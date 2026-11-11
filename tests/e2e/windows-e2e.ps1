@@ -687,7 +687,7 @@ function Stop-Otto($process) {
 function Assert-NoCrash($process) {
     $pidHex = '0x{0:X}' -f $process.Id
     $crash = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $process.StartTime } -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message -match 'otto-os\.exe' -and $_.Message -match "Faulting process id: $pidHex" } |
+        Where-Object { $_.Message -match 'otto-os\.exe' -and $_.Message -match "Faulting process id: $pidHex(?![0-9A-Fa-f])" } |
         Select-Object -First 1
     if ($crash) {
         $module = [regex]::Match($crash.Message, 'Faulting module name: ([^,]+)').Groups[1].Value
