@@ -21,6 +21,8 @@ struct MediaCache {
     snapshot: Option<NowPlaying>,
     refreshed_at: Option<Instant>,
     refresh_pending: bool,
+    last_track: (String, String),
+    last_thumbnail: Option<Arc<[u8]>>,
 }
 
 struct MediaRuntime {
@@ -95,8 +97,17 @@ fn media_worker(receiver: mpsc::Receiver<MediaTask>, cache: &Mutex<MediaCache>) 
     for task in receiver {
         match task {
             MediaTask::Refresh => {
-                let snapshot = initialized.then(read_now_playing_sync).flatten();
                 if let Ok(mut state) = cache.lock() {
+                    let MediaCache {
+                        ref mut last_track,
+                        ref mut last_thumbnail,
+                        ..
+                    } = *state;
+                    let snapshot = if initialized {
+                        read_now_playing_sync(last_track, last_thumbnail)
+                    } else {
+                        None
+                    };
                     state.snapshot = snapshot;
                     state.refreshed_at = Some(Instant::now());
                     state.refresh_pending = false;
@@ -123,7 +134,25 @@ fn current_session() -> Option<GlobalSystemMediaTransportControlsSession> {
         .ok()
 }
 
-fn read_now_playing_sync() -> Option<NowPlaying> {
+fn read_thumbnail_bytes(
+    stream_ref: &windows::Storage::Streams::IRandomAccessStreamReference,
+) -> Option<Arc<[u8]>> {
+    let stream = stream_ref.OpenReadAsync().ok()?.join().ok()?;
+    let size = stream.Size().ok()? as u32;
+    if size == 0 || size > 10 * 1024 * 1024 {
+        return None;
+    }
+    let reader = windows::Storage::Streams::DataReader::CreateDataReader(&stream).ok()?;
+    reader.LoadAsync(size).ok()?.join().ok()?;
+    let mut bytes = vec![0u8; size as usize];
+    reader.ReadBytes(&mut bytes).ok()?;
+    Some(Arc::from(bytes.into_boxed_slice()))
+}
+
+fn read_now_playing_sync(
+    last_track: &mut (String, String),
+    last_thumbnail: &mut Option<Arc<[u8]>>,
+) -> Option<NowPlaying> {
     let session = current_session()?;
     let props = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
     let title = props.Title().ok()?.to_string();
@@ -137,10 +166,37 @@ fn read_now_playing_sync() -> Option<NowPlaying> {
         .is_ok_and(|status| {
             status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing
         });
+    let (position_ms, duration_ms) = session.GetTimelineProperties().ok().map_or((0, 0), |tl| {
+        let pos = tl
+            .Position()
+            .ok()
+            .map_or(0, |p| (p.Duration / 10_000).max(0) as u64);
+        let end = tl
+            .EndTime()
+            .ok()
+            .map_or(0, |e| (e.Duration / 10_000).max(0) as u64);
+        (pos, end)
+    });
+
+    let thumbnail = if last_track.0 == title && last_track.1 == artist {
+        last_thumbnail.clone()
+    } else {
+        let thumb = props
+            .Thumbnail()
+            .ok()
+            .and_then(|t| read_thumbnail_bytes(&t));
+        *last_track = (title.clone(), artist.clone());
+        last_thumbnail.clone_from(&thumb);
+        thumb
+    };
+
     Some(NowPlaying {
         title,
         artist,
         playing,
+        position_ms,
+        duration_ms,
+        thumbnail,
     })
 }
 
@@ -152,5 +208,9 @@ fn send_media_command_sync(command: MediaCommand) {
         MediaCommand::TogglePlayPause => session.TryTogglePlayPauseAsync(),
         MediaCommand::Next => session.TrySkipNextAsync(),
         MediaCommand::Previous => session.TrySkipPreviousAsync(),
+        MediaCommand::Seek(target_ms) => {
+            let nanos_100 = (target_ms as i64).saturating_mul(10_000);
+            session.TryChangePlaybackPositionAsync(nanos_100)
+        }
     };
 }

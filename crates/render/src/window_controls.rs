@@ -81,6 +81,14 @@ pub struct WindowControlsRenderer {
     factory: ID2D1Factory,
     target: ID2D1DCRenderTarget,
     stroke_style: ID2D1StrokeStyle,
+    bg_brush: ID2D1SolidColorBrush,
+    red_fill: ID2D1SolidColorBrush,
+    red_border: ID2D1SolidColorBrush,
+    yellow_fill: ID2D1SolidColorBrush,
+    yellow_border: ID2D1SolidColorBrush,
+    green_fill: ID2D1SolidColorBrush,
+    green_border: ID2D1SolidColorBrush,
+    glyph_brush: ID2D1SolidColorBrush,
     dc: HDC,
     dib: HBITMAP,
     previous: HGDIOBJ,
@@ -114,6 +122,15 @@ impl WindowControlsRenderer {
             };
             let stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
 
+            let bg_brush = target.CreateSolidColorBrush(&CLEAR, None)?;
+            let red_fill = target.CreateSolidColorBrush(&RED_FILL, None)?;
+            let red_border = target.CreateSolidColorBrush(&RED_BORDER, None)?;
+            let yellow_fill = target.CreateSolidColorBrush(&YELLOW_FILL, None)?;
+            let yellow_border = target.CreateSolidColorBrush(&YELLOW_BORDER, None)?;
+            let green_fill = target.CreateSolidColorBrush(&GREEN_FILL, None)?;
+            let green_border = target.CreateSolidColorBrush(&GREEN_BORDER, None)?;
+            let glyph_brush = target.CreateSolidColorBrush(&GLYPH_DARK, None)?;
+
             let dc = CreateCompatibleDC(None);
             let info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -135,6 +152,14 @@ impl WindowControlsRenderer {
                 factory,
                 target,
                 stroke_style,
+                bg_brush,
+                red_fill,
+                red_border,
+                yellow_fill,
+                yellow_border,
+                green_fill,
+                green_border,
+                glyph_brush,
                 dc,
                 dib,
                 previous,
@@ -209,7 +234,7 @@ impl WindowControlsRenderer {
                 b: f32::from(titlebar_rgb.2) / 255.0,
                 a: 1.0,
             };
-            let bg_brush = self.target.CreateSolidColorBrush(&bg_color, None)?;
+            self.bg_brush.SetColor(&bg_color);
             if maximized {
                 let rect = D2D_RECT_F {
                     left: 0.0,
@@ -217,7 +242,7 @@ impl WindowControlsRenderer {
                     right: width as f32,
                     bottom: height as f32,
                 };
-                self.target.FillRectangle(&rect, &bg_brush);
+                self.target.FillRectangle(&rect, &self.bg_brush);
             } else {
                 let rounded = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
@@ -229,29 +254,21 @@ impl WindowControlsRenderer {
                     radiusX: 8.0,
                     radiusY: 8.0,
                 };
-                self.target.FillRoundedRectangle(&rounded, &bg_brush);
+                self.target.FillRoundedRectangle(&rounded, &self.bg_brush);
             }
-
-            let red_fill = self.target.CreateSolidColorBrush(&RED_FILL, None)?;
-            let red_border = self.target.CreateSolidColorBrush(&RED_BORDER, None)?;
-            let yellow_fill = self.target.CreateSolidColorBrush(&YELLOW_FILL, None)?;
-            let yellow_border = self.target.CreateSolidColorBrush(&YELLOW_BORDER, None)?;
-            let green_fill = self.target.CreateSolidColorBrush(&GREEN_FILL, None)?;
-            let green_border = self.target.CreateSolidColorBrush(&GREEN_BORDER, None)?;
-            let glyph_brush = self.target.CreateSolidColorBrush(&GLYPH_DARK, None)?;
 
             let [max_x, min_x, close_x] = layout.centers_x;
             let cy = layout.center_y;
             let r = layout.radius;
 
-            self.draw_circle(&green_fill, &green_border, max_x, cy, r);
-            self.draw_circle(&yellow_fill, &yellow_border, min_x, cy, r);
-            self.draw_circle(&red_fill, &red_border, close_x, cy, r);
+            self.draw_circle(&self.green_fill, &self.green_border, max_x, cy, r);
+            self.draw_circle(&self.yellow_fill, &self.yellow_border, min_x, cy, r);
+            self.draw_circle(&self.red_fill, &self.red_border, close_x, cy, r);
 
             if hovered {
-                self.draw_zoom_glyph(&glyph_brush, max_x, cy, maximized)?;
-                self.draw_minimize_glyph(&glyph_brush, min_x, cy);
-                self.draw_close_glyph(&glyph_brush, close_x, cy);
+                self.draw_zoom_glyph(&self.glyph_brush, max_x, cy, maximized)?;
+                self.draw_minimize_glyph(&self.glyph_brush, min_x, cy);
+                self.draw_close_glyph(&self.glyph_brush, close_x, cy);
             }
 
             self.target.EndDraw(None, None)

@@ -1,19 +1,22 @@
 use std::cell::RefCell;
 use std::mem::size_of;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 use std::time::Instant;
 
 use crate::bar_controls::{BarControlAction, BarControlsController};
 use crate::host::{self, PluginId};
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    HitTarget, Layout, Metrics, NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort,
-    NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target,
+    HitTarget, Layout, LyricsSheet, Metrics, NotchExpandedTab, NotchHudKind, NotchLayoutInput,
+    NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target,
+    parse_lrc,
 };
 use otto_platform::{
     AppBar, PrimaryScreen, WindowsNotchPort, adjust_volume, current_process_id, cursor_position,
-    enable_backdrop_blur, foreground_app_snapshot, open_quick_settings, open_spotlight_search,
-    primary_screen, read_system_status, register_notch_hotkeys, step_display_brightness,
-    suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
+    enable_backdrop_blur, foreground_app_snapshot, get_or_fetch_lyrics, open_quick_settings,
+    open_spotlight_search, primary_screen, read_system_status, register_notch_hotkeys,
+    step_display_brightness, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -36,6 +39,12 @@ thread_local! {
     static BAR: RefCell<Option<Bar>> = const { RefCell::new(None) };
 }
 
+struct LyricsResponse {
+    title: String,
+    artist: String,
+    sheet: Option<LyricsSheet>,
+}
+
 struct Bar {
     hwnd: isize,
     panel_hwnd: isize,
@@ -54,6 +63,9 @@ struct Bar {
     tracking_bar_mouse: bool,
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
+    lyrics_receiver: Receiver<LyricsResponse>,
+    lyrics_sender: Sender<LyricsResponse>,
+    lyrics_track: Option<(String, String)>,
 }
 
 pub fn start(
@@ -103,6 +115,24 @@ pub fn start(
     appbar.reserve_top(screen.width, screen.height, layout.bar.height);
     register_notch_hotkeys(hwnd);
 
+    let (lyrics_sender, lyrics_receiver) = channel();
+    let lyrics_track = notch.media().map(|m| (m.title.clone(), m.artist.clone()));
+    if let Some(m) = notch.media() {
+        let sender = lyrics_sender.clone();
+        let title = m.title.clone();
+        let artist = m.artist.clone();
+        let dur = m.duration_ms;
+        thread::spawn(move || {
+            let text = get_or_fetch_lyrics(&title, &artist, dur);
+            let sheet = text.map(|s| parse_lrc(&s));
+            let _ = sender.send(LyricsResponse {
+                title,
+                artist,
+                sheet,
+            });
+        });
+    }
+
     let bar = Bar {
         hwnd,
         panel_hwnd,
@@ -121,6 +151,9 @@ pub fn start(
         tracking_bar_mouse: false,
         tracking_panel_mouse: false,
         maintain_ticks: 0,
+        lyrics_receiver,
+        lyrics_sender,
+        lyrics_track,
     };
     bar.place();
     bar.present();
@@ -344,6 +377,15 @@ impl Bar {
             }
         }
         let mut dirty = false;
+        while let Ok(response) = self.lyrics_receiver.try_recv() {
+            if let Some(media) = self.notch.media()
+                && media.title == response.title
+                && media.artist == response.artist
+            {
+                self.notch.set_lyrics(response.sheet);
+                dirty = true;
+            }
+        }
         if let Some((app_name, app_hwnd)) = foreground_app_snapshot(self.own_pid)
             && self.controls.apply_foreground(app_name, app_hwnd)
         {
@@ -363,6 +405,28 @@ impl Bar {
             if self.notch.set_media(latest_media) {
                 self.recompute_layout();
                 dirty = true;
+            }
+            if let Some(media) = self.notch.media() {
+                let track_key = (media.title.clone(), media.artist.clone());
+                if !track_key.0.trim().is_empty() && self.lyrics_track.as_ref() != Some(&track_key)
+                {
+                    self.lyrics_track = Some(track_key.clone());
+                    let sender = self.lyrics_sender.clone();
+                    let title = track_key.0;
+                    let artist = track_key.1;
+                    let duration_ms = media.duration_ms;
+                    thread::spawn(move || {
+                        let text = get_or_fetch_lyrics(&title, &artist, duration_ms);
+                        let sheet = text.map(|s| parse_lrc(&s));
+                        let _ = sender.send(LyricsResponse {
+                            title,
+                            artist,
+                            sheet,
+                        });
+                    });
+                }
+            } else {
+                self.lyrics_track = None;
             }
         }
         if dirty {
@@ -528,6 +592,22 @@ impl Bar {
             return;
         };
 
+        if target == HitTarget::MediaSeekbar {
+            let seekbar = self.layout.media_seekbar;
+            if seekbar.width > 0 {
+                let ratio = ((x - seekbar.x) as f32 / seekbar.width as f32).clamp(0.0, 1.0);
+                let update = self.notch.handle_seekbar_click(ratio);
+                if let Some(NotchEffect::Platform(action)) = update.effect {
+                    self.notch_port.execute(action);
+                }
+                if update.changed {
+                    self.recompute_layout();
+                    self.present();
+                }
+                return;
+            }
+        }
+
         let notch_target = matches!(
             target,
             HitTarget::Notch
@@ -542,6 +622,7 @@ impl Bar {
                 | HitTarget::MediaPlayPause
                 | HitTarget::MediaPrevious
                 | HitTarget::MediaNext
+                | HitTarget::MediaLyricsToggle
         );
         if notch_target {
             let update = self.notch.handle_click(target);
@@ -650,6 +731,8 @@ impl Bar {
                 hovered,
                 self.notch.pomodoro(),
                 self.notch.media(),
+                self.notch.anim_phase(),
+                self.notch.lyrics(),
             );
         }
     }

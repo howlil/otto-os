@@ -32,7 +32,7 @@ use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::create_text_format;
-use crate::theme::LiquidGlassPalette;
+use crate::theme::{BrushPalette, LiquidGlassPalette};
 
 const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
@@ -48,6 +48,7 @@ const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
 pub struct PopupMenuRenderer {
     factory: ID2D1Factory,
     target: ID2D1DCRenderTarget,
+    brushes: BrushPalette,
     stroke_style: ID2D1StrokeStyle,
     label_format: IDWriteTextFormat,
     shortcut_format: IDWriteTextFormat,
@@ -74,6 +75,7 @@ impl PopupMenuRenderer {
                 minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
             };
             let target = factory.CreateDCRenderTarget(&properties)?;
+            let brushes = BrushPalette::new(&target)?;
 
             let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
                 startCap: D2D1_CAP_STYLE_ROUND,
@@ -129,6 +131,7 @@ impl PopupMenuRenderer {
             Ok(Self {
                 factory,
                 target,
+                brushes,
                 stroke_style,
                 label_format,
                 shortcut_format,
@@ -204,7 +207,7 @@ impl PopupMenuRenderer {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
 
-            self.draw_shell(width as f32, height as f32, layout.corner_radius, &palette)?;
+            self.draw_shell(width as f32, height as f32, layout.corner_radius, &palette);
 
             for (row_layout, row_model) in layout.rows.iter().zip(rows) {
                 self.draw_row(layout, row_layout, row_model, hovered_row, &palette)?;
@@ -225,24 +228,22 @@ impl PopupMenuRenderer {
         unsafe {
             match row_model {
                 MenuRow::Separator => {
-                    let sep_brush = self
-                        .target
-                        .CreateSolidColorBrush(&palette.menu_separator, None)?;
+                    let sep_brush = self.brushes.scratch(0, palette.menu_separator);
                     let y = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
                     let inset = scale(8, self.dpi) as f32;
                     self.target.DrawLine(
                         Vector2::new(row_layout.rect.x as f32 + inset, y),
                         Vector2::new(row_layout.rect.right() as f32 - inset, y),
-                        &sep_brush,
+                        sep_brush,
                         1.0,
                         None,
                     );
                 }
                 MenuRow::Calendar { year, month, today } => {
-                    self.draw_calendar(row_layout, *year, *month, *today, palette)?;
+                    self.draw_calendar(row_layout, *year, *month, *today, palette);
                 }
                 MenuRow::Slider { label, value, .. } => {
-                    self.draw_slider(layout, row_layout, label, *value, palette)?;
+                    self.draw_slider(layout, row_layout, label, *value, palette);
                 }
                 MenuRow::Item {
                     label,
@@ -253,9 +254,7 @@ impl PopupMenuRenderer {
                 } => {
                     let is_hovered = *enabled && hovered_row == Some(row_layout.index);
                     if is_hovered {
-                        let hover_brush = self
-                            .target
-                            .CreateSolidColorBrush(&palette.menu_hover_fill, None)?;
+                        let hover_brush = self.brushes.scratch(0, palette.menu_hover_fill);
                         let pill = D2D1_ROUNDED_RECT {
                             rect: D2D_RECT_F {
                                 left: row_layout.rect.x as f32,
@@ -266,7 +265,7 @@ impl PopupMenuRenderer {
                             radiusX: layout.row_corner_radius,
                             radiusY: layout.row_corner_radius,
                         };
-                        self.target.FillRoundedRectangle(&pill, &hover_brush);
+                        self.target.FillRoundedRectangle(&pill, hover_brush);
                     }
 
                     let fg_color = if *enabled {
@@ -274,10 +273,10 @@ impl PopupMenuRenderer {
                     } else {
                         palette.text_disabled
                     };
-                    let fg = self.target.CreateSolidColorBrush(&fg_color, None)?;
+                    let fg = self.brushes.scratch(1, fg_color);
 
                     if *checked {
-                        self.draw_checkmark(row_layout, layout.check_col_width, &fg)?;
+                        self.draw_checkmark(row_layout, layout.check_col_width, fg)?;
                     }
 
                     let text_rect = D2D_RECT_F {
@@ -291,7 +290,7 @@ impl PopupMenuRenderer {
                         &label_wide,
                         &self.label_format,
                         &text_rect,
-                        &fg,
+                        fg,
                         D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
@@ -304,13 +303,13 @@ impl PopupMenuRenderer {
                         } else {
                             palette.text_muted
                         };
-                        let sb = self.target.CreateSolidColorBrush(&short_color, None)?;
+                        let sb = self.brushes.scratch(2, short_color);
                         let short_wide: Vec<u16> = shortcut.encode_utf16().collect();
                         self.target.DrawText(
                             &short_wide,
                             &self.shortcut_format,
                             &text_rect,
-                            &sb,
+                            sb,
                             D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                             DWRITE_MEASURING_MODE_NATURAL,
                         );
@@ -328,22 +327,16 @@ impl PopupMenuRenderer {
         month: u8,
         today: Option<u8>,
         palette: &LiquidGlassPalette,
-    ) -> Result<()> {
+    ) {
         let unit = row.rect.height as f32 / 8.0;
         let inset = scale(6, self.dpi) as f32;
         let left = row.rect.x as f32 + inset;
         let col_w = (row.rect.width as f32 - inset * 2.0) / 7.0;
         let top = row.rect.y as f32;
         unsafe {
-            let text = self
-                .target
-                .CreateSolidColorBrush(&palette.text_primary, None)?;
-            let dim = self
-                .target
-                .CreateSolidColorBrush(&palette.text_muted, None)?;
-            let accent = self
-                .target
-                .CreateSolidColorBrush(&palette.toggle_active, None)?;
+            let text = self.brushes.scratch(0, palette.text_primary);
+            let dim = self.brushes.scratch(1, palette.text_muted);
+            let accent = self.brushes.scratch(2, palette.toggle_active);
 
             let title_rect = D2D_RECT_F {
                 left: left + scale(4, self.dpi) as f32,
@@ -356,7 +349,7 @@ impl PopupMenuRenderer {
                 &title,
                 &self.label_format,
                 &title_rect,
-                &text,
+                text,
                 D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
@@ -373,7 +366,7 @@ impl PopupMenuRenderer {
                     &wide,
                     &self.cell_format,
                     &cell,
-                    &dim,
+                    dim,
                     D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
@@ -400,7 +393,7 @@ impl PopupMenuRenderer {
                             radiusX: radius,
                             radiusY: radius,
                         },
-                        &accent,
+                        accent,
                     );
                 }
                 let wide: Vec<u16> = day.to_string().encode_utf16().collect();
@@ -408,13 +401,12 @@ impl PopupMenuRenderer {
                     &wide,
                     &self.cell_format,
                     &cell,
-                    &text,
+                    text,
                     D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
             }
         }
-        Ok(())
     }
 
     fn draw_slider(
@@ -424,7 +416,7 @@ impl PopupMenuRenderer {
         label: &str,
         value: u8,
         palette: &LiquidGlassPalette,
-    ) -> Result<()> {
+    ) {
         let inset = layout.slider_inset as f32;
         let left = row.rect.x as f32 + inset;
         let right = row.rect.right() as f32 - inset;
@@ -434,9 +426,7 @@ impl PopupMenuRenderer {
         let fill_right = left + (right - left) * fraction;
         let radius = track_h * 0.5;
         unsafe {
-            let text = self
-                .target
-                .CreateSolidColorBrush(&palette.text_primary, None)?;
+            let text = self.brushes.scratch(0, palette.text_primary);
             let label_rect = D2D_RECT_F {
                 left,
                 top: row.rect.y as f32 + scale(4, self.dpi) as f32,
@@ -448,19 +438,17 @@ impl PopupMenuRenderer {
                 &label_wide,
                 &self.label_format,
                 &label_rect,
-                &text,
+                text,
                 D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
             let percent_wide: Vec<u16> = format!("{value}%").encode_utf16().collect();
-            let percent_brush = self
-                .target
-                .CreateSolidColorBrush(&palette.text_muted, None)?;
+            let percent_brush = self.brushes.scratch(1, palette.text_muted);
             self.target.DrawText(
                 &percent_wide,
                 &self.shortcut_format,
                 &label_rect,
-                &percent_brush,
+                percent_brush,
                 D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
@@ -475,10 +463,8 @@ impl PopupMenuRenderer {
                 radiusX: radius,
                 radiusY: radius,
             };
-            let track_brush = self
-                .target
-                .CreateSolidColorBrush(&palette.slider_track, None)?;
-            self.target.FillRoundedRectangle(&track, &track_brush);
+            let track_brush = self.brushes.scratch(2, palette.slider_track);
+            self.target.FillRoundedRectangle(&track, track_brush);
             if fill_right > left + 0.5 {
                 let fill = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
@@ -490,22 +476,13 @@ impl PopupMenuRenderer {
                     radiusX: radius,
                     radiusY: radius,
                 };
-                let fill_brush = self
-                    .target
-                    .CreateSolidColorBrush(&palette.slider_fill, None)?;
-                self.target.FillRoundedRectangle(&fill, &fill_brush);
+                let fill_brush = self.brushes.scratch(3, palette.slider_fill);
+                self.target.FillRoundedRectangle(&fill, fill_brush);
             }
         }
-        Ok(())
     }
 
-    fn draw_shell(
-        &self,
-        width: f32,
-        height: f32,
-        radius: f32,
-        palette: &LiquidGlassPalette,
-    ) -> Result<()> {
+    fn draw_shell(&self, width: f32, height: f32, radius: f32, palette: &LiquidGlassPalette) {
         let outer = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: 0.5,
@@ -527,22 +504,15 @@ impl PopupMenuRenderer {
             radiusY: (radius - 1.0).max(1.0),
         };
         unsafe {
-            let fill = self
-                .target
-                .CreateSolidColorBrush(&palette.menu_fill, None)?;
-            let outer_border = self
-                .target
-                .CreateSolidColorBrush(&palette.menu_outer_border, None)?;
-            let inner_border = self
-                .target
-                .CreateSolidColorBrush(&palette.menu_inner_border, None)?;
-            self.target.FillRoundedRectangle(&outer, &fill);
+            let fill = self.brushes.scratch(0, palette.menu_fill);
+            let outer_border = self.brushes.scratch(1, palette.menu_outer_border);
+            let inner_border = self.brushes.scratch(2, palette.menu_inner_border);
+            self.target.FillRoundedRectangle(&outer, fill);
             self.target
-                .DrawRoundedRectangle(&outer, &outer_border, 1.0, None);
+                .DrawRoundedRectangle(&outer, outer_border, 1.0, None);
             self.target
-                .DrawRoundedRectangle(&inner, &inner_border, 1.0, None);
+                .DrawRoundedRectangle(&inner, inner_border, 1.0, None);
         }
-        Ok(())
     }
 
     fn draw_checkmark(

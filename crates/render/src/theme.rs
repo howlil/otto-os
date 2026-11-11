@@ -1,5 +1,7 @@
 use otto_core::ResolvedTheme;
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::{ID2D1DCRenderTarget, ID2D1SolidColorBrush};
+use windows::core::Result;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LiquidGlassPalette {
@@ -286,5 +288,151 @@ impl LiquidGlassPalette {
                 a: 0.08,
             },
         }
+    }
+}
+
+pub struct BrushPalette {
+    pub solid: ID2D1SolidColorBrush,
+    pub stroke: ID2D1SolidColorBrush,
+    pub text_primary: ID2D1SolidColorBrush,
+    pub text_muted: ID2D1SolidColorBrush,
+    pub hover: ID2D1SolidColorBrush,
+    pub accent: ID2D1SolidColorBrush,
+    pub black: ID2D1SolidColorBrush,
+    pub white: ID2D1SolidColorBrush,
+    scratches: [ID2D1SolidColorBrush; 8],
+}
+
+impl BrushPalette {
+    pub fn new(target: &ID2D1DCRenderTarget) -> Result<Self> {
+        let clear = D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
+        unsafe {
+            Ok(Self {
+                solid: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?,
+                stroke: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.20,
+                    },
+                    None,
+                )?,
+                text_primary: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.95,
+                    },
+                    None,
+                )?,
+                text_muted: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.52,
+                    },
+                    None,
+                )?,
+                hover: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.12,
+                    },
+                    None,
+                )?,
+                accent: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.039,
+                        g: 0.518,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?,
+                black: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?,
+                white: target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?,
+                scratches: [
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                    target.CreateSolidColorBrush(&clear, None)?,
+                ],
+            })
+        }
+    }
+
+    pub fn update_theme(&self, palette: &LiquidGlassPalette) {
+        unsafe {
+            self.text_primary.SetColor(&palette.text_primary);
+            self.text_muted.SetColor(&palette.text_muted);
+            self.hover.SetColor(&palette.hover_pill);
+            self.accent.SetColor(&palette.slider_fill);
+            self.stroke.SetColor(&palette.menu_inner_border);
+        }
+    }
+
+    #[must_use]
+    pub fn scratch(&self, slot: usize, color: D2D1_COLOR_F) -> &ID2D1SolidColorBrush {
+        let brush = &self.scratches[slot % self.scratches.len()];
+        unsafe {
+            brush.SetColor(&color);
+        }
+        brush
+    }
+
+    #[must_use]
+    pub fn alpha_brush(
+        &self,
+        slot: usize,
+        base: D2D1_COLOR_F,
+        alpha: f32,
+    ) -> &ID2D1SolidColorBrush {
+        self.scratch(
+            slot,
+            D2D1_COLOR_F {
+                r: base.r,
+                g: base.g,
+                b: base.b,
+                a: alpha,
+            },
+        )
     }
 }

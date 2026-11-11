@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1CreateFactory, ID2D1Bitmap,
-    ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1DCRenderTarget, ID2D1Factory, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
@@ -34,7 +34,7 @@ use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::create_text_format;
-use crate::theme::LiquidGlassPalette;
+use crate::theme::{BrushPalette, LiquidGlassPalette};
 
 const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
@@ -88,6 +88,7 @@ pub struct DockRenderer {
     dpi: u32,
     font_px: f32,
     icons: HashMap<String, ID2D1Bitmap>,
+    brushes: BrushPalette,
 }
 
 impl DockRenderer {
@@ -140,6 +141,7 @@ impl DockRenderer {
             let mut bits: *mut c_void = std::ptr::null_mut();
             let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
             let previous = SelectObject(dc, HGDIOBJ(dib.0));
+            let brushes = BrushPalette::new(&target)?;
 
             Ok(Self {
                 factory,
@@ -153,6 +155,7 @@ impl DockRenderer {
                 dpi,
                 font_px,
                 icons: HashMap::new(),
+                brushes,
             })
         }
     }
@@ -242,29 +245,26 @@ impl DockRenderer {
             self.target.BeginDraw();
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
+            self.brushes.update_theme(&palette);
 
             if layout.pill.width > 0 && layout.pill.height > 0 {
-                self.draw_pill(layout, &palette)?;
+                self.draw_pill(layout, &palette);
             }
 
             if let Some(div_x) = layout.divider_x {
-                let div_brush = self
-                    .target
-                    .CreateSolidColorBrush(&palette.dock_divider, None)?;
+                let div_brush = self.brushes.scratch(0, palette.dock_divider);
                 let pad_v = layout.pill.height as f32 * 0.20;
                 self.target.DrawLine(
                     Vector2::new(div_x, layout.pill.y as f32 + pad_v),
                     Vector2::new(div_x, layout.pill.bottom() as f32 - pad_v),
-                    &div_brush,
+                    div_brush,
                     (scale(1, self.dpi) as f32).max(1.0),
                     None,
                 );
             }
 
-            let dot_brush = self.target.CreateSolidColorBrush(&palette.dock_dot, None)?;
-            let active_dot_brush = self
-                .target
-                .CreateSolidColorBrush(&palette.text_primary, None)?;
+            let dot_brush = self.brushes.scratch(1, palette.dock_dot);
+            let active_dot_brush = &self.brushes.text_primary;
 
             for (slot, item) in layout.items.iter().zip(items) {
                 if slot.opacity < 0.03 || slot.size < 2.0 {
@@ -297,9 +297,9 @@ impl DockRenderer {
                         radiusY: r,
                     };
                     let b = if item.active {
-                        &active_dot_brush
+                        active_dot_brush
                     } else {
-                        &dot_brush
+                        dot_brush
                     };
                     self.target.FillEllipse(&ellipse, b);
                 }
@@ -356,26 +356,26 @@ impl DockRenderer {
     fn draw_apple_icon(&self, slot: &DockItemLayout, kind: AppleIconKind) -> Result<()> {
         let (tile, shadow) = Self::squircle_bounds(slot);
         unsafe {
-            let shadow_brush = self.target.CreateSolidColorBrush(&ICON_SHADOW, None)?;
-            let rim_brush = self.target.CreateSolidColorBrush(&ICON_RIM, None)?;
-            self.target.FillRoundedRectangle(&shadow, &shadow_brush);
+            let shadow_brush = self.brushes.scratch(0, ICON_SHADOW);
+            self.target.FillRoundedRectangle(&shadow, shadow_brush);
 
             match kind {
                 AppleIconKind::Finder => self.draw_finder_tile(&tile)?,
-                AppleIconKind::Launchpad => self.draw_launchpad_tile(&tile)?,
+                AppleIconKind::Launchpad => self.draw_launchpad_tile(&tile),
                 AppleIconKind::Trash => self.draw_trash_tile(&tile, false)?,
                 AppleIconKind::TrashFull => self.draw_trash_tile(&tile, true)?,
                 AppleIconKind::Terminal => self.draw_terminal_tile(&tile)?,
-                AppleIconKind::Settings => self.draw_settings_tile(&tile)?,
+                AppleIconKind::Settings => self.draw_settings_tile(&tile),
                 AppleIconKind::Browser => self.draw_safari_tile(&tile)?,
                 AppleIconKind::Notes => self.draw_notes_tile(&tile)?,
                 AppleIconKind::Code => self.draw_code_tile(&tile)?,
-                AppleIconKind::Music => self.draw_music_tile(&tile)?,
-                AppleIconKind::Folder => self.draw_folder_tile(&tile)?,
+                AppleIconKind::Music => self.draw_music_tile(&tile),
+                AppleIconKind::Folder => self.draw_folder_tile(&tile),
             }
 
+            let rim_brush = self.brushes.scratch(1, ICON_RIM);
             self.target
-                .DrawRoundedRectangle(&tile, &rim_brush, 1.1, None);
+                .DrawRoundedRectangle(&tile, rim_brush, 1.1, None);
         }
         Ok(())
     }
@@ -387,17 +387,11 @@ impl DockRenderer {
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let light_blue = self
-                .target
-                .CreateSolidColorBrush(&rgb(138, 214, 255, 1.0), None)?;
-            let deep_blue = self
-                .target
-                .CreateSolidColorBrush(&rgb(28, 120, 242, 1.0), None)?;
-            let feature = self
-                .target
-                .CreateSolidColorBrush(&rgb(20, 44, 84, 0.96), None)?;
+            let light_blue = self.brushes.scratch(2, rgb(138, 214, 255, 1.0));
+            let deep_blue = self.brushes.scratch(3, rgb(28, 120, 242, 1.0));
+            let feature = self.brushes.scratch(4, rgb(20, 44, 84, 0.96));
 
-            self.target.FillRoundedRectangle(tile, &light_blue);
+            self.target.FillRoundedRectangle(tile, light_blue);
 
             let left_half = D2D_RECT_F {
                 left: r.left,
@@ -410,14 +404,14 @@ impl DockRenderer {
                 radiusX: tile.radiusX,
                 radiusY: tile.radiusY,
             };
-            self.target.FillRoundedRectangle(&left_round, &deep_blue);
+            self.target.FillRoundedRectangle(&left_round, deep_blue);
             let seam_fill = D2D_RECT_F {
                 left: cx - tile.radiusX * 0.6,
                 top: r.top,
                 right: cx + w * 0.02,
                 bottom: r.bottom,
             };
-            self.target.FillRectangle(&seam_fill, &deep_blue);
+            self.target.FillRectangle(&seam_fill, deep_blue);
 
             let stroke = (w * 0.045).max(1.5);
             let nose = self.factory.CreatePathGeometry()?;
@@ -435,7 +429,7 @@ impl DockRenderer {
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close()?;
             self.target
-                .DrawGeometry(&nose, &feature, stroke, &self.stroke_style);
+                .DrawGeometry(&nose, feature, stroke, &self.stroke_style);
 
             let eye_w = (w * 0.035).max(1.3);
             let eye_h = h * 0.11;
@@ -451,7 +445,7 @@ impl DockRenderer {
                     radiusX: eye_w,
                     radiusY: eye_w,
                 };
-                self.target.FillRoundedRectangle(&eye, &feature);
+                self.target.FillRoundedRectangle(&eye, feature);
             }
 
             let smile = self.factory.CreatePathGeometry()?;
@@ -468,7 +462,7 @@ impl DockRenderer {
             s_sink.EndFigure(D2D1_FIGURE_END_OPEN);
             s_sink.Close()?;
             self.target
-                .DrawGeometry(&smile, &feature, stroke, &self.stroke_style);
+                .DrawGeometry(&smile, feature, stroke, &self.stroke_style);
         }
         Ok(())
     }
@@ -480,20 +474,12 @@ impl DockRenderer {
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let plate = self
-                .target
-                .CreateSolidColorBrush(&rgb(232, 236, 242, 1.0), None)?;
-            let bin_fill = self
-                .target
-                .CreateSolidColorBrush(&rgb(180, 188, 198, 1.0), None)?;
-            let bin_dark = self
-                .target
-                .CreateSolidColorBrush(&rgb(104, 112, 124, 0.95), None)?;
-            let rim_light = self
-                .target
-                .CreateSolidColorBrush(&rgb(248, 250, 252, 1.0), None)?;
+            let plate = self.brushes.scratch(2, rgb(232, 236, 242, 1.0));
+            let bin_fill = self.brushes.scratch(3, rgb(180, 188, 198, 1.0));
+            let bin_dark = self.brushes.scratch(4, rgb(104, 112, 124, 0.95));
+            let rim_light = self.brushes.scratch(5, rgb(248, 250, 252, 1.0));
 
-            self.target.FillRoundedRectangle(tile, &plate);
+            self.target.FillRoundedRectangle(tile, plate);
 
             let top_y = r.top + h * 0.24;
             let bot_y = r.top + h * 0.82;
@@ -508,24 +494,20 @@ impl DockRenderer {
             sink.AddLine(Vector2::new(cx - bot_hw, bot_y));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
-            self.target.FillGeometry(&body, &bin_fill, None);
+            self.target.FillGeometry(&body, bin_fill, None);
             self.target
-                .DrawGeometry(&body, &bin_dark, (w * 0.025).max(1.0), &self.stroke_style);
+                .DrawGeometry(&body, bin_dark, (w * 0.025).max(1.0), &self.stroke_style);
 
             let rim_ellipse = D2D1_ELLIPSE {
                 point: Vector2::new(cx, top_y),
                 radiusX: top_hw,
                 radiusY: h * 0.055,
             };
-            self.target.FillEllipse(&rim_ellipse, &rim_light);
+            self.target.FillEllipse(&rim_ellipse, rim_light);
 
             if is_full {
-                let paper_fill = self
-                    .target
-                    .CreateSolidColorBrush(&rgb(252, 250, 244, 0.98), None)?;
-                let paper_crease = self
-                    .target
-                    .CreateSolidColorBrush(&rgb(156, 164, 176, 0.90), None)?;
+                let paper_fill = self.brushes.scratch(6, rgb(252, 250, 244, 0.98));
+                let paper_crease = self.brushes.scratch(7, rgb(156, 164, 176, 0.90));
                 let blobs = [
                     (cx - w * 0.11, top_y + h * 0.01, w * 0.095, h * 0.075),
                     (cx + w * 0.09, top_y + h * 0.02, w * 0.10, h * 0.08),
@@ -538,15 +520,15 @@ impl DockRenderer {
                         radiusX: rx,
                         radiusY: ry,
                     };
-                    self.target.FillEllipse(&e, &paper_fill);
+                    self.target.FillEllipse(&e, paper_fill);
                     self.target
-                        .DrawEllipse(&e, &paper_crease, (w * 0.018).max(0.9), None);
+                        .DrawEllipse(&e, paper_crease, (w * 0.018).max(0.9), None);
                 }
             }
 
             self.target.DrawEllipse(
                 &rim_ellipse,
-                &bin_dark,
+                bin_dark,
                 (w * 0.025).max(1.0),
                 &self.stroke_style,
             );
@@ -557,7 +539,7 @@ impl DockRenderer {
                 self.target.DrawLine(
                     Vector2::new(x_top, top_y + h * 0.08),
                     Vector2::new(x_bot, bot_y - h * 0.05),
-                    &bin_dark,
+                    bin_dark,
                     (w * 0.022).max(1.0),
                     &self.stroke_style,
                 );
@@ -566,16 +548,14 @@ impl DockRenderer {
         Ok(())
     }
 
-    fn draw_launchpad_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
+    fn draw_launchpad_tile(&self, tile: &D2D1_ROUNDED_RECT) {
         let r = tile.rect;
         let w = r.right - r.left;
         let h = r.bottom - r.top;
 
         unsafe {
-            let plate = self
-                .target
-                .CreateSolidColorBrush(&rgb(38, 42, 52, 1.0), None)?;
-            self.target.FillRoundedRectangle(tile, &plate);
+            let plate = self.brushes.scratch(2, rgb(38, 42, 52, 1.0));
+            self.target.FillRoundedRectangle(tile, plate);
 
             let colors = [
                 rgb(10, 132, 255, 1.0),
@@ -600,7 +580,7 @@ impl DockRenderer {
                 let row = (idx / 3) as f32;
                 let cell_x = start_x + col * (cell + gap);
                 let cell_y = start_y + row * (cell + gap);
-                let brush = self.target.CreateSolidColorBrush(color, None)?;
+                let brush = self.brushes.scratch(3, *color);
                 let mini = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
                         left: cell_x,
@@ -611,10 +591,9 @@ impl DockRenderer {
                     radiusX: rad,
                     radiusY: rad,
                 };
-                self.target.FillRoundedRectangle(&mini, &brush);
+                self.target.FillRoundedRectangle(&mini, brush);
             }
         }
-        Ok(())
     }
 
     fn draw_code_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
@@ -624,17 +603,11 @@ impl DockRenderer {
         let cy = r.top + h * 0.5;
 
         unsafe {
-            let bg = self
-                .target
-                .CreateSolidColorBrush(&rgb(24, 30, 42, 1.0), None)?;
-            let cyan = self
-                .target
-                .CreateSolidColorBrush(&rgb(36, 172, 242, 1.0), None)?;
-            let deep_cyan = self
-                .target
-                .CreateSolidColorBrush(&rgb(0, 120, 212, 1.0), None)?;
+            let bg = self.brushes.scratch(2, rgb(24, 30, 42, 1.0));
+            let cyan = self.brushes.scratch(3, rgb(36, 172, 242, 1.0));
+            let deep_cyan = self.brushes.scratch(4, rgb(0, 120, 212, 1.0));
 
-            self.target.FillRoundedRectangle(tile, &bg);
+            self.target.FillRoundedRectangle(tile, bg);
 
             let stroke = (w * 0.075).max(1.8);
             let left_chev = self.factory.CreatePathGeometry()?;
@@ -648,7 +621,7 @@ impl DockRenderer {
             s1.EndFigure(D2D1_FIGURE_END_OPEN);
             s1.Close()?;
             self.target
-                .DrawGeometry(&left_chev, &cyan, stroke, &self.stroke_style);
+                .DrawGeometry(&left_chev, cyan, stroke, &self.stroke_style);
 
             let right_chev = self.factory.CreatePathGeometry()?;
             let s2 = right_chev.Open()?;
@@ -661,12 +634,12 @@ impl DockRenderer {
             s2.EndFigure(D2D1_FIGURE_END_OPEN);
             s2.Close()?;
             self.target
-                .DrawGeometry(&right_chev, &deep_cyan, stroke, &self.stroke_style);
+                .DrawGeometry(&right_chev, deep_cyan, stroke, &self.stroke_style);
 
             self.target.DrawLine(
                 Vector2::new(r.left + w * 0.54, cy - h * 0.23),
                 Vector2::new(r.left + w * 0.46, cy + h * 0.23),
-                &cyan,
+                cyan,
                 (stroke * 0.82).max(1.4),
                 &self.stroke_style,
             );
@@ -674,20 +647,16 @@ impl DockRenderer {
         Ok(())
     }
 
-    fn draw_music_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
+    fn draw_music_tile(&self, tile: &D2D1_ROUNDED_RECT) {
         let r = tile.rect;
         let w = r.right - r.left;
         let h = r.bottom - r.top;
 
         unsafe {
-            let coral = self
-                .target
-                .CreateSolidColorBrush(&rgb(250, 45, 72, 1.0), None)?;
-            let white = self
-                .target
-                .CreateSolidColorBrush(&rgb(255, 255, 255, 0.96), None)?;
+            let coral = self.brushes.scratch(2, rgb(250, 45, 72, 1.0));
+            let white = &self.brushes.white;
 
-            self.target.FillRoundedRectangle(tile, &coral);
+            self.target.FillRoundedRectangle(tile, coral);
 
             let left_x = r.left + w * 0.36;
             let right_x = r.left + w * 0.68;
@@ -700,21 +669,21 @@ impl DockRenderer {
             self.target.DrawLine(
                 Vector2::new(left_x, top_left_y),
                 Vector2::new(left_x, bot_left_y),
-                &white,
+                white,
                 stem_w,
                 &self.stroke_style,
             );
             self.target.DrawLine(
                 Vector2::new(right_x, top_right_y),
                 Vector2::new(right_x, bot_right_y),
-                &white,
+                white,
                 stem_w,
                 &self.stroke_style,
             );
             self.target.DrawLine(
                 Vector2::new(left_x, top_left_y),
                 Vector2::new(right_x, top_right_y),
-                &white,
+                white,
                 (stem_w * 1.45).max(2.2),
                 &self.stroke_style,
             );
@@ -730,33 +699,24 @@ impl DockRenderer {
                     radiusX: note_width,
                     radiusY: note_height,
                 };
-                self.target.FillEllipse(&note_head, &white);
+                self.target.FillEllipse(&note_head, white);
             }
         }
-        Ok(())
     }
 
-    fn draw_folder_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
+    fn draw_folder_tile(&self, tile: &D2D1_ROUNDED_RECT) {
         let r = tile.rect;
         let w = r.right - r.left;
         let h = r.bottom - r.top;
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let plate = self
-                .target
-                .CreateSolidColorBrush(&rgb(238, 244, 252, 1.0), None)?;
-            let back_blue = self
-                .target
-                .CreateSolidColorBrush(&rgb(42, 152, 240, 1.0), None)?;
-            let front_blue = self
-                .target
-                .CreateSolidColorBrush(&rgb(96, 194, 255, 1.0), None)?;
-            let arrow_brush = self
-                .target
-                .CreateSolidColorBrush(&rgb(24, 118, 210, 0.92), None)?;
+            let plate = self.brushes.scratch(2, rgb(238, 244, 252, 1.0));
+            let back_blue = self.brushes.scratch(3, rgb(42, 152, 240, 1.0));
+            let front_blue = self.brushes.scratch(4, rgb(96, 194, 255, 1.0));
+            let arrow_brush = self.brushes.scratch(5, rgb(24, 118, 210, 0.92));
 
-            self.target.FillRoundedRectangle(tile, &plate);
+            self.target.FillRoundedRectangle(tile, plate);
 
             let tab_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -768,7 +728,7 @@ impl DockRenderer {
                 radiusX: w * 0.06,
                 radiusY: w * 0.06,
             };
-            self.target.FillRoundedRectangle(&tab_rect, &back_blue);
+            self.target.FillRoundedRectangle(&tab_rect, back_blue);
 
             let back_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -780,7 +740,7 @@ impl DockRenderer {
                 radiusX: w * 0.07,
                 radiusY: w * 0.07,
             };
-            self.target.FillRoundedRectangle(&back_rect, &back_blue);
+            self.target.FillRoundedRectangle(&back_rect, back_blue);
 
             let front_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -792,7 +752,7 @@ impl DockRenderer {
                 radiusX: w * 0.07,
                 radiusY: w * 0.07,
             };
-            self.target.FillRoundedRectangle(&front_rect, &front_blue);
+            self.target.FillRoundedRectangle(&front_rect, front_blue);
 
             let stroke = (w * 0.048).max(1.3);
             let ay0 = r.top + h * 0.46;
@@ -800,7 +760,7 @@ impl DockRenderer {
             self.target.DrawLine(
                 Vector2::new(cx, ay0),
                 Vector2::new(cx, ay1),
-                &arrow_brush,
+                arrow_brush,
                 stroke,
                 &self.stroke_style,
             );
@@ -808,19 +768,18 @@ impl DockRenderer {
             self.target.DrawLine(
                 Vector2::new(cx - wing, ay1 - wing * 0.85),
                 Vector2::new(cx, ay1),
-                &arrow_brush,
+                arrow_brush,
                 stroke,
                 &self.stroke_style,
             );
             self.target.DrawLine(
                 Vector2::new(cx + wing, ay1 - wing * 0.85),
                 Vector2::new(cx, ay1),
-                &arrow_brush,
+                arrow_brush,
                 stroke,
                 &self.stroke_style,
             );
         }
-        Ok(())
     }
 
     fn draw_terminal_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
@@ -829,17 +788,11 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let outer = self
-                .target
-                .CreateSolidColorBrush(&rgb(58, 62, 70, 1.0), None)?;
-            let inner = self
-                .target
-                .CreateSolidColorBrush(&rgb(24, 26, 31, 1.0), None)?;
-            let glyph = self
-                .target
-                .CreateSolidColorBrush(&rgb(245, 247, 250, 0.96), None)?;
+            let outer = self.brushes.scratch(2, rgb(58, 62, 70, 1.0));
+            let inner = self.brushes.scratch(3, rgb(24, 26, 31, 1.0));
+            let glyph = self.brushes.scratch(4, rgb(245, 247, 250, 0.96));
 
-            self.target.FillRoundedRectangle(tile, &outer);
+            self.target.FillRoundedRectangle(tile, outer);
             let pad = (w * 0.055).max(1.8);
             let inner_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -851,7 +804,7 @@ impl DockRenderer {
                 radiusX: (tile.radiusX - pad).max(2.0),
                 radiusY: (tile.radiusY - pad).max(2.0),
             };
-            self.target.FillRoundedRectangle(&inner_rect, &inner);
+            self.target.FillRoundedRectangle(&inner_rect, inner);
 
             let stroke = (w * 0.06).max(1.6);
             let chevron = self.factory.CreatePathGeometry()?;
@@ -865,12 +818,12 @@ impl DockRenderer {
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close()?;
             self.target
-                .DrawGeometry(&chevron, &glyph, stroke, &self.stroke_style);
+                .DrawGeometry(&chevron, glyph, stroke, &self.stroke_style);
 
             self.target.DrawLine(
                 Vector2::new(r.left + w * 0.44, r.top + h * 0.54),
                 Vector2::new(r.left + w * 0.64, r.top + h * 0.54),
-                &glyph,
+                glyph,
                 stroke,
                 &self.stroke_style,
             );
@@ -878,31 +831,25 @@ impl DockRenderer {
         Ok(())
     }
 
-    fn draw_settings_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
+    fn draw_settings_tile(&self, tile: &D2D1_ROUNDED_RECT) {
         let r = tile.rect;
         let w = r.right - r.left;
         let cx = r.left + w * 0.5;
         let cy = r.top + (r.bottom - r.top) * 0.5;
 
         unsafe {
-            let plate = self
-                .target
-                .CreateSolidColorBrush(&rgb(208, 213, 221, 1.0), None)?;
-            let well = self
-                .target
-                .CreateSolidColorBrush(&rgb(58, 62, 70, 1.0), None)?;
-            let gear = self
-                .target
-                .CreateSolidColorBrush(&rgb(218, 223, 230, 0.96), None)?;
+            let plate = self.brushes.scratch(2, rgb(208, 213, 221, 1.0));
+            let well = self.brushes.scratch(3, rgb(58, 62, 70, 1.0));
+            let gear = self.brushes.scratch(4, rgb(218, 223, 230, 0.96));
 
-            self.target.FillRoundedRectangle(tile, &plate);
+            self.target.FillRoundedRectangle(tile, plate);
 
             let well_ellipse = D2D1_ELLIPSE {
                 point: Vector2::new(cx, cy),
                 radiusX: w * 0.37,
                 radiusY: w * 0.37,
             };
-            self.target.FillEllipse(&well_ellipse, &well);
+            self.target.FillEllipse(&well_ellipse, well);
 
             let outer_r = w * 0.28;
             let inner_r = w * 0.12;
@@ -914,7 +861,7 @@ impl DockRenderer {
                 self.target.DrawLine(
                     Vector2::new(cx - cos_a * outer_r, cy - sin_a * outer_r),
                     Vector2::new(cx + cos_a * outer_r, cy + sin_a * outer_r),
-                    &gear,
+                    gear,
                     stroke,
                     &self.stroke_style,
                 );
@@ -931,12 +878,11 @@ impl DockRenderer {
                 radiusY: inner_r,
             };
             self.target
-                .DrawEllipse(&outer_ring, &gear, stroke * 1.1, &self.stroke_style);
-            self.target.FillEllipse(&inner_ring, &well);
+                .DrawEllipse(&outer_ring, gear, stroke * 1.1, &self.stroke_style);
+            self.target.FillEllipse(&inner_ring, well);
             self.target
-                .DrawEllipse(&inner_ring, &gear, stroke * 0.85, &self.stroke_style);
+                .DrawEllipse(&inner_ring, gear, stroke * 0.85, &self.stroke_style);
         }
-        Ok(())
     }
 
     fn draw_safari_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
@@ -946,20 +892,12 @@ impl DockRenderer {
         let cy = r.top + (r.bottom - r.top) * 0.5;
 
         unsafe {
-            let plate = self
-                .target
-                .CreateSolidColorBrush(&rgb(250, 252, 255, 1.0), None)?;
-            let dial = self
-                .target
-                .CreateSolidColorBrush(&rgb(24, 132, 247, 1.0), None)?;
-            let white = self
-                .target
-                .CreateSolidColorBrush(&rgb(255, 255, 255, 0.95), None)?;
-            let red = self
-                .target
-                .CreateSolidColorBrush(&rgb(255, 59, 48, 0.98), None)?;
+            let plate = self.brushes.scratch(2, rgb(250, 252, 255, 1.0));
+            let dial = self.brushes.scratch(3, rgb(24, 132, 247, 1.0));
+            let white = self.brushes.scratch(4, rgb(255, 255, 255, 0.95));
+            let red = self.brushes.scratch(5, rgb(255, 59, 48, 0.98));
 
-            self.target.FillRoundedRectangle(tile, &plate);
+            self.target.FillRoundedRectangle(tile, plate);
 
             let dial_r = w * 0.41;
             let dial_ellipse = D2D1_ELLIPSE {
@@ -967,7 +905,7 @@ impl DockRenderer {
                 radiusX: dial_r,
                 radiusY: dial_r,
             };
-            self.target.FillEllipse(&dial_ellipse, &dial);
+            self.target.FillEllipse(&dial_ellipse, dial);
 
             for i in 0..12 {
                 let angle = (i as f32) * (PI / 6.0);
@@ -977,7 +915,7 @@ impl DockRenderer {
                 self.target.DrawLine(
                     Vector2::new(cx + cos_a * r0, cy + sin_a * r0),
                     Vector2::new(cx + cos_a * r1, cy + sin_a * r1),
-                    &white,
+                    white,
                     (w * 0.022).max(1.0),
                     &self.stroke_style,
                 );
@@ -997,7 +935,7 @@ impl DockRenderer {
             s1.AddLine(Vector2::new(cx - unit * needle_hw, cy - unit * needle_hw));
             s1.EndFigure(D2D1_FIGURE_END_CLOSED);
             s1.Close()?;
-            self.target.FillGeometry(&ne, &red, None);
+            self.target.FillGeometry(&ne, red, None);
 
             let sw = self.factory.CreatePathGeometry()?;
             let s2 = sw.Open()?;
@@ -1009,7 +947,7 @@ impl DockRenderer {
             s2.AddLine(Vector2::new(cx - unit * needle_hw, cy - unit * needle_hw));
             s2.EndFigure(D2D1_FIGURE_END_CLOSED);
             s2.Close()?;
-            self.target.FillGeometry(&sw, &white, None);
+            self.target.FillGeometry(&sw, white, None);
         }
         Ok(())
     }
@@ -1020,17 +958,11 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let paper = self
-                .target
-                .CreateSolidColorBrush(&rgb(252, 251, 247, 1.0), None)?;
-            let header = self
-                .target
-                .CreateSolidColorBrush(&rgb(245, 184, 41, 1.0), None)?;
-            let rule = self
-                .target
-                .CreateSolidColorBrush(&rgb(214, 212, 206, 1.0), None)?;
+            let paper = self.brushes.scratch(2, rgb(252, 251, 247, 1.0));
+            let header = self.brushes.scratch(3, rgb(245, 184, 41, 1.0));
+            let rule = self.brushes.scratch(4, rgb(214, 212, 206, 1.0));
 
-            self.target.FillRoundedRectangle(tile, &paper);
+            self.target.FillRoundedRectangle(tile, paper);
 
             let header_h = h * 0.28;
             let header_path = self.factory.CreatePathGeometry()?;
@@ -1065,14 +997,14 @@ impl DockRenderer {
             sink.AddLine(Vector2::new(r.right, r.top + header_h));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
-            self.target.FillGeometry(&header_path, &header, None);
+            self.target.FillGeometry(&header_path, header, None);
 
             for frac in [0.46_f32, 0.62, 0.78] {
                 let y = r.top + h * frac;
                 self.target.DrawLine(
                     Vector2::new(r.left + w * 0.14, y),
                     Vector2::new(r.right - w * 0.14, y),
-                    &rule,
+                    rule,
                     (w * 0.025).max(1.0),
                     &self.stroke_style,
                 );
@@ -1081,7 +1013,7 @@ impl DockRenderer {
         Ok(())
     }
 
-    fn draw_pill(&self, layout: &DockLayout, palette: &LiquidGlassPalette) -> Result<()> {
+    fn draw_pill(&self, layout: &DockLayout, palette: &LiquidGlassPalette) {
         let p = layout.pill;
         let r = layout.pill_radius;
         let outer = D2D1_ROUNDED_RECT {
@@ -1105,23 +1037,16 @@ impl DockRenderer {
             radiusY: (r - 1.0).max(1.0),
         };
         unsafe {
-            let fill = self
-                .target
-                .CreateSolidColorBrush(&palette.dock_fill, None)?;
-            let outer_border = self
-                .target
-                .CreateSolidColorBrush(&palette.dock_outer_border, None)?;
-            let inner_border = self
-                .target
-                .CreateSolidColorBrush(&palette.dock_inner_border, None)?;
+            let fill = self.brushes.scratch(2, palette.dock_fill);
+            let outer_border = self.brushes.scratch(3, palette.dock_outer_border);
+            let inner_border = self.brushes.scratch(4, palette.dock_inner_border);
 
-            self.target.FillRoundedRectangle(&outer, &fill);
+            self.target.FillRoundedRectangle(&outer, fill);
             self.target
-                .DrawRoundedRectangle(&outer, &outer_border, 1.0, None);
+                .DrawRoundedRectangle(&outer, outer_border, 1.0, None);
             self.target
-                .DrawRoundedRectangle(&inner, &inner_border, 1.0, None);
+                .DrawRoundedRectangle(&inner, inner_border, 1.0, None);
         }
-        Ok(())
     }
 
     fn draw_tooltip(
@@ -1155,18 +1080,12 @@ impl DockRenderer {
         };
 
         unsafe {
-            let bg = self
-                .target
-                .CreateSolidColorBrush(&palette.menu_fill, None)?;
-            let border = self
-                .target
-                .CreateSolidColorBrush(&palette.dock_inner_border, None)?;
-            let text_brush: ID2D1SolidColorBrush = self
-                .target
-                .CreateSolidColorBrush(&palette.text_primary, None)?;
+            let bg = self.brushes.scratch(2, palette.menu_fill);
+            let border = self.brushes.scratch(3, palette.dock_inner_border);
+            let text_brush = self.brushes.scratch(4, palette.text_primary);
 
-            self.target.FillRoundedRectangle(&pill, &bg);
-            self.target.DrawRoundedRectangle(&pill, &border, 1.0, None);
+            self.target.FillRoundedRectangle(&pill, bg);
+            self.target.DrawRoundedRectangle(&pill, border, 1.0, None);
 
             let pointer = self.factory.CreatePathGeometry()?;
             let sink = pointer.Open()?;
@@ -1178,14 +1097,14 @@ impl DockRenderer {
             sink.AddLine(Vector2::new(center_x, bottom + arrow_size));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
-            self.target.FillGeometry(&pointer, &bg, None);
+            self.target.FillGeometry(&pointer, bg, None);
 
             let wide: Vec<u16> = title.encode_utf16().collect();
             self.target.DrawText(
                 &wide,
                 &self.tooltip_format,
                 &pill.rect,
-                &text_brush,
+                text_brush,
                 D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );

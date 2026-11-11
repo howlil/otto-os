@@ -57,6 +57,8 @@ pub(crate) struct NotchController {
     media: Option<NowPlaying>,
     notch_tab: NotchExpandedTab,
     anim_phase: f32,
+    lyrics_expanded: bool,
+    lyrics: Option<otto_core::LyricsSheet>,
 }
 
 impl NotchController {
@@ -77,6 +79,8 @@ impl NotchController {
             media,
             notch_tab,
             anim_phase: 0.0,
+            lyrics_expanded: false,
+            lyrics: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl NotchController {
             alert_mode: self.pomodoro.status == PomodoroStatus::Alert,
             active_tab: self.notch_tab,
             control_center_enabled,
+            lyrics_expanded: self.lyrics_expanded,
         }
     }
 
@@ -125,6 +130,14 @@ impl NotchController {
         if latest_media == self.media {
             return false;
         }
+        let track_changed = match (&self.media, &latest_media) {
+            (Some(prev), Some(next)) => prev.title != next.title || prev.artist != next.artist,
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if track_changed {
+            self.lyrics = None;
+        }
         if latest_media.as_ref().is_some_and(NowPlaying::is_active)
             && !self.pomodoro.is_compact_active()
             && self.notch_tab == NotchExpandedTab::Pomodoro
@@ -133,6 +146,29 @@ impl NotchController {
         }
         self.media = latest_media;
         true
+    }
+
+    pub(crate) fn lyrics(&self) -> Option<&otto_core::LyricsSheet> {
+        self.lyrics.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_lyrics(&mut self, lyrics: Option<otto_core::LyricsSheet>) {
+        self.lyrics = lyrics;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn lyrics_expanded(&self) -> bool {
+        self.lyrics_expanded
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn toggle_lyrics(&mut self) -> NotchUpdate {
+        self.lyrics_expanded = !self.lyrics_expanded;
+        NotchUpdate {
+            changed: true,
+            effect: None,
+        }
     }
 
     pub(crate) fn trigger_hud(&mut self, kind: NotchHudKind) {
@@ -200,6 +236,20 @@ impl NotchController {
         false
     }
 
+    pub(crate) fn handle_seekbar_click(&mut self, ratio: f32) -> NotchUpdate {
+        let Some(media) = self.media.as_mut() else {
+            return NotchUpdate::default();
+        };
+        let target_ms = ((ratio * media.duration_ms as f32).round() as u64).min(media.duration_ms);
+        media.position_ms = target_ms;
+        NotchUpdate {
+            changed: true,
+            effect: Some(NotchEffect::Platform(NotchAction::Media(
+                MediaCommand::Seek(target_ms),
+            ))),
+        }
+    }
+
     pub(crate) fn handle_click(&mut self, target: HitTarget) -> NotchUpdate {
         match target {
             HitTarget::PomodoroPlayPause
@@ -212,6 +262,7 @@ impl NotchController {
             HitTarget::MediaPlayPause | HitTarget::MediaPrevious | HitTarget::MediaNext => {
                 self.handle_media_click(target)
             }
+            HitTarget::MediaLyricsToggle => self.toggle_lyrics(),
             HitTarget::Notch => self.handle_notch_click(),
             _ => NotchUpdate::default(),
         }
@@ -461,6 +512,9 @@ mod tests {
             title: String::from("Track"),
             artist: String::from("Artist"),
             playing: true,
+            position_ms: 10_000,
+            duration_ms: 60_000,
+            thumbnail: None,
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
 
@@ -472,6 +526,30 @@ mod tests {
             update.effect,
             Some(NotchEffect::Platform(NotchAction::Media(
                 MediaCommand::TogglePlayPause
+            )))
+        );
+    }
+
+    #[test]
+    fn media_seekbar_click_updates_position_and_returns_seek_effect() {
+        let media = NowPlaying {
+            title: String::from("Track"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 200_000,
+            thumbnail: None,
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+
+        let update = notch.handle_seekbar_click(0.5);
+
+        assert!(update.changed);
+        assert_eq!(notch.media().map(|item| item.position_ms), Some(100_000));
+        assert_eq!(
+            update.effect,
+            Some(NotchEffect::Platform(NotchAction::Media(
+                MediaCommand::Seek(100_000)
             )))
         );
     }
@@ -493,9 +571,77 @@ mod tests {
             title: String::from("Track"),
             artist: String::new(),
             playing: true,
+            position_ms: 0,
+            duration_ms: 0,
+            thumbnail: None,
         };
 
         assert!(notch.set_media(Some(media)));
         assert_eq!(notch.layout_input(true).active_tab, NotchExpandedTab::Media);
+    }
+
+    #[test]
+    fn media_lyrics_toggle_updates_lyrics_expanded_and_layout_input() {
+        let media = NowPlaying {
+            title: String::from("Track"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 200_000,
+            thumbnail: None,
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+
+        assert!(!notch.lyrics_expanded());
+        assert!(!notch.layout_input(true).lyrics_expanded);
+
+        let update = notch.handle_click(HitTarget::MediaLyricsToggle);
+        assert!(update.changed);
+        assert_eq!(update.effect, None);
+        assert!(notch.lyrics_expanded());
+        assert!(notch.layout_input(true).lyrics_expanded);
+
+        let update2 = notch.handle_click(HitTarget::MediaLyricsToggle);
+        assert!(update2.changed);
+        assert!(!notch.lyrics_expanded());
+        assert!(!notch.layout_input(true).lyrics_expanded);
+    }
+
+    #[test]
+    fn track_change_resets_loaded_lyrics() {
+        let media = NowPlaying {
+            title: String::from("Track 1"),
+            artist: String::from("Artist 1"),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 200_000,
+            thumbnail: None,
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+        let sheet = otto_core::parse_lrc("[00:01.00]Hello world");
+        notch.set_lyrics(Some(sheet));
+        assert!(notch.lyrics().is_some());
+
+        let same_track_updated_pos = NowPlaying {
+            title: String::from("Track 1"),
+            artist: String::from("Artist 1"),
+            playing: true,
+            position_ms: 50_000,
+            duration_ms: 200_000,
+            thumbnail: None,
+        };
+        notch.set_media(Some(same_track_updated_pos));
+        assert!(notch.lyrics().is_some());
+
+        let different_track = NowPlaying {
+            title: String::from("Track 2"),
+            artist: String::from("Artist 2"),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 180_000,
+            thumbnail: None,
+        };
+        notch.set_media(Some(different_track));
+        assert!(notch.lyrics().is_none());
     }
 }

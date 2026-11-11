@@ -5,6 +5,7 @@ mod control_center;
 mod dock;
 mod file;
 mod instance;
+mod lyrics;
 mod media;
 mod motion;
 mod notch;
@@ -38,6 +39,7 @@ pub use dock::{
 };
 pub use file::replace_file_atomically;
 pub use instance::InstanceGuard;
+pub use lyrics::{get_or_fetch_lyrics, load_cached_lyrics, save_cached_lyrics};
 pub use media::{
     MediaCommand, NowPlaying, read_now_playing, send_media_command, shutdown_media_task,
 };

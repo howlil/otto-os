@@ -1,6 +1,6 @@
 use crate::media::NotchExpandedTab;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -46,6 +46,8 @@ pub enum HitTarget {
     MediaPlayPause,
     MediaPrevious,
     MediaNext,
+    MediaSeekbar,
+    MediaLyricsToggle,
     Tray,
     QuickSettings,
     Search,
@@ -61,6 +63,7 @@ pub struct NotchLayoutInput {
     pub alert_mode: bool,
     pub active_tab: NotchExpandedTab,
     pub control_center_enabled: bool,
+    pub lyrics_expanded: bool,
 }
 
 impl Default for NotchLayoutInput {
@@ -72,6 +75,7 @@ impl Default for NotchLayoutInput {
             alert_mode: false,
             active_tab: NotchExpandedTab::Pomodoro,
             control_center_enabled: true,
+            lyrics_expanded: false,
         }
     }
 }
@@ -84,6 +88,7 @@ pub struct Metrics {
     pub notch_expanded_width: i32,
     pub notch_height: i32,
     pub notch_expanded_height: i32,
+    pub notch_lyrics_height: i32,
     pub notch_corner_radius: i32,
     pub notch_expanded_corner_radius: i32,
     pub notch_ear_radius: i32,
@@ -114,7 +119,8 @@ impl Metrics {
         notch_hud_width: 356,
         notch_expanded_width: 380,
         notch_height: 32,
-        notch_expanded_height: 116,
+        notch_expanded_height: 144,
+        notch_lyrics_height: 280,
         notch_corner_radius: 10,
         notch_expanded_corner_radius: 22,
         notch_ear_radius: 6,
@@ -164,9 +170,14 @@ pub struct Layout {
     pub pomodoro_alert_extend_button: Rect,
     pub notch_tab_pomodoro: Rect,
     pub notch_tab_media: Rect,
+    pub media_cover_art: Rect,
+    pub media_lyrics_toggle: Rect,
+    pub media_lyrics_drawer: Rect,
+    pub media_seekbar: Rect,
     pub media_play_button: Rect,
     pub media_prev_button: Rect,
     pub media_next_button: Rect,
+    pub lyrics_expanded: bool,
     pub icon_size: i32,
     pub start_slot: Rect,
     pub app_slot: Rect,
@@ -202,6 +213,9 @@ impl Layout {
                 return Some(HitTarget::NotchTabMedia);
             }
             if self.active_tab == NotchExpandedTab::Media {
+                if self.media_lyrics_toggle.contains(x, y) {
+                    return Some(HitTarget::MediaLyricsToggle);
+                }
                 if self.media_play_button.contains(x, y) {
                     return Some(HitTarget::MediaPlayPause);
                 }
@@ -210,6 +224,9 @@ impl Layout {
                 }
                 if self.media_next_button.contains(x, y) {
                     return Some(HitTarget::MediaNext);
+                }
+                if self.media_seekbar.contains(x, y) {
+                    return Some(HitTarget::MediaSeekbar);
                 }
             } else {
                 if self.pomodoro_play_button.contains(x, y) {
@@ -280,7 +297,9 @@ impl Layout {
             | HitTarget::NotchTabMedia
             | HitTarget::MediaPlayPause
             | HitTarget::MediaPrevious
-            | HitTarget::MediaNext => None,
+            | HitTarget::MediaNext
+            | HitTarget::MediaSeekbar
+            | HitTarget::MediaLyricsToggle => None,
             HitTarget::Tray => Some(self.tray_slot),
             HitTarget::QuickSettings => Some(self.status_slot),
             HitTarget::Search => Some(self.search_slot),
@@ -369,6 +388,7 @@ pub fn compute_layout_with_hud(
             alert_mode: false,
             active_tab: NotchExpandedTab::Pomodoro,
             control_center_enabled: true,
+            lyrics_expanded: false,
         },
     )
 }
@@ -382,12 +402,21 @@ struct ExpandedNotchControls {
     alert_extend_button: Rect,
     notch_tab_pomodoro: Rect,
     notch_tab_media: Rect,
+    media_cover_art: Rect,
+    media_lyrics_toggle: Rect,
+    media_lyrics_drawer: Rect,
+    media_seekbar: Rect,
     media_play_button: Rect,
     media_prev_button: Rect,
     media_next_button: Rect,
 }
 
-fn compute_expanded_notch_controls(notch: Rect, dpi: u32) -> ExpandedNotchControls {
+#[allow(clippy::too_many_lines)]
+fn compute_expanded_notch_controls(
+    notch: Rect,
+    dpi: u32,
+    lyrics_expanded: bool,
+) -> ExpandedNotchControls {
     let pad_x = scale(18, dpi);
     let tab_y = scale(7, dpi);
     let tab_h = scale(20, dpi);
@@ -409,7 +438,7 @@ fn compute_expanded_notch_controls(notch: Rect, dpi: u32) -> ExpandedNotchContro
     };
     let phase_slot = notch_tab_pomodoro;
 
-    let row_cy = scale(70, dpi);
+    let row_cy = scale(78, dpi);
     let play_size = scale(38, dpi);
     let secondary_size = scale(30, dpi);
     let btn_gap = scale(8, dpi);
@@ -437,27 +466,81 @@ fn compute_expanded_notch_controls(notch: Rect, dpi: u32) -> ExpandedNotchContro
         height: play_size,
     };
 
-    let media_next_x = notch.right() - pad_x - secondary_size;
-    let media_play_x = media_next_x - btn_gap - play_size;
-    let media_prev_x = media_play_x - btn_gap - secondary_size;
-
-    let media_next_button = Rect {
-        x: media_next_x,
-        y: row_cy - secondary_size / 2,
-        width: secondary_size,
-        height: secondary_size,
+    let media_art_size = scale(44, dpi);
+    let media_art_y = scale(36, dpi);
+    let media_cover_art = Rect {
+        x: notch.x + pad_x,
+        y: media_art_y,
+        width: media_art_size,
+        height: media_art_size,
     };
+
+    let lyrics_toggle_size = scale(22, dpi);
+    let media_lyrics_toggle = Rect {
+        x: notch.right() - pad_x - scale(52, dpi),
+        y: scale(46, dpi),
+        width: lyrics_toggle_size,
+        height: lyrics_toggle_size,
+    };
+
+    let media_seekbar_h = scale(14, dpi);
+    let media_seekbar_w = notch.width - pad_x * 2;
+
+    let (media_lyrics_drawer, media_seekbar_y, media_row_cy) = if lyrics_expanded {
+        let drawer_y = scale(86, dpi);
+        let drawer_h = scale(130, dpi);
+        (
+            Rect {
+                x: notch.x + pad_x,
+                y: drawer_y,
+                width: media_seekbar_w,
+                height: drawer_h,
+            },
+            scale(220, dpi),
+            scale(256, dpi),
+        )
+    } else {
+        (
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            scale(90, dpi),
+            scale(122, dpi),
+        )
+    };
+
+    let media_seekbar = Rect {
+        x: notch.x + pad_x,
+        y: media_seekbar_y,
+        width: media_seekbar_w,
+        height: media_seekbar_h,
+    };
+
+    let media_play_size = scale(34, dpi);
+    let media_secondary_size = scale(28, dpi);
+    let media_btn_gap = scale(20, dpi);
+    let notch_center_x = notch.x + notch.width / 2;
+
     let media_play_button = Rect {
-        x: media_play_x,
-        y: row_cy - play_size / 2,
-        width: play_size,
-        height: play_size,
+        x: notch_center_x - media_play_size / 2,
+        y: media_row_cy - media_play_size / 2,
+        width: media_play_size,
+        height: media_play_size,
     };
     let media_prev_button = Rect {
-        x: media_prev_x,
-        y: row_cy - secondary_size / 2,
-        width: secondary_size,
-        height: secondary_size,
+        x: media_play_button.x - media_btn_gap - media_secondary_size,
+        y: media_row_cy - media_secondary_size / 2,
+        width: media_secondary_size,
+        height: media_secondary_size,
+    };
+    let media_next_button = Rect {
+        x: media_play_button.right() + media_btn_gap,
+        y: media_row_cy - media_secondary_size / 2,
+        width: media_secondary_size,
+        height: media_secondary_size,
     };
 
     let alert_btn_h = scale(30, dpi);
@@ -489,6 +572,10 @@ fn compute_expanded_notch_controls(notch: Rect, dpi: u32) -> ExpandedNotchContro
         alert_extend_button,
         notch_tab_pomodoro,
         notch_tab_media,
+        media_cover_art,
+        media_lyrics_toggle,
+        media_lyrics_drawer,
+        media_seekbar,
         media_play_button,
         media_prev_button,
         media_next_button,
@@ -512,8 +599,14 @@ pub fn compute_layout_with_notch(
     let compact_pts = lerp_points(metrics.notch_width, metrics.notch_compact_width, compact_t);
     let hud_pts = lerp_points(metrics.notch_width, metrics.notch_hud_width, hud_t);
     let collapsed_pts = compact_pts.max(hud_pts);
+    let target_expanded_h =
+        if notch_input.lyrics_expanded && notch_input.active_tab == NotchExpandedTab::Media {
+            metrics.notch_lyrics_height
+        } else {
+            metrics.notch_expanded_height
+        };
     let notch_pts_w = lerp_points(collapsed_pts, metrics.notch_expanded_width, panel_t);
-    let notch_pts_h = lerp_points(metrics.notch_height, metrics.notch_expanded_height, panel_t);
+    let notch_pts_h = lerp_points(metrics.notch_height, target_expanded_h, panel_t);
 
     let notch_width = scale(notch_pts_w, dpi);
     let notch_height = scale(notch_pts_h, dpi);
@@ -535,7 +628,7 @@ pub fn compute_layout_with_notch(
     };
 
     let panel_pts_w = metrics.notch_expanded_width + metrics.notch_expanded_ear_radius * 2 + 8;
-    let panel_pts_h = metrics.notch_expanded_height + 4;
+    let panel_pts_h = target_expanded_h + 4;
     let panel_w = scale(panel_pts_w, dpi);
     let panel_h = scale(panel_pts_h, dpi);
     let panel_window = Rect {
@@ -545,7 +638,7 @@ pub fn compute_layout_with_notch(
         height: panel_h,
     };
 
-    let controls = compute_expanded_notch_controls(notch, dpi);
+    let controls = compute_expanded_notch_controls(notch, dpi, notch_input.lyrics_expanded);
 
     let left_limit = (notch.x - left_gap).max(padding);
     let mut lx = padding;
@@ -605,9 +698,14 @@ pub fn compute_layout_with_notch(
         pomodoro_alert_extend_button: controls.alert_extend_button,
         notch_tab_pomodoro: controls.notch_tab_pomodoro,
         notch_tab_media: controls.notch_tab_media,
+        media_cover_art: controls.media_cover_art,
+        media_lyrics_toggle: controls.media_lyrics_toggle,
+        media_lyrics_drawer: controls.media_lyrics_drawer,
+        media_seekbar: controls.media_seekbar,
         media_play_button: controls.media_play_button,
         media_prev_button: controls.media_prev_button,
         media_next_button: controls.media_next_button,
+        lyrics_expanded: notch_input.lyrics_expanded,
         icon_size: scale(metrics.icon_size, dpi),
         start_slot,
         app_slot,
@@ -668,11 +766,12 @@ mod tests {
                 alert_mode: false,
                 active_tab: NotchExpandedTab::Pomodoro,
                 control_center_enabled: true,
+                lyrics_expanded: false,
             },
         );
         assert_eq!(layout.bar.height, 32);
         assert_eq!(layout.notch.width, 380);
-        assert_eq!(layout.notch.height, 116);
+        assert_eq!(layout.notch.height, 144);
         assert_eq!(layout.notch_corner_radius, 22);
         assert_eq!(layout.notch_ear_radius, 8);
         assert_eq!(
@@ -719,6 +818,7 @@ mod tests {
                 alert_mode: false,
                 active_tab: NotchExpandedTab::Media,
                 control_center_enabled: true,
+                lyrics_expanded: false,
             },
         );
         assert_eq!(
@@ -753,6 +853,67 @@ mod tests {
             ),
             Some(HitTarget::MediaNext)
         );
+        assert_eq!(
+            layout.hit_test(layout.media_seekbar.x + 8, layout.media_seekbar.y + 4,),
+            Some(HitTarget::MediaSeekbar)
+        );
+        assert!(layout.media_cover_art.bottom() <= layout.media_seekbar.y);
+        assert!(layout.media_seekbar.bottom() <= layout.media_play_button.y);
+        assert_eq!(
+            layout.media_play_button.x + layout.media_play_button.width / 2,
+            layout.notch.x + layout.notch.width / 2
+        );
+        assert!(layout.media_prev_button.right() < layout.media_play_button.x);
+        assert!(layout.media_play_button.right() < layout.media_next_button.x);
+    }
+
+    #[test]
+    fn expanded_notch_supports_lyrics_drawer_and_toggle() {
+        let layout_collapsed = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                hud_expansion: 0.0,
+                compact_expansion: 0.0,
+                panel_expansion: 1.0,
+                alert_mode: false,
+                active_tab: NotchExpandedTab::Media,
+                control_center_enabled: true,
+                lyrics_expanded: false,
+            },
+        );
+        assert_eq!(layout_collapsed.notch.height, 144);
+        assert_eq!(layout_collapsed.media_lyrics_drawer.height, 0);
+        assert_eq!(
+            layout_collapsed.hit_test(
+                layout_collapsed.media_lyrics_toggle.x + 4,
+                layout_collapsed.media_lyrics_toggle.y + 4,
+            ),
+            Some(HitTarget::MediaLyricsToggle)
+        );
+
+        let layout_expanded = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                hud_expansion: 0.0,
+                compact_expansion: 0.0,
+                panel_expansion: 1.0,
+                alert_mode: false,
+                active_tab: NotchExpandedTab::Media,
+                control_center_enabled: true,
+                lyrics_expanded: true,
+            },
+        );
+        assert_eq!(layout_expanded.notch.height, 280);
+        assert!(layout_expanded.media_lyrics_drawer.height > 100);
+        assert!(layout_expanded.media_cover_art.bottom() <= layout_expanded.media_lyrics_drawer.y);
+        assert!(layout_expanded.media_lyrics_drawer.bottom() <= layout_expanded.media_seekbar.y);
+        assert!(layout_expanded.media_seekbar.bottom() <= layout_expanded.media_play_button.y);
     }
 
     #[test]
@@ -769,6 +930,7 @@ mod tests {
                 alert_mode: false,
                 active_tab: NotchExpandedTab::Pomodoro,
                 control_center_enabled: true,
+                lyrics_expanded: false,
             },
         );
         assert_eq!(layout.notch.width, 292);

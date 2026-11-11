@@ -2,6 +2,7 @@ mod calendar;
 mod dock;
 mod genie;
 mod layout;
+mod lyrics;
 mod media;
 mod menu;
 mod motion;
@@ -21,6 +22,7 @@ pub use layout::{
     HitTarget, Layout, Metrics, NotchLayoutInput, Rect, compute_layout, compute_layout_for_app,
     compute_layout_with_hud, compute_layout_with_notch, scale,
 };
+pub use lyrics::{LyricLine, LyricsSheet, parse_lrc};
 pub use media::{MediaCommand, NotchExpandedTab, NowPlaying};
 pub use menu::{
     CMD_APP_ACTIVATE, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY,

@@ -4,6 +4,7 @@ mod menu;
 mod theme;
 mod window_controls;
 
+use std::cell::RefCell;
 use std::f32::consts::PI;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -11,12 +12,12 @@ use std::mem::size_of;
 pub use dock::{DockRenderItem, DockRenderer};
 pub use genie::GenieRenderer;
 pub use menu::PopupMenuRenderer;
-pub use theme::LiquidGlassPalette;
+pub use theme::{BrushPalette, LiquidGlassPalette};
 pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
 
 use otto_core::{
-    HitTarget, Layout, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying, PomodoroPhase,
-    PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
+    HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying,
+    PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
 };
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -25,21 +26,23 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
-    D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget,
+    ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
-    IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+    IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -47,6 +50,11 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
     HGDIOBJ, SelectObject,
 };
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -115,6 +123,15 @@ const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
     format: DXGI_FORMAT_B8G8R8A8_UNORM,
     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
 };
+
+const fn rgb(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a,
+    }
+}
 
 const fn phase_accent_color(phase: PomodoroPhase) -> D2D1_COLOR_F {
     match phase {
@@ -199,6 +216,19 @@ impl Drop for DibSurface {
     }
 }
 
+struct CachedNotchGeometry {
+    rect: Rect,
+    corner_radius_bits: u32,
+    ear_radius_bits: u32,
+    geometry: ID2D1PathGeometry,
+}
+
+struct CachedCoverArt {
+    bytes_ptr: usize,
+    bytes_len: usize,
+    bitmap: ID2D1Bitmap,
+}
+
 pub struct Renderer {
     factory: ID2D1Factory,
     target: ID2D1DCRenderTarget,
@@ -214,6 +244,35 @@ pub struct Renderer {
     bar_surface: DibSurface,
     panel_surface: DibSurface,
     dpi: u32,
+    brushes: BrushPalette,
+    cached_bar_notch: RefCell<Option<CachedNotchGeometry>>,
+    cached_panel_notch: RefCell<Option<CachedNotchGeometry>>,
+    cached_cover_art: RefCell<Option<CachedCoverArt>>,
+}
+
+fn decode_image_bytes(target: &ID2D1DCRenderTarget, bytes: &[u8]) -> Result<ID2D1Bitmap> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let stream = factory.CreateStream()?;
+        stream.InitializeFromMemory(bytes)?;
+        let decoder = factory.CreateDecoderFromStream(
+            &stream,
+            std::ptr::null(),
+            WICDecodeMetadataCacheOnDemand,
+        )?;
+        let frame = decoder.GetFrame(0)?;
+        let converter = factory.CreateFormatConverter()?;
+        converter.Initialize(
+            &frame,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )?;
+        target.CreateBitmapFromWicBitmap(&converter, None)
+    }
 }
 
 impl Renderer {
@@ -301,6 +360,9 @@ impl Renderer {
 
             let bar_surface = DibSurface::new(width, height)?;
             let panel_surface = DibSurface::new(panel_width, panel_height)?;
+            let brushes = BrushPalette::new(&target)?;
+            let cached_bar_notch = RefCell::new(None);
+            let cached_panel_notch = RefCell::new(None);
 
             Ok(Self {
                 factory,
@@ -317,6 +379,10 @@ impl Renderer {
                 bar_surface,
                 panel_surface,
                 dpi,
+                brushes,
+                cached_bar_notch,
+                cached_panel_notch,
+                cached_cover_art: RefCell::new(None),
             })
         }
     }
@@ -342,6 +408,7 @@ impl Renderer {
         unsafe { self.bar_surface.present(hwnd, origin) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn present_panel(
         &self,
         panel_hwnd: isize,
@@ -349,8 +416,10 @@ impl Renderer {
         hovered: Option<HitTarget>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
+        anim_phase: f32,
+        lyrics: Option<&LyricsSheet>,
     ) -> Result<()> {
-        self.draw_panel(layout, hovered, pomodoro, media)?;
+        self.draw_panel(layout, hovered, pomodoro, media, anim_phase, lyrics)?;
         unsafe {
             self.panel_surface
                 .present(panel_hwnd, (layout.panel_window.x, layout.panel_window.y))
@@ -385,8 +454,8 @@ impl Renderer {
             self.target.BeginDraw();
             let clear = palette.bar_background;
             self.target.Clear(Some(&raw const clear));
+            self.brushes.update_theme(&palette);
 
-            let black = self.target.CreateSolidColorBrush(&BLACK, None)?;
             let bar_notch = Rect {
                 x: layout.notch.x,
                 y: 0,
@@ -399,34 +468,32 @@ impl Renderer {
                 layout.notch_corner_radius as f32
             };
             self.target.FillGeometry(
-                &self.notch_geometry_rect(bar_notch, corner_r, layout.notch_ear_radius as f32)?,
-                &black,
+                &self.notch_geometry_rect(
+                    bar_notch,
+                    corner_r,
+                    layout.notch_ear_radius as f32,
+                    &self.cached_bar_notch,
+                )?,
+                &self.brushes.black,
                 None,
             );
 
             if let Some(target_slot) = hovered.and_then(|t| layout.slot_rect(t)) {
-                let hover_brush = self
-                    .target
-                    .CreateSolidColorBrush(&palette.hover_pill, None)?;
-                self.draw_slot_pill(target_slot, &hover_brush);
+                self.draw_slot_pill(target_slot, &self.brushes.hover);
             }
 
-            let fg = self
-                .target
-                .CreateSolidColorBrush(&palette.text_primary, None)?;
-            let muted = self
-                .target
-                .CreateSolidColorBrush(&palette.text_muted, None)?;
+            let fg = &self.brushes.text_primary;
+            let muted = &self.brushes.text_muted;
 
-            self.draw_apple_logo(layout, &fg)?;
-            self.draw_left_menu_bar(layout, app_name, &fg);
-            self.draw_tray_chevron(layout, &fg)?;
-            self.draw_status_slot(layout, status, &fg, &muted)?;
-            self.draw_search_slot(layout, &fg);
+            self.draw_apple_logo(layout, fg)?;
+            self.draw_left_menu_bar(layout, app_name, fg);
+            self.draw_tray_chevron(layout, fg)?;
+            self.draw_status_slot(layout, status, fg, muted)?;
+            self.draw_search_slot(layout, fg);
             if layout.control_center_slot.width > 0 {
-                self.draw_control_center_slot(layout, &fg, &muted);
+                self.draw_control_center_slot(layout, fg, muted);
             }
-            self.draw_clock_slot(layout, status, &fg)?;
+            self.draw_clock_slot(layout, status, fg)?;
 
             if layout.panel_expansion < 0.15 {
                 if let Some(hud_state) = hud
@@ -448,6 +515,8 @@ impl Renderer {
         hovered: Option<HitTarget>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
+        anim_phase: f32,
+        lyrics: Option<&LyricsSheet>,
     ) -> Result<()> {
         let (width, height) = self.panel_surface.size;
         let offset_x = layout.panel_window.x;
@@ -472,19 +541,19 @@ impl Renderer {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
 
-            let black = self.target.CreateSolidColorBrush(&BLACK, None)?;
             let geom = self.notch_geometry_rect(
                 local_notch,
                 layout.notch_corner_radius as f32,
                 layout.notch_ear_radius as f32,
+                &self.cached_panel_notch,
             )?;
-            self.target.FillGeometry(&geom, &black, None);
+            self.target.FillGeometry(&geom, &self.brushes.black, None);
 
             let rim_alpha = (layout.panel_expansion * 0.12).clamp(0.0, 0.12);
             if rim_alpha > 0.01 {
-                let rim = self.alpha_brush(FOREGROUND, rim_alpha)?;
+                let rim = self.brushes.alpha_brush(0, FOREGROUND, rim_alpha);
                 self.target
-                    .DrawGeometry(&geom, &rim, 1.0, &self.stroke_style);
+                    .DrawGeometry(&geom, rim, 1.0, &self.stroke_style);
             }
 
             if layout.panel_expansion > 0.22 {
@@ -504,8 +573,16 @@ impl Renderer {
                         layout.active_tab,
                         true,
                         pomodoro,
+                    );
+                    self.draw_expanded_media(
+                        layout,
+                        offset_x,
+                        alpha,
+                        hovered,
+                        active_media,
+                        anim_phase,
+                        lyrics,
                     )?;
-                    self.draw_expanded_media(layout, offset_x, alpha, hovered, active_media)?;
                 } else {
                     let has_media = media.is_some();
                     self.draw_expanded_tabs(
@@ -516,7 +593,7 @@ impl Renderer {
                         layout.active_tab,
                         has_media,
                         pomodoro,
-                    )?;
+                    );
                     self.draw_expanded_pomodoro(layout, offset_x, alpha, hovered, pomodoro)?;
                 }
             }
@@ -536,43 +613,38 @@ impl Renderer {
         let media_item = media.filter(|m| m.is_active());
         match (pomo_active, media_item) {
             (true, Some(m)) => self.draw_dual_compact(layout, pomodoro, m, anim_phase),
-            (false, Some(m)) => self.draw_compact_media(layout, m, anim_phase),
+            (false, Some(m)) => {
+                self.draw_compact_media(layout, m, anim_phase);
+                Ok(())
+            }
             (true, None) => self.draw_compact_pomodoro(layout, pomodoro),
             (false, None) => Ok(()),
         }
     }
 
-    fn draw_compact_media(
-        &self,
-        layout: &Layout,
-        media: &NowPlaying,
-        anim_phase: f32,
-    ) -> Result<()> {
+    fn draw_compact_media(&self, layout: &Layout, media: &NowPlaying, anim_phase: f32) {
         let alpha = ((layout.compact_expansion - 0.15) / 0.85).clamp(0.0, 1.0);
         let n = layout.notch;
         let cy = layout.bar.height as f32 * 0.5;
         let note_cx = n.x as f32 + scale(18, self.dpi) as f32;
         let note_r = scale(6, self.dpi) as f32;
 
-        unsafe {
-            let accent = self.alpha_brush(MUSIC_ACCENT, 0.96 * alpha)?;
-            let fg = self.alpha_brush(FOREGROUND, 0.92 * alpha)?;
-            let eq_brush = self.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha)?;
+        let accent = self.brushes.alpha_brush(0, MUSIC_ACCENT, 0.96 * alpha);
+        let fg = self.brushes.alpha_brush(1, FOREGROUND, 0.92 * alpha);
+        let eq_brush = self.brushes.alpha_brush(2, EQUALIZER_GREEN, 0.96 * alpha);
 
-            self.draw_music_note_glyph(note_cx, cy, note_r, &accent);
+        self.draw_music_note_glyph(note_cx, cy, note_r, accent);
 
-            let eq_cx = n.right() as f32 - scale(20, self.dpi) as f32;
-            self.draw_audio_equalizer(eq_cx, cy, anim_phase, &eq_brush);
+        let eq_cx = n.right() as f32 - scale(20, self.dpi) as f32;
+        self.draw_audio_equalizer(eq_cx, cy, anim_phase, eq_brush);
 
-            let text_rect = D2D_RECT_F {
-                left: note_cx + scale(12, self.dpi) as f32,
-                top: 0.0,
-                right: eq_cx - scale(12, self.dpi) as f32,
-                bottom: layout.bar.height as f32,
-            };
-            self.draw_text(&media.title, &self.text_leading, text_rect, &fg);
-        }
-        Ok(())
+        let text_rect = D2D_RECT_F {
+            left: note_cx + scale(12, self.dpi) as f32,
+            top: 0.0,
+            right: eq_cx - scale(12, self.dpi) as f32,
+            bottom: layout.bar.height as f32,
+        };
+        self.draw_text(&media.title, &self.text_leading, text_rect, fg);
     }
 
     fn draw_dual_compact(
@@ -590,33 +662,31 @@ impl Renderer {
         let stroke = (scale(2, self.dpi) as f32).max(1.6);
         let accent_color = phase_accent_color(pomodoro.phase);
 
-        unsafe {
-            let accent = self.alpha_brush(accent_color, 0.96 * alpha)?;
-            let track = self.alpha_brush(FOREGROUND, 0.22 * alpha)?;
-            let eq_brush = self.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha)?;
+        let accent = self.brushes.alpha_brush(0, accent_color, 0.96 * alpha);
+        let track = self.brushes.alpha_brush(1, FOREGROUND, 0.22 * alpha);
+        let eq_brush = self.brushes.alpha_brush(2, EQUALIZER_GREEN, 0.96 * alpha);
 
-            self.draw_progress_ring(
-                ring_cx,
-                cy,
-                ring_r,
-                stroke,
-                pomodoro.progress(),
-                &accent,
-                &track,
-            )?;
+        self.draw_progress_ring(
+            ring_cx,
+            cy,
+            ring_r,
+            stroke,
+            pomodoro.progress(),
+            accent,
+            track,
+        )?;
 
-            let text = pomodoro.format_time();
-            let text_rect = D2D_RECT_F {
-                left: ring_cx + scale(10, self.dpi) as f32,
-                top: 0.0,
-                right: n.right() as f32 - scale(36, self.dpi) as f32,
-                bottom: layout.bar.height as f32,
-            };
-            self.draw_text(&text, &self.text_leading, text_rect, &accent);
+        let text = pomodoro.format_time();
+        let text_rect = D2D_RECT_F {
+            left: ring_cx + scale(10, self.dpi) as f32,
+            top: 0.0,
+            right: n.right() as f32 - scale(36, self.dpi) as f32,
+            bottom: layout.bar.height as f32,
+        };
+        self.draw_text(&text, &self.text_leading, text_rect, accent);
 
-            let eq_cx = n.right() as f32 - scale(18, self.dpi) as f32;
-            self.draw_audio_equalizer(eq_cx, cy, anim_phase, &eq_brush);
-        }
+        let eq_cx = n.right() as f32 - scale(18, self.dpi) as f32;
+        self.draw_audio_equalizer(eq_cx, cy, anim_phase, eq_brush);
         Ok(())
     }
 
@@ -630,8 +700,8 @@ impl Renderer {
         let accent_color = phase_accent_color(pomodoro.phase);
 
         unsafe {
-            let accent = self.alpha_brush(accent_color, 0.96 * alpha)?;
-            let track = self.alpha_brush(FOREGROUND, 0.22 * alpha)?;
+            let accent = self.brushes.alpha_brush(0, accent_color, 0.96 * alpha);
+            let track = self.brushes.alpha_brush(1, FOREGROUND, 0.22 * alpha);
 
             self.draw_progress_ring(
                 ring_cx,
@@ -639,8 +709,8 @@ impl Renderer {
                 ring_r,
                 stroke,
                 pomodoro.progress(),
-                &accent,
-                &track,
+                accent,
+                track,
             )?;
 
             if pomodoro.status == PomodoroStatus::Paused {
@@ -649,14 +719,14 @@ impl Renderer {
                     radiusX: stroke * 0.65,
                     radiusY: stroke * 0.65,
                 };
-                self.target.FillEllipse(&dot, &track);
+                self.target.FillEllipse(&dot, track);
             } else {
                 let dot = D2D1_ELLIPSE {
                     point: Vector2::new(ring_cx, cy),
                     radiusX: stroke * 0.75,
                     radiusY: stroke * 0.75,
                 };
-                self.target.FillEllipse(&dot, &accent);
+                self.target.FillEllipse(&dot, accent);
             }
 
             let text = pomodoro.format_time();
@@ -666,7 +736,7 @@ impl Renderer {
                 right: n.right() as f32 - scale(11, self.dpi) as f32,
                 bottom: layout.bar.height as f32,
             };
-            self.draw_text(&text, &self.text_trailing, text_rect, &accent);
+            self.draw_text(&text, &self.text_trailing, text_rect, accent);
         }
         Ok(())
     }
@@ -681,7 +751,7 @@ impl Renderer {
         active_tab: NotchExpandedTab,
         has_media: bool,
         pomodoro: PomodoroState,
-    ) -> Result<()> {
+    ) {
         let pomo_rect = translate_rect(layout.notch_tab_pomodoro, -offset_x);
         let media_rect = translate_rect(layout.notch_tab_media, -offset_x);
 
@@ -695,31 +765,32 @@ impl Renderer {
             } else {
                 0.06 * alpha
             };
-            let pomo_brush = self.alpha_brush(FOREGROUND, pomo_alpha)?;
-            self.draw_rounded_box(pomo_rect, pomo_rect.height as f32 * 0.5, &pomo_brush);
+            let pomo_brush = self.brushes.alpha_brush(0, FOREGROUND, pomo_alpha);
+            self.draw_rounded_box(pomo_rect, pomo_rect.height as f32 * 0.5, pomo_brush);
 
             let accent_color = phase_accent_color(pomodoro.phase);
             let dot_x = pomo_rect.x as f32 + scale(10, self.dpi) as f32;
             let dot_mid_y = pomo_rect.y as f32 + pomo_rect.height as f32 * 0.5;
             let dot_r = scale(3, self.dpi) as f32;
-            let accent = self.alpha_brush(accent_color, alpha)?;
+            let accent = self.brushes.alpha_brush(1, accent_color, alpha);
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: Vector2::new(dot_x, dot_mid_y),
                     radiusX: dot_r,
                     radiusY: dot_r,
                 },
-                &accent,
+                accent,
             );
 
-            let pomo_text_brush = self.alpha_brush(
+            let pomo_text_brush = self.brushes.alpha_brush(
+                2,
                 FOREGROUND,
                 if pomo_active {
                     0.96 * alpha
                 } else {
                     0.55 * alpha
                 },
-            )?;
+            );
             let pomo_label_rect = D2D_RECT_F {
                 left: dot_x + scale(7, self.dpi) as f32,
                 top: pomo_rect.y as f32,
@@ -730,7 +801,7 @@ impl Renderer {
                 pomodoro.phase.badge_label(),
                 &self.text_badge,
                 pomo_label_rect,
-                &pomo_text_brush,
+                pomo_text_brush,
             );
 
             if has_media {
@@ -743,27 +814,28 @@ impl Renderer {
                 } else {
                     0.06 * alpha
                 };
-                let media_brush = self.alpha_brush(FOREGROUND, media_alpha)?;
-                self.draw_rounded_box(media_rect, media_rect.height as f32 * 0.5, &media_brush);
+                let media_brush = self.brushes.alpha_brush(3, FOREGROUND, media_alpha);
+                self.draw_rounded_box(media_rect, media_rect.height as f32 * 0.5, media_brush);
 
                 let m_dot_x = media_rect.x as f32 + scale(10, self.dpi) as f32;
                 let m_dot_mid_y = media_rect.y as f32 + media_rect.height as f32 * 0.5;
-                let m_accent = self.alpha_brush(MUSIC_ACCENT, alpha)?;
+                let m_accent = self.brushes.alpha_brush(4, MUSIC_ACCENT, alpha);
                 self.draw_music_note_glyph(
                     m_dot_x,
                     m_dot_mid_y,
                     scale(4, self.dpi) as f32,
-                    &m_accent,
+                    m_accent,
                 );
 
-                let media_text_brush = self.alpha_brush(
+                let media_text_brush = self.brushes.alpha_brush(
+                    5,
                     FOREGROUND,
                     if media_active {
                         0.96 * alpha
                     } else {
                         0.55 * alpha
                     },
-                )?;
+                );
                 let media_label_rect = D2D_RECT_F {
                     left: m_dot_x + scale(7, self.dpi) as f32,
                     top: media_rect.y as f32,
@@ -774,13 +846,35 @@ impl Renderer {
                     "NOW PLAYING",
                     &self.text_badge,
                     media_label_rect,
-                    &media_text_brush,
+                    media_text_brush,
                 );
             }
         }
-        Ok(())
     }
 
+    fn get_or_decode_cover_art(&self, thumbnail: &[u8]) -> Option<ID2D1Bitmap> {
+        let ptr = thumbnail.as_ptr() as usize;
+        let len = thumbnail.len();
+        if let Some(cached) = self.cached_cover_art.borrow().as_ref()
+            && cached.bytes_ptr == ptr
+            && cached.bytes_len == len
+        {
+            return Some(cached.bitmap.clone());
+        }
+        let bitmap = decode_image_bytes(&self.target, thumbnail).ok()?;
+        *self.cached_cover_art.borrow_mut() = Some(CachedCoverArt {
+            bytes_ptr: ptr,
+            bytes_len: len,
+            bitmap: bitmap.clone(),
+        });
+        Some(bitmap)
+    }
+
+    #[allow(
+        clippy::similar_names,
+        clippy::too_many_arguments,
+        clippy::too_many_lines
+    )]
     fn draw_expanded_media(
         &self,
         layout: &Layout,
@@ -788,61 +882,317 @@ impl Renderer {
         alpha: f32,
         hovered: Option<HitTarget>,
         media: &NowPlaying,
+        anim_phase: f32,
+        lyrics: Option<&LyricsSheet>,
     ) -> Result<()> {
-        let local_left = (layout.notch.x - offset_x) as f32;
-        let pad_x = scale(18, self.dpi) as f32;
-        let tile_size = scale(46, self.dpi) as f32;
-        let tile_x = local_left + pad_x;
-        let tile_y = scale(44, self.dpi) as f32;
+        let art_rect = translate_rect(layout.media_cover_art, -offset_x);
+        let seekbar_rect = translate_rect(layout.media_seekbar, -offset_x);
 
-        unsafe {
-            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
-            let muted = self.alpha_brush(FOREGROUND, 0.55 * alpha)?;
-            let tile_bg = self.alpha_brush(MUSIC_ACCENT, 0.18 * alpha)?;
-            let tile_icon = self.alpha_brush(MUSIC_ACCENT, 0.96 * alpha)?;
+        let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
+        let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.55 * alpha);
+        let tile_bg = self.brushes.alpha_brush(2, MUSIC_ACCENT, 0.18 * alpha);
+        let tile_icon = self.brushes.alpha_brush(3, MUSIC_ACCENT, 0.96 * alpha);
+        let eq_brush = self.brushes.alpha_brush(4, EQUALIZER_GREEN, 0.96 * alpha);
 
-            let icon_box = Rect {
-                x: tile_x as i32,
-                y: tile_y as i32,
-                width: tile_size as i32,
-                height: tile_size as i32,
+        let mut drawn_art = false;
+        if let Some(thumb) = media.thumbnail.as_ref()
+            && let Some(bitmap) = self.get_or_decode_cover_art(thumb)
+        {
+            let dest = D2D_RECT_F {
+                left: art_rect.x as f32,
+                top: art_rect.y as f32,
+                right: art_rect.right() as f32,
+                bottom: art_rect.bottom() as f32,
             };
-            self.draw_rounded_box(icon_box, scale(10, self.dpi) as f32, &tile_bg);
+            let squircle = D2D1_ROUNDED_RECT {
+                rect: dest,
+                radiusX: scale(10, self.dpi) as f32,
+                radiusY: scale(10, self.dpi) as f32,
+            };
+            unsafe {
+                self.target.DrawBitmap(
+                    &bitmap,
+                    Some(&raw const dest),
+                    alpha,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+                let rim_brush = self.brushes.alpha_brush(5, FOREGROUND, 0.15 * alpha);
+                self.target
+                    .DrawRoundedRectangle(&squircle, rim_brush, 1.0, None);
+            }
+            drawn_art = true;
+        }
+
+        if !drawn_art {
+            self.draw_rounded_box(art_rect, scale(10, self.dpi) as f32, tile_bg);
             self.draw_music_note_glyph(
-                tile_x + tile_size * 0.5,
-                tile_y + tile_size * 0.5,
+                art_rect.x as f32 + art_rect.width as f32 * 0.5,
+                art_rect.y as f32 + art_rect.height as f32 * 0.5,
                 scale(11, self.dpi) as f32,
-                &tile_icon,
+                tile_icon,
             );
+        }
 
-            let prev_rect = translate_rect(layout.media_prev_button, -offset_x);
-            let text_left = tile_x + tile_size + scale(12, self.dpi) as f32;
-            let text_right = (prev_rect.x - scale(10, self.dpi)) as f32;
+        let local_notch = Rect {
+            x: layout.notch.x - offset_x,
+            y: 0,
+            width: layout.notch.width,
+            height: layout.notch.height,
+        };
+        let eq_cx = local_notch.right() as f32 - scale(20, self.dpi) as f32;
+        let eq_cy = art_rect.y as f32 + art_rect.height as f32 * 0.5;
+        let eq_phase = if media.playing { anim_phase } else { 0.0 };
+        self.draw_audio_equalizer(eq_cx, eq_cy, eq_phase, eq_brush);
 
-            let title_rect = D2D_RECT_F {
-                left: text_left,
-                top: scale(43, self.dpi) as f32,
-                right: text_right,
-                bottom: scale(67, self.dpi) as f32,
-            };
-            self.draw_text(&media.title, &self.text_alert_title, title_rect, &fg);
+        let toggle_rect = translate_rect(layout.media_lyrics_toggle, -offset_x);
+        self.draw_lyrics_toggle_button(
+            toggle_rect,
+            alpha,
+            hovered == Some(HitTarget::MediaLyricsToggle),
+            layout.lyrics_expanded,
+        );
 
-            let artist_rect = D2D_RECT_F {
-                left: text_left,
-                top: scale(68, self.dpi) as f32,
-                right: text_right,
-                bottom: scale(88, self.dpi) as f32,
-            };
+        let text_left = art_rect.right() as f32 + scale(12, self.dpi) as f32;
+        let text_right = toggle_rect.x as f32 - scale(6, self.dpi) as f32;
+
+        let title_rect = D2D_RECT_F {
+            left: text_left,
+            top: art_rect.y as f32 + scale(2, self.dpi) as f32,
+            right: text_right,
+            bottom: art_rect.y as f32 + scale(24, self.dpi) as f32,
+        };
+        self.draw_text(&media.title, &self.text_alert_title, title_rect, fg);
+
+        let artist_rect = D2D_RECT_F {
+            left: text_left,
+            top: art_rect.y as f32 + scale(25, self.dpi) as f32,
+            right: text_right,
+            bottom: art_rect.bottom() as f32,
+        };
+
+        if let Some(active_lyric) = lyrics.and_then(|l| l.active_line(media.position_ms)) {
+            let lyric_brush = self.brushes.alpha_brush(6, MUSIC_ACCENT, 0.95 * alpha);
+            self.draw_text(active_lyric, &self.text_caption, artist_rect, lyric_brush);
+        } else {
             self.draw_text(
                 media.display_artist(),
                 &self.text_caption,
                 artist_rect,
-                &muted,
+                muted,
             );
-
-            self.draw_media_action_buttons(layout, offset_x, alpha, hovered, media, &fg)?;
         }
+
+        if layout.lyrics_expanded {
+            let drawer_rect = translate_rect(layout.media_lyrics_drawer, -offset_x);
+            self.draw_lyrics_drawer(drawer_rect, alpha, media, lyrics);
+        }
+
+        self.draw_media_seekbar(
+            seekbar_rect,
+            alpha,
+            hovered == Some(HitTarget::MediaSeekbar),
+            media,
+            muted,
+        );
+
+        self.draw_media_action_buttons(layout, offset_x, alpha, hovered, media, fg)?;
         Ok(())
+    }
+
+    fn draw_lyrics_toggle_button(&self, rect: Rect, alpha: f32, hovered: bool, expanded: bool) {
+        let radius = scale(6, self.dpi) as f32;
+        let bg_color = if expanded {
+            MUSIC_ACCENT
+        } else if hovered {
+            brighten(FOREGROUND, 0.2)
+        } else {
+            FOREGROUND
+        };
+        let bg_alpha = if expanded {
+            0.85 * alpha
+        } else if hovered {
+            0.20 * alpha
+        } else {
+            0.10 * alpha
+        };
+        let bg_brush = self.brushes.alpha_brush(7, bg_color, bg_alpha);
+        self.draw_rounded_box(rect, radius, bg_brush);
+
+        let glyph_color = if expanded || hovered {
+            FOREGROUND
+        } else {
+            rgb(200, 205, 215, 1.0)
+        };
+        let glyph_brush = self.brushes.alpha_brush(0, glyph_color, 0.92 * alpha);
+        let glyph_rect = D2D_RECT_F {
+            left: rect.x as f32,
+            top: rect.y as f32,
+            right: rect.right() as f32,
+            bottom: rect.bottom() as f32,
+        };
+        self.draw_text("”", &self.text_caption, glyph_rect, glyph_brush);
+    }
+
+    fn draw_lyrics_drawer(
+        &self,
+        drawer_rect: Rect,
+        alpha: f32,
+        media: &NowPlaying,
+        lyrics: Option<&LyricsSheet>,
+    ) {
+        let radius = scale(12, self.dpi) as f32;
+        let bg_brush = self.brushes.alpha_brush(1, FOREGROUND, 0.07 * alpha);
+        self.draw_rounded_box(drawer_rect, radius, bg_brush);
+
+        let border_brush = self.brushes.alpha_brush(2, FOREGROUND, 0.12 * alpha);
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: drawer_rect.x as f32,
+                top: drawer_rect.y as f32,
+                right: drawer_rect.right() as f32,
+                bottom: drawer_rect.bottom() as f32,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target
+                .DrawRoundedRectangle(&rounded, border_brush, 1.0, None);
+        }
+
+        if let Some(sheet) = lyrics.filter(|s| !s.is_empty()) {
+            let (rel_active, lines) = sheet.visible_window(media.position_ms, 3);
+            let line_count = lines.len().max(1);
+            let line_h =
+                (drawer_rect.height as f32 - scale(12, self.dpi) as f32) / line_count as f32;
+
+            for (i, line) in lines.iter().enumerate() {
+                let y_top = drawer_rect.y as f32 + scale(6, self.dpi) as f32 + i as f32 * line_h;
+                let rect = D2D_RECT_F {
+                    left: drawer_rect.x as f32 + scale(14, self.dpi) as f32,
+                    top: y_top,
+                    right: drawer_rect.right() as f32 - scale(14, self.dpi) as f32,
+                    bottom: y_top + line_h,
+                };
+                if i == rel_active {
+                    let active_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.98 * alpha);
+                    self.draw_text(&line.text, &self.text_alert_title, rect, active_brush);
+                } else {
+                    let inactive_brush = self.brushes.alpha_brush(4, FOREGROUND, 0.40 * alpha);
+                    self.draw_text(&line.text, &self.text_caption, rect, inactive_brush);
+                }
+            }
+        } else {
+            let empty_rect = D2D_RECT_F {
+                left: drawer_rect.x as f32 + scale(12, self.dpi) as f32,
+                top: drawer_rect.y as f32 + drawer_rect.height as f32 * 0.38,
+                right: drawer_rect.right() as f32 - scale(12, self.dpi) as f32,
+                bottom: drawer_rect.bottom() as f32,
+            };
+            let status_text = if media.title.trim().is_empty() {
+                "Tidak ada media diputar"
+            } else {
+                "Lirik tidak tersedia untuk lagu ini"
+            };
+            let empty_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.45 * alpha);
+            self.draw_text(status_text, &self.text_caption, empty_rect, empty_brush);
+        }
+    }
+
+    fn draw_media_seekbar(
+        &self,
+        seekbar_rect: Rect,
+        alpha: f32,
+        hovered: bool,
+        media: &NowPlaying,
+        muted_brush: &ID2D1SolidColorBrush,
+    ) {
+        let track_h = scale(4, self.dpi) as f32;
+        let track_y = seekbar_rect.y as f32 + scale(2, self.dpi) as f32;
+        let track_rect = D2D_RECT_F {
+            left: seekbar_rect.x as f32,
+            top: track_y,
+            right: seekbar_rect.right() as f32,
+            bottom: track_y + track_h,
+        };
+
+        let ratio = media.progress_ratio();
+        let fill_w = (seekbar_rect.width as f32 * ratio).max(0.0);
+        let fill_rect = D2D_RECT_F {
+            left: seekbar_rect.x as f32,
+            top: track_y,
+            right: (seekbar_rect.x as f32 + fill_w).min(seekbar_rect.right() as f32),
+            bottom: track_y + track_h,
+        };
+
+        unsafe {
+            let track_alpha = if hovered { 0.28 * alpha } else { 0.16 * alpha };
+            let track_brush = self.brushes.alpha_brush(5, FOREGROUND, track_alpha);
+            let fill_color = if hovered {
+                brighten(MUSIC_ACCENT, 0.14)
+            } else {
+                MUSIC_ACCENT
+            };
+            let fill_brush = self.brushes.alpha_brush(6, fill_color, 0.95 * alpha);
+
+            let track_radius = track_h * 0.5;
+            let track_box = Rect {
+                x: track_rect.left as i32,
+                y: track_rect.top as i32,
+                width: (track_rect.right - track_rect.left) as i32,
+                height: track_h as i32,
+            };
+            self.draw_rounded_box(track_box, track_radius, track_brush);
+
+            if fill_w > 1.0 {
+                let fill_box = Rect {
+                    x: fill_rect.left as i32,
+                    y: fill_rect.top as i32,
+                    width: (fill_rect.right - fill_rect.left) as i32,
+                    height: track_h as i32,
+                };
+                self.draw_rounded_box(fill_box, track_radius, fill_brush);
+            }
+
+            if hovered && fill_w > 0.0 {
+                let thumb_x = (seekbar_rect.x as f32 + fill_w).min(seekbar_rect.right() as f32);
+                let thumb_y = track_y + track_h * 0.5;
+                let thumb_ellipse = D2D1_ELLIPSE {
+                    point: Vector2::new(thumb_x, thumb_y),
+                    radiusX: scale(4, self.dpi) as f32,
+                    radiusY: scale(4, self.dpi) as f32,
+                };
+                self.target.FillEllipse(&thumb_ellipse, fill_brush);
+            }
+
+            let label_y = track_y + track_h + scale(2, self.dpi) as f32;
+            let label_h = scale(12, self.dpi) as f32;
+            let elapsed_rect = D2D_RECT_F {
+                left: seekbar_rect.x as f32,
+                top: label_y,
+                right: seekbar_rect.x as f32 + scale(48, self.dpi) as f32,
+                bottom: label_y + label_h,
+            };
+            let remaining_rect = D2D_RECT_F {
+                left: seekbar_rect.right() as f32 - scale(48, self.dpi) as f32,
+                top: label_y,
+                right: seekbar_rect.right() as f32,
+                bottom: label_y + label_h,
+            };
+            self.draw_text(
+                &media.elapsed_formatted(),
+                &self.text_caption,
+                elapsed_rect,
+                muted_brush,
+            );
+            self.draw_text(
+                &media.remaining_formatted(),
+                &self.text_trailing,
+                remaining_rect,
+                muted_brush,
+            );
+        }
     }
 
     fn draw_media_action_buttons(
@@ -858,52 +1208,50 @@ impl Renderer {
         let play_rect = translate_rect(layout.media_play_button, -offset_x);
         let next_rect = translate_rect(layout.media_next_button, -offset_x);
 
-        unsafe {
-            let prev_alpha = if hovered == Some(HitTarget::MediaPrevious) {
-                0.25 * alpha
-            } else {
-                0.14 * alpha
-            };
-            let prev_fill = self.alpha_brush(FOREGROUND, prev_alpha)?;
-            self.draw_circle_button(prev_rect, &prev_fill);
-            self.draw_previous_glyph(
-                prev_rect.x as f32 + prev_rect.width as f32 * 0.5,
-                prev_rect.y as f32 + prev_rect.height as f32 * 0.5,
-                scale(6, self.dpi) as f32,
-                fg,
-            )?;
+        let prev_alpha = if hovered == Some(HitTarget::MediaPrevious) {
+            0.25 * alpha
+        } else {
+            0.14 * alpha
+        };
+        let prev_fill = self.brushes.alpha_brush(5, FOREGROUND, prev_alpha);
+        self.draw_circle_button(prev_rect, prev_fill);
+        self.draw_previous_glyph(
+            prev_rect.x as f32 + prev_rect.width as f32 * 0.5,
+            prev_rect.y as f32 + prev_rect.height as f32 * 0.5,
+            scale(6, self.dpi) as f32,
+            fg,
+        )?;
 
-            let play_hover = hovered == Some(HitTarget::MediaPlayPause);
-            let play_color = if play_hover {
-                brighten(MUSIC_ACCENT, 0.14)
-            } else {
-                MUSIC_ACCENT
-            };
-            let play_fill = self.alpha_brush(play_color, alpha)?;
-            let dark_icon = self.alpha_brush(BLACK, 0.92 * alpha)?;
-            self.draw_circle_button(play_rect, &play_fill);
-            let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
-            let play_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
-            if media.playing {
-                self.draw_pause_glyph(play_x, play_y, scale(7, self.dpi) as f32, &dark_icon);
-            } else {
-                self.draw_play_glyph(play_x, play_y, scale(7, self.dpi) as f32, &dark_icon)?;
-            }
-
-            let next_alpha = if hovered == Some(HitTarget::MediaNext) {
-                0.25 * alpha
-            } else {
-                0.14 * alpha
-            };
-            let next_fill = self.alpha_brush(FOREGROUND, next_alpha)?;
-            self.draw_circle_button(next_rect, &next_fill);
-            self.draw_skip_glyph(
-                next_rect.x as f32 + next_rect.width as f32 * 0.5,
-                next_rect.y as f32 + next_rect.height as f32 * 0.5,
-                scale(6, self.dpi) as f32,
-                fg,
-            )?;
+        let play_hover = hovered == Some(HitTarget::MediaPlayPause);
+        let play_color = if play_hover {
+            brighten(MUSIC_ACCENT, 0.14)
+        } else {
+            MUSIC_ACCENT
+        };
+        let play_fill = self.brushes.alpha_brush(6, play_color, alpha);
+        let dark_icon = self.brushes.alpha_brush(7, BLACK, 0.92 * alpha);
+        self.draw_circle_button(play_rect, play_fill);
+        let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
+        let play_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
+        if media.playing {
+            self.draw_pause_glyph(play_x, play_y, scale(7, self.dpi) as f32, dark_icon);
+        } else {
+            self.draw_play_glyph(play_x, play_y, scale(7, self.dpi) as f32, dark_icon)?;
         }
+
+        let next_alpha = if hovered == Some(HitTarget::MediaNext) {
+            0.25 * alpha
+        } else {
+            0.14 * alpha
+        };
+        let next_fill = self.brushes.alpha_brush(5, FOREGROUND, next_alpha);
+        self.draw_circle_button(next_rect, next_fill);
+        self.draw_skip_glyph(
+            next_rect.x as f32 + next_rect.width as f32 * 0.5,
+            next_rect.y as f32 + next_rect.height as f32 * 0.5,
+            scale(6, self.dpi) as f32,
+            fg,
+        )?;
         Ok(())
     }
 
@@ -919,71 +1267,64 @@ impl Renderer {
         let local_right = (layout.notch.right() - offset_x) as f32;
         let accent_color = phase_accent_color(pomodoro.phase);
 
-        unsafe {
-            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
-            let muted = self.alpha_brush(FOREGROUND, 0.48 * alpha)?;
-            let track = self.alpha_brush(FOREGROUND, 0.15 * alpha)?;
-            let accent = self.alpha_brush(accent_color, alpha)?;
+        let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
+        let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.48 * alpha);
+        let track = self.brushes.alpha_brush(2, FOREGROUND, 0.15 * alpha);
+        let accent = self.brushes.alpha_brush(3, accent_color, alpha);
 
-            let dot_mid_y = scale(17, self.dpi) as f32;
-            self.draw_session_dots(
-                local_right - scale(18, self.dpi) as f32,
-                dot_mid_y,
-                pomodoro.completed_focus_sessions,
-                &accent,
-                &track,
-            );
+        let dot_mid_y = scale(17, self.dpi) as f32;
+        self.draw_session_dots(
+            local_right - scale(18, self.dpi) as f32,
+            dot_mid_y,
+            pomodoro.completed_focus_sessions,
+            accent,
+            track,
+        );
 
-            let row_cy = scale(70, self.dpi) as f32;
-            let ring_cx = local_left + scale(42, self.dpi) as f32;
-            let ring_r = scale(20, self.dpi) as f32;
-            let ring_stroke = (scale(4, self.dpi) as f32).max(2.6);
-            self.draw_progress_ring(
-                ring_cx,
-                row_cy,
-                ring_r,
-                ring_stroke,
-                pomodoro.progress(),
-                &accent,
-                &track,
-            )?;
-            self.draw_phase_center_glyph(ring_cx, row_cy, ring_r * 0.45, pomodoro.phase, &accent);
+        let row_cy = scale(70, self.dpi) as f32;
+        let ring_cx = local_left + scale(42, self.dpi) as f32;
+        let ring_r = scale(20, self.dpi) as f32;
+        let ring_stroke = (scale(4, self.dpi) as f32).max(2.6);
+        self.draw_progress_ring(
+            ring_cx,
+            row_cy,
+            ring_r,
+            ring_stroke,
+            pomodoro.progress(),
+            accent,
+            track,
+        )?;
+        self.draw_phase_center_glyph(ring_cx, row_cy, ring_r * 0.45, pomodoro.phase, accent);
 
-            let play_rect = translate_rect(layout.pomodoro_play_button, -offset_x);
-            let timer_left = local_left + scale(74, self.dpi) as f32;
-            let timer_right = (play_rect.x - scale(8, self.dpi)) as f32;
-            let timer_rect = D2D_RECT_F {
-                left: timer_left,
-                top: scale(43, self.dpi) as f32,
-                right: timer_right,
-                bottom: scale(79, self.dpi) as f32,
-            };
-            let time_str = pomodoro.format_time();
-            self.draw_text(&time_str, &self.text_timer_display, timer_rect, &fg);
+        let play_rect = translate_rect(layout.pomodoro_play_button, -offset_x);
+        let timer_left = local_left + scale(74, self.dpi) as f32;
+        let timer_right = (play_rect.x - scale(8, self.dpi)) as f32;
+        let timer_rect = D2D_RECT_F {
+            left: timer_left,
+            top: scale(43, self.dpi) as f32,
+            right: timer_right,
+            bottom: scale(79, self.dpi) as f32,
+        };
+        let time_str = pomodoro.format_time();
+        self.draw_text(&time_str, &self.text_timer_display, timer_rect, fg);
 
-            let hint_rect = D2D_RECT_F {
-                left: timer_left + 1.0,
-                top: scale(79, self.dpi) as f32,
-                right: timer_right + scale(20, self.dpi) as f32,
-                bottom: scale(97, self.dpi) as f32,
-            };
-            self.draw_text(
-                pomodoro.status_hint(),
-                &self.text_caption,
-                hint_rect,
-                &muted,
-            );
+        let hint_rect = D2D_RECT_F {
+            left: timer_left + 1.0,
+            top: scale(79, self.dpi) as f32,
+            right: timer_right + scale(20, self.dpi) as f32,
+            bottom: scale(97, self.dpi) as f32,
+        };
+        self.draw_text(pomodoro.status_hint(), &self.text_caption, hint_rect, muted);
 
-            self.draw_pomodoro_action_buttons(
-                layout,
-                offset_x,
-                alpha,
-                hovered,
-                pomodoro,
-                accent_color,
-                &fg,
-            )?;
-        }
+        self.draw_pomodoro_action_buttons(
+            layout,
+            offset_x,
+            alpha,
+            hovered,
+            pomodoro,
+            accent_color,
+            fg,
+        )?;
         Ok(())
     }
 
@@ -1002,52 +1343,50 @@ impl Renderer {
         let reset_rect = translate_rect(layout.pomodoro_reset_button, -offset_x);
         let skip_rect = translate_rect(layout.pomodoro_skip_button, -offset_x);
 
-        unsafe {
-            let play_hover = hovered == Some(HitTarget::PomodoroPlayPause);
-            let play_fill_color = if play_hover {
-                brighten(accent_color, 0.14)
-            } else {
-                accent_color
-            };
-            let play_fill = self.alpha_brush(play_fill_color, alpha)?;
-            let dark_icon = self.alpha_brush(BLACK, 0.92 * alpha)?;
-            self.draw_circle_button(play_rect, &play_fill);
-            let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
-            let play_mid_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
-            if pomodoro.status == PomodoroStatus::Running {
-                self.draw_pause_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, &dark_icon);
-            } else {
-                self.draw_play_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, &dark_icon)?;
-            }
-
-            let reset_alpha = if hovered == Some(HitTarget::PomodoroReset) {
-                0.25 * alpha
-            } else {
-                0.14 * alpha
-            };
-            let reset_fill = self.alpha_brush(FOREGROUND, reset_alpha)?;
-            self.draw_circle_button(reset_rect, &reset_fill);
-            self.draw_reset_glyph(
-                reset_rect.x as f32 + reset_rect.width as f32 * 0.5,
-                reset_rect.y as f32 + reset_rect.height as f32 * 0.5,
-                scale(6, self.dpi) as f32,
-                fg,
-            )?;
-
-            let skip_alpha = if hovered == Some(HitTarget::PomodoroSkip) {
-                0.25 * alpha
-            } else {
-                0.14 * alpha
-            };
-            let skip_fill = self.alpha_brush(FOREGROUND, skip_alpha)?;
-            self.draw_circle_button(skip_rect, &skip_fill);
-            self.draw_skip_glyph(
-                skip_rect.x as f32 + skip_rect.width as f32 * 0.5,
-                skip_rect.y as f32 + skip_rect.height as f32 * 0.5,
-                scale(6, self.dpi) as f32,
-                fg,
-            )?;
+        let play_hover = hovered == Some(HitTarget::PomodoroPlayPause);
+        let play_fill_color = if play_hover {
+            brighten(accent_color, 0.14)
+        } else {
+            accent_color
+        };
+        let play_fill = self.brushes.alpha_brush(4, play_fill_color, alpha);
+        let dark_icon = self.brushes.alpha_brush(5, BLACK, 0.92 * alpha);
+        self.draw_circle_button(play_rect, play_fill);
+        let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
+        let play_mid_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
+        if pomodoro.status == PomodoroStatus::Running {
+            self.draw_pause_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, dark_icon);
+        } else {
+            self.draw_play_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, dark_icon)?;
         }
+
+        let reset_alpha = if hovered == Some(HitTarget::PomodoroReset) {
+            0.25 * alpha
+        } else {
+            0.14 * alpha
+        };
+        let reset_fill = self.brushes.alpha_brush(6, FOREGROUND, reset_alpha);
+        self.draw_circle_button(reset_rect, reset_fill);
+        self.draw_reset_glyph(
+            reset_rect.x as f32 + reset_rect.width as f32 * 0.5,
+            reset_rect.y as f32 + reset_rect.height as f32 * 0.5,
+            scale(6, self.dpi) as f32,
+            fg,
+        )?;
+
+        let skip_alpha = if hovered == Some(HitTarget::PomodoroSkip) {
+            0.25 * alpha
+        } else {
+            0.14 * alpha
+        };
+        let skip_fill = self.brushes.alpha_brush(7, FOREGROUND, skip_alpha);
+        self.draw_circle_button(skip_rect, skip_fill);
+        self.draw_skip_glyph(
+            skip_rect.x as f32 + skip_rect.width as f32 * 0.5,
+            skip_rect.y as f32 + skip_rect.height as f32 * 0.5,
+            scale(6, self.dpi) as f32,
+            fg,
+        )?;
         Ok(())
     }
 
@@ -1065,11 +1404,11 @@ impl Renderer {
         let accent_color = phase_accent_color(alert.next_phase);
 
         unsafe {
-            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
-            let muted = self.alpha_brush(FOREGROUND, 0.58 * alpha)?;
-            let track = self.alpha_brush(FOREGROUND, 0.16 * alpha)?;
-            let accent = self.alpha_brush(accent_color, alpha)?;
-            let accent_soft = self.alpha_brush(accent_color, 0.20 * alpha)?;
+            let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
+            let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.58 * alpha);
+            let track = self.brushes.alpha_brush(2, FOREGROUND, 0.16 * alpha);
+            let accent = self.brushes.alpha_brush(3, accent_color, alpha);
+            let accent_soft = self.brushes.alpha_brush(4, accent_color, 0.20 * alpha);
 
             let top_cy = scale(17, self.dpi) as f32;
             let badge_rect = D2D_RECT_F {
@@ -1082,14 +1421,14 @@ impl Renderer {
                 "POMODORO NOTIFICATION",
                 &self.text_badge,
                 badge_rect,
-                &accent,
+                accent,
             );
             self.draw_session_dots(
                 local_right - scale(18, self.dpi) as f32,
                 top_cy,
                 pomodoro.completed_focus_sessions,
-                &accent,
-                &track,
+                accent,
+                track,
             );
 
             let bell_x = local_left + scale(38, self.dpi) as f32;
@@ -1101,9 +1440,9 @@ impl Renderer {
                     radiusX: icon_r,
                     radiusY: icon_r,
                 },
-                &accent_soft,
+                accent_soft,
             );
-            self.draw_bell_icon(bell_x, bell_mid_y, icon_r * 0.52, &accent)?;
+            self.draw_bell_icon(bell_x, bell_mid_y, icon_r * 0.52, accent)?;
 
             let extend_rect = translate_rect(layout.pomodoro_alert_extend_button, -offset_x);
             let start_rect = translate_rect(layout.pomodoro_alert_start_button, -offset_x);
@@ -1116,7 +1455,7 @@ impl Renderer {
                 right: text_right,
                 bottom: scale(69, self.dpi) as f32,
             };
-            self.draw_text(alert.title(), &self.text_alert_title, title_rect, &fg);
+            self.draw_text(alert.title(), &self.text_alert_title, title_rect, fg);
 
             let sub_rect = D2D_RECT_F {
                 left: text_left,
@@ -1124,30 +1463,30 @@ impl Renderer {
                 right: text_right + scale(12, self.dpi) as f32,
                 bottom: scale(90, self.dpi) as f32,
             };
-            self.draw_text(alert.subtitle(), &self.text_caption, sub_rect, &muted);
+            self.draw_text(alert.subtitle(), &self.text_caption, sub_rect, muted);
 
             let ext_alpha = if hovered == Some(HitTarget::PomodoroExtendFive) {
                 0.26 * alpha
             } else {
                 0.15 * alpha
             };
-            let ext_brush = self.alpha_brush(FOREGROUND, ext_alpha)?;
-            self.draw_rounded_box(extend_rect, extend_rect.height as f32 * 0.5, &ext_brush);
-            self.draw_text("+5m", &self.text_app_bold, rect_to_d2d(extend_rect), &fg);
+            let ext_brush = self.brushes.alpha_brush(5, FOREGROUND, ext_alpha);
+            self.draw_rounded_box(extend_rect, extend_rect.height as f32 * 0.5, ext_brush);
+            self.draw_text("+5m", &self.text_app_bold, rect_to_d2d(extend_rect), fg);
 
             let start_color = if hovered == Some(HitTarget::PomodoroStartNext) {
                 brighten(accent_color, 0.14)
             } else {
                 accent_color
             };
-            let start_brush = self.alpha_brush(start_color, alpha)?;
-            let dark_text = self.alpha_brush(BLACK, 0.92 * alpha)?;
-            self.draw_rounded_box(start_rect, start_rect.height as f32 * 0.5, &start_brush);
+            let start_brush = self.brushes.alpha_brush(6, start_color, alpha);
+            let dark_text = self.brushes.alpha_brush(7, BLACK, 0.92 * alpha);
+            self.draw_rounded_box(start_rect, start_rect.height as f32 * 0.5, start_brush);
             self.draw_text(
                 alert.action_label(),
                 &self.text_app_bold,
                 rect_to_d2d(start_rect),
-                &dark_text,
+                dark_text,
             );
         }
         Ok(())
@@ -1821,8 +2160,8 @@ impl Renderer {
                 .DrawRoundedRectangle(&body, muted, stroke * 0.9, &self.stroke_style);
             self.target.FillRoundedRectangle(&cap, muted);
             if status.battery.charging {
-                let green = self.target.CreateSolidColorBrush(&CHARGING_GREEN, None)?;
-                self.target.FillRoundedRectangle(&fill_rect, &green);
+                let green = self.brushes.scratch(0, CHARGING_GREEN);
+                self.target.FillRoundedRectangle(&fill_rect, green);
                 self.draw_charging_bolt(bat_x + bat_w * 0.5, cy, bat_h * 0.42, fg)?;
             } else {
                 self.target.FillRoundedRectangle(&fill_rect, fg);
@@ -1993,91 +2332,74 @@ impl Renderer {
         let left_x = n.x as f32 + pad_x;
         let right_x = n.right() as f32 - pad_x;
 
-        unsafe {
-            let fg_brush = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
-            let muted_brush = self.alpha_brush(FOREGROUND, 0.30 * alpha)?;
-            let green_brush = self.alpha_brush(CHARGING_GREEN, 0.96 * alpha)?;
-            let amber_brush = self.alpha_brush(AMBER_WARN, 0.96 * alpha)?;
+        let fg_brush = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
+        let muted_brush = self.brushes.alpha_brush(1, FOREGROUND, 0.30 * alpha);
+        let green_brush = self.brushes.alpha_brush(2, CHARGING_GREEN, 0.96 * alpha);
+        let amber_brush = self.brushes.alpha_brush(3, AMBER_WARN, 0.96 * alpha);
 
-            match hud.kind {
-                NotchHudKind::Volume { percent, muted } => {
-                    self.draw_speaker_icon(
-                        left_x,
-                        cy,
-                        unit * 0.46,
-                        stroke,
-                        percent,
-                        muted,
-                        &fg_brush,
-                    )?;
-                    let label = if muted || percent == 0 {
-                        "Muted"
-                    } else {
-                        "Sound"
-                    };
-                    self.draw_hud_text(left_x + unit * 1.45, h, label, &fg_brush);
-                    self.draw_hud_bar(
-                        right_x,
-                        cy,
-                        hud.level,
-                        percent,
-                        muted,
-                        &fg_brush,
-                        &muted_brush,
-                    );
-                }
-                NotchHudKind::Brightness { percent } => {
-                    self.draw_sun_icon(left_x + unit * 0.50, cy, unit * 0.44, stroke, &fg_brush);
-                    self.draw_hud_text(left_x + unit * 1.45, h, "Display", &fg_brush);
-                    self.draw_hud_bar(
-                        right_x,
-                        cy,
-                        hud.level,
-                        percent,
-                        false,
-                        &fg_brush,
-                        &muted_brush,
-                    );
-                }
-                NotchHudKind::Charging {
+        match hud.kind {
+            NotchHudKind::Volume { percent, muted } => {
+                self.draw_speaker_icon(left_x, cy, unit * 0.46, stroke, percent, muted, fg_brush)?;
+                let label = if muted || percent == 0 {
+                    "Muted"
+                } else {
+                    "Sound"
+                };
+                self.draw_hud_text(left_x + unit * 1.45, h, label, fg_brush);
+                self.draw_hud_bar(
+                    right_x,
+                    cy,
+                    hud.level,
                     percent,
-                    plugged_in,
-                } => {
-                    let accent = if plugged_in { &green_brush } else { &fg_brush };
-                    self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, accent)?;
-                    let label = if plugged_in { "Charging" } else { "Battery" };
-                    self.draw_hud_text(left_x + unit * 1.25, h, label, &fg_brush);
-                    self.draw_hud_bar(right_x, cy, hud.level, percent, false, accent, &muted_brush);
-                }
-                NotchHudKind::LowBattery { percent } => {
-                    self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, &amber_brush)?;
-                    self.draw_hud_text(left_x + unit * 1.25, h, "Low Bat", &amber_brush);
-                    self.draw_hud_bar(
-                        right_x,
-                        cy,
-                        hud.level,
-                        percent,
-                        false,
-                        &amber_brush,
-                        &muted_brush,
-                    );
-                }
-                NotchHudKind::CapsLock { enabled } => {
-                    let accent = if enabled { &green_brush } else { &muted_brush };
-                    self.draw_capslock_icon(left_x + unit * 0.50, cy, unit * 0.42, stroke, accent)?;
-                    self.draw_hud_text(left_x + unit * 1.35, h, "Caps Lock", &fg_brush);
-                    self.draw_capslock_pill(right_x, cy, enabled, accent, &fg_brush);
-                }
+                    muted,
+                    fg_brush,
+                    muted_brush,
+                );
+            }
+            NotchHudKind::Brightness { percent } => {
+                self.draw_sun_icon(left_x + unit * 0.50, cy, unit * 0.44, stroke, fg_brush);
+                self.draw_hud_text(left_x + unit * 1.45, h, "Display", fg_brush);
+                self.draw_hud_bar(
+                    right_x,
+                    cy,
+                    hud.level,
+                    percent,
+                    false,
+                    fg_brush,
+                    muted_brush,
+                );
+            }
+            NotchHudKind::Charging {
+                percent,
+                plugged_in,
+            } => {
+                let accent = if plugged_in { green_brush } else { fg_brush };
+                self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, accent)?;
+                let label = if plugged_in { "Charging" } else { "Battery" };
+                self.draw_hud_text(left_x + unit * 1.25, h, label, fg_brush);
+                self.draw_hud_bar(right_x, cy, hud.level, percent, false, accent, muted_brush);
+            }
+            NotchHudKind::LowBattery { percent } => {
+                self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, amber_brush)?;
+                self.draw_hud_text(left_x + unit * 1.25, h, "Low Bat", amber_brush);
+                self.draw_hud_bar(
+                    right_x,
+                    cy,
+                    hud.level,
+                    percent,
+                    false,
+                    amber_brush,
+                    muted_brush,
+                );
+            }
+            NotchHudKind::CapsLock { enabled } => {
+                let accent = if enabled { green_brush } else { muted_brush };
+                self.draw_capslock_icon(left_x + unit * 0.50, cy, unit * 0.42, stroke, accent)?;
+                self.draw_hud_text(left_x + unit * 1.35, h, "Caps Lock", fg_brush);
+                self.draw_capslock_pill(right_x, cy, enabled, accent, fg_brush);
             }
         }
         Ok(())
-    }
-
-    unsafe fn alpha_brush(&self, base: D2D1_COLOR_F, alpha: f32) -> Result<ID2D1SolidColorBrush> {
-        unsafe {
-            self.target
-                .CreateSolidColorBrush(&D2D1_COLOR_F { a: alpha, ..base }, None)
-        }
     }
 
     fn draw_capslock_pill(
@@ -2316,7 +2638,7 @@ impl Renderer {
                 format,
                 &rect,
                 brush,
-                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
@@ -2327,7 +2649,18 @@ impl Renderer {
         n: Rect,
         corner_radius: f32,
         ear_radius: f32,
+        cache: &RefCell<Option<CachedNotchGeometry>>,
     ) -> Result<ID2D1PathGeometry> {
+        let cr_bits = corner_radius.to_bits();
+        let er_bits = ear_radius.to_bits();
+        if let Some(cached) = cache.borrow().as_ref()
+            && cached.rect == n
+            && cached.corner_radius_bits == cr_bits
+            && cached.ear_radius_bits == er_bits
+        {
+            return Ok(cached.geometry.clone());
+        }
+
         let (left, right) = (n.x as f32, n.right() as f32);
         let bottom = n.height as f32;
         let cr = corner_radius.min(bottom * 0.5).max(0.0);
@@ -2387,6 +2720,12 @@ impl Renderer {
             });
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
+            *cache.borrow_mut() = Some(CachedNotchGeometry {
+                rect: n,
+                corner_radius_bits: cr_bits,
+                ear_radius_bits: er_bits,
+                geometry: geometry.clone(),
+            });
             Ok(geometry)
         }
     }
@@ -2464,6 +2803,13 @@ unsafe fn create_text_format(
         format.SetTextAlignment(alignment)?;
         format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
         format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        let trimming_sign = dwrite.CreateEllipsisTrimmingSign(&format).ok();
+        let _ = format.SetTrimming(&trimming, trimming_sign.as_ref());
         Ok(format)
     }
 }

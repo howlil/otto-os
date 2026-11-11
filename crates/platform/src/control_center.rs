@@ -30,10 +30,15 @@ impl ControlCenterPort for WindowsControlCenter {
     }
 
     fn execute(&self, action: ControlCenterAction) {
+        if let ControlCenterAction::Media(cmd @ MediaCommand::Seek(_)) = action {
+            super::send_media_command(cmd);
+            return;
+        }
         let command = match action {
             ControlCenterAction::Media(MediaCommand::TogglePlayPause) => CMD_CC_MEDIA_TOGGLE,
             ControlCenterAction::Media(MediaCommand::Next) => CMD_CC_MEDIA_NEXT,
             ControlCenterAction::Media(MediaCommand::Previous) => CMD_CC_MEDIA_PREVIOUS,
+            ControlCenterAction::Media(MediaCommand::Seek(_)) => unreachable!(),
             ControlCenterAction::OpenCalendar => CMD_CC_CALENDAR,
             ControlCenterAction::OpenCalendarSettings => CMD_CAL_SETTINGS,
             ControlCenterAction::OpenWifi => CMD_CC_WIFI,
