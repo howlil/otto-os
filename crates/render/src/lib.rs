@@ -2643,3 +2643,79 @@ unsafe fn create_text_format(
         Ok(format)
     }
 }
+
+#[cfg(test)]
+mod resource_tests {
+    use super::{
+        DockRenderer, GenieRenderer, PopupMenuRenderer, Renderer, WindowControlsRenderer,
+        release_shared_factories,
+    };
+    use crate::surface::DibSurface;
+    use otto_core::Rect;
+    use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources};
+
+    const ROUNDS: usize = 3;
+    const IMPOSSIBLE: i32 = 1 << 20;
+
+    fn gdi_objects() -> u32 {
+        unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
+    }
+
+    fn assert_no_growth(label: &str, before: u32) {
+        let after = gdi_objects();
+        assert!(
+            after <= before,
+            "{label}: GDI objects grew from {before} to {after}"
+        );
+    }
+
+    fn exercise_successful_constructions() {
+        for _ in 0..ROUNDS {
+            drop(DibSurface::new(320, 200).expect("surface"));
+            drop(WindowControlsRenderer::new(108, 42).expect("window controls"));
+            drop(DockRenderer::new(800, 160, 96).expect("dock"));
+            drop(PopupMenuRenderer::new(144).expect("popup menu"));
+            drop(
+                GenieRenderer::new(Rect {
+                    x: -200,
+                    y: 0,
+                    width: 640,
+                    height: 480,
+                })
+                .expect("genie"),
+            );
+            drop(Renderer::new(1920, 48, 600, 432, 144, 0.0).expect("bar"));
+        }
+    }
+
+    fn exercise_failed_constructions() {
+        for _ in 0..ROUNDS {
+            assert!(DibSurface::new(IMPOSSIBLE, IMPOSSIBLE).is_err());
+            assert!(WindowControlsRenderer::new(IMPOSSIBLE, IMPOSSIBLE).is_err());
+            assert!(DockRenderer::new(IMPOSSIBLE, IMPOSSIBLE, 96).is_err());
+            assert!(
+                GenieRenderer::new(Rect {
+                    x: 0,
+                    y: 0,
+                    width: IMPOSSIBLE,
+                    height: IMPOSSIBLE,
+                })
+                .is_err()
+            );
+            assert!(Renderer::new(1920, 48, IMPOSSIBLE, IMPOSSIBLE, 144, 0.0).is_err());
+        }
+    }
+
+    #[test]
+    fn constructing_and_dropping_renderers_releases_every_gdi_object() {
+        exercise_successful_constructions();
+        exercise_failed_constructions();
+        let baseline = gdi_objects();
+        exercise_successful_constructions();
+        assert_no_growth("successful constructions", baseline);
+        exercise_failed_constructions();
+        assert_no_growth("failed constructions", baseline);
+        release_shared_factories();
+        assert_no_growth("factory release", baseline);
+    }
+}

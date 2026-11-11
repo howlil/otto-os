@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 windows = "0.62"
+windows-core = "0.62"
 otto-core = { path = "crates/core" }
 otto-platform = { path = "crates/platform" }
 otto-render = { path = "crates/render" }
