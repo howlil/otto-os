@@ -206,6 +206,42 @@ fn lerp(start: f32, end: f32, progress: f32) -> f32 {
     start + (end - start) * progress
 }
 
+#[must_use]
+pub fn is_blank_frame(width: u32, height: u32, pixels: &[u8]) -> bool {
+    const X_RATIOS: [f32; 5] = [0.15, 0.30, 0.50, 0.70, 0.85];
+    const Y_RATIOS: [f32; 5] = [0.20, 0.35, 0.50, 0.65, 0.80];
+
+    let total_width = width as usize;
+    let total_height = height as usize;
+    if width < 10
+        || height < 10
+        || pixels.len() < total_width.saturating_mul(total_height).saturating_mul(4)
+    {
+        return true;
+    }
+    let width_f = width as f32;
+    let height_f = height as f32;
+    let stride = total_width * 4;
+
+    for &ratio_y in &Y_RATIOS {
+        let sample_y = (height_f * ratio_y) as usize;
+        let row_offset = sample_y * stride;
+        for &ratio_x in &X_RATIOS {
+            let sample_x = (width_f * ratio_x) as usize;
+            let offset = row_offset + sample_x * 4;
+            if offset + 3 < pixels.len() {
+                let blue = pixels[offset];
+                let green = pixels[offset + 1];
+                let red = pixels[offset + 2];
+                if red >= 3 || green >= 3 || blue >= 3 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +333,42 @@ mod tests {
                 .strips
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn is_blank_frame_detects_all_black_buffer() {
+        let pixels = vec![0u8; 100 * 100 * 4];
+        assert!(is_blank_frame(100, 100, &pixels));
+    }
+
+    #[test]
+    fn is_blank_frame_detects_rendered_window() {
+        let mut pixels = vec![0u8; 100 * 100 * 4];
+        let offset = (50 * 100 + 50) * 4;
+        pixels[offset] = 200;
+        pixels[offset + 1] = 150;
+        pixels[offset + 2] = 100;
+        assert!(!is_blank_frame(100, 100, &pixels));
+    }
+
+    #[test]
+    fn is_blank_frame_detects_chromium_titlebar_only_black_box() {
+        let mut pixels = vec![0u8; 100 * 100 * 4];
+        for y in 0..15 {
+            for x in 0..100 {
+                let offset = (y * 100 + x) * 4;
+                pixels[offset] = 220;
+                pixels[offset + 1] = 220;
+                pixels[offset + 2] = 220;
+            }
+        }
+        assert!(is_blank_frame(100, 100, &pixels));
+    }
+
+    #[test]
+    fn is_blank_frame_handles_small_or_invalid_buffers() {
+        assert!(is_blank_frame(0, 0, &[]));
+        assert!(is_blank_frame(5, 5, &[255u8; 100]));
+        assert!(is_blank_frame(100, 100, &[255u8; 10]));
     }
 }

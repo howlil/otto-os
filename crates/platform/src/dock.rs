@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use otto_core::{
     AppleIconKind, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN, CMD_DOCK_QUIT,
     CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, MenuRow, Rect, TrafficLightAction, WindowControlAction,
-    select_dock_click_window,
+    is_blank_frame, select_dock_click_window,
 };
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -227,6 +227,9 @@ pub fn window_bounds(hwnd_val: isize) -> Option<Rect> {
 pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
     let hwnd = HWND(hwnd_val as *mut c_void);
     let rect = window_bounds(hwnd_val)?;
+    if rect.width <= 0 || rect.height <= 0 {
+        return None;
+    }
     unsafe {
         let screen_dc = GetDC(None);
         if screen_dc.0.is_null() {
@@ -258,11 +261,28 @@ pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
             return None;
         };
         let previous = SelectObject(memory_dc, HGDIOBJ(bitmap.0));
-        let printed = PrintWindow(hwnd, memory_dc, PRINT_WINDOW_FLAGS(2)).as_bool();
-        let copied = if printed {
-            true
-        } else {
-            BitBlt(
+
+        let mut captured = false;
+        let mut pixels = vec![0u8; rect.width as usize * rect.height as usize * 4];
+        let mut header = info;
+
+        if PrintWindow(hwnd, memory_dc, PRINT_WINDOW_FLAGS(2)).as_bool() {
+            let rows = GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                rect.height as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &raw mut header,
+                DIB_RGB_COLORS,
+            );
+            if rows > 0 && !is_blank_frame(rect.width as u32, rect.height as u32, &pixels) {
+                captured = true;
+            }
+        }
+
+        if !captured && GetForegroundWindow() == hwnd {
+            let blt_ok = BitBlt(
                 memory_dc,
                 0,
                 0,
@@ -273,30 +293,32 @@ pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
                 rect.y,
                 SRCCOPY,
             )
-            .is_ok()
-        };
+            .is_ok();
+            if blt_ok {
+                let rows = GetDIBits(
+                    memory_dc,
+                    bitmap,
+                    0,
+                    rect.height as u32,
+                    Some(pixels.as_mut_ptr().cast()),
+                    &raw mut header,
+                    DIB_RGB_COLORS,
+                );
+                if rows > 0 && !is_blank_frame(rect.width as u32, rect.height as u32, &pixels) {
+                    captured = true;
+                }
+            }
+        }
+
         let _ = SelectObject(memory_dc, previous);
-        let mut header = info;
-        let mut pixels = vec![0u8; rect.width as usize * rect.height as usize * 4];
-        let rows = if copied {
-            GetDIBits(
-                memory_dc,
-                bitmap,
-                0,
-                rect.height as u32,
-                Some(pixels.as_mut_ptr().cast()),
-                &raw mut header,
-                DIB_RGB_COLORS,
-            )
-        } else {
-            0
-        };
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = DeleteDC(memory_dc);
         ReleaseDC(None, screen_dc);
-        if rows == 0 {
+
+        if !captured {
             return None;
         }
+
         for pixel in pixels.chunks_exact_mut(4) {
             pixel[3] = 255;
         }

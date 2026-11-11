@@ -17,7 +17,9 @@ pub use dock::{
     AppleIconKind, DockInput, DockItemLayout, DockLayout, DockMetrics, compute_dock_layout,
     select_dock_click_window, smooth_damp, step_toward,
 };
-pub use genie::{GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry};
+pub use genie::{
+    GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry, is_blank_frame,
+};
 pub use layout::{
     HitTarget, Layout, Metrics, NotchLayoutInput, Rect, compute_layout, compute_layout_for_app,
     compute_layout_with_hud, compute_layout_with_notch, scale,
