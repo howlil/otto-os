@@ -1,0 +1,2469 @@
+mod dock;
+mod genie;
+mod menu;
+mod theme;
+mod window_controls;
+
+use std::f32::consts::PI;
+use std::ffi::c_void;
+use std::mem::size_of;
+
+pub use dock::{DockRenderItem, DockRenderer};
+pub use genie::GenieRenderer;
+pub use menu::PopupMenuRenderer;
+pub use theme::LiquidGlassPalette;
+pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
+
+use otto_core::{
+    HitTarget, Layout, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying, PomodoroPhase,
+    PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
+};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
+    D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
+    IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
+    HGDIOBJ, SelectObject,
+};
+use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
+use windows::core::{PCWSTR, Result, w};
+use windows_numerics::Vector2;
+
+const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.95,
+};
+const CHARGING_GREEN: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.19,
+    g: 0.82,
+    b: 0.35,
+    a: 0.96,
+};
+const AMBER_WARN: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 1.0,
+    g: 0.62,
+    b: 0.04,
+    a: 0.96,
+};
+const FOCUS_ORANGE: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 1.0,
+    g: 0.624,
+    b: 0.039,
+    a: 1.0,
+};
+const BREAK_GREEN: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.188,
+    g: 0.820,
+    b: 0.345,
+    a: 1.0,
+};
+const LONG_BREAK_BLUE: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.039,
+    g: 0.518,
+    b: 1.0,
+    a: 1.0,
+};
+const MUSIC_ACCENT: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.988,
+    g: 0.235,
+    b: 0.329,
+    a: 1.0,
+};
+const EQUALIZER_GREEN: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.188,
+    g: 0.820,
+    b: 0.345,
+    a: 1.0,
+};
+const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
+const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
+    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+};
+
+const fn phase_accent_color(phase: PomodoroPhase) -> D2D1_COLOR_F {
+    match phase {
+        PomodoroPhase::Focus => FOCUS_ORANGE,
+        PomodoroPhase::ShortBreak => BREAK_GREEN,
+        PomodoroPhase::LongBreak => LONG_BREAK_BLUE,
+    }
+}
+
+struct DibSurface {
+    dc: HDC,
+    dib: HBITMAP,
+    previous: HGDIOBJ,
+    size: (i32, i32),
+}
+
+impl DibSurface {
+    unsafe fn new(width: i32, height: i32) -> Result<Self> {
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width.max(1),
+                    biHeight: -height.max(1),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..BITMAPINFOHEADER::default()
+                },
+                ..BITMAPINFO::default()
+            };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
+            let previous = SelectObject(dc, HGDIOBJ(dib.0));
+            Ok(Self {
+                dc,
+                dib,
+                previous,
+                size: (width.max(1), height.max(1)),
+            })
+        }
+    }
+
+    unsafe fn present(&self, hwnd: isize, origin: (i32, i32)) -> Result<()> {
+        let (width, height) = self.size;
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        unsafe {
+            UpdateLayeredWindow(
+                HWND(hwnd as *mut c_void),
+                None,
+                Some(&POINT {
+                    x: origin.0,
+                    y: origin.1,
+                }),
+                Some(&SIZE {
+                    cx: width,
+                    cy: height,
+                }),
+                Some(self.dc),
+                Some(&POINT { x: 0, y: 0 }),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            )
+        }
+    }
+}
+
+impl Drop for DibSurface {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.dc, self.previous);
+            let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            let _ = DeleteDC(self.dc);
+        }
+    }
+}
+
+pub struct Renderer {
+    factory: ID2D1Factory,
+    target: ID2D1DCRenderTarget,
+    stroke_style: ID2D1StrokeStyle,
+    text_leading: IDWriteTextFormat,
+    text_trailing: IDWriteTextFormat,
+    text_app_bold: IDWriteTextFormat,
+    text_menu: IDWriteTextFormat,
+    text_timer_display: IDWriteTextFormat,
+    text_badge: IDWriteTextFormat,
+    text_caption: IDWriteTextFormat,
+    text_alert_title: IDWriteTextFormat,
+    bar_surface: DibSurface,
+    panel_surface: DibSurface,
+    dpi: u32,
+}
+
+impl Renderer {
+    pub fn new(
+        width: i32,
+        height: i32,
+        panel_width: i32,
+        panel_height: i32,
+        dpi: u32,
+        _tint_alpha: f32,
+    ) -> Result<Self> {
+        unsafe {
+            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let properties = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: PIXEL_FORMAT,
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let target = factory.CreateDCRenderTarget(&properties)?;
+
+            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 2.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            };
+            let stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
+
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let font_px = scale(12, dpi) as f32;
+            let text_leading = create_text_format(
+                &dwrite,
+                font_px,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_trailing = create_text_format(
+                &dwrite,
+                scale(11, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+            )?;
+            let text_app_bold = create_text_format(
+                &dwrite,
+                font_px,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
+            let text_menu = create_text_format(
+                &dwrite,
+                font_px,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
+            let text_timer_display = create_text_format(
+                &dwrite,
+                scale(27, dpi) as f32,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_badge = create_text_format(
+                &dwrite,
+                scale(10, dpi) as f32,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_caption = create_text_format(
+                &dwrite,
+                scale(10, dpi) as f32,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_alert_title = create_text_format(
+                &dwrite,
+                scale(14, dpi) as f32,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+
+            let bar_surface = DibSurface::new(width, height)?;
+            let panel_surface = DibSurface::new(panel_width, panel_height)?;
+
+            Ok(Self {
+                factory,
+                target,
+                stroke_style,
+                text_leading,
+                text_trailing,
+                text_app_bold,
+                text_menu,
+                text_timer_display,
+                text_badge,
+                text_caption,
+                text_alert_title,
+                bar_surface,
+                panel_surface,
+                dpi,
+            })
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn present(
+        &self,
+        hwnd: isize,
+        origin: (i32, i32),
+        layout: &Layout,
+        status: SystemStatus,
+        app_name: &str,
+        hovered: Option<HitTarget>,
+        hud: Option<NotchHudState>,
+        pomodoro: PomodoroState,
+        media: Option<&NowPlaying>,
+        anim_phase: f32,
+        theme: ResolvedTheme,
+    ) -> Result<()> {
+        self.draw_bar(
+            layout, status, app_name, hovered, hud, pomodoro, media, anim_phase, theme,
+        )?;
+        unsafe { self.bar_surface.present(hwnd, origin) }
+    }
+
+    pub fn present_panel(
+        &self,
+        panel_hwnd: isize,
+        layout: &Layout,
+        hovered: Option<HitTarget>,
+        pomodoro: PomodoroState,
+        media: Option<&NowPlaying>,
+    ) -> Result<()> {
+        self.draw_panel(layout, hovered, pomodoro, media)?;
+        unsafe {
+            self.panel_surface
+                .present(panel_hwnd, (layout.panel_window.x, layout.panel_window.y))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_bar(
+        &self,
+        layout: &Layout,
+        status: SystemStatus,
+        app_name: &str,
+        hovered: Option<HitTarget>,
+        hud: Option<NotchHudState>,
+        pomodoro: PomodoroState,
+        media: Option<&NowPlaying>,
+        anim_phase: f32,
+        theme: ResolvedTheme,
+    ) -> Result<()> {
+        let palette = LiquidGlassPalette::for_theme(theme);
+        let (width, height) = self.bar_surface.size;
+        unsafe {
+            self.target.BindDC(
+                self.bar_surface.dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                },
+            )?;
+            self.target.BeginDraw();
+            let clear = palette.bar_background;
+            self.target.Clear(Some(&raw const clear));
+
+            let black = self.target.CreateSolidColorBrush(&BLACK, None)?;
+            let bar_notch = Rect {
+                x: layout.notch.x,
+                y: 0,
+                width: layout.notch.width,
+                height: layout.bar.height,
+            };
+            let corner_r = if layout.panel_expansion > 0.05 {
+                0.0
+            } else {
+                layout.notch_corner_radius as f32
+            };
+            self.target.FillGeometry(
+                &self.notch_geometry_rect(bar_notch, corner_r, layout.notch_ear_radius as f32)?,
+                &black,
+                None,
+            );
+
+            if let Some(target_slot) = hovered.and_then(|t| layout.slot_rect(t)) {
+                let hover_brush = self
+                    .target
+                    .CreateSolidColorBrush(&palette.hover_pill, None)?;
+                self.draw_slot_pill(target_slot, &hover_brush);
+            }
+
+            let fg = self
+                .target
+                .CreateSolidColorBrush(&palette.text_primary, None)?;
+            let muted = self
+                .target
+                .CreateSolidColorBrush(&palette.text_muted, None)?;
+
+            self.draw_apple_logo(layout, &fg)?;
+            self.draw_left_menu_bar(layout, app_name, &fg);
+            self.draw_tray_chevron(layout, &fg)?;
+            self.draw_status_slot(layout, status, &fg, &muted)?;
+            self.draw_search_slot(layout, &fg);
+            if layout.control_center_slot.width > 0 {
+                self.draw_control_center_slot(layout, &fg, &muted);
+            }
+            self.draw_clock_slot(layout, status, &fg)?;
+
+            if layout.panel_expansion < 0.15 {
+                if let Some(hud_state) = hud
+                    && hud_state.expansion > 0.12
+                {
+                    self.draw_notch_hud(layout, hud_state)?;
+                } else if layout.compact_expansion > 0.15 {
+                    self.draw_compact_notch(layout, pomodoro, media, anim_phase)?;
+                }
+            }
+
+            self.target.EndDraw(None, None)
+        }
+    }
+
+    fn draw_panel(
+        &self,
+        layout: &Layout,
+        hovered: Option<HitTarget>,
+        pomodoro: PomodoroState,
+        media: Option<&NowPlaying>,
+    ) -> Result<()> {
+        let (width, height) = self.panel_surface.size;
+        let offset_x = layout.panel_window.x;
+        let local_notch = Rect {
+            x: layout.notch.x - offset_x,
+            y: 0,
+            width: layout.notch.width,
+            height: layout.notch.height,
+        };
+
+        unsafe {
+            self.target.BindDC(
+                self.panel_surface.dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                },
+            )?;
+            self.target.BeginDraw();
+            let clear = CLEAR;
+            self.target.Clear(Some(&raw const clear));
+
+            let black = self.target.CreateSolidColorBrush(&BLACK, None)?;
+            let geom = self.notch_geometry_rect(
+                local_notch,
+                layout.notch_corner_radius as f32,
+                layout.notch_ear_radius as f32,
+            )?;
+            self.target.FillGeometry(&geom, &black, None);
+
+            let rim_alpha = (layout.panel_expansion * 0.12).clamp(0.0, 0.12);
+            if rim_alpha > 0.01 {
+                let rim = self.alpha_brush(FOREGROUND, rim_alpha)?;
+                self.target
+                    .DrawGeometry(&geom, &rim, 1.0, &self.stroke_style);
+            }
+
+            if layout.panel_expansion > 0.22 {
+                let alpha = ((layout.panel_expansion - 0.22) / 0.78).clamp(0.0, 1.0);
+                if pomodoro.status == PomodoroStatus::Alert
+                    && let Some(alert) = pomodoro.alert
+                {
+                    self.draw_expanded_alert(layout, offset_x, alpha, hovered, pomodoro, alert)?;
+                } else if layout.active_tab == NotchExpandedTab::Media
+                    && let Some(active_media) = media
+                {
+                    self.draw_expanded_tabs(
+                        layout,
+                        offset_x,
+                        alpha,
+                        hovered,
+                        layout.active_tab,
+                        true,
+                        pomodoro,
+                    )?;
+                    self.draw_expanded_media(layout, offset_x, alpha, hovered, active_media)?;
+                } else {
+                    let has_media = media.is_some();
+                    self.draw_expanded_tabs(
+                        layout,
+                        offset_x,
+                        alpha,
+                        hovered,
+                        layout.active_tab,
+                        has_media,
+                        pomodoro,
+                    )?;
+                    self.draw_expanded_pomodoro(layout, offset_x, alpha, hovered, pomodoro)?;
+                }
+            }
+
+            self.target.EndDraw(None, None)
+        }
+    }
+
+    fn draw_compact_notch(
+        &self,
+        layout: &Layout,
+        pomodoro: PomodoroState,
+        media: Option<&NowPlaying>,
+        anim_phase: f32,
+    ) -> Result<()> {
+        let pomo_active = pomodoro.is_compact_active();
+        let media_item = media.filter(|m| m.is_active());
+        match (pomo_active, media_item) {
+            (true, Some(m)) => self.draw_dual_compact(layout, pomodoro, m, anim_phase),
+            (false, Some(m)) => self.draw_compact_media(layout, m, anim_phase),
+            (true, None) => self.draw_compact_pomodoro(layout, pomodoro),
+            (false, None) => Ok(()),
+        }
+    }
+
+    fn draw_compact_media(
+        &self,
+        layout: &Layout,
+        media: &NowPlaying,
+        anim_phase: f32,
+    ) -> Result<()> {
+        let alpha = ((layout.compact_expansion - 0.15) / 0.85).clamp(0.0, 1.0);
+        let n = layout.notch;
+        let cy = layout.bar.height as f32 * 0.5;
+        let note_cx = n.x as f32 + scale(18, self.dpi) as f32;
+        let note_r = scale(6, self.dpi) as f32;
+
+        unsafe {
+            let accent = self.alpha_brush(MUSIC_ACCENT, 0.96 * alpha)?;
+            let fg = self.alpha_brush(FOREGROUND, 0.92 * alpha)?;
+            let eq_brush = self.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha)?;
+
+            self.draw_music_note_glyph(note_cx, cy, note_r, &accent);
+
+            let eq_cx = n.right() as f32 - scale(20, self.dpi) as f32;
+            self.draw_audio_equalizer(eq_cx, cy, anim_phase, &eq_brush);
+
+            let text_rect = D2D_RECT_F {
+                left: note_cx + scale(12, self.dpi) as f32,
+                top: 0.0,
+                right: eq_cx - scale(12, self.dpi) as f32,
+                bottom: layout.bar.height as f32,
+            };
+            self.draw_text(&media.title, &self.text_leading, text_rect, &fg);
+        }
+        Ok(())
+    }
+
+    fn draw_dual_compact(
+        &self,
+        layout: &Layout,
+        pomodoro: PomodoroState,
+        _media: &NowPlaying,
+        anim_phase: f32,
+    ) -> Result<()> {
+        let alpha = ((layout.compact_expansion - 0.15) / 0.85).clamp(0.0, 1.0);
+        let n = layout.notch;
+        let cy = layout.bar.height as f32 * 0.5;
+        let ring_cx = n.x as f32 + scale(18, self.dpi) as f32;
+        let ring_r = scale(6, self.dpi) as f32;
+        let stroke = (scale(2, self.dpi) as f32).max(1.6);
+        let accent_color = phase_accent_color(pomodoro.phase);
+
+        unsafe {
+            let accent = self.alpha_brush(accent_color, 0.96 * alpha)?;
+            let track = self.alpha_brush(FOREGROUND, 0.22 * alpha)?;
+            let eq_brush = self.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha)?;
+
+            self.draw_progress_ring(
+                ring_cx,
+                cy,
+                ring_r,
+                stroke,
+                pomodoro.progress(),
+                &accent,
+                &track,
+            )?;
+
+            let text = pomodoro.format_time();
+            let text_rect = D2D_RECT_F {
+                left: ring_cx + scale(10, self.dpi) as f32,
+                top: 0.0,
+                right: n.right() as f32 - scale(36, self.dpi) as f32,
+                bottom: layout.bar.height as f32,
+            };
+            self.draw_text(&text, &self.text_leading, text_rect, &accent);
+
+            let eq_cx = n.right() as f32 - scale(18, self.dpi) as f32;
+            self.draw_audio_equalizer(eq_cx, cy, anim_phase, &eq_brush);
+        }
+        Ok(())
+    }
+
+    fn draw_compact_pomodoro(&self, layout: &Layout, pomodoro: PomodoroState) -> Result<()> {
+        let alpha = ((layout.compact_expansion - 0.15) / 0.85).clamp(0.0, 1.0);
+        let n = layout.notch;
+        let cy = layout.bar.height as f32 * 0.5;
+        let ring_cx = n.x as f32 + scale(18, self.dpi) as f32;
+        let ring_r = scale(6, self.dpi) as f32;
+        let stroke = (scale(2, self.dpi) as f32).max(1.6);
+        let accent_color = phase_accent_color(pomodoro.phase);
+
+        unsafe {
+            let accent = self.alpha_brush(accent_color, 0.96 * alpha)?;
+            let track = self.alpha_brush(FOREGROUND, 0.22 * alpha)?;
+
+            self.draw_progress_ring(
+                ring_cx,
+                cy,
+                ring_r,
+                stroke,
+                pomodoro.progress(),
+                &accent,
+                &track,
+            )?;
+
+            if pomodoro.status == PomodoroStatus::Paused {
+                let dot = D2D1_ELLIPSE {
+                    point: Vector2::new(ring_cx, cy),
+                    radiusX: stroke * 0.65,
+                    radiusY: stroke * 0.65,
+                };
+                self.target.FillEllipse(&dot, &track);
+            } else {
+                let dot = D2D1_ELLIPSE {
+                    point: Vector2::new(ring_cx, cy),
+                    radiusX: stroke * 0.75,
+                    radiusY: stroke * 0.75,
+                };
+                self.target.FillEllipse(&dot, &accent);
+            }
+
+            let text = pomodoro.format_time();
+            let text_rect = D2D_RECT_F {
+                left: n.right() as f32 - scale(54, self.dpi) as f32,
+                top: 0.0,
+                right: n.right() as f32 - scale(11, self.dpi) as f32,
+                bottom: layout.bar.height as f32,
+            };
+            self.draw_text(&text, &self.text_trailing, text_rect, &accent);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_expanded_tabs(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        active_tab: NotchExpandedTab,
+        has_media: bool,
+        pomodoro: PomodoroState,
+    ) -> Result<()> {
+        let pomo_rect = translate_rect(layout.notch_tab_pomodoro, -offset_x);
+        let media_rect = translate_rect(layout.notch_tab_media, -offset_x);
+
+        unsafe {
+            let pomo_active = active_tab == NotchExpandedTab::Pomodoro;
+            let pomo_hover = hovered == Some(HitTarget::NotchTabPomodoro);
+            let pomo_alpha = if pomo_active {
+                0.22 * alpha
+            } else if pomo_hover {
+                0.14 * alpha
+            } else {
+                0.06 * alpha
+            };
+            let pomo_brush = self.alpha_brush(FOREGROUND, pomo_alpha)?;
+            self.draw_rounded_box(pomo_rect, pomo_rect.height as f32 * 0.5, &pomo_brush);
+
+            let accent_color = phase_accent_color(pomodoro.phase);
+            let dot_x = pomo_rect.x as f32 + scale(10, self.dpi) as f32;
+            let dot_mid_y = pomo_rect.y as f32 + pomo_rect.height as f32 * 0.5;
+            let dot_r = scale(3, self.dpi) as f32;
+            let accent = self.alpha_brush(accent_color, alpha)?;
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(dot_x, dot_mid_y),
+                    radiusX: dot_r,
+                    radiusY: dot_r,
+                },
+                &accent,
+            );
+
+            let pomo_text_brush = self.alpha_brush(
+                FOREGROUND,
+                if pomo_active {
+                    0.96 * alpha
+                } else {
+                    0.55 * alpha
+                },
+            )?;
+            let pomo_label_rect = D2D_RECT_F {
+                left: dot_x + scale(7, self.dpi) as f32,
+                top: pomo_rect.y as f32,
+                right: pomo_rect.right() as f32 - scale(6, self.dpi) as f32,
+                bottom: pomo_rect.bottom() as f32,
+            };
+            self.draw_text(
+                pomodoro.phase.badge_label(),
+                &self.text_badge,
+                pomo_label_rect,
+                &pomo_text_brush,
+            );
+
+            if has_media {
+                let media_active = active_tab == NotchExpandedTab::Media;
+                let media_hover = hovered == Some(HitTarget::NotchTabMedia);
+                let media_alpha = if media_active {
+                    0.22 * alpha
+                } else if media_hover {
+                    0.14 * alpha
+                } else {
+                    0.06 * alpha
+                };
+                let media_brush = self.alpha_brush(FOREGROUND, media_alpha)?;
+                self.draw_rounded_box(media_rect, media_rect.height as f32 * 0.5, &media_brush);
+
+                let m_dot_x = media_rect.x as f32 + scale(10, self.dpi) as f32;
+                let m_dot_mid_y = media_rect.y as f32 + media_rect.height as f32 * 0.5;
+                let m_accent = self.alpha_brush(MUSIC_ACCENT, alpha)?;
+                self.draw_music_note_glyph(
+                    m_dot_x,
+                    m_dot_mid_y,
+                    scale(4, self.dpi) as f32,
+                    &m_accent,
+                );
+
+                let media_text_brush = self.alpha_brush(
+                    FOREGROUND,
+                    if media_active {
+                        0.96 * alpha
+                    } else {
+                        0.55 * alpha
+                    },
+                )?;
+                let media_label_rect = D2D_RECT_F {
+                    left: m_dot_x + scale(7, self.dpi) as f32,
+                    top: media_rect.y as f32,
+                    right: media_rect.right() as f32 - scale(6, self.dpi) as f32,
+                    bottom: media_rect.bottom() as f32,
+                };
+                self.draw_text(
+                    "NOW PLAYING",
+                    &self.text_badge,
+                    media_label_rect,
+                    &media_text_brush,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_expanded_media(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        media: &NowPlaying,
+    ) -> Result<()> {
+        let local_left = (layout.notch.x - offset_x) as f32;
+        let pad_x = scale(18, self.dpi) as f32;
+        let tile_size = scale(46, self.dpi) as f32;
+        let tile_x = local_left + pad_x;
+        let tile_y = scale(44, self.dpi) as f32;
+
+        unsafe {
+            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
+            let muted = self.alpha_brush(FOREGROUND, 0.55 * alpha)?;
+            let tile_bg = self.alpha_brush(MUSIC_ACCENT, 0.18 * alpha)?;
+            let tile_icon = self.alpha_brush(MUSIC_ACCENT, 0.96 * alpha)?;
+
+            let icon_box = Rect {
+                x: tile_x as i32,
+                y: tile_y as i32,
+                width: tile_size as i32,
+                height: tile_size as i32,
+            };
+            self.draw_rounded_box(icon_box, scale(10, self.dpi) as f32, &tile_bg);
+            self.draw_music_note_glyph(
+                tile_x + tile_size * 0.5,
+                tile_y + tile_size * 0.5,
+                scale(11, self.dpi) as f32,
+                &tile_icon,
+            );
+
+            let prev_rect = translate_rect(layout.media_prev_button, -offset_x);
+            let text_left = tile_x + tile_size + scale(12, self.dpi) as f32;
+            let text_right = (prev_rect.x - scale(10, self.dpi)) as f32;
+
+            let title_rect = D2D_RECT_F {
+                left: text_left,
+                top: scale(43, self.dpi) as f32,
+                right: text_right,
+                bottom: scale(67, self.dpi) as f32,
+            };
+            self.draw_text(&media.title, &self.text_alert_title, title_rect, &fg);
+
+            let artist_rect = D2D_RECT_F {
+                left: text_left,
+                top: scale(68, self.dpi) as f32,
+                right: text_right,
+                bottom: scale(88, self.dpi) as f32,
+            };
+            self.draw_text(
+                media.display_artist(),
+                &self.text_caption,
+                artist_rect,
+                &muted,
+            );
+
+            self.draw_media_action_buttons(layout, offset_x, alpha, hovered, media, &fg)?;
+        }
+        Ok(())
+    }
+
+    fn draw_media_action_buttons(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        media: &NowPlaying,
+        fg: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let prev_rect = translate_rect(layout.media_prev_button, -offset_x);
+        let play_rect = translate_rect(layout.media_play_button, -offset_x);
+        let next_rect = translate_rect(layout.media_next_button, -offset_x);
+
+        unsafe {
+            let prev_alpha = if hovered == Some(HitTarget::MediaPrevious) {
+                0.25 * alpha
+            } else {
+                0.14 * alpha
+            };
+            let prev_fill = self.alpha_brush(FOREGROUND, prev_alpha)?;
+            self.draw_circle_button(prev_rect, &prev_fill);
+            self.draw_previous_glyph(
+                prev_rect.x as f32 + prev_rect.width as f32 * 0.5,
+                prev_rect.y as f32 + prev_rect.height as f32 * 0.5,
+                scale(6, self.dpi) as f32,
+                fg,
+            )?;
+
+            let play_hover = hovered == Some(HitTarget::MediaPlayPause);
+            let play_color = if play_hover {
+                brighten(MUSIC_ACCENT, 0.14)
+            } else {
+                MUSIC_ACCENT
+            };
+            let play_fill = self.alpha_brush(play_color, alpha)?;
+            let dark_icon = self.alpha_brush(BLACK, 0.92 * alpha)?;
+            self.draw_circle_button(play_rect, &play_fill);
+            let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
+            let play_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
+            if media.playing {
+                self.draw_pause_glyph(play_x, play_y, scale(7, self.dpi) as f32, &dark_icon);
+            } else {
+                self.draw_play_glyph(play_x, play_y, scale(7, self.dpi) as f32, &dark_icon)?;
+            }
+
+            let next_alpha = if hovered == Some(HitTarget::MediaNext) {
+                0.25 * alpha
+            } else {
+                0.14 * alpha
+            };
+            let next_fill = self.alpha_brush(FOREGROUND, next_alpha)?;
+            self.draw_circle_button(next_rect, &next_fill);
+            self.draw_skip_glyph(
+                next_rect.x as f32 + next_rect.width as f32 * 0.5,
+                next_rect.y as f32 + next_rect.height as f32 * 0.5,
+                scale(6, self.dpi) as f32,
+                fg,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_expanded_pomodoro(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        pomodoro: PomodoroState,
+    ) -> Result<()> {
+        let local_left = (layout.notch.x - offset_x) as f32;
+        let local_right = (layout.notch.right() - offset_x) as f32;
+        let accent_color = phase_accent_color(pomodoro.phase);
+
+        unsafe {
+            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
+            let muted = self.alpha_brush(FOREGROUND, 0.48 * alpha)?;
+            let track = self.alpha_brush(FOREGROUND, 0.15 * alpha)?;
+            let accent = self.alpha_brush(accent_color, alpha)?;
+
+            let dot_mid_y = scale(17, self.dpi) as f32;
+            self.draw_session_dots(
+                local_right - scale(18, self.dpi) as f32,
+                dot_mid_y,
+                pomodoro.completed_focus_sessions,
+                &accent,
+                &track,
+            );
+
+            let row_cy = scale(70, self.dpi) as f32;
+            let ring_cx = local_left + scale(42, self.dpi) as f32;
+            let ring_r = scale(20, self.dpi) as f32;
+            let ring_stroke = (scale(4, self.dpi) as f32).max(2.6);
+            self.draw_progress_ring(
+                ring_cx,
+                row_cy,
+                ring_r,
+                ring_stroke,
+                pomodoro.progress(),
+                &accent,
+                &track,
+            )?;
+            self.draw_phase_center_glyph(ring_cx, row_cy, ring_r * 0.45, pomodoro.phase, &accent);
+
+            let play_rect = translate_rect(layout.pomodoro_play_button, -offset_x);
+            let timer_left = local_left + scale(74, self.dpi) as f32;
+            let timer_right = (play_rect.x - scale(8, self.dpi)) as f32;
+            let timer_rect = D2D_RECT_F {
+                left: timer_left,
+                top: scale(43, self.dpi) as f32,
+                right: timer_right,
+                bottom: scale(79, self.dpi) as f32,
+            };
+            let time_str = pomodoro.format_time();
+            self.draw_text(&time_str, &self.text_timer_display, timer_rect, &fg);
+
+            let hint_rect = D2D_RECT_F {
+                left: timer_left + 1.0,
+                top: scale(79, self.dpi) as f32,
+                right: timer_right + scale(20, self.dpi) as f32,
+                bottom: scale(97, self.dpi) as f32,
+            };
+            self.draw_text(
+                pomodoro.status_hint(),
+                &self.text_caption,
+                hint_rect,
+                &muted,
+            );
+
+            self.draw_pomodoro_action_buttons(
+                layout,
+                offset_x,
+                alpha,
+                hovered,
+                pomodoro,
+                accent_color,
+                &fg,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pomodoro_action_buttons(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        pomodoro: PomodoroState,
+        accent_color: D2D1_COLOR_F,
+        fg: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let play_rect = translate_rect(layout.pomodoro_play_button, -offset_x);
+        let reset_rect = translate_rect(layout.pomodoro_reset_button, -offset_x);
+        let skip_rect = translate_rect(layout.pomodoro_skip_button, -offset_x);
+
+        unsafe {
+            let play_hover = hovered == Some(HitTarget::PomodoroPlayPause);
+            let play_fill_color = if play_hover {
+                brighten(accent_color, 0.14)
+            } else {
+                accent_color
+            };
+            let play_fill = self.alpha_brush(play_fill_color, alpha)?;
+            let dark_icon = self.alpha_brush(BLACK, 0.92 * alpha)?;
+            self.draw_circle_button(play_rect, &play_fill);
+            let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
+            let play_mid_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
+            if pomodoro.status == PomodoroStatus::Running {
+                self.draw_pause_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, &dark_icon);
+            } else {
+                self.draw_play_glyph(play_x, play_mid_y, scale(7, self.dpi) as f32, &dark_icon)?;
+            }
+
+            let reset_alpha = if hovered == Some(HitTarget::PomodoroReset) {
+                0.25 * alpha
+            } else {
+                0.14 * alpha
+            };
+            let reset_fill = self.alpha_brush(FOREGROUND, reset_alpha)?;
+            self.draw_circle_button(reset_rect, &reset_fill);
+            self.draw_reset_glyph(
+                reset_rect.x as f32 + reset_rect.width as f32 * 0.5,
+                reset_rect.y as f32 + reset_rect.height as f32 * 0.5,
+                scale(6, self.dpi) as f32,
+                fg,
+            )?;
+
+            let skip_alpha = if hovered == Some(HitTarget::PomodoroSkip) {
+                0.25 * alpha
+            } else {
+                0.14 * alpha
+            };
+            let skip_fill = self.alpha_brush(FOREGROUND, skip_alpha)?;
+            self.draw_circle_button(skip_rect, &skip_fill);
+            self.draw_skip_glyph(
+                skip_rect.x as f32 + skip_rect.width as f32 * 0.5,
+                skip_rect.y as f32 + skip_rect.height as f32 * 0.5,
+                scale(6, self.dpi) as f32,
+                fg,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_expanded_alert(
+        &self,
+        layout: &Layout,
+        offset_x: i32,
+        alpha: f32,
+        hovered: Option<HitTarget>,
+        pomodoro: PomodoroState,
+        alert: otto_core::PomodoroAlert,
+    ) -> Result<()> {
+        let local_left = (layout.notch.x - offset_x) as f32;
+        let local_right = (layout.notch.right() - offset_x) as f32;
+        let accent_color = phase_accent_color(alert.next_phase);
+
+        unsafe {
+            let fg = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
+            let muted = self.alpha_brush(FOREGROUND, 0.58 * alpha)?;
+            let track = self.alpha_brush(FOREGROUND, 0.16 * alpha)?;
+            let accent = self.alpha_brush(accent_color, alpha)?;
+            let accent_soft = self.alpha_brush(accent_color, 0.20 * alpha)?;
+
+            let top_cy = scale(17, self.dpi) as f32;
+            let badge_rect = D2D_RECT_F {
+                left: local_left + scale(20, self.dpi) as f32,
+                top: scale(7, self.dpi) as f32,
+                right: local_left + scale(180, self.dpi) as f32,
+                bottom: scale(27, self.dpi) as f32,
+            };
+            self.draw_text(
+                "POMODORO NOTIFICATION",
+                &self.text_badge,
+                badge_rect,
+                &accent,
+            );
+            self.draw_session_dots(
+                local_right - scale(18, self.dpi) as f32,
+                top_cy,
+                pomodoro.completed_focus_sessions,
+                &accent,
+                &track,
+            );
+
+            let bell_x = local_left + scale(38, self.dpi) as f32;
+            let bell_mid_y = scale(68, self.dpi) as f32;
+            let icon_r = scale(18, self.dpi) as f32;
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(bell_x, bell_mid_y),
+                    radiusX: icon_r,
+                    radiusY: icon_r,
+                },
+                &accent_soft,
+            );
+            self.draw_bell_icon(bell_x, bell_mid_y, icon_r * 0.52, &accent)?;
+
+            let extend_rect = translate_rect(layout.pomodoro_alert_extend_button, -offset_x);
+            let start_rect = translate_rect(layout.pomodoro_alert_start_button, -offset_x);
+
+            let text_left = local_left + scale(64, self.dpi) as f32;
+            let text_right = (extend_rect.x - scale(8, self.dpi)) as f32;
+            let title_rect = D2D_RECT_F {
+                left: text_left,
+                top: scale(47, self.dpi) as f32,
+                right: text_right,
+                bottom: scale(69, self.dpi) as f32,
+            };
+            self.draw_text(alert.title(), &self.text_alert_title, title_rect, &fg);
+
+            let sub_rect = D2D_RECT_F {
+                left: text_left,
+                top: scale(69, self.dpi) as f32,
+                right: text_right + scale(12, self.dpi) as f32,
+                bottom: scale(90, self.dpi) as f32,
+            };
+            self.draw_text(alert.subtitle(), &self.text_caption, sub_rect, &muted);
+
+            let ext_alpha = if hovered == Some(HitTarget::PomodoroExtendFive) {
+                0.26 * alpha
+            } else {
+                0.15 * alpha
+            };
+            let ext_brush = self.alpha_brush(FOREGROUND, ext_alpha)?;
+            self.draw_rounded_box(extend_rect, extend_rect.height as f32 * 0.5, &ext_brush);
+            self.draw_text("+5m", &self.text_app_bold, rect_to_d2d(extend_rect), &fg);
+
+            let start_color = if hovered == Some(HitTarget::PomodoroStartNext) {
+                brighten(accent_color, 0.14)
+            } else {
+                accent_color
+            };
+            let start_brush = self.alpha_brush(start_color, alpha)?;
+            let dark_text = self.alpha_brush(BLACK, 0.92 * alpha)?;
+            self.draw_rounded_box(start_rect, start_rect.height as f32 * 0.5, &start_brush);
+            self.draw_text(
+                alert.action_label(),
+                &self.text_app_bold,
+                rect_to_d2d(start_rect),
+                &dark_text,
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_session_dots(
+        &self,
+        right_x: f32,
+        cy: f32,
+        completed: u8,
+        active_brush: &ID2D1SolidColorBrush,
+        inactive_brush: &ID2D1SolidColorBrush,
+    ) {
+        let dot_r = scale(3, self.dpi) as f32;
+        let gap = scale(10, self.dpi) as f32;
+        for i in 0..4u8 {
+            let cx = right_x - f32::from(3 - i) * gap;
+            let brush = if i < completed {
+                active_brush
+            } else {
+                inactive_brush
+            };
+            unsafe {
+                self.target.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2::new(cx, cy),
+                        radiusX: dot_r,
+                        radiusY: dot_r,
+                    },
+                    brush,
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_progress_ring(
+        &self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        stroke: f32,
+        progress: f32,
+        active_brush: &ID2D1SolidColorBrush,
+        track_brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let circle = D2D1_ELLIPSE {
+            point: Vector2::new(cx, cy),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target
+                .DrawEllipse(&circle, track_brush, stroke, &self.stroke_style);
+
+            let clamped = progress.clamp(0.0, 1.0);
+            if clamped <= 0.005 {
+                return Ok(());
+            }
+            if clamped >= 0.998 {
+                self.target
+                    .DrawEllipse(&circle, active_brush, stroke, &self.stroke_style);
+                return Ok(());
+            }
+
+            let start_angle = -PI * 0.5;
+            let sweep = clamped * PI * 2.0;
+            let end_angle = start_angle + sweep;
+            let start = Vector2::new(
+                cx + radius * start_angle.cos(),
+                cy + radius * start_angle.sin(),
+            );
+            let end = Vector2::new(cx + radius * end_angle.cos(), cy + radius * end_angle.sin());
+            let arc_size = if sweep > PI {
+                D2D1_ARC_SIZE_LARGE
+            } else {
+                D2D1_ARC_SIZE_SMALL
+            };
+
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            sink.BeginFigure(start, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: end,
+                size: D2D_SIZE_F {
+                    width: radius,
+                    height: radius,
+                },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: arc_size,
+            });
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+            self.target
+                .DrawGeometry(&geom, active_brush, stroke, &self.stroke_style);
+        }
+        Ok(())
+    }
+
+    fn draw_phase_center_glyph(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        phase: PomodoroPhase,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        let stroke = (r * 0.22).max(1.5);
+        unsafe {
+            match phase {
+                PomodoroPhase::Focus => {
+                    self.target.DrawLine(
+                        Vector2::new(cx, cy),
+                        Vector2::new(cx, cy - r * 0.72),
+                        brush,
+                        stroke,
+                        &self.stroke_style,
+                    );
+                    self.target.DrawLine(
+                        Vector2::new(cx, cy),
+                        Vector2::new(cx + r * 0.52, cy + r * 0.22),
+                        brush,
+                        stroke,
+                        &self.stroke_style,
+                    );
+                }
+                PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => {
+                    let dot = D2D1_ELLIPSE {
+                        point: Vector2::new(cx, cy),
+                        radiusX: r * 0.42,
+                        radiusY: r * 0.42,
+                    };
+                    self.target.FillEllipse(&dot, brush);
+                }
+            }
+        }
+    }
+
+    fn draw_circle_button(&self, rect: Rect, brush: &ID2D1SolidColorBrush) {
+        let r = rect.width.min(rect.height) as f32 * 0.5;
+        let cx = rect.x as f32 + rect.width as f32 * 0.5;
+        let cy = rect.y as f32 + rect.height as f32 * 0.5;
+        unsafe {
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(cx, cy),
+                    radiusX: r,
+                    radiusY: r,
+                },
+                brush,
+            );
+        }
+    }
+
+    fn draw_rounded_box(&self, box_rect: Rect, radius: f32, brush: &ID2D1SolidColorBrush) {
+        let pill = D2D1_ROUNDED_RECT {
+            rect: rect_to_d2d(box_rect),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&pill, brush);
+        }
+    }
+
+    fn draw_play_glyph(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        unsafe {
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            sink.BeginFigure(
+                Vector2::new(cx - r * 0.55, cy - r * 0.85),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddLine(Vector2::new(cx + r * 0.90, cy));
+            sink.AddLine(Vector2::new(cx - r * 0.55, cy + r * 0.85));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&geom, brush, None);
+        }
+        Ok(())
+    }
+
+    fn draw_pause_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
+        let bar_w = (r * 0.42).max(2.2);
+        let bar_h = r * 1.55;
+        let gap = r * 0.36;
+        for dx in [-gap - bar_w * 0.5, gap + bar_w * 0.5] {
+            let pill = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: cx + dx - bar_w * 0.5,
+                    top: cy - bar_h * 0.5,
+                    right: cx + dx + bar_w * 0.5,
+                    bottom: cy + bar_h * 0.5,
+                },
+                radiusX: bar_w * 0.45,
+                radiusY: bar_w * 0.45,
+            };
+            unsafe {
+                self.target.FillRoundedRectangle(&pill, brush);
+            }
+        }
+    }
+
+    fn draw_reset_glyph(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let stroke = (r * 0.28).max(1.5);
+        unsafe {
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            let start = Vector2::new(cx, cy - r);
+            let end = Vector2::new(cx - r * 0.86, cy - r * 0.50);
+            sink.BeginFigure(start, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: end,
+                size: D2D_SIZE_F {
+                    width: r,
+                    height: r,
+                },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: D2D1_ARC_SIZE_LARGE,
+            });
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+            self.target
+                .DrawGeometry(&geom, brush, stroke, &self.stroke_style);
+
+            self.target.DrawLine(
+                start,
+                Vector2::new(cx - r * 0.45, cy - r * 1.25),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+            self.target.DrawLine(
+                start,
+                Vector2::new(cx - r * 0.40, cy - r * 0.65),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_skip_glyph(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let stroke = (r * 0.30).max(1.6);
+        unsafe {
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            sink.BeginFigure(
+                Vector2::new(cx - r * 0.75, cy - r * 0.72),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddLine(Vector2::new(cx + r * 0.35, cy));
+            sink.AddLine(Vector2::new(cx - r * 0.75, cy + r * 0.72));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&geom, brush, None);
+
+            self.target.DrawLine(
+                Vector2::new(cx + r * 0.62, cy - r * 0.68),
+                Vector2::new(cx + r * 0.62, cy + r * 0.68),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_previous_glyph(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let stroke = (r * 0.30).max(1.6);
+        unsafe {
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            sink.BeginFigure(
+                Vector2::new(cx + r * 0.75, cy - r * 0.72),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddLine(Vector2::new(cx - r * 0.35, cy));
+            sink.AddLine(Vector2::new(cx + r * 0.75, cy + r * 0.72));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&geom, brush, None);
+
+            self.target.DrawLine(
+                Vector2::new(cx - r * 0.62, cy - r * 0.68),
+                Vector2::new(cx - r * 0.62, cy + r * 0.68),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_music_note_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
+        let stroke = (r * 0.22).max(1.5);
+        let head_radius_x = r * 0.38;
+        let head_radius_y = r * 0.28;
+        let gap = r * 0.75;
+        let x1 = cx - gap * 0.5;
+        let x2 = cx + gap * 0.5;
+        let y_head1 = cy + r * 0.45;
+        let y_head2 = cy + r * 0.25;
+        let y_top = cy - r * 0.70;
+        unsafe {
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(x1, y_head1),
+                    radiusX: head_radius_x,
+                    radiusY: head_radius_y,
+                },
+                brush,
+            );
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(x2, y_head2),
+                    radiusX: head_radius_x,
+                    radiusY: head_radius_y,
+                },
+                brush,
+            );
+            self.target.DrawLine(
+                Vector2::new(x1 + head_radius_x * 0.6, y_head1),
+                Vector2::new(x1 + head_radius_x * 0.6, y_top),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+            self.target.DrawLine(
+                Vector2::new(x2 + head_radius_x * 0.6, y_head2),
+                Vector2::new(x2 + head_radius_x * 0.6, y_top - r * 0.2),
+                brush,
+                stroke,
+                &self.stroke_style,
+            );
+            self.target.DrawLine(
+                Vector2::new(x1 + head_radius_x * 0.6, y_top),
+                Vector2::new(x2 + head_radius_x * 0.6, y_top - r * 0.2),
+                brush,
+                stroke * 1.6,
+                &self.stroke_style,
+            );
+        }
+    }
+
+    fn draw_audio_equalizer(
+        &self,
+        cx: f32,
+        cy: f32,
+        anim_phase: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        let bar_w = (scale(2, self.dpi) as f32).max(1.8);
+        let gap = (scale(2, self.dpi) as f32).max(1.8);
+        let max_h = scale(12, self.dpi) as f32;
+        let min_h = scale(3, self.dpi) as f32;
+        let offsets = [-1.5f32, -0.5, 0.5, 1.5];
+        let phases = [0.0f32, 1.6, 3.1, 4.7];
+        let speeds = [5.5f32, 7.8, 6.2, 8.5];
+        for (i, &dx_mult) in offsets.iter().enumerate() {
+            let bx = cx + dx_mult * (bar_w + gap);
+            let wave = ((anim_phase * speeds[i] + phases[i]).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let h = min_h + wave * (max_h - min_h);
+            let pill = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: bx - bar_w * 0.5,
+                    top: cy - h * 0.5,
+                    right: bx + bar_w * 0.5,
+                    bottom: cy + h * 0.5,
+                },
+                radiusX: bar_w * 0.45,
+                radiusY: bar_w * 0.45,
+            };
+            unsafe {
+                self.target.FillRoundedRectangle(&pill, brush);
+            }
+        }
+    }
+
+    fn draw_left_menu_bar(&self, layout: &Layout, app_name: &str, fg: &ID2D1SolidColorBrush) {
+        self.draw_slot_label(layout.app_slot, app_name, &self.text_app_bold, fg);
+        for (slot, label) in [
+            (layout.file_slot, "File"),
+            (layout.edit_slot, "Edit"),
+            (layout.view_slot, "View"),
+            (layout.window_slot, "Window"),
+            (layout.help_slot, "Help"),
+        ] {
+            self.draw_slot_label(slot, label, &self.text_menu, fg);
+        }
+    }
+
+    fn draw_slot_label(
+        &self,
+        slot: Rect,
+        label: &str,
+        format: &IDWriteTextFormat,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        if slot.width <= 8 {
+            return;
+        }
+        let rect = D2D_RECT_F {
+            left: slot.x as f32,
+            top: 0.0,
+            right: slot.right() as f32,
+            bottom: slot.bottom() as f32,
+        };
+        self.draw_text(label, format, rect, brush);
+    }
+
+    fn draw_search_slot(&self, layout: &Layout, fg: &ID2D1SolidColorBrush) {
+        let slot = layout.search_slot;
+        let cx = slot.x as f32 + slot.width as f32 * 0.5;
+        let cy = slot.height as f32 * 0.5;
+        let unit = layout.icon_size as f32;
+        let r = unit * 0.34;
+        let stroke = (unit * 0.11).max(1.4);
+        let center = Vector2::new(cx - unit * 0.07, cy - unit * 0.07);
+
+        unsafe {
+            let circle = D2D1_ELLIPSE {
+                point: center,
+                radiusX: r,
+                radiusY: r,
+            };
+            self.target
+                .DrawEllipse(&circle, fg, stroke, &self.stroke_style);
+
+            let diag = 0.707_106_77_f32;
+            let start = Vector2::new(cx - unit * 0.07 + r * diag, cy - unit * 0.07 + r * diag);
+            let end = Vector2::new(
+                cx - unit * 0.07 + (r + unit * 0.28) * diag,
+                cy - unit * 0.07 + (r + unit * 0.28) * diag,
+            );
+            self.target
+                .DrawLine(start, end, fg, stroke * 1.15, &self.stroke_style);
+        }
+    }
+
+    fn draw_control_center_slot(
+        &self,
+        layout: &Layout,
+        fg: &ID2D1SolidColorBrush,
+        muted: &ID2D1SolidColorBrush,
+    ) {
+        let slot = layout.control_center_slot;
+        let cx = slot.x as f32 + slot.width as f32 * 0.5;
+        let cy = slot.height as f32 * 0.5;
+        let unit = layout.icon_size as f32;
+        let pill_w = unit * 0.94;
+        let pill_h = unit * 0.36;
+        let gap_y = unit * 0.24;
+        let stroke = (unit * 0.095).max(1.25);
+
+        for (dy, knob_right) in [(-gap_y, false), (gap_y, true)] {
+            let row_cy = cy + dy;
+            let left = cx - pill_w * 0.5;
+            let right = cx + pill_w * 0.5;
+            let radius = pill_h * 0.5;
+            let pill = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left,
+                    top: row_cy - radius,
+                    right,
+                    bottom: row_cy + radius,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let knob_r = (radius - stroke * 0.45).max(1.8);
+            let knob_x = if knob_right {
+                right - radius
+            } else {
+                left + radius
+            };
+            let knob = D2D1_ELLIPSE {
+                point: Vector2::new(knob_x, row_cy),
+                radiusX: knob_r,
+                radiusY: knob_r,
+            };
+            unsafe {
+                self.target
+                    .DrawRoundedRectangle(&pill, muted, stroke, &self.stroke_style);
+                self.target.FillEllipse(&knob, fg);
+            }
+        }
+    }
+
+    fn draw_slot_pill(&self, slot: Rect, brush: &ID2D1SolidColorBrush) {
+        let pad_y = scale(4, self.dpi) as f32;
+        let radius = scale(6, self.dpi) as f32;
+        let rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: slot.x as f32,
+                top: slot.y as f32 + pad_y,
+                right: slot.right() as f32,
+                bottom: slot.bottom() as f32 - pad_y,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&rect, brush);
+        }
+    }
+
+    fn draw_apple_logo(&self, layout: &Layout, brush: &ID2D1SolidColorBrush) -> Result<()> {
+        let size = layout.icon_size as f32 * 1.08;
+        let x0 = layout.start_slot.x as f32 + (layout.start_slot.width as f32 - size) * 0.5;
+        let y0 = (layout.start_slot.height as f32 - size) * 0.5;
+        let pt = |nx: f32, ny: f32| Vector2::new(x0 + nx * size, y0 + ny * size);
+        let bez = |x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32| D2D1_BEZIER_SEGMENT {
+            point1: pt(x1, y1),
+            point2: pt(x2, y2),
+            point3: pt(x3, y3),
+        };
+
+        unsafe {
+            let geometry = self.factory.CreatePathGeometry()?;
+            let sink = geometry.Open()?;
+
+            sink.BeginFigure(pt(0.67, 0.02), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddBezier(&bez(0.55, 0.03, 0.46, 0.12, 0.48, 0.24));
+            sink.AddBezier(&bez(0.59, 0.24, 0.68, 0.15, 0.67, 0.02));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+
+            sink.BeginFigure(pt(0.49, 0.29), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddBezier(&bez(0.43, 0.29, 0.38, 0.24, 0.32, 0.24));
+            sink.AddBezier(&bez(0.19, 0.24, 0.10, 0.36, 0.12, 0.54));
+            sink.AddBezier(&bez(0.14, 0.72, 0.24, 0.94, 0.33, 0.94));
+            sink.AddBezier(&bez(0.39, 0.94, 0.42, 0.89, 0.49, 0.89));
+            sink.AddBezier(&bez(0.56, 0.89, 0.59, 0.94, 0.65, 0.94));
+            sink.AddBezier(&bez(0.73, 0.94, 0.81, 0.81, 0.86, 0.69));
+            sink.AddBezier(&bez(0.73, 0.63, 0.71, 0.43, 0.82, 0.36));
+            sink.AddBezier(&bez(0.77, 0.28, 0.70, 0.24, 0.64, 0.24));
+            sink.AddBezier(&bez(0.57, 0.24, 0.54, 0.29, 0.49, 0.29));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+
+            sink.Close()?;
+            self.target.FillGeometry(&geometry, brush, None);
+        }
+        Ok(())
+    }
+
+    fn draw_tray_chevron(&self, layout: &Layout, brush: &ID2D1SolidColorBrush) -> Result<()> {
+        let slot = layout.tray_slot;
+        let cx = slot.x as f32 + slot.width as f32 * 0.5;
+        let cy = slot.height as f32 * 0.5;
+        let unit = layout.icon_size as f32;
+        let dx = unit * 0.30;
+        let dy = unit * 0.16;
+        let stroke = (unit * 0.11).max(1.4);
+
+        unsafe {
+            let geometry = self.factory.CreatePathGeometry()?;
+            let sink = geometry.Open()?;
+            sink.BeginFigure(Vector2::new(cx - dx, cy + dy), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddLine(Vector2::new(cx, cy - dy));
+            sink.AddLine(Vector2::new(cx + dx, cy + dy));
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+            self.target
+                .DrawGeometry(&geometry, brush, stroke, &self.stroke_style);
+        }
+        Ok(())
+    }
+
+    fn draw_status_slot(
+        &self,
+        layout: &Layout,
+        status: SystemStatus,
+        fg: &ID2D1SolidColorBrush,
+        muted: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let slot = layout.status_slot;
+        let cy = slot.height as f32 * 0.5;
+        let unit = layout.icon_size as f32;
+        let stroke = (unit * 0.105).max(1.35);
+
+        let wifi_cx = slot.x as f32 + unit * 0.80;
+        self.draw_wifi_icon(wifi_cx, cy, unit * 0.48, stroke, fg)?;
+
+        let speaker_x = wifi_cx + unit * 0.88;
+        self.draw_speaker_icon(
+            speaker_x,
+            cy,
+            unit * 0.44,
+            stroke,
+            status.volume,
+            status.muted,
+            fg,
+        )?;
+
+        let bat_x = speaker_x + unit * 1.05;
+        let bat_w = unit * 1.40;
+        let bat_h = unit * 0.72;
+        let bat_top = cy - bat_h * 0.5;
+        let corner = (bat_h * 0.28).max(2.0);
+
+        let body = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: bat_x,
+                top: bat_top,
+                right: bat_x + bat_w,
+                bottom: bat_top + bat_h,
+            },
+            radiusX: corner,
+            radiusY: corner,
+        };
+        let cap_h = bat_h * 0.40;
+        let cap_w = (stroke * 1.15).max(1.5);
+        let cap = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: bat_x + bat_w + 1.2,
+                top: cy - cap_h * 0.5,
+                right: bat_x + bat_w + 1.2 + cap_w,
+                bottom: cy + cap_h * 0.5,
+            },
+            radiusX: cap_w * 0.5,
+            radiusY: cap_w * 0.5,
+        };
+
+        let inset = (stroke * 1.30).max(1.8);
+        let max_fill_w = (bat_w - inset * 2.0).max(0.0);
+        let fill_w = (max_fill_w * status.battery.fill_fraction()).max(if max_fill_w > 0.0 {
+            1.5
+        } else {
+            0.0
+        });
+        let fill_rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: bat_x + inset,
+                top: bat_top + inset,
+                right: bat_x + inset + fill_w,
+                bottom: bat_top + bat_h - inset,
+            },
+            radiusX: (corner - 1.2).max(1.0),
+            radiusY: (corner - 1.2).max(1.0),
+        };
+
+        unsafe {
+            self.target
+                .DrawRoundedRectangle(&body, muted, stroke * 0.9, &self.stroke_style);
+            self.target.FillRoundedRectangle(&cap, muted);
+            if status.battery.charging {
+                let green = self.target.CreateSolidColorBrush(&CHARGING_GREEN, None)?;
+                self.target.FillRoundedRectangle(&fill_rect, &green);
+                self.draw_charging_bolt(bat_x + bat_w * 0.5, cy, bat_h * 0.42, fg)?;
+            } else {
+                self.target.FillRoundedRectangle(&fill_rect, fg);
+            }
+        }
+
+        let text_left = bat_x + bat_w + cap_w + unit * 0.34;
+        let text_rect = D2D_RECT_F {
+            left: text_left,
+            top: 0.0,
+            right: slot.right() as f32,
+            bottom: slot.height as f32,
+        };
+        let label = status.battery.label();
+        self.draw_text(&label, &self.text_leading, text_rect, fg);
+        Ok(())
+    }
+
+    fn draw_charging_bolt(
+        &self,
+        cx: f32,
+        cy: f32,
+        half_h: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let w = half_h * 0.65;
+        unsafe {
+            let bolt = self.factory.CreatePathGeometry()?;
+            let sink = bolt.Open()?;
+            sink.BeginFigure(
+                Vector2::new(cx + w * 0.15, cy - half_h),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddLine(Vector2::new(cx - w, cy + half_h * 0.10));
+            sink.AddLine(Vector2::new(cx - w * 0.05, cy + half_h * 0.10));
+            sink.AddLine(Vector2::new(cx - w * 0.15, cy + half_h));
+            sink.AddLine(Vector2::new(cx + w, cy - half_h * 0.10));
+            sink.AddLine(Vector2::new(cx + w * 0.05, cy - half_h * 0.10));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&bolt, brush, None);
+        }
+        Ok(())
+    }
+
+    fn draw_wifi_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        stroke: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let base_y = cy + radius * 0.56;
+        unsafe {
+            let dot = D2D1_ELLIPSE {
+                point: Vector2::new(cx, base_y),
+                radiusX: stroke * 0.80,
+                radiusY: stroke * 0.80,
+            };
+            self.target.FillEllipse(&dot, brush);
+
+            for factor in [0.54_f32, 0.96_f32] {
+                let r = radius * factor;
+                let dx = r * 0.72;
+                let dy = r * 0.72;
+                let geometry = self.factory.CreatePathGeometry()?;
+                let sink = geometry.Open()?;
+                sink.BeginFigure(Vector2::new(cx - dx, base_y - dy), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: Vector2::new(cx + dx, base_y - dy),
+                    size: D2D_SIZE_F {
+                        width: r,
+                        height: r,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                sink.Close()?;
+                self.target
+                    .DrawGeometry(&geometry, brush, stroke, &self.stroke_style);
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_speaker_icon(
+        &self,
+        x: f32,
+        cy: f32,
+        half_h: f32,
+        stroke: f32,
+        volume: u8,
+        muted: bool,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let box_h = half_h * 0.44;
+        let box_w = half_h * 0.40;
+        let cone_w = half_h * 0.92;
+        unsafe {
+            let cone = self.factory.CreatePathGeometry()?;
+            let sink = cone.Open()?;
+            sink.BeginFigure(Vector2::new(x, cy - box_h), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(Vector2::new(x + box_w, cy - box_h));
+            sink.AddLine(Vector2::new(x + cone_w, cy - half_h * 0.88));
+            sink.AddLine(Vector2::new(x + cone_w, cy + half_h * 0.88));
+            sink.AddLine(Vector2::new(x + box_w, cy + box_h));
+            sink.AddLine(Vector2::new(x, cy + box_h));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&cone, brush, None);
+
+            if muted || volume == 0 {
+                self.target.DrawLine(
+                    Vector2::new(x + cone_w + stroke * 0.65, cy - half_h * 0.55),
+                    Vector2::new(x + cone_w + stroke * 2.55, cy + half_h * 0.55),
+                    brush,
+                    stroke * 0.95,
+                    &self.stroke_style,
+                );
+                self.target.DrawLine(
+                    Vector2::new(x + cone_w + stroke * 2.55, cy - half_h * 0.55),
+                    Vector2::new(x + cone_w + stroke * 0.65, cy + half_h * 0.55),
+                    brush,
+                    stroke * 0.95,
+                    &self.stroke_style,
+                );
+                return Ok(());
+            }
+
+            let wave_count = if volume <= 35 { 1 } else { 2 };
+            for &(offset, scale_y) in &[(1.10_f32, 0.46_f32), (2.25_f32, 0.78_f32)][..wave_count] {
+                let wave = self.factory.CreatePathGeometry()?;
+                let wsink = wave.Open()?;
+                let wx = x + cone_w + stroke * offset;
+                let wy = half_h * scale_y;
+                wsink.BeginFigure(Vector2::new(wx, cy - wy), D2D1_FIGURE_BEGIN_HOLLOW);
+                wsink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: Vector2::new(wx, cy + wy),
+                    size: D2D_SIZE_F {
+                        width: wy * 1.15,
+                        height: wy * 1.15,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+                wsink.EndFigure(D2D1_FIGURE_END_OPEN);
+                wsink.Close()?;
+                self.target
+                    .DrawGeometry(&wave, brush, stroke * 0.90, &self.stroke_style);
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_notch_hud(&self, layout: &Layout, hud: NotchHudState) -> Result<()> {
+        let alpha = ((hud.expansion - 0.12) / 0.88).clamp(0.0, 1.0);
+        let n = layout.notch;
+        let h = layout.bar.height as f32;
+        let cy = h * 0.5;
+        let unit = layout.icon_size as f32;
+        let stroke = (unit * 0.105).max(1.35);
+        let pad_x = scale(14, self.dpi) as f32;
+        let left_x = n.x as f32 + pad_x;
+        let right_x = n.right() as f32 - pad_x;
+
+        unsafe {
+            let fg_brush = self.alpha_brush(FOREGROUND, 0.96 * alpha)?;
+            let muted_brush = self.alpha_brush(FOREGROUND, 0.30 * alpha)?;
+            let green_brush = self.alpha_brush(CHARGING_GREEN, 0.96 * alpha)?;
+            let amber_brush = self.alpha_brush(AMBER_WARN, 0.96 * alpha)?;
+
+            match hud.kind {
+                NotchHudKind::Volume { percent, muted } => {
+                    self.draw_speaker_icon(
+                        left_x,
+                        cy,
+                        unit * 0.46,
+                        stroke,
+                        percent,
+                        muted,
+                        &fg_brush,
+                    )?;
+                    let label = if muted || percent == 0 {
+                        "Muted"
+                    } else {
+                        "Sound"
+                    };
+                    self.draw_hud_text(left_x + unit * 1.45, h, label, &fg_brush);
+                    self.draw_hud_bar(
+                        right_x,
+                        cy,
+                        hud.level,
+                        percent,
+                        muted,
+                        &fg_brush,
+                        &muted_brush,
+                    );
+                }
+                NotchHudKind::Brightness { percent } => {
+                    self.draw_sun_icon(left_x + unit * 0.50, cy, unit * 0.44, stroke, &fg_brush);
+                    self.draw_hud_text(left_x + unit * 1.45, h, "Display", &fg_brush);
+                    self.draw_hud_bar(
+                        right_x,
+                        cy,
+                        hud.level,
+                        percent,
+                        false,
+                        &fg_brush,
+                        &muted_brush,
+                    );
+                }
+                NotchHudKind::Charging {
+                    percent,
+                    plugged_in,
+                } => {
+                    let accent = if plugged_in { &green_brush } else { &fg_brush };
+                    self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, accent)?;
+                    let label = if plugged_in { "Charging" } else { "Battery" };
+                    self.draw_hud_text(left_x + unit * 1.25, h, label, &fg_brush);
+                    self.draw_hud_bar(right_x, cy, hud.level, percent, false, accent, &muted_brush);
+                }
+                NotchHudKind::LowBattery { percent } => {
+                    self.draw_charging_bolt(left_x + unit * 0.45, cy, unit * 0.46, &amber_brush)?;
+                    self.draw_hud_text(left_x + unit * 1.25, h, "Low Bat", &amber_brush);
+                    self.draw_hud_bar(
+                        right_x,
+                        cy,
+                        hud.level,
+                        percent,
+                        false,
+                        &amber_brush,
+                        &muted_brush,
+                    );
+                }
+                NotchHudKind::CapsLock { enabled } => {
+                    let accent = if enabled { &green_brush } else { &muted_brush };
+                    self.draw_capslock_icon(left_x + unit * 0.50, cy, unit * 0.42, stroke, accent)?;
+                    self.draw_hud_text(left_x + unit * 1.35, h, "Caps Lock", &fg_brush);
+                    self.draw_capslock_pill(right_x, cy, enabled, accent, &fg_brush);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn alpha_brush(&self, base: D2D1_COLOR_F, alpha: f32) -> Result<ID2D1SolidColorBrush> {
+        unsafe {
+            self.target
+                .CreateSolidColorBrush(&D2D1_COLOR_F { a: alpha, ..base }, None)
+        }
+    }
+
+    fn draw_capslock_pill(
+        &self,
+        right_x: f32,
+        cy: f32,
+        enabled: bool,
+        accent: &ID2D1SolidColorBrush,
+        fg: &ID2D1SolidColorBrush,
+    ) {
+        let state_text = if enabled { "ON" } else { "OFF" };
+        let pill_w = scale(36, self.dpi) as f32;
+        let pill_h = scale(18, self.dpi) as f32;
+        let pill = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: right_x - pill_w,
+                top: cy - pill_h * 0.5,
+                right: right_x,
+                bottom: cy + pill_h * 0.5,
+            },
+            radiusX: pill_h * 0.5,
+            radiusY: pill_h * 0.5,
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&pill, accent);
+        }
+        self.draw_text(state_text, &self.text_app_bold, pill.rect, fg);
+    }
+
+    fn draw_hud_text(&self, left: f32, height: f32, label: &str, brush: &ID2D1SolidColorBrush) {
+        let rect = D2D_RECT_F {
+            left,
+            top: 0.0,
+            right: left + scale(72, self.dpi) as f32,
+            bottom: height,
+        };
+        self.draw_text(label, &self.text_leading, rect, brush);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_hud_bar(
+        &self,
+        right_x: f32,
+        cy: f32,
+        level: f32,
+        percent: u8,
+        muted: bool,
+        fill_brush: &ID2D1SolidColorBrush,
+        track_brush: &ID2D1SolidColorBrush,
+    ) {
+        let pct_w = scale(34, self.dpi) as f32;
+        let bar_w = scale(68, self.dpi) as f32;
+        let bar_h = scale(5, self.dpi) as f32;
+        let gap = scale(6, self.dpi) as f32;
+        let bar_left = right_x - pct_w - gap - bar_w;
+        let seg_gap = 1.2_f32;
+        let seg_w = (bar_w - seg_gap * 15.0) / 16.0;
+        let active_segs = if muted {
+            0
+        } else {
+            (level.clamp(0.0, 1.0) * 16.0).round() as i32
+        };
+
+        for i in 0..16 {
+            let sx = bar_left + i as f32 * (seg_w + seg_gap);
+            let seg = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: sx,
+                    top: cy - bar_h * 0.5,
+                    right: sx + seg_w,
+                    bottom: cy + bar_h * 0.5,
+                },
+                radiusX: 1.2,
+                radiusY: 1.2,
+            };
+            let brush = if i < active_segs {
+                fill_brush
+            } else {
+                track_brush
+            };
+            unsafe {
+                self.target.FillRoundedRectangle(&seg, brush);
+            }
+        }
+
+        let pct_label = if muted {
+            String::from("0%")
+        } else {
+            format!("{}%", percent.min(100))
+        };
+        let text_rect = D2D_RECT_F {
+            left: right_x - pct_w,
+            top: 0.0,
+            right: right_x,
+            bottom: cy * 2.0,
+        };
+        self.draw_text(&pct_label, &self.text_menu, text_rect, fill_brush);
+    }
+
+    fn draw_sun_icon(&self, cx: f32, cy: f32, r: f32, stroke: f32, brush: &ID2D1SolidColorBrush) {
+        let core_r = r * 0.46;
+        let inner = r * 0.68;
+        let outer = r * 1.04;
+        let diag = 0.707_106_77_f32;
+        unsafe {
+            let core = D2D1_ELLIPSE {
+                point: Vector2::new(cx, cy),
+                radiusX: core_r,
+                radiusY: core_r,
+            };
+            self.target.FillEllipse(&core, brush);
+            for (dx, dy) in [
+                (1.0_f32, 0.0_f32),
+                (-1.0, 0.0),
+                (0.0, 1.0),
+                (0.0, -1.0),
+                (diag, diag),
+                (-diag, diag),
+                (diag, -diag),
+                (-diag, -diag),
+            ] {
+                self.target.DrawLine(
+                    Vector2::new(cx + dx * inner, cy + dy * inner),
+                    Vector2::new(cx + dx * outer, cy + dy * outer),
+                    brush,
+                    stroke * 0.92,
+                    &self.stroke_style,
+                );
+            }
+        }
+    }
+
+    fn draw_capslock_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        stroke: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        unsafe {
+            let arrow = self.factory.CreatePathGeometry()?;
+            let sink = arrow.Open()?;
+            sink.BeginFigure(Vector2::new(cx, cy - r * 0.85), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(Vector2::new(cx + r * 0.75, cy - r * 0.05));
+            sink.AddLine(Vector2::new(cx + r * 0.32, cy - r * 0.05));
+            sink.AddLine(Vector2::new(cx + r * 0.32, cy + r * 0.35));
+            sink.AddLine(Vector2::new(cx - r * 0.32, cy + r * 0.35));
+            sink.AddLine(Vector2::new(cx - r * 0.32, cy - r * 0.05));
+            sink.AddLine(Vector2::new(cx - r * 0.75, cy - r * 0.05));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&arrow, brush, None);
+
+            self.target.DrawLine(
+                Vector2::new(cx - r * 0.32, cy + r * 0.68),
+                Vector2::new(cx + r * 0.32, cy + r * 0.68),
+                brush,
+                stroke * 1.15,
+                &self.stroke_style,
+            );
+        }
+        Ok(())
+    }
+
+    fn draw_clock_slot(
+        &self,
+        layout: &Layout,
+        status: SystemStatus,
+        fg: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let slot = layout.clock_slot;
+        let unit = layout.icon_size as f32;
+        let pad_x = scale(6, self.dpi) as f32;
+        let bell_cx = slot.right() as f32 - pad_x - unit * 0.45;
+        let cy = slot.height as f32 * 0.5;
+
+        let text_rect = D2D_RECT_F {
+            left: slot.x as f32 + pad_x,
+            top: 0.0,
+            right: bell_cx - unit * 0.45,
+            bottom: slot.height as f32,
+        };
+        let text = status.clock.format();
+        self.draw_text(&text, &self.text_leading, text_rect, fg);
+        self.draw_bell_icon(bell_cx, cy, unit * 0.42, fg)?;
+        Ok(())
+    }
+
+    fn draw_bell_icon(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) -> Result<()> {
+        let top_y = cy - r * 0.85;
+        let base_y = cy + r * 0.48;
+        let dome_w = r * 0.72;
+        let rim_w = r * 0.96;
+
+        unsafe {
+            let bell = self.factory.CreatePathGeometry()?;
+            let sink = bell.Open()?;
+            sink.BeginFigure(Vector2::new(cx, top_y), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(cx + dome_w * 0.85, top_y),
+                point2: Vector2::new(cx + dome_w, cy - r * 0.10),
+                point3: Vector2::new(cx + rim_w, base_y),
+            });
+            sink.AddLine(Vector2::new(cx - rim_w, base_y));
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(cx - dome_w, cy - r * 0.10),
+                point2: Vector2::new(cx - dome_w * 0.85, top_y),
+                point3: Vector2::new(cx, top_y),
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&bell, brush, None);
+
+            let clapper = D2D1_ELLIPSE {
+                point: Vector2::new(cx, base_y + r * 0.28),
+                radiusX: r * 0.24,
+                radiusY: r * 0.22,
+            };
+            self.target.FillEllipse(&clapper, brush);
+        }
+        Ok(())
+    }
+
+    fn draw_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            self.target.DrawText(
+                &wide,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    fn notch_geometry_rect(
+        &self,
+        n: Rect,
+        corner_radius: f32,
+        ear_radius: f32,
+    ) -> Result<ID2D1PathGeometry> {
+        let (left, right) = (n.x as f32, n.right() as f32);
+        let bottom = n.height as f32;
+        let cr = corner_radius.min(bottom * 0.5).max(0.0);
+        let er = ear_radius.max(1.0);
+
+        unsafe {
+            let geometry = self.factory.CreatePathGeometry()?;
+            let sink = geometry.Open()?;
+            sink.BeginFigure(Vector2::new(left - er, 0.0), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(Vector2::new(right + er, 0.0));
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: Vector2::new(right, er),
+                size: D2D_SIZE_F {
+                    width: er,
+                    height: er,
+                },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                arcSize: D2D1_ARC_SIZE_SMALL,
+            });
+            sink.AddLine(Vector2::new(right, bottom - cr));
+            if cr > 0.5 {
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: Vector2::new(right - cr, bottom),
+                    size: D2D_SIZE_F {
+                        width: cr,
+                        height: cr,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+            }
+            sink.AddLine(Vector2::new(left + cr, bottom));
+            if cr > 0.5 {
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: Vector2::new(left, bottom - cr),
+                    size: D2D_SIZE_F {
+                        width: cr,
+                        height: cr,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+            }
+            sink.AddLine(Vector2::new(left, er));
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: Vector2::new(left - er, 0.0),
+                size: D2D_SIZE_F {
+                    width: er,
+                    height: er,
+                },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                arcSize: D2D1_ARC_SIZE_SMALL,
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            Ok(geometry)
+        }
+    }
+}
+
+const fn translate_rect(rect: Rect, dx: i32) -> Rect {
+    Rect {
+        x: rect.x + dx,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+const fn rect_to_d2d(rect: Rect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.x as f32,
+        top: rect.y as f32,
+        right: rect.right() as f32,
+        bottom: rect.bottom() as f32,
+    }
+}
+
+const fn brighten(color: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: (color.r + amount).min(1.0),
+        g: (color.g + amount).min(1.0),
+        b: (color.b + amount).min(1.0),
+        a: color.a,
+    }
+}
+
+unsafe fn resolve_apple_font_family(dwrite: &IDWriteFactory) -> PCWSTR {
+    let candidates = [w!("SF Pro Text"), w!("SF Pro Display"), w!("SF Pro")];
+    unsafe {
+        let mut collection: Option<IDWriteFontCollection> = None;
+        if dwrite
+            .GetSystemFontCollection(&raw mut collection, true)
+            .is_ok()
+            && let Some(coll) = collection
+        {
+            for family in candidates {
+                let mut index = 0u32;
+                let mut exists = windows::core::BOOL(0);
+                if coll
+                    .FindFamilyName(family, &raw mut index, &raw mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    return family;
+                }
+            }
+        }
+    }
+    w!("Segoe UI Variable Display")
+}
+
+unsafe fn create_text_format(
+    dwrite: &IDWriteFactory,
+    font_px: f32,
+    weight: DWRITE_FONT_WEIGHT,
+    alignment: DWRITE_TEXT_ALIGNMENT,
+) -> Result<IDWriteTextFormat> {
+    unsafe {
+        let family = resolve_apple_font_family(dwrite);
+        let format = dwrite.CreateTextFormat(
+            family,
+            None,
+            weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            font_px,
+            w!("en-us"),
+        )?;
+        format.SetTextAlignment(alignment)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(format)
+    }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "otto-core"
+description = "Pure, platform-independent layout and window model for the notch bar."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
