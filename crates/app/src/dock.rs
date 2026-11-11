@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::time::Instant;
 
+use crate::host::RuntimeContext;
 use otto_core::{
     CMD_DOCK_EMPTY_TRASH, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN, CMD_DOCK_QUIT, CMD_DOCK_TOGGLE,
     CMD_DOCK_WINDOW_BASE, DockInput, DockLayout, DockMetrics, MotionMetrics, MotionPreference,
@@ -30,10 +30,6 @@ const DOCK_POLL_TIMER: usize = 10;
 const DOCK_ANIM_TIMER: usize = 11;
 const DOCK_POLL_MS: u32 = 150;
 
-thread_local! {
-    static DOCK: RefCell<Option<Dock>> = const { RefCell::new(None) };
-}
-
 struct AnimState {
     mag_strength: f32,
     hide_progress: f32,
@@ -58,7 +54,7 @@ impl Default for AnimState {
     }
 }
 
-struct Dock {
+pub(crate) struct Dock {
     hwnd: isize,
     own_pid: u32,
     renderer: DockRenderer,
@@ -76,7 +72,7 @@ struct Dock {
     anim: AnimState,
 }
 
-pub fn start(hwnd: isize) -> Result<()> {
+pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let own_pid = current_process_id();
     let screen = primary_screen();
     let metrics = DockMetrics::default();
@@ -123,7 +119,7 @@ pub fn start(hwnd: isize) -> Result<()> {
         anim: AnimState::default(),
     };
     dock.place();
-    dock.present();
+    dock.present(runtime);
 
     unsafe {
         SetTimer(
@@ -134,23 +130,22 @@ pub fn start(hwnd: isize) -> Result<()> {
         );
     }
 
-    DOCK.with(|cell| *cell.borrow_mut() = Some(dock));
+    *runtime.dock.borrow_mut() = Some(dock);
     Ok(())
 }
 
-pub fn stop() {
+pub fn stop(runtime: &RuntimeContext) {
     shutdown_recycle_bin_task();
-    DOCK.with(|cell| {
-        if let Some(dock) = cell.borrow_mut().take() {
-            unsafe {
-                let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_POLL_TIMER);
-                let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_ANIM_TIMER);
-            }
+    if let Some(dock) = runtime.dock.borrow_mut().take() {
+        unsafe {
+            let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_POLL_TIMER);
+            let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_ANIM_TIMER);
         }
-    });
+    }
 }
 
 pub fn handle_message(
+    runtime: &RuntimeContext,
     _hwnd: isize,
     message: u32,
     wparam: WPARAM,
@@ -159,34 +154,34 @@ pub fn handle_message(
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_TIMER if wparam.0 == DOCK_POLL_TIMER => {
-            with_dock(Dock::on_poll_timer);
+            with_dock(runtime, |dock| dock.on_poll_timer(runtime));
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == DOCK_ANIM_TIMER => {
-            with_dock(Dock::on_anim_timer);
+            with_dock(runtime, |dock| dock.on_anim_timer(runtime));
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);
-            with_dock(|dock| dock.on_mouse_move(x, y));
+            with_dock(runtime, |dock| dock.on_mouse_move(x, y));
             Some(LRESULT(0))
         }
         WM_MOUSELEAVE => {
-            with_dock(Dock::on_mouse_leave);
+            with_dock(runtime, Dock::on_mouse_leave);
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_point(lparam);
-            with_dock(|dock| dock.on_left_click(x, y));
+            with_dock(runtime, |dock| dock.on_left_click(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_RBUTTONUP => {
             let (x, y) = unpack_point(lparam);
-            with_dock(|dock| dock.on_right_click(x, y));
+            with_dock(runtime, |dock| dock.on_right_click(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            with_dock(Dock::rebuild);
+            with_dock(runtime, |dock| dock.rebuild(runtime));
             Some(LRESULT(0))
         }
         _ => None,
@@ -199,69 +194,72 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-fn with_dock(action: impl FnOnce(&mut Dock)) {
-    DOCK.with(|cell| {
-        if let Ok(mut guard) = cell.try_borrow_mut()
-            && let Some(dock) = guard.as_mut()
-        {
-            action(dock);
-        }
-    });
+fn with_dock(runtime: &RuntimeContext, action: impl FnOnce(&mut Dock)) {
+    if let Ok(mut guard) = runtime.dock.try_borrow_mut()
+        && let Some(dock) = guard.as_mut()
+    {
+        action(dock);
+    }
 }
 
-pub fn repaint() {
-    with_dock(|dock| dock.present());
+pub fn repaint(runtime: &RuntimeContext) {
+    with_dock(runtime, |dock| dock.present(runtime));
 }
 
 #[must_use]
-pub fn dock_target_for_window(hwnd: isize) -> Option<Rect> {
-    DOCK.with(|cell| {
-        let guard = cell.try_borrow().ok()?;
-        let dock = guard.as_ref()?;
-        let entries = dock.combined_entries();
-        let index = entries
-            .iter()
-            .position(|entry| entry.hwnds.contains(&hwnd))?;
-        let item = dock.layout.items.get(index)?;
-        let (origin_x, origin_y) = dock.window_origin();
-        let size = item.size.round().max(1.0) as i32;
-        Some(Rect {
-            x: origin_x + item.x.round() as i32,
-            y: origin_y + item.y.round() as i32,
-            width: size,
-            height: size,
-        })
+pub fn dock_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Option<Rect> {
+    let guard = runtime.dock.try_borrow().ok()?;
+    let dock = guard.as_ref()?;
+    let entries = dock.combined_entries();
+    let index = entries
+        .iter()
+        .position(|entry| entry.hwnds.contains(&hwnd))?;
+    let item = dock.layout.items.get(index)?;
+    let (origin_x, origin_y) = dock.window_origin();
+    let size = item.size.round().max(1.0) as i32;
+    Some(Rect {
+        x: origin_x + item.x.round() as i32,
+        y: origin_y + item.y.round() as i32,
+        width: size,
+        height: size,
     })
 }
 
-fn activate_entry(entry: &DockEntry, target: Option<Rect>) {
+fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target: Option<Rect>) {
     if entry.hwnds.len() == 1
         && let Some(&hwnd) = entry.hwnds.first()
     {
         if is_window_minimized(hwnd) {
-            if crate::genie::restore_window_to(hwnd, target) {
+            if crate::genie::restore_window_to(runtime, hwnd, target) {
                 return;
             }
-        } else if is_window_foreground(hwnd) && crate::genie::minimize_window_to(hwnd, target) {
+        } else if is_window_foreground(hwnd)
+            && crate::genie::minimize_window_to(runtime, hwnd, target)
+        {
             return;
         }
     } else if entry.hwnds.len() > 1
         && !entry.hwnds.iter().copied().any(is_window_foreground)
         && let Some(&hwnd) = entry.hwnds.first()
         && is_window_minimized(hwnd)
-        && crate::genie::restore_window_to(hwnd, target)
+        && crate::genie::restore_window_to(runtime, hwnd, target)
     {
         return;
     }
     activate_or_launch(entry);
 }
 
-pub fn execute_dock_menu_command(cmd: usize, entry: &DockEntry, target: Option<Rect>) {
+pub fn execute_dock_menu_command(
+    runtime: &RuntimeContext,
+    cmd: usize,
+    entry: &DockEntry,
+    target: Option<Rect>,
+) {
     if cmd >= CMD_DOCK_WINDOW_BASE {
         let idx = cmd - CMD_DOCK_WINDOW_BASE;
         if let Some(&hwnd) = entry.hwnds.get(idx) {
             if is_window_minimized(hwnd) {
-                if !crate::genie::restore_window_to(hwnd, target) {
+                if !crate::genie::restore_window_to(runtime, hwnd, target) {
                     focus_window_hwnd(hwnd);
                 }
             } else {
@@ -273,15 +271,15 @@ pub fn execute_dock_menu_command(cmd: usize, entry: &DockEntry, target: Option<R
     match cmd {
         CMD_DOCK_PIN => {
             toggle_pin_entry(entry);
-            with_dock(|dock| {
+            with_dock(runtime, |dock| {
                 dock.entries = collect_dock_entries(dock.own_pid);
                 let updated = dock.combined_entries();
                 sync_icons(&mut dock.renderer, &updated);
                 dock.recompute_layout();
-                dock.present();
+                dock.present(runtime);
             });
         }
-        CMD_DOCK_TOGGLE => activate_entry(entry, target),
+        CMD_DOCK_TOGGLE => activate_entry(runtime, entry, target),
         CMD_DOCK_NEW_WINDOW => launch_new_instance(entry),
         CMD_DOCK_EMPTY_TRASH => empty_recycle_bin(),
         CMD_DOCK_QUIT => close_entry_windows(entry),
@@ -356,7 +354,7 @@ impl Dock {
         };
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, runtime: &RuntimeContext) {
         self.screen = primary_screen();
         self.recompute_layout();
         let all = self.combined_entries();
@@ -369,10 +367,10 @@ impl Dock {
             self.renderer = renderer;
         }
         self.place();
-        self.present();
+        self.present(runtime);
     }
 
-    fn on_poll_timer(&mut self) {
+    fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
         let mut dirty = false;
         let next_motion = motion_preference();
         if next_motion != self.motion {
@@ -470,11 +468,11 @@ impl Dock {
         }
 
         if dirty && !self.anim.timer_running {
-            self.present();
+            self.present(runtime);
         }
     }
 
-    fn on_anim_timer(&mut self) {
+    fn on_anim_timer(&mut self, runtime: &RuntimeContext) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.anim.last_tick)
@@ -570,7 +568,7 @@ impl Dock {
         self.closing_entries = still_closing;
 
         self.recompute_layout();
-        self.present();
+        self.present(runtime);
 
         let mag_done = (self.anim.mag_strength - target_mag).abs() < 0.001;
         let hide_done = (self.anim.hide_progress - target_hide).abs() < 0.001;
@@ -634,8 +632,8 @@ impl Dock {
         }
     }
 
-    fn on_left_click(&mut self, x: i32, y: i32) {
-        crate::menu::close();
+    fn on_left_click(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
+        crate::menu::close(runtime);
         let gap_pad = scale(self.metrics.icon_gap, self.screen.dpi) as f32 * 0.5;
         let Some(idx) = self.layout.hit_test(x, y, gap_pad) else {
             return;
@@ -663,10 +661,10 @@ impl Dock {
             self.ensure_animating();
         }
         let target = self.target_for_entry(&entry);
-        activate_entry(&entry, target);
+        activate_entry(runtime, &entry, target);
     }
 
-    fn on_right_click(&mut self, x: i32, y: i32) {
+    fn on_right_click(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
         let gap_pad = scale(self.metrics.icon_gap, self.screen.dpi) as f32 * 0.5;
         let Some(idx) = self.layout.hit_test(x, y, gap_pad) else {
             return;
@@ -685,7 +683,7 @@ impl Dock {
         let center_x = origin_x + (slot.x + slot.size * 0.5).round() as i32;
         let bottom_y = origin_y + slot.y.round() as i32 - scale(10, self.screen.dpi);
         let target = self.target_for_entry(&entry);
-        crate::menu::open_dock_menu(entry, center_x, bottom_y, target);
+        crate::menu::open_dock_menu(runtime, entry, center_x, bottom_y, target);
     }
 
     fn ensure_animating(&mut self) {
@@ -774,7 +772,7 @@ impl Dock {
         })
     }
 
-    fn present(&self) {
+    fn present(&self, runtime: &RuntimeContext) {
         let all = self.combined_entries();
         let render_items: Vec<DockRenderItem<'_>> = all
             .iter()
@@ -786,7 +784,7 @@ impl Dock {
                 active: e.active,
             })
             .collect();
-        let theme = crate::theme_state::resolved_theme();
+        let theme = crate::theme_state::resolved_theme(runtime);
         let _ = self.renderer.present(
             self.hwnd,
             self.window_origin(),

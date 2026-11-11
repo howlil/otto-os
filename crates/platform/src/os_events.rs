@@ -1,14 +1,15 @@
 use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicIsize, AtomicPtr, AtomicU32, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, FindWindowW, HHOOK,
-    KBDLLHOOKSTRUCT, OBJID_WINDOW, PostMessageW, SW_HIDE, SetWindowsHookExW, ShowWindow,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, FindWindowW,
+    GetForegroundWindow, HHOOK, KBDLLHOOKSTRUCT, OBJID_WINDOW, PostMessageW, SW_HIDE,
+    SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 use windows::core::{PCWSTR, w};
 
@@ -55,6 +56,8 @@ pub fn uninstall_window_tracking_hook() {
     WIN_EVENT_MSG.store(0, Ordering::SeqCst);
 }
 
+static WIN_EVENT_LAST_POSTED: AtomicU32 = AtomicU32::new(0);
+
 unsafe extern "system" fn win_event_proc(
     _hook: HWINEVENTHOOK,
     event: u32,
@@ -62,25 +65,45 @@ unsafe extern "system" fn win_event_proc(
     id_object: i32,
     _id_child: i32,
     _id_event_thread: u32,
-    _dwms_event_time: u32,
+    dwms_event_time: u32,
 ) {
-    if id_object != OBJID_WINDOW.0 {
-        return;
-    }
-    if event == EVENT_SYSTEM_FOREGROUND || event == EVENT_OBJECT_LOCATIONCHANGE {
-        let target = WIN_EVENT_TARGET.load(Ordering::Relaxed);
-        let msg = WIN_EVENT_MSG.load(Ordering::Relaxed);
-        if target != 0 && msg != 0 {
-            unsafe {
-                let _ = PostMessageW(
-                    Some(HWND(target as *mut _)),
-                    msg,
-                    WPARAM(hwnd.0 as usize),
-                    LPARAM(event as isize),
-                );
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if id_object != OBJID_WINDOW.0 {
+            return;
+        }
+        let should_post = if event == EVENT_SYSTEM_FOREGROUND {
+            true
+        } else if event == EVENT_OBJECT_LOCATIONCHANGE {
+            let fg = unsafe { GetForegroundWindow() };
+            if fg == hwnd {
+                let prev = WIN_EVENT_LAST_POSTED.load(Ordering::Relaxed);
+                if dwms_event_time == 0 || dwms_event_time.wrapping_sub(prev) >= 16 {
+                    WIN_EVENT_LAST_POSTED.store(dwms_event_time, Ordering::Relaxed);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if should_post {
+            let target = WIN_EVENT_TARGET.load(Ordering::Relaxed);
+            let msg = WIN_EVENT_MSG.load(Ordering::Relaxed);
+            if target != 0 && msg != 0 {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(target as *mut _)),
+                        msg,
+                        WPARAM(hwnd.0 as usize),
+                        LPARAM(event as isize),
+                    );
+                }
             }
         }
-    }
+    }));
 }
 
 pub fn install_os_event_hooks() -> bool {
@@ -123,21 +146,24 @@ unsafe extern "system" fn low_level_keyboard_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if code >= 0 && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize) {
-        let kbd = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let vk = kbd.vkCode as u16;
-        if vk == VK_VOLUME_UP.0 {
-            let _ = step_system_volume(120);
-            return LRESULT(1);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if code >= 0 && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize) {
+            let kbd = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            let vk = kbd.vkCode as u16;
+            if vk == VK_VOLUME_UP.0 && step_system_volume(120).is_some() {
+                return Some(LRESULT(1));
+            }
+            if vk == VK_VOLUME_DOWN.0 && step_system_volume(-120).is_some() {
+                return Some(LRESULT(1));
+            }
+            if vk == VK_VOLUME_MUTE.0 && toggle_system_mute().is_some() {
+                return Some(LRESULT(1));
+            }
         }
-        if vk == VK_VOLUME_DOWN.0 {
-            let _ = step_system_volume(-120);
-            return LRESULT(1);
-        }
-        if vk == VK_VOLUME_MUTE.0 {
-            let _ = toggle_system_mute();
-            return LRESULT(1);
-        }
+        None
+    }));
+    if let Ok(Some(handled)) = result {
+        return handled;
     }
     let hook = HOOK.load(Ordering::Relaxed);
     unsafe { CallNextHookEx(Some(HHOOK(hook.cast())), code, wparam, lparam) }

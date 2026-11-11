@@ -867,14 +867,8 @@ pub fn extract_dock_icon(entry: &DockEntry) -> Option<IconBitmap> {
     let DockItemKind::App { exe_path } = &entry.kind else {
         return None;
     };
-    let raw = file_icon_bitmap(exe_path).or_else(|| {
-        entry
-            .hwnds
-            .first()
-            .copied()
-            .and_then(window_hicon)
-            .and_then(hicon_to_bitmap)
-    })?;
+    let raw = file_icon_bitmap(exe_path)
+        .or_else(|| entry.hwnds.first().copied().and_then(window_icon_bitmap))?;
     Some(normalize_to_macos_squircle(&raw))
 }
 
@@ -1187,10 +1181,10 @@ fn is_sparse_jumbo_icon(bmp: &IconBitmap) -> bool {
     true
 }
 
-fn window_hicon(hwnd_val: isize) -> Option<HICON> {
+fn window_icon_bitmap(hwnd_val: isize) -> Option<IconBitmap> {
     let hwnd = HWND(hwnd_val as *mut c_void);
     let mut result = 0usize;
-    let handle = unsafe {
+    let (handle, owned) = unsafe {
         let _ = SendMessageTimeoutW(
             hwnd,
             WM_GETICON,
@@ -1201,12 +1195,22 @@ fn window_hicon(hwnd_val: isize) -> Option<HICON> {
             Some(&raw mut result),
         );
         if result == 0 {
-            GetClassLongPtrW(hwnd, GCLP_HICON)
+            (GetClassLongPtrW(hwnd, GCLP_HICON), false)
         } else {
-            result
+            (result, true)
         }
     };
-    (handle != 0).then_some(HICON(handle as *mut c_void))
+    if handle == 0 {
+        return None;
+    }
+    let hicon = HICON(handle as *mut c_void);
+    let bmp = hicon_to_bitmap(hicon);
+    if owned {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
+        }
+    }
+    bmp
 }
 
 fn hicon_to_bitmap(hicon: HICON) -> Option<IconBitmap> {

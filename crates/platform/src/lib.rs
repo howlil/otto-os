@@ -21,7 +21,7 @@ pub use actions::{
     open_calendar_notifications, open_quick_settings, open_spotlight_search, open_start_menu,
     open_task_view, play_pomodoro_chime, poll_menu_dismiss_keys, register_notch_hotkeys,
     show_apple_system_menu, show_quit_menu, show_top_bar_menu, toggle_tray_overflow,
-    unregister_notch_hotkeys,
+    trim_working_set, unregister_notch_hotkeys,
 };
 pub use appbar::AppBar;
 pub use blur::enable_backdrop_blur;
@@ -39,7 +39,7 @@ pub use dock::{
 };
 pub use file::replace_file_atomically;
 pub use instance::InstanceGuard;
-pub use lyrics::{get_or_fetch_lyrics, load_cached_lyrics, save_cached_lyrics};
+pub use lyrics::{clean_track_title, get_or_fetch_lyrics, load_cached_lyrics, save_cached_lyrics};
 pub use media::{
     MediaCommand, NowPlaying, read_now_playing, send_media_command, shutdown_media_task,
 };

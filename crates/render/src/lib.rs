@@ -1,3 +1,4 @@
+mod bar;
 mod dock;
 mod genie;
 mod menu;
@@ -5,7 +6,7 @@ mod theme;
 mod window_controls;
 
 use std::cell::RefCell;
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -19,7 +20,7 @@ use otto_core::{
     HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying,
     PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
 };
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, E_FAIL, HWND, POINT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
@@ -52,7 +53,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
-    WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
@@ -177,7 +179,16 @@ impl DibSurface {
     }
 
     unsafe fn present(&self, hwnd: isize, origin: (i32, i32)) -> Result<()> {
-        let (width, height) = self.size;
+        unsafe { self.present_sized(hwnd, origin, self.size) }
+    }
+
+    unsafe fn present_sized(
+        &self,
+        hwnd: isize,
+        origin: (i32, i32),
+        size: (i32, i32),
+    ) -> Result<()> {
+        let (width, height) = size;
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
@@ -193,8 +204,8 @@ impl DibSurface {
                     y: origin.1,
                 }),
                 Some(&SIZE {
-                    cx: width,
-                    cy: height,
+                    cx: width.max(1),
+                    cy: height.max(1),
                 }),
                 Some(self.dc),
                 Some(&POINT { x: 0, y: 0 }),
@@ -250,6 +261,42 @@ pub struct Renderer {
     cached_cover_art: RefCell<Option<CachedCoverArt>>,
 }
 
+pub(crate) fn shared_d2d_factory() -> Result<ID2D1Factory> {
+    thread_local! {
+        static FACTORY: RefCell<Option<ID2D1Factory>> = const { RefCell::new(None) };
+    }
+    FACTORY.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            let factory: ID2D1Factory =
+                unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+            *guard = Some(factory);
+        }
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))
+    })
+}
+
+pub(crate) fn shared_dwrite_factory() -> Result<IDWriteFactory> {
+    thread_local! {
+        static FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
+    }
+    FACTORY.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            let factory: IDWriteFactory =
+                unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+            *guard = Some(factory);
+        }
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))
+    })
+}
+
 fn decode_image_bytes(target: &ID2D1DCRenderTarget, bytes: &[u8]) -> Result<ID2D1Bitmap> {
     unsafe {
         let factory: IWICImagingFactory =
@@ -262,15 +309,36 @@ fn decode_image_bytes(target: &ID2D1DCRenderTarget, bytes: &[u8]) -> Result<ID2D
             WICDecodeMetadataCacheOnDemand,
         )?;
         let frame = decoder.GetFrame(0)?;
+        let mut original_w = 0u32;
+        let mut original_h = 0u32;
+        frame.GetSize(&mut original_w, &mut original_h)?;
+
         let converter = factory.CreateFormatConverter()?;
-        converter.Initialize(
-            &frame,
-            &GUID_WICPixelFormat32bppPBGRA,
-            WICBitmapDitherTypeNone,
-            None,
-            0.0,
-            WICBitmapPaletteTypeCustom,
-        )?;
+        if original_w > 128 || original_h > 128 {
+            let max_dim = original_w.max(original_h).max(1) as f32;
+            let scale_factor = (128.0 / max_dim).min(1.0);
+            let target_w = ((original_w as f32 * scale_factor).round() as u32).max(1);
+            let target_h = ((original_h as f32 * scale_factor).round() as u32).max(1);
+            let scaler = factory.CreateBitmapScaler()?;
+            scaler.Initialize(&frame, target_w, target_h, WICBitmapInterpolationModeFant)?;
+            converter.Initialize(
+                &scaler,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )?;
+        } else {
+            converter.Initialize(
+                &frame,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )?;
+        }
         target.CreateBitmapFromWicBitmap(&converter, None)
     }
 }
@@ -285,7 +353,7 @@ impl Renderer {
         _tint_alpha: f32,
     ) -> Result<Self> {
         unsafe {
-            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let factory = shared_d2d_factory()?;
             let properties = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
                 pixelFormat: PIXEL_FORMAT,
@@ -307,7 +375,7 @@ impl Renderer {
             };
             let stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
 
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let dwrite = shared_dwrite_factory()?;
             let font_px = scale(12, dpi) as f32;
             let text_leading = create_text_format(
                 &dwrite,
@@ -421,184 +489,11 @@ impl Renderer {
     ) -> Result<()> {
         self.draw_panel(layout, hovered, pomodoro, media, anim_phase, lyrics)?;
         unsafe {
-            self.panel_surface
-                .present(panel_hwnd, (layout.panel_window.x, layout.panel_window.y))
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_bar(
-        &self,
-        layout: &Layout,
-        status: SystemStatus,
-        app_name: &str,
-        hovered: Option<HitTarget>,
-        hud: Option<NotchHudState>,
-        pomodoro: PomodoroState,
-        media: Option<&NowPlaying>,
-        anim_phase: f32,
-        theme: ResolvedTheme,
-    ) -> Result<()> {
-        let palette = LiquidGlassPalette::for_theme(theme);
-        let (width, height) = self.bar_surface.size;
-        unsafe {
-            self.target.BindDC(
-                self.bar_surface.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
-            let clear = palette.bar_background;
-            self.target.Clear(Some(&raw const clear));
-            self.brushes.update_theme(&palette);
-
-            let bar_notch = Rect {
-                x: layout.notch.x,
-                y: 0,
-                width: layout.notch.width,
-                height: layout.bar.height,
-            };
-            let corner_r = if layout.panel_expansion > 0.05 {
-                0.0
-            } else {
-                layout.notch_corner_radius as f32
-            };
-            self.target.FillGeometry(
-                &self.notch_geometry_rect(
-                    bar_notch,
-                    corner_r,
-                    layout.notch_ear_radius as f32,
-                    &self.cached_bar_notch,
-                )?,
-                &self.brushes.black,
-                None,
-            );
-
-            if let Some(target_slot) = hovered.and_then(|t| layout.slot_rect(t)) {
-                self.draw_slot_pill(target_slot, &self.brushes.hover);
-            }
-
-            let fg = &self.brushes.text_primary;
-            let muted = &self.brushes.text_muted;
-
-            self.draw_apple_logo(layout, fg)?;
-            self.draw_left_menu_bar(layout, app_name, fg);
-            self.draw_tray_chevron(layout, fg)?;
-            self.draw_status_slot(layout, status, fg, muted)?;
-            self.draw_search_slot(layout, fg);
-            if layout.control_center_slot.width > 0 {
-                self.draw_control_center_slot(layout, fg, muted);
-            }
-            self.draw_clock_slot(layout, status, fg)?;
-
-            if layout.panel_expansion < 0.15 {
-                if let Some(hud_state) = hud
-                    && hud_state.expansion > 0.12
-                {
-                    self.draw_notch_hud(layout, hud_state)?;
-                } else if layout.compact_expansion > 0.15 {
-                    self.draw_compact_notch(layout, pomodoro, media, anim_phase)?;
-                }
-            }
-
-            self.target.EndDraw(None, None)
-        }
-    }
-
-    fn draw_panel(
-        &self,
-        layout: &Layout,
-        hovered: Option<HitTarget>,
-        pomodoro: PomodoroState,
-        media: Option<&NowPlaying>,
-        anim_phase: f32,
-        lyrics: Option<&LyricsSheet>,
-    ) -> Result<()> {
-        let (width, height) = self.panel_surface.size;
-        let offset_x = layout.panel_window.x;
-        let local_notch = Rect {
-            x: layout.notch.x - offset_x,
-            y: 0,
-            width: layout.notch.width,
-            height: layout.notch.height,
-        };
-
-        unsafe {
-            self.target.BindDC(
-                self.panel_surface.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
-            let clear = CLEAR;
-            self.target.Clear(Some(&raw const clear));
-
-            let geom = self.notch_geometry_rect(
-                local_notch,
-                layout.notch_corner_radius as f32,
-                layout.notch_ear_radius as f32,
-                &self.cached_panel_notch,
-            )?;
-            self.target.FillGeometry(&geom, &self.brushes.black, None);
-
-            let rim_alpha = (layout.panel_expansion * 0.12).clamp(0.0, 0.12);
-            if rim_alpha > 0.01 {
-                let rim = self.brushes.alpha_brush(0, FOREGROUND, rim_alpha);
-                self.target
-                    .DrawGeometry(&geom, rim, 1.0, &self.stroke_style);
-            }
-
-            if layout.panel_expansion > 0.22 {
-                let alpha = ((layout.panel_expansion - 0.22) / 0.78).clamp(0.0, 1.0);
-                if pomodoro.status == PomodoroStatus::Alert
-                    && let Some(alert) = pomodoro.alert
-                {
-                    self.draw_expanded_alert(layout, offset_x, alpha, hovered, pomodoro, alert)?;
-                } else if layout.active_tab == NotchExpandedTab::Media
-                    && let Some(active_media) = media
-                {
-                    self.draw_expanded_tabs(
-                        layout,
-                        offset_x,
-                        alpha,
-                        hovered,
-                        layout.active_tab,
-                        true,
-                        pomodoro,
-                    );
-                    self.draw_expanded_media(
-                        layout,
-                        offset_x,
-                        alpha,
-                        hovered,
-                        active_media,
-                        anim_phase,
-                        lyrics,
-                    )?;
-                } else {
-                    let has_media = media.is_some();
-                    self.draw_expanded_tabs(
-                        layout,
-                        offset_x,
-                        alpha,
-                        hovered,
-                        layout.active_tab,
-                        has_media,
-                        pomodoro,
-                    );
-                    self.draw_expanded_pomodoro(layout, offset_x, alpha, hovered, pomodoro)?;
-                }
-            }
-
-            self.target.EndDraw(None, None)
+            self.panel_surface.present_sized(
+                panel_hwnd,
+                (layout.panel_window.x, layout.panel_window.y),
+                (layout.panel_window.width, layout.panel_window.height),
+            )
         }
     }
 
@@ -985,7 +880,7 @@ impl Renderer {
 
         if layout.lyrics_expanded {
             let drawer_rect = translate_rect(layout.media_lyrics_drawer, -offset_x);
-            self.draw_lyrics_drawer(drawer_rect, alpha, media, lyrics);
+            self.draw_lyrics_drawer(drawer_rect, alpha, media, lyrics, anim_phase);
         }
 
         self.draw_media_seekbar(
@@ -1040,6 +935,7 @@ impl Renderer {
         alpha: f32,
         media: &NowPlaying,
         lyrics: Option<&LyricsSheet>,
+        anim_phase: f32,
     ) {
         let radius = scale(12, self.dpi) as f32;
         let bg_brush = self.brushes.alpha_brush(1, FOREGROUND, 0.07 * alpha);
@@ -1076,10 +972,21 @@ impl Renderer {
                     bottom: y_top + line_h,
                 };
                 if i == rel_active {
+                    let pill_pad_x = scale(6, self.dpi) as f32;
+                    let pill_pad_y = scale(2, self.dpi) as f32;
+                    let pill_rect = Rect {
+                        x: (rect.left - pill_pad_x) as i32,
+                        y: (rect.top - pill_pad_y) as i32,
+                        width: (rect.right - rect.left + pill_pad_x * 2.0) as i32,
+                        height: (line_h + pill_pad_y * 2.0) as i32,
+                    };
+                    let pill_brush = self.brushes.alpha_brush(5, FOREGROUND, 0.12 * alpha);
+                    self.draw_rounded_box(pill_rect, scale(8, self.dpi) as f32, pill_brush);
+
                     let active_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.98 * alpha);
                     self.draw_text(&line.text, &self.text_alert_title, rect, active_brush);
                 } else {
-                    let inactive_brush = self.brushes.alpha_brush(4, FOREGROUND, 0.40 * alpha);
+                    let inactive_brush = self.brushes.alpha_brush(4, FOREGROUND, 0.35 * alpha);
                     self.draw_text(&line.text, &self.text_caption, rect, inactive_brush);
                 }
             }
@@ -1090,13 +997,24 @@ impl Renderer {
                 right: drawer_rect.right() as f32 - scale(12, self.dpi) as f32,
                 bottom: drawer_rect.bottom() as f32,
             };
-            let status_text = if media.title.trim().is_empty() {
-                "Tidak ada media diputar"
+            if media.title.trim().is_empty() {
+                let empty_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.45 * alpha);
+                self.draw_text(
+                    "Tidak ada media diputar",
+                    &self.text_caption,
+                    empty_rect,
+                    empty_brush,
+                );
             } else {
-                "Lirik tidak tersedia untuk lagu ini"
-            };
-            let empty_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.45 * alpha);
-            self.draw_text(status_text, &self.text_caption, empty_rect, empty_brush);
+                let pulse = 0.35 + 0.30 * (anim_phase * TAU).sin().abs();
+                let pulse_brush = self.brushes.alpha_brush(3, FOREGROUND, pulse * alpha);
+                self.draw_text(
+                    "Memuat lirik...",
+                    &self.text_caption,
+                    empty_rect,
+                    pulse_brush,
+                );
+            }
         }
     }
 

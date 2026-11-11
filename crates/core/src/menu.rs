@@ -61,6 +61,7 @@ pub const CMD_CC_THEME_TOGGLE: usize = 75;
 pub const CMD_CC_THEME_LIGHT: usize = 76;
 pub const CMD_CC_THEME_DARK: usize = 77;
 pub const CMD_CC_THEME_AUTO: usize = 78;
+pub const CMD_CC_LYRICS_ONLINE: usize = 79;
 pub const CMD_DOCK_PIN: usize = 100;
 pub const CMD_DOCK_TOGGLE: usize = 101;
 pub const CMD_DOCK_NEW_WINDOW: usize = 102;
@@ -412,6 +413,7 @@ pub fn build_control_center_rows(
     brightness: u8,
     now_playing: Option<(&str, &str, bool)>,
     theme_mode: ThemeMode,
+    online_lyrics: bool,
 ) -> Vec<MenuRow> {
     let mut rows = vec![
         MenuRow::Slider {
@@ -429,6 +431,16 @@ pub fn build_control_center_rows(
             CMD_CC_THEME_TOGGLE,
             format!("Theme: {} (Click to Cycle)", theme_mode.label()),
             "⌘T",
+        ),
+        MenuRow::check_item(
+            CMD_CC_LYRICS_ONLINE,
+            if online_lyrics {
+                "Online Lyrics: On"
+            } else {
+                "Online Lyrics: Off"
+            },
+            online_lyrics,
+            true,
         ),
         MenuRow::Separator,
     ];
@@ -539,7 +551,7 @@ mod tests {
 
     #[test]
     fn control_center_slider_maps_pointer_to_percent() {
-        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto);
+        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto, false);
         let layout = compute_popup_menu_layout(
             &PopupMenuMetrics::MACOS_SONOMA,
             1920,
@@ -558,6 +570,20 @@ mod tests {
             .unwrap();
         assert!((49..=51).contains(&mid));
         assert_eq!(layout.slider_value_at(3, left), None);
+    }
+
+    #[test]
+    fn control_center_exposes_online_lyrics_as_a_checked_opt_in() {
+        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto, true);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item {
+                id: CMD_CC_LYRICS_ONLINE,
+                checked: true,
+                enabled: true,
+                ..
+            }
+        )));
     }
 
     #[test]

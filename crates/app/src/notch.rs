@@ -378,12 +378,8 @@ impl NotchController {
         let (mut changed, effect) = self.step_pomodoro_clock(now, raw_dt);
         self.step_hover_tracking(now, cursor_inside_notch, panel_visible);
 
-        let media_active = self.media.as_ref().is_some_and(NowPlaying::is_active);
-        if media_active && (self.compact_expansion > 0.05 || self.panel_expansion > 0.05) {
-            changed = true;
-        }
-
         let hud_active = self.hud_until.is_some_and(|until| now < until);
+        let media_active = self.media.as_ref().is_some_and(NowPlaying::is_active);
         let target_hud = if hud_active { 1.0 } else { 0.0 };
         let target_compact = if self.pomodoro.is_compact_active() || media_active {
             1.0
@@ -578,6 +574,26 @@ mod tests {
 
         assert!(notch.set_media(Some(media)));
         assert_eq!(notch.layout_input(true).active_tab, NotchExpandedTab::Media);
+    }
+
+    #[test]
+    fn settled_media_does_not_force_animation_repaints() {
+        let media = NowPlaying {
+            title: String::from("Track"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 200_000,
+            thumbnail: None,
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+        let now = std::time::Instant::now();
+        notch.compact_expansion = 1.0;
+        notch.last_anim_instant = now;
+
+        let update = notch.advance(now, false, false);
+
+        assert!(!update.changed);
     }
 
     #[test]

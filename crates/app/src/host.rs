@@ -1,6 +1,7 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::mem::size_of;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -13,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Error, PCWSTR, Result, w};
 
 use crate::{bar, dock, genie, menu, window_controls};
+use otto_core::ThemeMode;
 use otto_platform::{replace_file_atomically, shutdown_media_task};
 
 const CONFIG_FILE: &str = "plugins.txt";
@@ -37,46 +39,103 @@ enum PluginState {
 }
 
 #[derive(Clone, Copy)]
+enum SurfaceSlot {
+    Bar,
+    Panel,
+    Menu,
+    Dock,
+    WindowControls,
+    Genie,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceDescriptor {
+    class_name: PCWSTR,
+    wnd_proc: WNDPROC,
+    slot: SurfaceSlot,
+}
+
+type PluginStart = fn(&Host) -> Result<()>;
+type PluginStop = fn(&RuntimeContext);
+
+#[derive(Clone, Copy)]
 struct PluginDescriptor {
     id: PluginId,
     required: bool,
     dependencies: &'static [PluginId],
+    surface: Option<SurfaceDescriptor>,
+    start: Option<PluginStart>,
+    stop: PluginStop,
 }
 
 const NO_DEPENDENCIES: &[PluginId] = &[];
 const POPUP_DEPENDENCY: &[PluginId] = &[PluginId::PopupMenu];
 const WINDOW_CONTROLS_DEPENDENCIES: &[PluginId] = &[PluginId::PopupMenu, PluginId::Genie];
 
+const DOCK_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
+    class_name: w!("OttoDockBar"),
+    wnd_proc: Some(dock_window_proc),
+    slot: SurfaceSlot::Dock,
+};
+const WINDOW_CONTROLS_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
+    class_name: w!("OttoWindowControls"),
+    wnd_proc: Some(window_controls_window_proc),
+    slot: SurfaceSlot::WindowControls,
+};
+const GENIE_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
+    class_name: w!("OttoGenie"),
+    wnd_proc: Some(genie_window_proc),
+    slot: SurfaceSlot::Genie,
+};
+
 const PLUGIN_DESCRIPTORS: &[PluginDescriptor] = &[
     PluginDescriptor {
         id: PluginId::PopupMenu,
         required: true,
         dependencies: NO_DEPENDENCIES,
+        surface: None,
+        start: Some(start_popup_menu),
+        stop: stop_popup_menu,
     },
     PluginDescriptor {
         id: PluginId::TopBar,
         required: true,
         dependencies: POPUP_DEPENDENCY,
+        surface: None,
+        start: Some(start_top_bar),
+        stop: stop_top_bar,
     },
     PluginDescriptor {
         id: PluginId::Genie,
         required: false,
         dependencies: NO_DEPENDENCIES,
+        surface: Some(GENIE_SURFACE),
+        start: Some(start_genie),
+        stop: stop_genie,
     },
     PluginDescriptor {
         id: PluginId::Dock,
         required: false,
         dependencies: POPUP_DEPENDENCY,
+        surface: Some(DOCK_SURFACE),
+        start: Some(start_dock),
+        stop: stop_dock,
     },
     PluginDescriptor {
         id: PluginId::WindowControls,
         required: false,
         dependencies: WINDOW_CONTROLS_DEPENDENCIES,
+        surface: Some(WINDOW_CONTROLS_SURFACE),
+        start: Some(start_window_controls),
+        stop: stop_window_controls,
     },
     PluginDescriptor {
         id: PluginId::ControlCenter,
         required: false,
         dependencies: &[PluginId::PopupMenu, PluginId::TopBar],
+        surface: None,
+        start: None,
+        stop: stop_control_center,
     },
 ];
 
@@ -108,6 +167,7 @@ impl PluginId {
 #[derive(Clone, Debug)]
 struct PluginConfig {
     enabled: Vec<PluginId>,
+    online_lyrics: bool,
 }
 
 impl Default for PluginConfig {
@@ -121,6 +181,7 @@ impl Default for PluginConfig {
                 PluginId::Genie,
                 PluginId::ControlCenter,
             ],
+            online_lyrics: false,
         }
     }
 }
@@ -145,6 +206,10 @@ impl PluginConfig {
         };
         let mut config = Self {
             enabled: Vec::new(),
+            online_lyrics: contents
+                .lines()
+                .find_map(|line| line.strip_prefix("online_lyrics="))
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true")),
         };
         for name in enabled.split(',') {
             if let Some(plugin) = PluginId::parse(name)
@@ -171,7 +236,14 @@ impl PluginConfig {
             .map(|plugin| plugin.name())
             .collect::<Vec<_>>()
             .join(",");
-        replace_file_atomically(&path, format!("version=1\nenabled={enabled}\n").as_bytes())
+        replace_file_atomically(
+            &path,
+            format!(
+                "version=1\nenabled={enabled}\nonline_lyrics={}\n",
+                self.online_lyrics
+            )
+            .as_bytes(),
+        )
     }
 
     fn ensure_required(&mut self) {
@@ -208,6 +280,70 @@ struct Surfaces {
     genie: Option<HWND>,
 }
 
+impl Surfaces {
+    fn get(&self, slot: SurfaceSlot) -> Option<HWND> {
+        match slot {
+            SurfaceSlot::Bar => Some(self.bar),
+            SurfaceSlot::Panel => Some(self.panel),
+            SurfaceSlot::Menu => Some(self.menu),
+            SurfaceSlot::Dock => self.dock,
+            SurfaceSlot::WindowControls => self.window_controls,
+            SurfaceSlot::Genie => self.genie,
+        }
+    }
+
+    fn store(&mut self, slot: SurfaceSlot, hwnd: HWND) -> Result<()> {
+        let target = match slot {
+            SurfaceSlot::Dock => &mut self.dock,
+            SurfaceSlot::WindowControls => &mut self.window_controls,
+            SurfaceSlot::Genie => &mut self.genie,
+            SurfaceSlot::Bar | SurfaceSlot::Panel | SurfaceSlot::Menu => {
+                return Err(Error::new(
+                    windows::Win32::Foundation::E_INVALIDARG,
+                    "Base surface cannot be registered as an optional surface",
+                ));
+            }
+        };
+        *target = Some(hwnd);
+        Ok(())
+    }
+
+    fn take(&mut self, slot: SurfaceSlot) -> Option<HWND> {
+        match slot {
+            SurfaceSlot::Dock => self.dock.take(),
+            SurfaceSlot::WindowControls => self.window_controls.take(),
+            SurfaceSlot::Genie => self.genie.take(),
+            SurfaceSlot::Bar | SurfaceSlot::Panel | SurfaceSlot::Menu => None,
+        }
+    }
+}
+
+pub(crate) struct RuntimeContext {
+    pub(crate) bar: RefCell<Option<bar::Bar>>,
+    pub(crate) menu: RefCell<Option<menu::PopupMenu>>,
+    pub(crate) dock: RefCell<Option<dock::Dock>>,
+    pub(crate) window_controls: RefCell<Option<window_controls::WindowControls>>,
+    pub(crate) genie: RefCell<Option<genie::Genie>>,
+    pub(crate) theme_mode: Cell<ThemeMode>,
+    pub(crate) online_lyrics_enabled: Cell<bool>,
+    pub(crate) pending_online_lyrics: Cell<Option<bool>>,
+}
+
+impl RuntimeContext {
+    pub(crate) fn new(online_lyrics_enabled: bool) -> Self {
+        Self {
+            bar: RefCell::new(None),
+            menu: RefCell::new(None),
+            dock: RefCell::new(None),
+            window_controls: RefCell::new(None),
+            genie: RefCell::new(None),
+            theme_mode: Cell::new(ThemeMode::Auto),
+            online_lyrics_enabled: Cell::new(online_lyrics_enabled),
+            pending_online_lyrics: Cell::new(None),
+        }
+    }
+}
+
 struct Host {
     instance: HINSTANCE,
     cursor: HCURSOR,
@@ -218,6 +354,7 @@ struct Host {
     started: Vec<PluginId>,
     states: Vec<(PluginId, PluginState)>,
     shutting_down: bool,
+    runtime: RuntimeContext,
 }
 
 thread_local! {
@@ -228,12 +365,14 @@ pub fn start(blur: bool) -> Result<()> {
     let instance: HINSTANCE =
         unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? }.into();
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
+    let config = PluginConfig::load();
+    let online_lyrics_enabled = config.online_lyrics;
     let mut host = Host {
         instance,
         cursor,
         ex_style: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         blur,
-        config: PluginConfig::load(),
+        config,
         surfaces: None,
         started: Vec::new(),
         states: PLUGIN_DESCRIPTORS
@@ -241,6 +380,7 @@ pub fn start(blur: bool) -> Result<()> {
             .map(|descriptor| (descriptor.id, PluginState::Disabled))
             .collect(),
         shutting_down: false,
+        runtime: RuntimeContext::new(online_lyrics_enabled),
     };
     if let Err(error) = host.initialize() {
         host.shutdown();
@@ -283,14 +423,6 @@ pub fn stop() {
     });
 }
 
-pub fn is_plugin_enabled(plugin: PluginId) -> bool {
-    HOST.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|host| host.config.is_enabled(plugin))
-    })
-}
-
 pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
     let result = HOST.with(|cell| {
         let mut guard = cell.borrow_mut();
@@ -303,9 +435,36 @@ pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
         host.set_plugin_enabled(plugin, enabled)
     });
     if result.is_ok() && plugin == PluginId::ControlCenter {
-        bar::refresh_plugin_layout();
+        HOST.with(|cell| {
+            if let Some(host) = cell.borrow().as_ref() {
+                bar::refresh_plugin_layout(
+                    &host.runtime,
+                    host.config.is_enabled(PluginId::ControlCenter),
+                );
+            }
+        });
     }
     result
+}
+
+pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
+    HOST.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(host) = guard.as_mut() else {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "Otto host is not running",
+            ));
+        };
+        let previous = host.config.online_lyrics;
+        host.config.online_lyrics = enabled;
+        if let Err(error) = host.config.save() {
+            host.config.online_lyrics = previous;
+            return Err(error);
+        }
+        host.runtime.online_lyrics_enabled.set(enabled);
+        Ok(())
+    })
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -321,16 +480,11 @@ fn io_error(_error: std::io::Error) -> Error {
     )
 }
 
-fn descriptor(plugin: PluginId) -> PluginDescriptor {
+fn descriptor(plugin: PluginId) -> &'static PluginDescriptor {
     PLUGIN_DESCRIPTORS
         .iter()
-        .copied()
         .find(|descriptor| descriptor.id == plugin)
-        .unwrap_or(PluginDescriptor {
-            id: plugin,
-            required: false,
-            dependencies: NO_DEPENDENCIES,
-        })
+        .expect("every PluginId must have a descriptor")
 }
 
 impl Host {
@@ -392,63 +546,50 @@ impl Host {
             genie: None,
         });
 
-        menu::start(menu.0 as isize)?;
-        self.started.push(PluginId::PopupMenu);
-        self.set_state(PluginId::PopupMenu, PluginState::Running);
-        bar::start(
-            bar.0 as isize,
-            panel.0 as isize,
-            self.blur,
-            self.config.is_enabled(PluginId::ControlCenter),
-        )?;
-        self.started.push(PluginId::TopBar);
-        self.set_state(PluginId::TopBar, PluginState::Running);
-        if self.config.is_enabled(PluginId::ControlCenter) {
-            self.set_state(PluginId::ControlCenter, PluginState::Running);
-        }
-
-        for plugin in [PluginId::Genie, PluginId::Dock, PluginId::WindowControls] {
-            if self.config.is_enabled(plugin)
-                && let Err(error) = self.start_optional(plugin)
-            {
-                report_plugin_failure(plugin, &error);
+        for descriptor in PLUGIN_DESCRIPTORS {
+            if !self.config.is_enabled(descriptor.id) {
+                continue;
+            }
+            match self.start_plugin(descriptor.id) {
+                Ok(()) => {}
+                Err(error) if descriptor.required => return Err(error),
+                Err(error) => report_plugin_failure(descriptor.id, &error),
             }
         }
         Ok(())
     }
 
-    fn start_optional(&mut self, plugin: PluginId) -> Result<()> {
+    fn start_plugin(&mut self, plugin: PluginId) -> Result<()> {
         let descriptor = descriptor(plugin);
-        if !descriptor
-            .dependencies
-            .iter()
-            .all(|dependency| self.started.contains(dependency))
-        {
+        if self.started.contains(&plugin) {
+            return Ok(());
+        }
+        if !dependencies_running(&self.started, descriptor.dependencies) {
             self.set_state(plugin, PluginState::Failed);
-            self.config.set_enabled(plugin, false);
+            if !descriptor.required {
+                self.config.set_enabled(plugin, false);
+            }
             return Err(Error::new(
                 windows::Win32::Foundation::E_INVALIDARG,
                 "Plugin dependency is not running",
             ));
         }
         self.set_state(plugin, PluginState::Starting);
-        let surface = match self.create_surface(plugin) {
-            Ok(surface) => surface,
-            Err(error) => {
-                self.set_state(plugin, PluginState::Failed);
+        if descriptor.surface.is_some()
+            && let Err(error) = self.create_surface(plugin)
+        {
+            self.set_state(plugin, PluginState::Failed);
+            if !descriptor.required {
                 self.config.set_enabled(plugin, false);
-                return Err(error);
             }
-        };
-        let result = match plugin {
-            PluginId::Dock => dock::start(surface.0 as isize),
-            PluginId::WindowControls => window_controls::start(surface.0 as isize),
-            PluginId::Genie => genie::start(surface.0 as isize),
-            PluginId::PopupMenu | PluginId::TopBar | PluginId::ControlCenter => Ok(()),
-        };
+            return Err(error);
+        }
+        let result = descriptor.start.map_or(Ok(()), |start| start(self));
         if let Err(error) = result {
             self.destroy_surface(plugin);
-            self.config.set_enabled(plugin, false);
+            if !descriptor.required {
+                self.config.set_enabled(plugin, false);
+            }
             self.set_state(plugin, PluginState::Failed);
             return Err(error);
         }
@@ -464,36 +605,20 @@ impl Host {
                 "The Otto top bar is required",
             ));
         }
-        if plugin == PluginId::ControlCenter {
-            self.config.set_enabled(plugin, enabled);
-            if enabled {
-                self.set_state(plugin, PluginState::Running);
-            } else {
-                menu::close();
-                self.set_state(plugin, PluginState::Disabled);
-            }
-            return self.config.save();
-        }
         if enabled == self.config.is_enabled(plugin) {
             return Ok(());
         }
         if enabled {
-            if plugin == PluginId::WindowControls && !self.config.is_enabled(PluginId::Genie) {
-                return Err(Error::new(
-                    windows::Win32::Foundation::E_INVALIDARG,
-                    "Window Controls require Genie",
-                ));
-            }
             self.config.set_enabled(plugin, true);
-            if let Err(error) = self.start_optional(plugin) {
+            if let Err(error) = self.start_plugin(plugin) {
                 self.config.set_enabled(plugin, false);
                 return Err(error);
             }
         } else {
-            if plugin == PluginId::Genie && self.config.is_enabled(PluginId::WindowControls) {
+            if let Some(dependent) = enabled_dependent(plugin, &self.config) {
                 return Err(Error::new(
                     windows::Win32::Foundation::E_INVALIDARG,
-                    "Disable Window Controls before Genie",
+                    format!("Disable {} before {}", dependent.name(), plugin.name()),
                 ));
             }
             self.stop_plugin(plugin);
@@ -509,61 +634,42 @@ impl Host {
                 "Otto surfaces are not initialized",
             ));
         }
-        let surface = match plugin {
-            PluginId::Dock => create_overlay_window(
-                self.instance,
-                self.cursor,
-                w!("OttoDockBar"),
-                Some(dock_window_proc),
-                self.ex_style,
-            )?,
-            PluginId::WindowControls => create_overlay_window(
-                self.instance,
-                self.cursor,
-                w!("OttoWindowControls"),
-                Some(window_controls_window_proc),
-                self.ex_style,
-            )?,
-            PluginId::Genie => create_overlay_window(
-                self.instance,
-                self.cursor,
-                w!("OttoGenie"),
-                Some(genie_window_proc),
-                self.ex_style,
-            )?,
-            PluginId::PopupMenu | PluginId::TopBar | PluginId::ControlCenter => {
-                return Err(Error::new(
-                    windows::Win32::Foundation::E_INVALIDARG,
-                    "Plugin does not own a dynamic surface",
-                ));
-            }
+        let Some(descriptor) = descriptor(plugin).surface else {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_INVALIDARG,
+                "Plugin does not own a dynamic surface",
+            ));
         };
+        let surface = create_overlay_window(
+            self.instance,
+            self.cursor,
+            descriptor.class_name,
+            descriptor.wnd_proc,
+            self.ex_style,
+        )?;
         let surfaces = self.surfaces.as_mut().ok_or_else(|| {
             Error::new(
                 windows::Win32::Foundation::E_FAIL,
                 "Otto surfaces are not initialized",
             )
         })?;
-        match plugin {
-            PluginId::Dock => surfaces.dock = Some(surface),
-            PluginId::WindowControls => surfaces.window_controls = Some(surface),
-            PluginId::Genie => surfaces.genie = Some(surface),
-            PluginId::PopupMenu | PluginId::TopBar | PluginId::ControlCenter => {}
+        if let Err(error) = surfaces.store(descriptor.slot, surface) {
+            unsafe {
+                let _ = DestroyWindow(surface);
+            }
+            return Err(error);
         }
         Ok(surface)
     }
 
     fn destroy_surface(&mut self, plugin: PluginId) {
+        let Some(descriptor) = descriptor(plugin).surface else {
+            return;
+        };
         let Some(surfaces) = self.surfaces.as_mut() else {
             return;
         };
-        let surface = match plugin {
-            PluginId::Dock => surfaces.dock.take(),
-            PluginId::WindowControls => surfaces.window_controls.take(),
-            PluginId::Genie => surfaces.genie.take(),
-            PluginId::PopupMenu | PluginId::TopBar | PluginId::ControlCenter => None,
-        };
-        if let Some(surface) = surface {
+        if let Some(surface) = surfaces.take(descriptor.slot) {
             unsafe {
                 let _ = DestroyWindow(surface);
             }
@@ -571,15 +677,15 @@ impl Host {
     }
 
     fn stop_plugin(&mut self, plugin: PluginId) {
-        self.set_state(plugin, PluginState::Stopping);
-        match plugin {
-            PluginId::PopupMenu => menu::stop(),
-            PluginId::TopBar => bar::stop(),
-            PluginId::Dock => dock::stop(),
-            PluginId::WindowControls => window_controls::stop(),
-            PluginId::Genie => genie::stop(),
-            PluginId::ControlCenter => menu::close(),
+        if !self.started.contains(&plugin) {
+            return;
         }
+        self.stop_started_plugin(plugin);
+    }
+
+    fn stop_started_plugin(&mut self, plugin: PluginId) {
+        self.set_state(plugin, PluginState::Stopping);
+        (descriptor(plugin).stop)(&self.runtime);
         self.started.retain(|started| *started != plugin);
         self.destroy_surface(plugin);
         self.set_state(plugin, PluginState::Disabled);
@@ -588,19 +694,10 @@ impl Host {
     fn shutdown(&mut self) {
         self.shutting_down = true;
         let started = std::mem::take(&mut self.started);
-        for plugin in started.into_iter().rev() {
-            self.set_state(plugin, PluginState::Stopping);
-            match plugin {
-                PluginId::PopupMenu => menu::stop(),
-                PluginId::TopBar => bar::stop(),
-                PluginId::Dock => dock::stop(),
-                PluginId::WindowControls => window_controls::stop(),
-                PluginId::Genie => genie::stop(),
-                PluginId::ControlCenter => menu::close(),
-            }
-            self.destroy_surface(plugin);
-            self.set_state(plugin, PluginState::Disabled);
+        for plugin in reverse_lifecycle_order(&started) {
+            self.stop_started_plugin(plugin);
         }
+        shutdown_media_task();
         if let Some(surfaces) = self.surfaces.take() {
             unsafe {
                 let _ = DestroyWindow(surfaces.menu);
@@ -611,8 +708,91 @@ impl Host {
         for (_, state) in &mut self.states {
             *state = PluginState::Disabled;
         }
-        shutdown_media_task();
     }
+}
+
+fn dependencies_running(started: &[PluginId], dependencies: &[PluginId]) -> bool {
+    dependencies
+        .iter()
+        .all(|dependency| started.contains(dependency))
+}
+
+fn reverse_lifecycle_order(started: &[PluginId]) -> impl Iterator<Item = PluginId> + '_ {
+    started.iter().rev().copied()
+}
+
+fn enabled_dependent(plugin: PluginId, config: &PluginConfig) -> Option<PluginId> {
+    PLUGIN_DESCRIPTORS
+        .iter()
+        .find(|candidate| {
+            config.is_enabled(candidate.id) && candidate.dependencies.contains(&plugin)
+        })
+        .map(|candidate| candidate.id)
+}
+
+fn surface(host: &Host, slot: SurfaceSlot) -> Result<HWND> {
+    host.surfaces
+        .as_ref()
+        .and_then(|surfaces| surfaces.get(slot))
+        .ok_or_else(|| {
+            Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "Otto surface is not initialized",
+            )
+        })
+}
+
+fn start_popup_menu(host: &Host) -> Result<()> {
+    menu::start(&host.runtime, surface(host, SurfaceSlot::Menu)?.0 as isize)
+}
+
+fn start_top_bar(host: &Host) -> Result<()> {
+    bar::start(
+        &host.runtime,
+        surface(host, SurfaceSlot::Bar)?.0 as isize,
+        surface(host, SurfaceSlot::Panel)?.0 as isize,
+        host.blur,
+        host.config.is_enabled(PluginId::ControlCenter),
+    )
+}
+
+fn start_dock(host: &Host) -> Result<()> {
+    dock::start(&host.runtime, surface(host, SurfaceSlot::Dock)?.0 as isize)
+}
+
+fn start_window_controls(host: &Host) -> Result<()> {
+    window_controls::start(
+        &host.runtime,
+        surface(host, SurfaceSlot::WindowControls)?.0 as isize,
+    )
+}
+
+fn start_genie(host: &Host) -> Result<()> {
+    genie::start(&host.runtime, surface(host, SurfaceSlot::Genie)?.0 as isize)
+}
+
+fn stop_popup_menu(runtime: &RuntimeContext) {
+    menu::stop(runtime);
+}
+
+fn stop_top_bar(runtime: &RuntimeContext) {
+    bar::stop(runtime);
+}
+
+fn stop_dock(runtime: &RuntimeContext) {
+    dock::stop(runtime);
+}
+
+fn stop_window_controls(runtime: &RuntimeContext) {
+    window_controls::stop(runtime);
+}
+
+fn stop_genie(runtime: &RuntimeContext) {
+    genie::stop(runtime);
+}
+
+fn stop_control_center(runtime: &RuntimeContext) {
+    menu::close(runtime);
 }
 
 fn report_plugin_failure(plugin: PluginId, error: &Error) {
@@ -660,23 +840,49 @@ fn create_overlay_window(
 
 fn should_post_quit(hwnd: isize) -> bool {
     HOST.with(|cell| {
-        cell.borrow().as_ref().is_some_and(|host| {
-            !host.shutting_down
-                && host
-                    .surfaces
-                    .as_ref()
-                    .is_some_and(|surfaces| surfaces.bar.0 as isize == hwnd)
+        cell.try_borrow().ok().is_some_and(|guard| {
+            guard.as_ref().is_some_and(|host| {
+                !host.shutting_down
+                    && host
+                        .surfaces
+                        .as_ref()
+                        .is_some_and(|surfaces| surfaces.bar.0 as isize == hwnd)
+            })
         })
     })
 }
 
-unsafe extern "system" fn bar_window_proc(
+fn dispatch_runtime_message(
+    action: impl FnOnce(&RuntimeContext) -> Option<LRESULT>,
+) -> Option<LRESULT> {
+    let (result, pending_online_lyrics) = HOST.with(|cell| {
+        let guard = cell.try_borrow().ok()?;
+        let host = guard.as_ref()?;
+        let result = action(&host.runtime);
+        let pending = host.runtime.pending_online_lyrics.take();
+        Some((result, pending))
+    })?;
+    if let Some(enabled) = pending_online_lyrics
+        && set_online_lyrics_enabled(enabled).is_ok()
+    {
+        HOST.with(|cell| {
+            if let Some(host) = cell.borrow().as_ref() {
+                bar::set_online_lyrics_enabled(&host.runtime, enabled);
+            }
+        });
+    }
+    result
+}
+
+fn safe_window_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+    handler: impl FnOnce() -> Option<LRESULT>,
 ) -> LRESULT {
-    if let Some(result) = bar::handle_message(hwnd.0 as isize, message, wparam, lparam) {
+    let result = catch_unwind(AssertUnwindSafe(handler));
+    if let Ok(Some(result)) = result {
         return result;
     }
     if message == WM_DESTROY && should_post_quit(hwnd.0 as isize) {
@@ -686,16 +892,30 @@ unsafe extern "system" fn bar_window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+unsafe extern "system" fn bar_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            bar::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
+}
+
 unsafe extern "system" fn dock_window_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if let Some(result) = dock::handle_message(hwnd.0 as isize, message, wparam, lparam) {
-        return result;
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            dock::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
 }
 
 unsafe extern "system" fn window_controls_window_proc(
@@ -704,11 +924,11 @@ unsafe extern "system" fn window_controls_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if let Some(result) = window_controls::handle_message(hwnd.0 as isize, message, wparam, lparam)
-    {
-        return result;
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            window_controls::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
 }
 
 unsafe extern "system" fn genie_window_proc(
@@ -717,10 +937,11 @@ unsafe extern "system" fn genie_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if let Some(result) = genie::handle_message(hwnd.0 as isize, message, wparam, lparam) {
-        return result;
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            genie::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
 }
 
 unsafe extern "system" fn menu_window_proc(
@@ -729,15 +950,23 @@ unsafe extern "system" fn menu_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if let Some(result) = menu::handle_message(hwnd.0 as isize, message, wparam, lparam) {
-        return result;
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            menu::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PluginConfig, PluginId};
+    use super::{
+        HWND, PLUGIN_DESCRIPTORS, PluginConfig, PluginId, SurfaceSlot, Surfaces,
+        dependencies_running, descriptor, enabled_dependent, reverse_lifecycle_order,
+    };
+
+    fn hwnd(value: usize) -> HWND {
+        HWND(value as *mut _)
+    }
 
     #[test]
     fn config_keeps_required_top_bar_and_ignores_unknown_plugins() {
@@ -752,5 +981,91 @@ mod tests {
         let config = PluginConfig::parse("version=1\n");
         assert!(config.is_enabled(PluginId::TopBar));
         assert!(config.is_enabled(PluginId::ControlCenter));
+        assert!(!config.online_lyrics);
+    }
+
+    #[test]
+    fn config_parses_online_lyrics_as_an_explicit_opt_in() {
+        let config =
+            PluginConfig::parse("version=1\nenabled=popup_menu,top_bar\nonline_lyrics=true\n");
+        assert!(config.online_lyrics);
+        let disabled = PluginConfig::parse("version=1\nenabled=popup_menu,top_bar\n");
+        assert!(!disabled.online_lyrics);
+    }
+
+    #[test]
+    fn descriptors_are_declared_in_dependency_order() {
+        let mut started = Vec::new();
+        for descriptor in PLUGIN_DESCRIPTORS {
+            assert!(
+                dependencies_running(&started, descriptor.dependencies),
+                "{} dependencies must start first",
+                descriptor.id.name()
+            );
+            started.push(descriptor.id);
+        }
+    }
+
+    #[test]
+    fn descriptors_register_surfaces_and_virtual_features() {
+        assert!(descriptor(PluginId::Dock).surface.is_some());
+        assert!(descriptor(PluginId::WindowControls).surface.is_some());
+        assert!(descriptor(PluginId::Genie).surface.is_some());
+        assert!(descriptor(PluginId::ControlCenter).surface.is_none());
+        assert!(descriptor(PluginId::Dock).start.is_some());
+        assert!(descriptor(PluginId::ControlCenter).start.is_none());
+    }
+
+    #[test]
+    fn surface_registry_stores_and_takes_dynamic_slots() {
+        let mut surfaces = Surfaces {
+            bar: hwnd(1),
+            panel: hwnd(2),
+            menu: hwnd(3),
+            dock: None,
+            window_controls: None,
+            genie: None,
+        };
+        let dock = hwnd(4);
+        surfaces.store(SurfaceSlot::Dock, dock).unwrap();
+        assert_eq!(surfaces.get(SurfaceSlot::Dock), Some(dock));
+        assert_eq!(surfaces.take(SurfaceSlot::Dock), Some(dock));
+        assert_eq!(surfaces.get(SurfaceSlot::Dock), None);
+        assert!(surfaces.store(SurfaceSlot::Menu, hwnd(5)).is_err());
+    }
+
+    #[test]
+    fn enabled_dependents_block_dependency_disable() {
+        let mut config = PluginConfig::default();
+        assert_eq!(
+            enabled_dependent(PluginId::Genie, &config),
+            Some(PluginId::WindowControls)
+        );
+        config.set_enabled(PluginId::WindowControls, false);
+        assert_eq!(enabled_dependent(PluginId::Genie, &config), None);
+    }
+
+    #[test]
+    fn shutdown_order_reverses_start_order() {
+        let started = vec![
+            PluginId::PopupMenu,
+            PluginId::TopBar,
+            PluginId::Genie,
+            PluginId::Dock,
+            PluginId::WindowControls,
+            PluginId::ControlCenter,
+        ];
+        let stopped = reverse_lifecycle_order(&started).collect::<Vec<_>>();
+        assert_eq!(
+            stopped,
+            vec![
+                PluginId::ControlCenter,
+                PluginId::WindowControls,
+                PluginId::Dock,
+                PluginId::Genie,
+                PluginId::TopBar,
+                PluginId::PopupMenu,
+            ]
+        );
     }
 }

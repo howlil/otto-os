@@ -21,8 +21,6 @@ struct MediaCache {
     snapshot: Option<NowPlaying>,
     refreshed_at: Option<Instant>,
     refresh_pending: bool,
-    last_track: (String, String),
-    last_thumbnail: Option<Arc<[u8]>>,
 }
 
 struct MediaRuntime {
@@ -94,20 +92,17 @@ pub fn shutdown_media_task() {
 
 fn media_worker(receiver: mpsc::Receiver<MediaTask>, cache: &Mutex<MediaCache>) {
     let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+    let mut last_track = (String::new(), String::new());
+    let mut last_thumbnail: Option<Arc<[u8]>> = None;
     for task in receiver {
         match task {
             MediaTask::Refresh => {
+                let snapshot = if initialized {
+                    read_now_playing_sync(&mut last_track, &mut last_thumbnail)
+                } else {
+                    None
+                };
                 if let Ok(mut state) = cache.lock() {
-                    let MediaCache {
-                        ref mut last_track,
-                        ref mut last_thumbnail,
-                        ..
-                    } = *state;
-                    let snapshot = if initialized {
-                        read_now_playing_sync(last_track, last_thumbnail)
-                    } else {
-                        None
-                    };
                     state.snapshot = snapshot;
                     state.refreshed_at = Some(Instant::now());
                     state.refresh_pending = false;

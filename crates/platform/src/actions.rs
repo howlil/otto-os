@@ -19,6 +19,7 @@ use otto_core::{
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::AddFontResourceW;
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey,
@@ -53,6 +54,12 @@ pub fn poll_menu_dismiss_keys() -> (bool, bool) {
         let right_down = (GetAsyncKeyState(i32::from(VK_RBUTTON.0)) as u16 & 0x8000) != 0;
         let esc_down = (GetAsyncKeyState(i32::from(VK_ESCAPE.0)) as u16 & 0x8000) != 0;
         (left_down || right_down, esc_down)
+    }
+}
+
+pub fn trim_working_set() {
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
 

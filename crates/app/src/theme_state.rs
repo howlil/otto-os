@@ -1,35 +1,30 @@
-use std::cell::Cell;
-
+use crate::host::RuntimeContext;
 use otto_core::{ResolvedTheme, ThemeMode};
 
-thread_local! {
-    static THEME_MODE: Cell<ThemeMode> = const { Cell::new(ThemeMode::Auto) };
+pub fn theme_mode(runtime: &RuntimeContext) -> ThemeMode {
+    runtime.theme_mode.get()
 }
 
-pub fn theme_mode() -> ThemeMode {
-    THEME_MODE.with(Cell::get)
+pub fn set_theme_mode(runtime: &RuntimeContext, mode: ThemeMode) {
+    runtime.theme_mode.set(mode);
+    refresh_theme(runtime);
 }
 
-pub fn set_theme_mode(mode: ThemeMode) {
-    THEME_MODE.with(|cell| cell.set(mode));
-    refresh_theme();
-}
-
-pub fn cycle_theme_mode() -> ThemeMode {
-    let next = theme_mode().next();
-    set_theme_mode(next);
+pub fn cycle_theme_mode(runtime: &RuntimeContext) -> ThemeMode {
+    let next = theme_mode(runtime).next();
+    set_theme_mode(runtime, next);
     next
 }
 
-pub fn resolved_theme() -> ResolvedTheme {
+pub fn resolved_theme(runtime: &RuntimeContext) -> ResolvedTheme {
     let system_dark = otto_platform::is_system_in_dark_mode();
-    theme_mode().resolve(system_dark)
+    theme_mode(runtime).resolve(system_dark)
 }
 
-pub fn refresh_theme() {
-    crate::bar::repaint();
-    crate::dock::repaint();
-    crate::menu::repaint();
+pub fn refresh_theme(runtime: &RuntimeContext) {
+    crate::bar::repaint(runtime);
+    crate::dock::repaint(runtime);
+    crate::menu::repaint(runtime);
 }
 
 #[cfg(test)]
@@ -38,13 +33,14 @@ mod tests {
 
     #[test]
     fn theme_mode_cycles_and_stores() {
-        set_theme_mode(ThemeMode::Auto);
-        assert_eq!(theme_mode(), ThemeMode::Auto);
-        assert_eq!(cycle_theme_mode(), ThemeMode::Dark);
-        assert_eq!(theme_mode(), ThemeMode::Dark);
-        assert_eq!(cycle_theme_mode(), ThemeMode::Light);
-        assert_eq!(theme_mode(), ThemeMode::Light);
-        assert_eq!(cycle_theme_mode(), ThemeMode::Auto);
-        assert_eq!(theme_mode(), ThemeMode::Auto);
+        let runtime = RuntimeContext::new(false);
+        set_theme_mode(&runtime, ThemeMode::Auto);
+        assert_eq!(theme_mode(&runtime), ThemeMode::Auto);
+        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Dark);
+        assert_eq!(theme_mode(&runtime), ThemeMode::Dark);
+        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Light);
+        assert_eq!(theme_mode(&runtime), ThemeMode::Light);
+        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Auto);
+        assert_eq!(theme_mode(&runtime), ThemeMode::Auto);
     }
 }

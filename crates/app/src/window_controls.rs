@@ -1,7 +1,7 @@
-use std::cell::RefCell;
 use std::mem::size_of;
 use std::time::Instant;
 
+use crate::host::RuntimeContext;
 use otto_core::{
     MotionMetrics, MotionPreference, WindowControlAction, WindowControlsLayout,
     WindowControlsMetrics, animate_value, compute_window_controls_layout,
@@ -26,12 +26,8 @@ const WM_APP_WINDOW_SYNC: u32 = 0x8000 + 20;
 const WINDOW_CONTROLS_ANIM_TIMER: usize = 20;
 const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
 
-thread_local! {
-    static WINDOW_CONTROLS: RefCell<Option<WindowControls>> = const { RefCell::new(None) };
-}
-
 #[allow(clippy::struct_excessive_bools)]
-struct WindowControls {
+pub(crate) struct WindowControls {
     hwnd: isize,
     own_pid: u32,
     renderer: WindowControlsRenderer,
@@ -50,7 +46,7 @@ struct WindowControls {
     last_tick: Instant,
 }
 
-pub fn start(hwnd: isize) -> Result<()> {
+pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let own_pid = current_process_id();
     let screen = primary_screen();
     let metrics = WindowControlsMetrics::default();
@@ -78,25 +74,24 @@ pub fn start(hwnd: isize) -> Result<()> {
     install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
     wc.sync_target();
 
-    WINDOW_CONTROLS.with(|cell| *cell.borrow_mut() = Some(wc));
+    *runtime.window_controls.borrow_mut() = Some(wc);
     Ok(())
 }
 
-pub fn stop() {
+pub fn stop(runtime: &RuntimeContext) {
     uninstall_window_tracking_hook();
-    WINDOW_CONTROLS.with(|cell| {
-        if let Some(controls) = cell.borrow_mut().take() {
-            unsafe {
-                let _ = KillTimer(
-                    Some(HWND(controls.hwnd as *mut _)),
-                    WINDOW_CONTROLS_ANIM_TIMER,
-                );
-            }
+    if let Some(controls) = runtime.window_controls.borrow_mut().take() {
+        unsafe {
+            let _ = KillTimer(
+                Some(HWND(controls.hwnd as *mut _)),
+                WINDOW_CONTROLS_ANIM_TIMER,
+            );
         }
-    });
+    }
 }
 
 pub fn handle_message(
+    runtime: &RuntimeContext,
     _hwnd: isize,
     message: u32,
     wparam: WPARAM,
@@ -105,33 +100,33 @@ pub fn handle_message(
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_APP_WINDOW_SYNC => {
-            with_window_controls(WindowControls::sync_target);
+            with_window_controls(runtime, WindowControls::sync_target);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == WINDOW_CONTROLS_ANIM_TIMER => {
-            with_window_controls(WindowControls::tick_animation);
+            with_window_controls(runtime, WindowControls::tick_animation);
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
-            with_window_controls(WindowControls::on_mouse_move);
+            with_window_controls(runtime, WindowControls::on_mouse_move);
             Some(LRESULT(0))
         }
         WM_MOUSELEAVE => {
-            with_window_controls(WindowControls::on_mouse_leave);
+            with_window_controls(runtime, WindowControls::on_mouse_leave);
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_point(lparam);
-            with_window_controls(|wc| wc.on_left_click(x, y));
+            with_window_controls(runtime, |wc| wc.on_left_click(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_RBUTTONUP => {
             let (x, y) = unpack_point(lparam);
-            with_window_controls(|wc| wc.on_right_click(x, y));
+            with_window_controls(runtime, |wc| wc.on_right_click(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            with_window_controls(WindowControls::rebuild);
+            with_window_controls(runtime, WindowControls::rebuild);
             Some(LRESULT(0))
         }
         _ => None,
@@ -144,14 +139,12 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-fn with_window_controls(action: impl FnOnce(&mut WindowControls)) {
-    WINDOW_CONTROLS.with(|cell| {
-        if let Ok(mut guard) = cell.try_borrow_mut()
-            && let Some(wc) = guard.as_mut()
-        {
-            action(wc);
-        }
-    });
+fn with_window_controls(runtime: &RuntimeContext, action: impl FnOnce(&mut WindowControls)) {
+    if let Ok(mut guard) = runtime.window_controls.try_borrow_mut()
+        && let Some(wc) = guard.as_mut()
+    {
+        action(wc);
+    }
 }
 
 impl WindowControls {
@@ -334,8 +327,8 @@ impl WindowControls {
         }
     }
 
-    fn on_left_click(&mut self, x: i32, y: i32) {
-        crate::menu::close();
+    fn on_left_click(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
+        crate::menu::close(runtime);
         let Some(action) = self.layout.hit_test(x, y) else {
             return;
         };
@@ -343,19 +336,20 @@ impl WindowControls {
             return;
         };
         if action == WindowControlAction::Minimize {
-            let _ = crate::genie::minimize_window(target.hwnd);
+            let _ = crate::genie::minimize_window(runtime, target.hwnd);
         } else {
             execute_window_control(target.hwnd, action);
         }
     }
 
-    fn on_right_click(&mut self, x: i32, y: i32) {
+    fn on_right_click(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
         let Some(target) = self.target else {
             return;
         };
         let _ = self.layout.hit_test(x, y);
         let (ox, oy) = self.render_origin();
         crate::menu::open_window_tiling_menu(
+            runtime,
             target.hwnd,
             target.maximized,
             ox,

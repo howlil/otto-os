@@ -10,6 +10,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -84,31 +85,31 @@ pub fn step_system_volume(wheel_delta: i16) -> Option<(u8, bool)> {
         std::cmp::Ordering::Less => -5,
         std::cmp::Ordering::Equal => return None,
     };
-    let endpoint = unsafe { audio_endpoint() }?;
-    let current = unsafe { endpoint.GetMasterVolumeLevelScalar() }
-        .unwrap_or(0.5)
-        .clamp(0.0, 1.0);
+    let current = with_audio_endpoint(|endpoint| {
+        let current = unsafe { endpoint.GetMasterVolumeLevelScalar() }
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+        Some(current)
+    })?;
     let current_pct = (current * 100.0).round() as i32;
     set_system_volume((current_pct + step).clamp(0, 100) as u8)
 }
 
 #[must_use]
 pub fn set_system_volume(percent: u8) -> Option<(u8, bool)> {
-    let endpoint = unsafe { audio_endpoint() }?;
     let next_pct = percent.min(100);
-    unsafe {
+    with_audio_endpoint(|endpoint| unsafe {
         let _ = endpoint.SetMasterVolumeLevelScalar(f32::from(next_pct) / 100.0, std::ptr::null());
         let muted = next_pct == 0;
         let _ = endpoint.SetMute(muted, std::ptr::null());
         FALLBACK_VOLUME.store(next_pct, Ordering::Relaxed);
         Some((next_pct, muted))
-    }
+    })
 }
 
 #[must_use]
 pub fn toggle_system_mute() -> Option<(u8, bool)> {
-    let endpoint = unsafe { audio_endpoint() }?;
-    unsafe {
+    with_audio_endpoint(|endpoint| unsafe {
         let current_mute = endpoint
             .GetMute()
             .unwrap_or(windows::core::BOOL(0))
@@ -118,7 +119,7 @@ pub fn toggle_system_mute() -> Option<(u8, bool)> {
         let current = endpoint.GetMasterVolumeLevelScalar().unwrap_or(0.5);
         let pct = (current * 100.0).round() as u8;
         Some((pct, next_mute))
-    }
+    })
 }
 
 #[must_use]
@@ -165,19 +166,19 @@ pub fn set_display_brightness(percent: u8) -> u8 {
 }
 
 fn read_volume_and_mute() -> (u8, bool) {
-    let Some(endpoint) = (unsafe { audio_endpoint() }) else {
-        return (FALLBACK_VOLUME.load(Ordering::Relaxed), false);
-    };
-    unsafe {
+    let Some((pct, muted)) = with_audio_endpoint(|endpoint| unsafe {
         let scalar = endpoint
             .GetMasterVolumeLevelScalar()
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
         let muted = endpoint.GetMute().is_ok_and(windows::core::BOOL::as_bool);
         let pct = (scalar * 100.0).round() as u8;
-        FALLBACK_VOLUME.store(pct, Ordering::Relaxed);
-        (pct, muted)
-    }
+        Some((pct, muted))
+    }) else {
+        return (FALLBACK_VOLUME.load(Ordering::Relaxed), false);
+    };
+    FALLBACK_VOLUME.store(pct, Ordering::Relaxed);
+    (pct, muted)
 }
 
 fn read_brightness() -> u8 {
@@ -255,12 +256,32 @@ unsafe fn snap_supported_brightness(handle: HANDLE, target: u8) -> u8 {
         .unwrap_or(target)
 }
 
-unsafe fn audio_endpoint() -> Option<IAudioEndpointVolume> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+struct ComApartmentGuard;
+
+impl ComApartmentGuard {
+    fn new() -> Option<Self> {
+        if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
+
+fn with_audio_endpoint<T>(operation: impl FnOnce(&IAudioEndpointVolume) -> Option<T>) -> Option<T> {
+    let _com = ComApartmentGuard::new()?;
+    let endpoint = unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).ok()?;
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-        device.Activate(CLSCTX_INPROC_SERVER, None).ok()
-    }
+        device.Activate(CLSCTX_INPROC_SERVER, None).ok()?
+    };
+    operation(&endpoint)
 }

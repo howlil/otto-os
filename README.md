@@ -81,7 +81,41 @@ To disable the optional backdrop blur during development:
 cargo run -p otto-os -- --no-blur
 ```
 
+### Build an MSIX package
+
+The repository includes a reproducible Windows SDK packaging lane. The Store identity, publisher, version, certificate, and final brand assets are supplied at build time rather than committed to source control.
+
+Place the final PNG artwork in `packaging/msix/Assets`, then run PowerShell from the repository root:
+
+```powershell
+.\packaging\msix\build.ps1 `
+  -IdentityName 'your-store-identity' `
+  -Publisher 'CN=Your Publisher' `
+  -PublisherDisplayName 'Your Publisher' `
+  -Version '0.1.0.0' `
+  -CertificatePath 'C:\path\to\publisher.pfx' `
+  -CertificatePassword (Read-Host 'PFX password' -AsSecureString)
+```
+
+Without `-CertificatePath`, the script produces an unsigned MSIX for local inspection and prints that it is not ready for Store submission. The script requires `makeappx.exe`, `signtool.exe` when signing, and the Windows 10/11 SDK.
+
 The workspace gate covers formatting, unit and documentation tests, compilation, and Clippy. Native Windows acceptance is still required for capture fidelity, DWM cloak timing, frame pacing, DPI behavior, and visual continuity.
+
+For a bounded startup and graceful-shutdown smoke test against a built executable:
+
+```powershell
+.\packaging\msix\smoke-test.ps1 -ExecutablePath 'target\release\otto-os.exe'
+```
+
+### Run Windows E2E acceptance
+
+The native E2E runner launches an isolated Otto process for each scenario, drives Win32 input, checks visible surface topology and geometry, waits for visual stability, captures screenshots, and writes a JSON report under `artifacts/e2e`:
+
+```powershell
+.\tests\e2e\windows-e2e.ps1 -Scenario all
+```
+
+The scenarios are `success` for the primary notch and Control Center journey, `false` for outside-click and single-instance rejection, `edge` for empty media and rapid hotkeys, and `worst` for teardown while the panel and popup are active. A non-zero exit is a release-gate failure. Inspect the named screenshots and report entries to distinguish runtime failure, visual signal failure, input-delivery warning, and environment contamination.
 
 ## Runtime configuration
 
