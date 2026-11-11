@@ -1,9 +1,9 @@
-use super::{CLEAR, FOREGROUND, LiquidGlassPalette, Renderer};
+use super::surface::draw_on;
+use super::{CLEAR, LiquidGlassPalette, Renderer};
 use otto_core::{
     HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudState, NowPlaying, PomodoroState,
     PomodoroStatus, Rect, ResolvedTheme, SystemStatus,
 };
-use windows::Win32::Foundation::RECT;
 use windows::core::Result;
 
 impl Renderer {
@@ -21,18 +21,8 @@ impl Renderer {
         theme: ResolvedTheme,
     ) -> Result<()> {
         let palette = LiquidGlassPalette::for_theme(theme);
-        let (width, height) = self.bar_surface.size;
-        unsafe {
-            self.target.BindDC(
-                self.bar_surface.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
+        let surface = &self.bar_surface;
+        draw_on(&self.target, surface, surface.size(), || unsafe {
             let clear = palette.bar_background;
             self.target.Clear(Some(&raw const clear));
             self.brushes.update_theme(&palette);
@@ -48,15 +38,19 @@ impl Renderer {
             } else {
                 layout.notch_corner_radius as f32
             };
-            self.target.FillGeometry(
-                &self.notch_geometry_rect(
-                    bar_notch,
-                    corner_r,
-                    layout.notch_ear_radius as f32,
-                    &self.cached_bar_notch,
-                )?,
-                &self.brushes.black,
-                None,
+            let notch_geom = self.notch_geometry_rect(
+                bar_notch,
+                corner_r,
+                layout.notch_ear_radius as f32,
+                &self.cached_bar_notch,
+            )?;
+            self.target
+                .FillGeometry(&notch_geom, &self.brushes.notch_obsidian, None);
+            self.target.DrawGeometry(
+                &notch_geom,
+                &self.brushes.specular_rim,
+                1.0,
+                &self.stroke_style,
             );
 
             if let Some(target_slot) = hovered.and_then(|t| layout.slot_rect(t)) {
@@ -66,15 +60,28 @@ impl Renderer {
             let fg = &self.brushes.text_primary;
             let muted = &self.brushes.text_muted;
 
-            self.draw_apple_logo(layout, fg)?;
+            if layout.start_slot.width > 0 {
+                self.draw_apple_logo(layout, fg)?;
+            }
             self.draw_left_menu_bar(layout, app_name, fg);
-            self.draw_tray_chevron(layout, fg)?;
-            self.draw_status_slot(layout, status, fg, muted)?;
-            self.draw_search_slot(layout, fg);
+            if layout.overflow_slot.width > 0 {
+                self.draw_slot_label(layout.overflow_slot, "»", &self.text_menu, fg);
+            }
+            if layout.tray_slot.width > 0 {
+                self.draw_tray_chevron(layout, fg)?;
+            }
+            if layout.status_slot.width > 0 {
+                self.draw_status_slot(layout, status, fg, muted)?;
+            }
+            if layout.search_slot.width > 0 {
+                self.draw_search_slot(layout, fg);
+            }
             if layout.control_center_slot.width > 0 {
                 self.draw_control_center_slot(layout, fg, muted);
             }
-            self.draw_clock_slot(layout, status, fg)?;
+            if layout.clock_slot.width > 0 {
+                self.draw_clock_slot(layout, status, fg)?;
+            }
 
             if layout.panel_expansion < 0.15 {
                 if let Some(hud_state) = hud
@@ -85,9 +92,8 @@ impl Renderer {
                     self.draw_compact_notch(layout, pomodoro, media, anim_phase)?;
                 }
             }
-
-            self.target.EndDraw(None, None)
-        }
+            Ok(())
+        })
     }
 
     pub(super) fn draw_panel(
@@ -99,9 +105,7 @@ impl Renderer {
         anim_phase: f32,
         lyrics: Option<&LyricsSheet>,
     ) -> Result<()> {
-        let (max_width, max_height) = self.panel_surface.size;
-        let draw_width = layout.panel_window.width.min(max_width);
-        let draw_height = layout.panel_window.height.min(max_height);
+        let draw_size = (layout.panel_window.width, layout.panel_window.height);
         let offset_x = layout.panel_window.x;
         let local_notch = Rect {
             x: layout.notch.x - offset_x,
@@ -110,17 +114,7 @@ impl Renderer {
             height: layout.notch.height,
         };
 
-        unsafe {
-            self.target.BindDC(
-                self.panel_surface.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: draw_width,
-                    bottom: draw_height,
-                },
-            )?;
-            self.target.BeginDraw();
+        draw_on(&self.target, &self.panel_surface, draw_size, || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
 
@@ -130,13 +124,17 @@ impl Renderer {
                 layout.notch_ear_radius as f32,
                 &self.cached_panel_notch,
             )?;
-            self.target.FillGeometry(&geom, &self.brushes.black, None);
+            self.target
+                .FillGeometry(&geom, &self.brushes.notch_obsidian, None);
 
             let rim_alpha = (layout.panel_expansion * 0.12).clamp(0.0, 0.12);
             if rim_alpha > 0.01 {
-                let rim = self.brushes.alpha_brush(0, FOREGROUND, rim_alpha);
-                self.target
-                    .DrawGeometry(&geom, rim, 1.0, &self.stroke_style);
+                self.target.DrawGeometry(
+                    &geom,
+                    &self.brushes.specular_rim,
+                    1.0,
+                    &self.stroke_style,
+                );
             }
 
             if layout.panel_expansion > 0.22 {
@@ -180,8 +178,7 @@ impl Renderer {
                     self.draw_expanded_pomodoro(layout, offset_x, alpha, hovered, pomodoro)?;
                 }
             }
-
-            self.target.EndDraw(None, None)
-        }
+            Ok(())
+        })
     }
 }

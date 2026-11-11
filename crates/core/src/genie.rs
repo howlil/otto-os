@@ -242,6 +242,73 @@ pub fn is_blank_frame(width: u32, height: u32, pixels: &[u8]) -> bool {
     true
 }
 
+#[must_use]
+pub fn genie_canvas(window: Rect, dock: Rect, virtual_screen: Rect) -> Option<Rect> {
+    if window.is_empty() || dock.is_empty() {
+        return None;
+    }
+    window.union(&dock).intersection(&virtual_screen)
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::genie_canvas;
+    use crate::layout::Rect;
+
+    const fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    const VIRTUAL: Rect = rect(-1920, -400, 1920 + 2560, 1440 + 400);
+
+    #[test]
+    fn canvas_spans_a_window_on_a_left_monitor_and_the_primary_dock() {
+        let window = rect(-1700, 120, 900, 700);
+        let dock = rect(1200, 1340, 64, 64);
+        let canvas = genie_canvas(window, dock, VIRTUAL).unwrap();
+        assert!(canvas.contains_rect(&window));
+        assert!(canvas.contains_rect(&dock));
+        assert_eq!(canvas.x, -1700);
+    }
+
+    #[test]
+    fn canvas_covers_a_monitor_above_the_primary() {
+        let window = rect(200, -380, 800, 300);
+        let dock = rect(900, 1340, 64, 64);
+        let canvas = genie_canvas(window, dock, VIRTUAL).unwrap();
+        assert_eq!(canvas.y, -380);
+        assert_eq!(canvas.bottom(), 1404);
+    }
+
+    #[test]
+    fn canvas_is_clipped_to_the_virtual_screen_after_a_monitor_is_removed() {
+        let window = rect(-1700, 120, 900, 700);
+        let dock = rect(1200, 1340, 64, 64);
+        let primary_only = rect(0, 0, 2560, 1440);
+        let canvas = genie_canvas(window, dock, primary_only).unwrap();
+        assert!(primary_only.contains_rect(&canvas));
+        assert!(
+            genie_canvas(
+                rect(-1700, 120, 900, 700),
+                rect(-900, 900, 64, 64),
+                primary_only
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_window_or_dock_has_no_canvas() {
+        assert!(genie_canvas(rect(0, 0, 0, 10), rect(0, 0, 10, 10), VIRTUAL).is_none());
+        assert!(genie_canvas(rect(0, 0, 10, 10), rect(0, 0, 10, 0), VIRTUAL).is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

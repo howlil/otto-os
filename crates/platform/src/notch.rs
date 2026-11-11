@@ -10,7 +10,11 @@ impl NotchPort for WindowsNotchPort {
 
     fn execute(&self, action: NotchAction) {
         match action {
-            NotchAction::Media(command) => super::send_media_command(command),
+            NotchAction::Media(command) => {
+                if !super::send_media_command(command) {
+                    super::signal_command_failure();
+                }
+            }
             NotchAction::OpenTaskView => super::open_task_view(),
             NotchAction::PlayPomodoroChime => super::play_pomodoro_chime(),
         }

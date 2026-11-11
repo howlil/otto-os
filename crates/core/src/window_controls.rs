@@ -1,3 +1,4 @@
+use crate::app_model::{WindowCommand, WindowInfo, WindowPresence};
 use crate::layout::scale;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,24 +14,24 @@ pub type TrafficLightAction = WindowControlAction;
 pub struct WindowControlsMetrics {
     pub width: i32,
     pub height: i32,
-    pub offset_right: i32,
+    pub offset_x: i32,
     pub offset_y: i32,
     pub button_radius: i32,
     pub button_spacing: i32,
-    pub right_margin: i32,
+    pub left_margin: i32,
 }
 
 pub type TrafficLightMetrics = WindowControlsMetrics;
 
 impl WindowControlsMetrics {
     pub const MACOS_SONOMA: Self = Self {
-        width: 138,
-        height: 32,
-        offset_right: 1,
-        offset_y: 1,
+        width: 72,
+        height: 28,
+        offset_x: 10,
+        offset_y: 6,
         button_radius: 6,
-        button_spacing: 22,
-        right_margin: 22,
+        button_spacing: 20,
+        left_margin: 12,
     };
 }
 
@@ -44,7 +45,7 @@ impl Default for WindowControlsMetrics {
 pub struct WindowControlsLayout {
     pub width: i32,
     pub height: i32,
-    pub offset_right: i32,
+    pub offset_x: i32,
     pub offset_y: i32,
     pub radius: f32,
     pub center_y: f32,
@@ -63,9 +64,9 @@ impl WindowControlsLayout {
             return None;
         }
         let actions = [
-            WindowControlAction::ToggleMaximize,
-            WindowControlAction::Minimize,
             WindowControlAction::Close,
+            WindowControlAction::Minimize,
+            WindowControlAction::ToggleMaximize,
         ];
         for (cx, action) in self.centers_x.into_iter().zip(actions) {
             let dx = fx - cx;
@@ -84,24 +85,24 @@ pub fn compute_window_controls_layout(
 ) -> WindowControlsLayout {
     let width = scale(metrics.width, dpi);
     let height = scale(metrics.height, dpi);
-    let offset_right = scale(metrics.offset_right, dpi);
+    let offset_x = scale(metrics.offset_x, dpi);
     let offset_y = scale(metrics.offset_y, dpi);
     let radius = scale(metrics.button_radius, dpi) as f32;
     let spacing = scale(metrics.button_spacing, dpi) as f32;
-    let right_margin = scale(metrics.right_margin, dpi) as f32;
-    let close_x = width as f32 - right_margin;
-    let min_x = close_x - spacing;
-    let max_x = min_x - spacing;
+    let left_margin = scale(metrics.left_margin, dpi) as f32;
+    let close_x = left_margin;
+    let min_x = close_x + spacing;
+    let max_x = min_x + spacing;
     let center_y = height as f32 * 0.5;
 
     WindowControlsLayout {
         width,
         height,
-        offset_right,
+        offset_x,
         offset_y,
         radius,
         center_y,
-        centers_x: [max_x, min_x, close_x],
+        centers_x: [close_x, min_x, max_x],
     }
 }
 
@@ -110,17 +111,144 @@ pub fn compute_traffic_light_layout(metrics: &TrafficLightMetrics, dpi: u32) -> 
     compute_window_controls_layout(metrics, dpi)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowControlsState {
+    pub close: bool,
+    pub minimize: bool,
+    pub zoom: bool,
+}
+
+impl WindowControlsState {
+    #[must_use]
+    pub const fn of(window: &WindowInfo) -> Self {
+        Self {
+            close: window.capability(WindowCommand::Close).is_available(),
+            minimize: window.capability(WindowCommand::Minimize).is_available(),
+            zoom: window.capability(WindowCommand::Zoom).is_available()
+                || window
+                    .capability(WindowCommand::ToggleFullScreen)
+                    .is_available(),
+        }
+    }
+
+    #[must_use]
+    pub const fn allows(self, action: WindowControlAction) -> bool {
+        match action {
+            WindowControlAction::Close => self.close,
+            WindowControlAction::Minimize => self.minimize,
+            WindowControlAction::ToggleMaximize => self.zoom,
+        }
+    }
+
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.close || self.minimize || self.zoom
+    }
+}
+
+#[must_use]
+pub const fn accepts_window_controls(window: &WindowInfo) -> bool {
+    window.traits.title_bar
+        && !window.full_screen
+        && matches!(window.presence, WindowPresence::Visible)
+        && WindowControlsState::of(window).any()
+}
+
+#[must_use]
+pub const fn window_controls_top(
+    window_top: i32,
+    offset_y: i32,
+    bar_height: Option<i32>,
+    maximized: bool,
+) -> i32 {
+    let natural = window_top + offset_y;
+    match bar_height {
+        Some(bar) if maximized && natural < bar + offset_y => bar + offset_y,
+        Some(bar) if natural < bar => bar,
+        _ => natural,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_model::{AppIdentity, WindowIdentity, WindowRole, WindowTraits};
+
+    fn window(traits: WindowTraits) -> WindowInfo {
+        WindowInfo {
+            identity: WindowIdentity {
+                hwnd: 1,
+                process_id: 2,
+                thread_id: 3,
+                generation: 4,
+            },
+            app: AppIdentity::executable("app.exe"),
+            app_name: String::from("App"),
+            executable: String::from("app.exe"),
+            title: String::from("App"),
+            role: WindowRole::Primary,
+            presence: WindowPresence::Visible,
+            zoomed: false,
+            full_screen: false,
+            active: true,
+            traits,
+        }
+    }
 
     #[test]
-    fn window_controls_hit_test_identifies_green_yellow_red_on_right() {
+    fn controls_attach_only_to_visible_captioned_windows_that_can_act() {
+        assert!(accepts_window_controls(&window(WindowTraits::STANDARD)));
+        let mut borderless = WindowTraits::STANDARD;
+        borderless.title_bar = false;
+        assert!(!accepts_window_controls(&window(borderless)));
+        let mut full = window(WindowTraits::STANDARD);
+        full.full_screen = true;
+        assert!(!accepts_window_controls(&full));
+        let mut inert = WindowTraits::STANDARD;
+        inert.closable = false;
+        inert.minimizable = false;
+        inert.maximizable = false;
+        assert!(!accepts_window_controls(&window(inert)));
+    }
+
+    #[test]
+    fn disabled_caption_buttons_disable_the_matching_control() {
+        let mut dialog = WindowTraits::STANDARD;
+        dialog.minimizable = false;
+        dialog.maximizable = false;
+        let state = WindowControlsState::of(&window(dialog));
+        assert!(state.allows(WindowControlAction::Close));
+        assert!(!state.allows(WindowControlAction::Minimize));
+        assert!(!state.allows(WindowControlAction::ToggleMaximize));
+        let mut blocked = WindowTraits::STANDARD;
+        blocked.blocked_by_modal = true;
+        assert!(!WindowControlsState::of(&window(blocked)).any());
+    }
+
+    #[test]
+    fn full_screen_capable_window_keeps_the_green_control_without_zoom() {
+        let mut browser = WindowTraits::STANDARD;
+        browser.maximizable = false;
+        browser.full_screen_shortcut = true;
+        assert!(WindowControlsState::of(&window(browser)).zoom);
+    }
+
+    #[test]
+    fn top_is_clamped_below_the_bar_only_on_the_bar_monitor() {
+        assert_eq!(window_controls_top(0, 9, Some(48), false), 48);
+        assert_eq!(window_controls_top(48, 9, Some(48), true), 57);
+        assert_eq!(window_controls_top(300, 9, Some(48), false), 309);
+        assert_eq!(window_controls_top(-400, 9, None, false), -391);
+        assert_eq!(window_controls_top(0, 9, None, true), 9);
+    }
+
+    #[test]
+    fn window_controls_hit_test_identifies_red_yellow_green_on_left() {
         let layout = compute_window_controls_layout(&WindowControlsMetrics::MACOS_SONOMA, 96);
         let cy = layout.center_y as i32;
         assert_eq!(
             layout.hit_test(layout.centers_x[0] as i32, cy),
-            Some(WindowControlAction::ToggleMaximize)
+            Some(WindowControlAction::Close)
         );
         assert_eq!(
             layout.hit_test(layout.centers_x[1] as i32, cy),
@@ -128,10 +256,10 @@ mod tests {
         );
         assert_eq!(
             layout.hit_test(layout.centers_x[2] as i32, cy),
-            Some(WindowControlAction::Close)
+            Some(WindowControlAction::ToggleMaximize)
         );
-        assert!(layout.centers_x[2] > layout.centers_x[1]);
-        assert!(layout.centers_x[1] > layout.centers_x[0]);
+        assert!(layout.centers_x[0] < layout.centers_x[1]);
+        assert!(layout.centers_x[1] < layout.centers_x[2]);
         assert_eq!(layout.hit_test(2, 2), None);
     }
 }

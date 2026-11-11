@@ -1,36 +1,40 @@
-use std::ffi::c_void;
-use std::mem::size_of;
-
 use otto_core::{
-    MenuRow, PopupMenuLayout, PopupMenuRowLayout, ResolvedTheme, month_cells, month_title, scale,
+    EstimatedMenuText, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuRowLayout,
+    ResolvedTheme, month_cells, month_title, scale,
 };
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_MEASURING_MODE_NATURAL,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    IDWriteTextFormat,
+    DWRITE_TEXT_METRICS, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
-    HGDIOBJ, SelectObject,
-};
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::Result;
 use windows_numerics::Vector2;
 
+impl MenuTextMeasure for PopupMenuRenderer {
+    fn label_width(&self, text: &str) -> i32 {
+        Self::measure(text, &self.label_format)
+            .unwrap_or_else(|| EstimatedMenuText { dpi: self.dpi }.label_width(text))
+    }
+
+    fn shortcut_width(&self, text: &str) -> i32 {
+        Self::measure(text, &self.shortcut_format)
+            .unwrap_or_else(|| EstimatedMenuText { dpi: self.dpi }.shortcut_width(text))
+    }
+}
+
+use crate::surface::{DibSurface, draw_on};
 use crate::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
@@ -53,10 +57,7 @@ pub struct PopupMenuRenderer {
     label_format: IDWriteTextFormat,
     shortcut_format: IDWriteTextFormat,
     cell_format: IDWriteTextFormat,
-    dc: HDC,
-    dib: HBITMAP,
-    previous: HGDIOBJ,
-    max_size: (i32, i32),
+    surface: DibSurface,
     dpi: u32,
 }
 
@@ -111,22 +112,7 @@ impl PopupMenuRenderer {
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
 
-            let dc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: max_w,
-                    biHeight: -max_h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..BITMAPINFOHEADER::default()
-                },
-                ..BITMAPINFO::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let previous = SelectObject(dc, HGDIOBJ(dib.0));
+            let surface = DibSurface::new(max_w, max_h)?;
 
             Ok(Self {
                 factory,
@@ -136,10 +122,7 @@ impl PopupMenuRenderer {
                 label_format,
                 shortcut_format,
                 cell_format,
-                dc,
-                dib,
-                previous,
-                max_size: (max_w, max_h),
+                surface,
                 dpi,
             })
         }
@@ -153,34 +136,12 @@ impl PopupMenuRenderer {
         hovered_row: Option<usize>,
         theme: ResolvedTheme,
     ) -> Result<()> {
-        let width = layout.window.width.clamp(1, self.max_size.0);
-        let height = layout.window.height.clamp(1, self.max_size.1);
+        let (max_width, max_height) = self.surface.size();
+        let width = layout.window.width.clamp(1, max_width);
+        let height = layout.window.height.clamp(1, max_height);
         self.draw(width, height, layout, rows, hovered_row, theme)?;
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        unsafe {
-            UpdateLayeredWindow(
-                HWND(hwnd as *mut c_void),
-                None,
-                Some(&POINT {
-                    x: layout.window.x,
-                    y: layout.window.y,
-                }),
-                Some(&SIZE {
-                    cx: width,
-                    cy: height,
-                }),
-                Some(self.dc),
-                Some(&POINT { x: 0, y: 0 }),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            )
-        }
+        self.surface
+            .present_sized(hwnd, (layout.window.x, layout.window.y), (width, height))
     }
 
     fn draw(
@@ -193,28 +154,77 @@ impl PopupMenuRenderer {
         theme: ResolvedTheme,
     ) -> Result<()> {
         let palette = LiquidGlassPalette::for_theme(theme);
-        unsafe {
-            self.target.BindDC(
-                self.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
+        draw_on(&self.target, &self.surface, (width, height), || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
+            self.brushes.update_theme(&palette);
 
             self.draw_shell(width as f32, height as f32, layout.corner_radius, &palette);
 
+            let viewport = D2D_RECT_F {
+                left: layout.viewport.x as f32,
+                top: layout.viewport.y as f32,
+                right: layout.viewport.right() as f32,
+                bottom: layout.viewport.bottom() as f32,
+            };
+            self.target
+                .PushAxisAlignedClip(&raw const viewport, D2D1_ANTIALIAS_MODE_ALIASED);
+            let mut drawn = Ok(());
             for (row_layout, row_model) in layout.rows.iter().zip(rows) {
-                self.draw_row(layout, row_layout, row_model, hovered_row, &palette)?;
+                if !layout.is_row_reachable(row_layout) {
+                    continue;
+                }
+                drawn = self.draw_row(layout, row_layout, row_model, hovered_row, &palette);
+                if drawn.is_err() {
+                    break;
+                }
             }
+            self.target.PopAxisAlignedClip();
+            drawn?;
+            self.draw_scroll_hints(layout);
+            Ok(())
+        })
+    }
 
-            self.target.EndDraw(None, None)
+    fn draw_scroll_hints(&self, layout: &PopupMenuLayout) {
+        if !layout.is_scrollable() {
+            return;
         }
+        let center = layout.viewport.x as f32 + layout.viewport.width as f32 * 0.5;
+        let half = scale(5, self.dpi) as f32;
+        let rise = scale(3, self.dpi) as f32;
+        let brush = &self.brushes.text_muted;
+        let chevron = |tip_y: f32, direction: f32| unsafe {
+            let tip = Vector2::new(center, tip_y);
+            for side in [-1.0, 1.0] {
+                self.target.DrawLine(
+                    Vector2::new(center + side * half, tip_y + direction * rise),
+                    tip,
+                    brush,
+                    1.5,
+                    &self.stroke_style,
+                );
+            }
+        };
+        if layout.scroll_offset > 0 {
+            chevron(layout.viewport.y as f32 - rise * 0.5, 1.0);
+        }
+        if layout.scroll_offset < layout.max_scroll() {
+            chevron(layout.viewport.bottom() as f32 + rise * 0.5, -1.0);
+        }
+    }
+
+    fn measure(text: &str, format: &IDWriteTextFormat) -> Option<i32> {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe {
+            let layout = shared_dwrite_factory()
+                .ok()?
+                .CreateTextLayout(&wide, format, 4096.0, 64.0)
+                .ok()?;
+            layout.GetMetrics(&raw mut metrics).ok()?;
+        }
+        Some(metrics.widthIncludingTrailingWhitespace.ceil() as i32 + 2)
     }
 
     fn draw_row(
@@ -228,7 +238,7 @@ impl PopupMenuRenderer {
         unsafe {
             match row_model {
                 MenuRow::Separator => {
-                    let sep_brush = self.brushes.scratch(0, palette.menu_separator);
+                    let sep_brush = &self.brushes.separator;
                     let y = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
                     let inset = scale(8, self.dpi) as f32;
                     self.target.DrawLine(
@@ -268,12 +278,11 @@ impl PopupMenuRenderer {
                         self.target.FillRoundedRectangle(&pill, hover_brush);
                     }
 
-                    let fg_color = if *enabled {
-                        palette.text_primary
+                    let fg = if *enabled {
+                        &self.brushes.text_primary
                     } else {
-                        palette.text_disabled
+                        &self.brushes.text_disabled
                     };
-                    let fg = self.brushes.scratch(1, fg_color);
 
                     if *checked {
                         self.draw_checkmark(row_layout, layout.check_col_width, fg)?;
@@ -285,25 +294,33 @@ impl PopupMenuRenderer {
                         right: row_layout.rect.right() as f32 - layout.right_pad,
                         bottom: row_layout.rect.bottom() as f32,
                     };
+                    let shortcut_column = if layout.shortcut_col_width > 0.0 {
+                        layout.shortcut_col_width + scale(12, self.dpi) as f32
+                    } else {
+                        0.0
+                    };
+                    let label_rect = D2D_RECT_F {
+                        right: (text_rect.right - shortcut_column).max(text_rect.left + 1.0),
+                        ..text_rect
+                    };
                     let label_wide: Vec<u16> = label.encode_utf16().collect();
                     self.target.DrawText(
                         &label_wide,
                         &self.label_format,
-                        &text_rect,
+                        &label_rect,
                         fg,
                         D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
 
                     if !shortcut.is_empty() {
-                        let short_color = if !*enabled {
-                            palette.text_disabled
+                        let sb = if !*enabled {
+                            &self.brushes.text_disabled
                         } else if is_hovered {
-                            palette.text_primary
+                            &self.brushes.text_primary
                         } else {
-                            palette.text_muted
+                            &self.brushes.text_muted
                         };
-                        let sb = self.brushes.scratch(2, short_color);
                         let short_wide: Vec<u16> = shortcut.encode_utf16().collect();
                         self.target.DrawText(
                             &short_wide,
@@ -506,7 +523,7 @@ impl PopupMenuRenderer {
         unsafe {
             let fill = self.brushes.scratch(0, palette.menu_fill);
             let outer_border = self.brushes.scratch(1, palette.menu_outer_border);
-            let inner_border = self.brushes.scratch(2, palette.menu_inner_border);
+            let inner_border = &self.brushes.specular_rim;
             self.target.FillRoundedRectangle(&outer, fill);
             self.target
                 .DrawRoundedRectangle(&outer, outer_border, 1.0, None);
@@ -540,15 +557,5 @@ impl PopupMenuRenderer {
                 .DrawGeometry(&path, brush, stroke, &self.stroke_style);
         }
         Ok(())
-    }
-}
-
-impl Drop for PopupMenuRenderer {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.dc, self.previous);
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            let _ = DeleteDC(self.dc);
-        }
     }
 }

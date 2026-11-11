@@ -31,7 +31,9 @@ impl ControlCenterPort for WindowsControlCenter {
 
     fn execute(&self, action: ControlCenterAction) {
         if let ControlCenterAction::Media(cmd @ MediaCommand::Seek(_)) = action {
-            super::send_media_command(cmd);
+            if !super::send_media_command(cmd) {
+                super::signal_command_failure();
+            }
             return;
         }
         let command = match action {

@@ -1,15 +1,14 @@
-use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    GenieDirection, MotionMetrics, MotionPreference, Rect, advance_genie_progress,
-    compute_genie_geometry,
+    GenieDirection, MotionMetrics, MotionPreference, Rect, SnapshotBudget, SnapshotCache,
+    WindowIdentity, advance_genie_progress, compute_genie_geometry, genie_canvas,
 };
 use otto_platform::{
     WindowSnapshot, capture_window, flush_compositor, is_window_minimized, minimize_window_native,
-    minimize_window_native_quiet, motion_preference, primary_screen, restore_window_native,
-    restore_window_native_quiet, set_window_cloaked, set_window_transitions_enabled,
+    minimize_window_native_quiet, motion_preference, restore_window_native,
+    restore_window_native_quiet, set_window_transitions_enabled, virtual_screen, window_identity,
 };
 use otto_render::GenieRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -20,11 +19,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::Result;
 
 const GENIE_TIMER: usize = 30;
-const MAX_GENIE_SNAPSHOTS: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 struct GenieAnimation {
-    hwnd: isize,
+    window_id: WindowIdentity,
     window: Rect,
     dock: Rect,
     progress: f32,
@@ -36,8 +34,7 @@ pub(crate) struct Genie {
     renderer: Option<GenieRenderer>,
     motion: MotionPreference,
     motion_metrics: MotionMetrics,
-    snapshots: HashMap<isize, WindowSnapshot>,
-    snapshot_order: Vec<isize>,
+    snapshots: SnapshotCache<WindowIdentity, WindowSnapshot>,
     animation: Option<GenieAnimation>,
     last_tick: Instant,
     timer_running: bool,
@@ -45,17 +42,7 @@ pub(crate) struct Genie {
 
 #[allow(clippy::unnecessary_wraps)]
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
-    let genie = Genie {
-        hwnd,
-        renderer: None,
-        motion: motion_preference(),
-        motion_metrics: MotionMetrics::default(),
-        snapshots: HashMap::new(),
-        snapshot_order: Vec::new(),
-        animation: None,
-        last_tick: Instant::now(),
-        timer_running: false,
-    };
+    let genie = Genie::new(hwnd);
     unsafe {
         let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
     }
@@ -103,16 +90,20 @@ pub fn minimize_window(runtime: &RuntimeContext, hwnd: isize) -> bool {
 
 #[must_use]
 pub fn minimize_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<Rect>) -> bool {
-    let Some(snapshot) = capture_window(hwnd) else {
+    if !motion_preference().allows_motion() {
         minimize_window_native(hwnd);
         return true;
-    };
+    }
     let Some(target) = target.or_else(|| crate::dock::dock_target_for_window(runtime, hwnd)) else {
         minimize_window_native(hwnd);
         return true;
     };
+    let (Some(window_id), Some(snapshot)) = (window_identity(hwnd), capture_window(hwnd)) else {
+        minimize_window_native(hwnd);
+        return true;
+    };
     if !with_genie(runtime, |genie| {
-        genie.begin_minimize(hwnd, &snapshot, target)
+        genie.begin_minimize(window_id, snapshot, target)
     }) {
         minimize_window_native(hwnd);
     }
@@ -124,12 +115,18 @@ pub fn restore_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<R
     if !is_window_minimized(hwnd) {
         return false;
     }
-    let Some(target) = target.or_else(|| crate::dock::dock_target_for_window(runtime, hwnd)) else {
+    if !motion_preference().allows_motion() {
+        restore_window_native(hwnd);
+        return true;
+    }
+    let (Some(target), Some(window_id)) = (
+        target.or_else(|| crate::dock::dock_target_for_window(runtime, hwnd)),
+        window_identity(hwnd),
+    ) else {
         restore_window_native(hwnd);
         return true;
     };
-    let started = with_genie(runtime, |genie| genie.begin_restore(hwnd, target));
-    if !started {
+    if !with_genie(runtime, |genie| genie.begin_restore(window_id, target)) {
         restore_window_native(hwnd);
     }
     true
@@ -146,124 +143,109 @@ fn with_genie(runtime: &RuntimeContext, action: impl FnOnce(&mut Genie) -> bool)
 }
 
 impl Genie {
-    fn ensure_renderer(&mut self) -> Result<()> {
-        if self.renderer.is_none() {
-            let screen = primary_screen();
-            self.renderer = Some(GenieRenderer::new(screen.width, screen.height)?);
-        }
-        Ok(())
-    }
-
-    fn store_snapshot(&mut self, hwnd: isize, snapshot: WindowSnapshot) {
-        self.snapshots.insert(hwnd, snapshot);
-        self.touch_snapshot(hwnd);
-        while self.snapshot_order.len() > MAX_GENIE_SNAPSHOTS {
-            let oldest = self.snapshot_order.remove(0);
-            self.remove_snapshot(oldest);
+    fn new(hwnd: isize) -> Self {
+        Self {
+            hwnd,
+            renderer: None,
+            motion: motion_preference(),
+            motion_metrics: MotionMetrics::default(),
+            snapshots: SnapshotCache::new(SnapshotBudget::GENIE),
+            animation: None,
+            last_tick: Instant::now(),
+            timer_running: false,
         }
     }
 
-    fn touch_snapshot(&mut self, hwnd: isize) {
-        self.snapshot_order.retain(|&id| id != hwnd);
-        if self.snapshots.contains_key(&hwnd) {
-            self.snapshot_order.push(hwnd);
+    fn prepare_renderer(&mut self, window: Rect, dock: Rect) -> bool {
+        let Some(canvas) = genie_canvas(window, dock, virtual_screen()) else {
+            return false;
+        };
+        if self
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.canvas() == canvas)
+        {
+            return true;
         }
+        self.renderer = GenieRenderer::new(canvas).ok();
+        self.renderer.is_some()
     }
 
-    fn remove_snapshot(&mut self, hwnd: isize) {
-        self.snapshots.remove(&hwnd);
-        self.snapshot_order.retain(|&id| id != hwnd);
+    fn upload(&mut self, snapshot: &WindowSnapshot, dock: Rect) -> bool {
+        if !self.prepare_renderer(snapshot.rect, dock) {
+            return false;
+        }
+        self.renderer.as_mut().is_some_and(|renderer| {
+            renderer
+                .set_snapshot(snapshot.width, snapshot.height, &snapshot.pixels)
+                .is_ok()
+        })
     }
 
-    fn begin_minimize(&mut self, hwnd: isize, snapshot: &WindowSnapshot, dock: Rect) -> bool {
+    fn start_overlay(&mut self, animation: GenieAnimation) -> bool {
+        let hwnd = animation.window_id.hwnd;
+        if !set_window_transitions_enabled(hwnd, false) {
+            return false;
+        }
+        if !self.present_initial(animation) || !self.arm_timer() {
+            let _ = set_window_transitions_enabled(hwnd, true);
+            self.clear_overlay();
+            return false;
+        }
+        self.animation = Some(animation);
+        true
+    }
+
+    fn begin_minimize(
+        &mut self,
+        window_id: WindowIdentity,
+        snapshot: WindowSnapshot,
+        dock: Rect,
+    ) -> bool {
         self.cancel_active_animation();
         self.prune_snapshots();
         self.motion = motion_preference();
-        if !self.motion.allows_motion() {
-            minimize_window_native(hwnd);
-            return true;
-        }
-        if self.ensure_renderer().is_err() {
+        if !self.upload(&snapshot, dock) {
             return false;
         }
-        let Some(renderer) = self.renderer.as_mut() else {
-            return false;
-        };
-        if renderer
-            .set_snapshot(snapshot.width, snapshot.height, &snapshot.pixels)
-            .is_err()
-        {
-            return false;
-        }
-
         let animation = GenieAnimation {
-            hwnd,
+            window_id,
             window: snapshot.rect,
             dock,
             progress: 0.0,
             direction: GenieDirection::Minimize,
         };
-        if !self.present_initial(animation) || !self.arm_timer() {
-            self.clear_overlay();
+        if !self.start_overlay(animation) {
             return false;
         }
-
-        if !set_window_cloaked(hwnd, true) {
-            self.clear_overlay();
-            return false;
-        }
-        self.animation = Some(animation);
-        minimize_window_native_quiet(hwnd);
-        self.store_snapshot(hwnd, snapshot.clone());
+        let _ = minimize_window_native_quiet(window_id.hwnd);
+        let bytes = snapshot.pixels.len();
+        let _ = self.snapshots.insert(window_id, snapshot, bytes);
         true
     }
 
-    fn begin_restore(&mut self, hwnd: isize, dock: Rect) -> bool {
+    fn begin_restore(&mut self, window_id: WindowIdentity, dock: Rect) -> bool {
         self.cancel_active_animation();
         self.prune_snapshots();
         self.motion = motion_preference();
-        let Some(snapshot) = self.snapshots.get(&hwnd).cloned() else {
+        let Some(snapshot) = self.snapshots.get(&window_id).cloned() else {
             return false;
         };
-        self.touch_snapshot(hwnd);
-        if !self.motion.allows_motion() {
-            self.remove_snapshot(hwnd);
+        if !self.upload(&snapshot, dock) {
+            self.snapshots.remove(&window_id);
             return false;
         }
-        if self.ensure_renderer().is_err() {
-            self.remove_snapshot(hwnd);
-            return false;
-        }
-        let Some(renderer) = self.renderer.as_mut() else {
-            self.remove_snapshot(hwnd);
-            return false;
-        };
-        if renderer
-            .set_snapshot(snapshot.width, snapshot.height, &snapshot.pixels)
-            .is_err()
-        {
-            self.remove_snapshot(hwnd);
-            return false;
-        }
-
         let animation = GenieAnimation {
-            hwnd,
+            window_id,
             window: snapshot.rect,
             dock,
             progress: 0.0,
             direction: GenieDirection::Restore,
         };
-        if !self.present_initial(animation) || !self.arm_timer() {
-            self.clear_overlay();
+        if !self.start_overlay(animation) {
+            self.snapshots.remove(&window_id);
             return false;
         }
-
-        if !set_window_cloaked(hwnd, true) {
-            self.clear_overlay();
-            return false;
-        }
-        self.animation = Some(animation);
-        restore_window_native_quiet(hwnd);
         true
     }
 
@@ -300,42 +282,45 @@ impl Genie {
         }
     }
 
+    fn settle_native_state(&mut self, animation: GenieAnimation) {
+        let hwnd = animation.window_id.hwnd;
+        match animation.direction {
+            GenieDirection::Minimize => {
+                let _ = set_window_transitions_enabled(hwnd, true);
+                if !is_window_minimized(hwnd) {
+                    self.snapshots.remove(&animation.window_id);
+                    minimize_window_native(hwnd);
+                }
+            }
+            GenieDirection::Restore => {
+                let _ = restore_window_native_quiet(hwnd);
+                flush_compositor();
+                let _ = set_window_transitions_enabled(hwnd, true);
+                if is_window_minimized(hwnd) {
+                    restore_window_native(hwnd);
+                }
+                self.snapshots.remove(&animation.window_id);
+            }
+        }
+    }
+
     fn finish(&mut self, animation: GenieAnimation) {
-        let _ = set_window_cloaked(animation.hwnd, false);
-        set_window_transitions_enabled(animation.hwnd, true);
-        self.settle_native_state(animation);
         self.animation = None;
+        self.settle_native_state(animation);
         self.clear_overlay();
     }
 
     fn cancel_active_animation(&mut self) {
-        if let Some(animation) = self.animation.take() {
-            let _ = set_window_cloaked(animation.hwnd, false);
-            set_window_transitions_enabled(animation.hwnd, true);
-            self.settle_native_state(animation);
-        }
-        self.clear_overlay();
-    }
-
-    fn settle_native_state(&mut self, animation: GenieAnimation) {
-        let minimized = is_window_minimized(animation.hwnd);
-        match (animation.direction, minimized) {
-            (GenieDirection::Minimize, false) => {
-                self.remove_snapshot(animation.hwnd);
-                minimize_window_native(animation.hwnd);
-            }
-            (GenieDirection::Restore, true) => restore_window_native(animation.hwnd),
-            (GenieDirection::Restore, false) => {
-                self.remove_snapshot(animation.hwnd);
-            }
-            (GenieDirection::Minimize, true) => {}
+        if let Some(animation) = self.animation {
+            self.finish(animation);
         }
     }
 
     fn prune_snapshots(&mut self) {
-        self.snapshots.retain(|hwnd, _| is_window_minimized(*hwnd));
-        self.snapshot_order
-            .retain(|hwnd| self.snapshots.contains_key(hwnd));
+        self.snapshots.retain(|window_id| {
+            window_identity(window_id.hwnd).as_ref() == Some(window_id)
+                && is_window_minimized(window_id.hwnd)
+        });
     }
 
     fn arm_timer(&mut self) -> bool {
@@ -376,7 +361,9 @@ impl Genie {
 
     fn rebuild(&mut self) {
         self.cancel_active_animation();
+        self.snapshots.clear();
         self.renderer = None;
+        self.motion = motion_preference();
     }
 
     fn present(&mut self, animation: GenieAnimation) -> Result<()> {
@@ -386,60 +373,55 @@ impl Genie {
             animation.progress,
             animation.direction,
         );
-        self.ensure_renderer()?;
-        if let Some(renderer) = self.renderer.as_ref() {
-            renderer.present(self.hwnd, &geometry)
-        } else {
-            Ok(())
+        match self.renderer.as_ref() {
+            Some(renderer) => renderer.present(self.hwnd, &geometry),
+            None => Err(windows::core::Error::from_hresult(
+                windows::Win32::Foundation::E_FAIL,
+            )),
         }
     }
 
     fn shutdown(&mut self) {
         self.cancel_active_animation();
         self.snapshots.clear();
-        self.snapshot_order.clear();
         self.renderer = None;
+        self.disarm_timer();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Genie;
+    use otto_core::WindowIdentity;
 
-    fn test_genie() -> Genie {
-        Genie {
-            hwnd: 0,
-            renderer: None,
-            motion: MotionPreference::Full,
-            motion_metrics: MotionMetrics::default(),
-            snapshots: HashMap::new(),
-            snapshot_order: Vec::new(),
-            animation: None,
-            last_tick: Instant::now(),
-            timer_running: false,
-        }
-    }
-
-    fn snapshot() -> WindowSnapshot {
-        WindowSnapshot {
-            rect: Rect::default(),
-            width: 1,
-            height: 1,
-            pixels: vec![0; 4],
+    fn missing_window() -> WindowIdentity {
+        WindowIdentity {
+            hwnd: 0x7FFF_FFF0,
+            process_id: 0xFFFF_FFF0,
+            thread_id: 0xFFFF_FFF1,
+            generation: 1,
         }
     }
 
     #[test]
-    fn snapshot_cache_is_bounded_and_evicts_least_recent_entry() {
-        let mut genie = test_genie();
-        genie.store_snapshot(1, snapshot());
-        genie.store_snapshot(2, snapshot());
-        genie.touch_snapshot(1);
-        genie.store_snapshot(3, snapshot());
+    fn restore_without_a_cached_snapshot_falls_back_to_native() {
+        let mut genie = Genie::new(0);
+        let dock = otto_core::Rect {
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+        };
+        assert!(!genie.begin_restore(missing_window(), dock));
+        assert!(genie.animation.is_none());
+    }
 
-        assert!(genie.snapshots.contains_key(&1));
-        assert!(!genie.snapshots.contains_key(&2));
-        assert!(genie.snapshots.contains_key(&3));
-        assert_eq!(genie.snapshot_order, vec![1, 3]);
+    #[test]
+    fn shutdown_without_animation_leaves_nothing_running() {
+        let mut genie = Genie::new(0);
+        genie.shutdown();
+        assert!(genie.animation.is_none());
+        assert!(!genie.timer_running);
+        assert!(genie.snapshots.is_empty());
     }
 }

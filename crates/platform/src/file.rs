@@ -1,11 +1,23 @@
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::core::{Error, PCWSTR, Result};
+
+pub const DATA_DIR_OVERRIDE: &str = "OTTO_OS_DATA_DIR";
+
+#[must_use]
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(overridden) = std::env::var_os(DATA_DIR_OVERRIDE)
+        && !overridden.is_empty()
+    {
+        return Some(PathBuf::from(overridden));
+    }
+    std::env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join("otto-os"))
+}
 
 pub fn replace_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     let temp_path = path.with_extension("tmp");

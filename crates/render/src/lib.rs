@@ -2,13 +2,12 @@ mod bar;
 mod dock;
 mod genie;
 mod menu;
+mod surface;
 mod theme;
 mod window_controls;
 
 use std::cell::RefCell;
 use std::f32::consts::{PI, TAU};
-use std::ffi::c_void;
-use std::mem::size_of;
 
 pub use dock::{DockRenderItem, DockRenderer};
 pub use genie::GenieRenderer;
@@ -20,7 +19,8 @@ use otto_core::{
     HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying,
     PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
 };
-use windows::Win32::Foundation::{COLORREF, E_FAIL, HWND, POINT, SIZE};
+use surface::DibSurface;
+use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
@@ -46,18 +46,12 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
-    HGDIOBJ, SelectObject,
-};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
     WICBitmapDitherTypeNone, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom,
     WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
@@ -140,90 +134,6 @@ const fn phase_accent_color(phase: PomodoroPhase) -> D2D1_COLOR_F {
         PomodoroPhase::Focus => FOCUS_ORANGE,
         PomodoroPhase::ShortBreak => BREAK_GREEN,
         PomodoroPhase::LongBreak => LONG_BREAK_BLUE,
-    }
-}
-
-struct DibSurface {
-    dc: HDC,
-    dib: HBITMAP,
-    previous: HGDIOBJ,
-    size: (i32, i32),
-}
-
-impl DibSurface {
-    unsafe fn new(width: i32, height: i32) -> Result<Self> {
-        unsafe {
-            let dc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width.max(1),
-                    biHeight: -height.max(1),
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..BITMAPINFOHEADER::default()
-                },
-                ..BITMAPINFO::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let previous = SelectObject(dc, HGDIOBJ(dib.0));
-            Ok(Self {
-                dc,
-                dib,
-                previous,
-                size: (width.max(1), height.max(1)),
-            })
-        }
-    }
-
-    unsafe fn present(&self, hwnd: isize, origin: (i32, i32)) -> Result<()> {
-        unsafe { self.present_sized(hwnd, origin, self.size) }
-    }
-
-    unsafe fn present_sized(
-        &self,
-        hwnd: isize,
-        origin: (i32, i32),
-        size: (i32, i32),
-    ) -> Result<()> {
-        let (width, height) = size;
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        unsafe {
-            UpdateLayeredWindow(
-                HWND(hwnd as *mut c_void),
-                None,
-                Some(&POINT {
-                    x: origin.0,
-                    y: origin.1,
-                }),
-                Some(&SIZE {
-                    cx: width.max(1),
-                    cy: height.max(1),
-                }),
-                Some(self.dc),
-                Some(&POINT { x: 0, y: 0 }),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            )
-        }
-    }
-}
-
-impl Drop for DibSurface {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.dc, self.previous);
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            let _ = DeleteDC(self.dc);
-        }
     }
 }
 
@@ -473,7 +383,7 @@ impl Renderer {
         self.draw_bar(
             layout, status, app_name, hovered, hud, pomodoro, media, anim_phase, theme,
         )?;
-        unsafe { self.bar_surface.present(hwnd, origin) }
+        self.bar_surface.present(hwnd, origin)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -488,13 +398,11 @@ impl Renderer {
         lyrics: Option<&LyricsSheet>,
     ) -> Result<()> {
         self.draw_panel(layout, hovered, pomodoro, media, anim_phase, lyrics)?;
-        unsafe {
-            self.panel_surface.present_sized(
-                panel_hwnd,
-                (layout.panel_window.x, layout.panel_window.y),
-                (layout.panel_window.width, layout.panel_window.height),
-            )
-        }
+        self.panel_surface.present_sized(
+            panel_hwnd,
+            (layout.panel_window.x, layout.panel_window.y),
+            (layout.panel_window.width, layout.panel_window.height),
+        )
     }
 
     fn draw_compact_notch(
@@ -1162,7 +1070,7 @@ impl Renderer {
         } else {
             0.14 * alpha
         };
-        let next_fill = self.brushes.alpha_brush(5, FOREGROUND, next_alpha);
+        let next_fill = self.brushes.alpha_brush(8, FOREGROUND, next_alpha);
         self.draw_circle_button(next_rect, next_fill);
         self.draw_skip_glyph(
             next_rect.x as f32 + next_rect.width as f32 * 0.5,
@@ -1831,7 +1739,7 @@ impl Renderer {
         format: &IDWriteTextFormat,
         brush: &ID2D1SolidColorBrush,
     ) {
-        if slot.width <= 8 {
+        if slot.width <= 0 {
             return;
         }
         let rect = D2D_RECT_F {

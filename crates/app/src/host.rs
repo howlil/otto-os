@@ -15,9 +15,12 @@ use windows::core::{Error, PCWSTR, Result, w};
 
 use crate::{bar, dock, genie, menu, window_controls};
 use otto_core::ThemeMode;
-use otto_platform::{replace_file_atomically, shutdown_media_task};
+use otto_platform::{
+    replace_file_atomically, restore_hidden_windows, shutdown_audio_task, shutdown_media_task,
+};
 
 const CONFIG_FILE: &str = "plugins.txt";
+const SUPPORTED_CONFIG_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PluginId {
@@ -164,10 +167,31 @@ impl PluginId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigSource {
+    Defaults,
+    Supported,
+    Unsupported,
+}
+
 #[derive(Clone, Debug)]
 struct PluginConfig {
     enabled: Vec<PluginId>,
     online_lyrics: bool,
+    source: ConfigSource,
+}
+
+fn config_source(contents: &str) -> ConfigSource {
+    let Some(version) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("version="))
+    else {
+        return ConfigSource::Supported;
+    };
+    match version.trim().parse::<u32>() {
+        Ok(version) if (1..=SUPPORTED_CONFIG_VERSION).contains(&version) => ConfigSource::Supported,
+        _ => ConfigSource::Unsupported,
+    }
 }
 
 impl Default for PluginConfig {
@@ -182,6 +206,7 @@ impl Default for PluginConfig {
                 PluginId::ControlCenter,
             ],
             online_lyrics: false,
+            source: ConfigSource::Defaults,
         }
     }
 }
@@ -198,13 +223,24 @@ impl PluginConfig {
     }
 
     fn parse(contents: &str) -> Self {
+        let source = config_source(contents);
+        if source == ConfigSource::Unsupported {
+            return Self {
+                source,
+                ..Self::default()
+            };
+        }
         let Some(enabled) = contents
             .lines()
             .find_map(|line| line.strip_prefix("enabled="))
         else {
-            return Self::default();
+            return Self {
+                source,
+                ..Self::default()
+            };
         };
         let mut config = Self {
+            source,
             enabled: Vec::new(),
             online_lyrics: contents
                 .lines()
@@ -223,6 +259,12 @@ impl PluginConfig {
     }
 
     fn save(&self) -> Result<()> {
+        if self.source == ConfigSource::Unsupported {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_ACCESSDENIED,
+                "The Otto configuration file was written by a newer version and is left untouched",
+            ));
+        }
         let Some(path) = config_path() else {
             return Ok(());
         };
@@ -239,7 +281,7 @@ impl PluginConfig {
         replace_file_atomically(
             &path,
             format!(
-                "version=1\nenabled={enabled}\nonline_lyrics={}\n",
+                "version={SUPPORTED_CONFIG_VERSION}\nenabled={enabled}\nonline_lyrics={}\n",
                 self.online_lyrics
             )
             .as_bytes(),
@@ -432,7 +474,7 @@ pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
                 "Otto host is not running",
             ));
         };
-        host.set_plugin_enabled(plugin, enabled)
+        host.set_plugin_enabled(plugin, enabled, PluginConfig::save)
     });
     if result.is_ok() && plugin == PluginId::ControlCenter {
         HOST.with(|cell| {
@@ -468,9 +510,7 @@ pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
 }
 
 fn config_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join("otto-os").join(CONFIG_FILE))
+    otto_platform::data_dir().map(|root| root.join(CONFIG_FILE))
 }
 
 fn io_error(_error: std::io::Error) -> Error {
@@ -598,7 +638,12 @@ impl Host {
         Ok(())
     }
 
-    fn set_plugin_enabled(&mut self, plugin: PluginId, enabled: bool) -> Result<()> {
+    fn set_plugin_enabled(
+        &mut self,
+        plugin: PluginId,
+        enabled: bool,
+        persist: impl FnOnce(&PluginConfig) -> Result<()>,
+    ) -> Result<()> {
         if descriptor(plugin).required {
             return Err(Error::new(
                 windows::Win32::Foundation::E_INVALIDARG,
@@ -609,22 +654,48 @@ impl Host {
             return Ok(());
         }
         if enabled {
-            self.config.set_enabled(plugin, true);
-            if let Err(error) = self.start_plugin(plugin) {
-                self.config.set_enabled(plugin, false);
-                return Err(error);
-            }
+            self.enable_plugin(plugin, persist)
         } else {
-            if let Some(dependent) = enabled_dependent(plugin, &self.config) {
-                return Err(Error::new(
-                    windows::Win32::Foundation::E_INVALIDARG,
-                    format!("Disable {} before {}", dependent.name(), plugin.name()),
-                ));
-            }
+            self.disable_plugin(plugin, persist)
+        }
+    }
+
+    fn enable_plugin(
+        &mut self,
+        plugin: PluginId,
+        persist: impl FnOnce(&PluginConfig) -> Result<()>,
+    ) -> Result<()> {
+        self.config.set_enabled(plugin, true);
+        if let Err(error) = self.start_plugin(plugin) {
+            self.config.set_enabled(plugin, false);
+            return Err(error);
+        }
+        if let Err(error) = persist(&self.config) {
             self.stop_plugin(plugin);
             self.config.set_enabled(plugin, false);
+            return Err(error);
         }
-        self.config.save()
+        Ok(())
+    }
+
+    fn disable_plugin(
+        &mut self,
+        plugin: PluginId,
+        persist: impl FnOnce(&PluginConfig) -> Result<()>,
+    ) -> Result<()> {
+        if let Some(dependent) = enabled_dependent(plugin, &self.config) {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_INVALIDARG,
+                format!("Disable {} before {}", dependent.name(), plugin.name()),
+            ));
+        }
+        self.config.set_enabled(plugin, false);
+        if let Err(error) = persist(&self.config) {
+            self.config.set_enabled(plugin, true);
+            return Err(error);
+        }
+        self.stop_plugin(plugin);
+        Ok(())
     }
 
     fn create_surface(&mut self, plugin: PluginId) -> Result<HWND> {
@@ -697,7 +768,9 @@ impl Host {
         for plugin in reverse_lifecycle_order(&started) {
             self.stop_started_plugin(plugin);
         }
+        let _ = restore_hidden_windows();
         shutdown_media_task();
+        shutdown_audio_task();
         if let Some(surfaces) = self.surfaces.take() {
             unsafe {
                 let _ = DestroyWindow(surfaces.menu);
@@ -960,9 +1033,116 @@ unsafe extern "system" fn menu_window_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        HWND, PLUGIN_DESCRIPTORS, PluginConfig, PluginId, SurfaceSlot, Surfaces,
+        ConfigSource, Error, HCURSOR, HINSTANCE, HWND, Host, PLUGIN_DESCRIPTORS, PluginConfig,
+        PluginId, PluginState, Result, RuntimeContext, SurfaceSlot, Surfaces, WINDOW_EX_STYLE,
         dependencies_running, descriptor, enabled_dependent, reverse_lifecycle_order,
     };
+
+    fn host_with_required_plugins() -> Host {
+        let mut config = PluginConfig::default();
+        config.set_enabled(PluginId::ControlCenter, false);
+        Host {
+            instance: HINSTANCE::default(),
+            cursor: HCURSOR::default(),
+            ex_style: WINDOW_EX_STYLE::default(),
+            blur: false,
+            config,
+            surfaces: None,
+            started: vec![PluginId::PopupMenu, PluginId::TopBar],
+            states: PLUGIN_DESCRIPTORS
+                .iter()
+                .map(|descriptor| (descriptor.id, PluginState::Disabled))
+                .collect(),
+            shutting_down: false,
+            runtime: RuntimeContext::new(false),
+        }
+    }
+
+    fn failing_save(_config: &PluginConfig) -> Result<()> {
+        Err(Error::new(
+            windows::Win32::Foundation::E_FAIL,
+            "simulated save failure",
+        ))
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn working_save(_config: &PluginConfig) -> Result<()> {
+        Ok(())
+    }
+
+    fn is_running(host: &Host, plugin: PluginId) -> bool {
+        host.started.contains(&plugin)
+    }
+
+    #[test]
+    fn failed_save_while_enabling_leaves_the_plugin_stopped_and_disabled() {
+        let mut host = host_with_required_plugins();
+        let result = host.set_plugin_enabled(PluginId::ControlCenter, true, failing_save);
+        assert!(result.is_err());
+        assert!(!is_running(&host, PluginId::ControlCenter));
+        assert!(!host.config.is_enabled(PluginId::ControlCenter));
+    }
+
+    #[test]
+    fn failed_save_while_disabling_leaves_the_plugin_running_and_enabled() {
+        let mut host = host_with_required_plugins();
+        host.set_plugin_enabled(PluginId::ControlCenter, true, working_save)
+            .unwrap();
+        assert!(is_running(&host, PluginId::ControlCenter));
+        let result = host.set_plugin_enabled(PluginId::ControlCenter, false, failing_save);
+        assert!(result.is_err());
+        assert!(is_running(&host, PluginId::ControlCenter));
+        assert!(host.config.is_enabled(PluginId::ControlCenter));
+    }
+
+    #[test]
+    fn successful_toggle_keeps_runtime_and_configuration_in_step() {
+        let mut host = host_with_required_plugins();
+        host.set_plugin_enabled(PluginId::ControlCenter, true, working_save)
+            .unwrap();
+        host.set_plugin_enabled(PluginId::ControlCenter, false, working_save)
+            .unwrap();
+        assert!(!is_running(&host, PluginId::ControlCenter));
+        assert!(!host.config.is_enabled(PluginId::ControlCenter));
+        host.stop_plugin(PluginId::ControlCenter);
+        host.stop_plugin(PluginId::ControlCenter);
+        assert_eq!(host.started, vec![PluginId::PopupMenu, PluginId::TopBar]);
+    }
+
+    #[test]
+    fn enabling_a_plugin_whose_dependency_is_not_running_is_rejected() {
+        let mut host = host_with_required_plugins();
+        host.started.clear();
+        let result = host.set_plugin_enabled(PluginId::ControlCenter, true, working_save);
+        assert!(result.is_err());
+        assert!(!host.config.is_enabled(PluginId::ControlCenter));
+    }
+
+    #[test]
+    fn newer_configuration_version_is_preserved_and_never_overwritten() {
+        let config = PluginConfig::parse("version=2\nenabled=popup_menu,top_bar\nfuture=1\n");
+        assert_eq!(config.source, ConfigSource::Unsupported);
+        assert!(config.is_enabled(PluginId::TopBar));
+        assert!(config.is_enabled(PluginId::Dock));
+        assert!(config.save().is_err());
+        assert_eq!(
+            PluginConfig::parse("version=banana\n").source,
+            ConfigSource::Unsupported
+        );
+    }
+
+    #[test]
+    fn current_and_legacy_configuration_versions_are_accepted() {
+        assert_eq!(
+            PluginConfig::parse("version=1\nenabled=dock\n").source,
+            ConfigSource::Supported
+        );
+        assert_eq!(
+            PluginConfig::parse("enabled=dock\n").source,
+            ConfigSource::Supported
+        );
+        assert_eq!(PluginConfig::default().source, ConfigSource::Defaults);
+    }
 
     fn hwnd(value: usize) -> HWND {
         HWND(value as *mut _)

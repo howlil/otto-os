@@ -74,11 +74,39 @@ impl Default for DockMetrics {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockPosition {
+    #[default]
+    Bottom,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DockPreferences {
+    pub position: DockPosition,
+    pub magnification: bool,
+    pub icon_size: i32,
+    pub autohide: bool,
+}
+
+impl Default for DockPreferences {
+    fn default() -> Self {
+        Self {
+            position: DockPosition::Bottom,
+            magnification: true,
+            icon_size: 48,
+            autohide: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DockInput<'a> {
     pub screen_width: i32,
     pub dpi: u32,
     pub app_count: usize,
+    pub right_count: usize,
     pub has_trash: bool,
     pub cursor_x: Option<f32>,
     pub mag_strength: f32,
@@ -154,16 +182,18 @@ pub fn smooth_damp(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockLayout {
     let dpi = input.dpi;
-    let base_icon = scale(metrics.base_icon_size, dpi) as f32;
-    let gap = scale(metrics.icon_gap, dpi) as f32;
-    let pad_x = scale(metrics.pad_x, dpi) as f32;
-    let pad_top = scale(metrics.pad_top, dpi) as f32;
-    let pad_bottom = scale(metrics.pad_bottom, dpi) as f32;
-    let corner_radius = scale(metrics.corner_radius, dpi) as f32;
+    let mut base_icon = scale(metrics.base_icon_size, dpi) as f32;
+    let mut gap = scale(metrics.icon_gap, dpi) as f32;
+    let mut pad_x = scale(metrics.pad_x, dpi) as f32;
+    let mut pad_top = scale(metrics.pad_top, dpi) as f32;
+    let mut pad_bottom = scale(metrics.pad_bottom, dpi) as f32;
+    let mut corner_radius = scale(metrics.corner_radius, dpi) as f32;
     let bottom_margin = scale(metrics.bottom_margin, dpi) as f32;
-    let divider_w = if input.has_trash && input.app_count > 0 {
+    let right_items = input.right_count.max(usize::from(input.has_trash));
+    let mut divider_w = if right_items > 0 && input.app_count > 0 {
         scale(metrics.divider_slot_width, dpi) as f32
     } else {
         0.0
@@ -173,7 +203,25 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
     let tooltip_height = scale(metrics.tooltip_height, dpi) as f32;
     let max_bounce = scale(metrics.bounce_height, dpi) as f32;
 
-    let total_items = input.app_count + usize::from(input.has_trash);
+    let total_items = input.app_count + right_items;
+    if total_items > 0 {
+        let unscaled_content_w = total_items as f32 * base_icon
+            + (total_items.saturating_sub(1) as f32) * gap
+            + divider_w;
+        let max_allowed_w = (input.screen_width as f32 - 32.0).max(120.0);
+        let needed_w = unscaled_content_w + pad_x * 2.0;
+        if needed_w > max_allowed_w {
+            let shrink = (max_allowed_w / needed_w).clamp(0.35, 1.0);
+            base_icon = (base_icon * shrink).max(16.0);
+            gap = (gap * shrink).max(2.0);
+            pad_x = (pad_x * shrink).max(4.0);
+            pad_top = (pad_top * shrink).max(4.0);
+            pad_bottom = (pad_bottom * shrink).max(4.0);
+            corner_radius = (corner_radius * shrink).max(6.0);
+            divider_w *= shrink;
+        }
+    }
+
     let max_icon = base_icon * metrics.max_scale;
     let unmag_pill_h = pad_top + base_icon + pad_bottom;
     let headroom = (max_icon - base_icon) + max_bounce + tooltip_gap + tooltip_height + 16.0;
@@ -223,7 +271,7 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
     let mut divider_x = None;
 
     for (i, &s) in scales.iter().enumerate() {
-        if input.has_trash && i == input.app_count && input.app_count > 0 {
+        if right_items > 0 && i == input.app_count && input.app_count > 0 {
             divider_x = Some(x - gap * 0.5 + divider_w * 0.5);
             x += divider_w;
         }
@@ -276,7 +324,8 @@ fn evaluate_scales(
     gap: f32,
     divider_w: f32,
 ) -> (Vec<f32>, Option<usize>) {
-    let total_items = input.app_count + usize::from(input.has_trash);
+    let right_items = input.right_count.max(usize::from(input.has_trash));
+    let total_items = input.app_count + right_items;
     let base_step = base_icon + gap;
     let base_content_w =
         total_items as f32 * base_icon + total_items.saturating_sub(1) as f32 * gap + divider_w;
@@ -285,7 +334,7 @@ fn evaluate_scales(
     let mut base_centers = Vec::with_capacity(total_items);
     let mut cx = base_left;
     for i in 0..total_items {
-        if input.has_trash && i == input.app_count && input.app_count > 0 {
+        if right_items > 0 && i == input.app_count && input.app_count > 0 {
             cx += divider_w;
         }
         base_centers.push(cx + base_icon * 0.5);
@@ -336,6 +385,7 @@ mod tests {
             screen_width: 1920,
             dpi: 96,
             app_count: 4,
+            right_count: 1,
             has_trash: true,
             cursor_x,
             mag_strength,
@@ -352,6 +402,19 @@ mod tests {
         assert!(layout.divider_x.is_some());
         let center = layout.pill.x + layout.pill.width / 2;
         assert!((center - 960).abs() <= 1);
+    }
+
+    #[test]
+    fn sector_separation_places_divider_between_apps_and_right_sector() {
+        let mut input = sample_input(None, 0.0);
+        input.app_count = 3;
+        input.right_count = 2;
+        let layout = compute_dock_layout(&M, input);
+        assert_eq!(layout.items.len(), 5);
+        assert!(layout.divider_x.is_some());
+        let div = layout.divider_x.unwrap();
+        assert!(div > layout.items[2].x + layout.items[2].size);
+        assert!(div < layout.items[3].x);
     }
 
     #[test]
@@ -394,5 +457,15 @@ mod tests {
         assert_eq!(select_dock_click_window(&windows, Some(202)), Some(303));
         assert_eq!(select_dock_click_window(&windows, Some(303)), Some(101));
         assert_eq!(select_dock_click_window(&[101], Some(101)), Some(101));
+    }
+
+    #[test]
+    fn dock_scales_adaptively_when_items_exceed_screen_width() {
+        let mut input = sample_input(None, 0.0);
+        input.screen_width = 800;
+        input.app_count = 30;
+        let layout = compute_dock_layout(&M, input);
+        assert!(layout.pill.width <= 800);
+        assert!(layout.pill.x >= 0);
     }
 }

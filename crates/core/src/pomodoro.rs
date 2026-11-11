@@ -287,9 +287,157 @@ impl PomodoroState {
     }
 }
 
+pub const POMODORO_SUSPEND_GAP_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PomodoroTick {
+    Unchanged,
+    Advanced,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PomodoroClock {
+    last_sync_ms: Option<u64>,
+    carry_ms: u64,
+}
+
+impl PomodoroClock {
+    pub fn restart(&mut self, now_ms: u64) {
+        self.last_sync_ms = Some(now_ms);
+        self.carry_ms = 0;
+    }
+
+    pub fn sync(&mut self, state: &mut PomodoroState, now_ms: u64) -> PomodoroTick {
+        let Some(last) = self.last_sync_ms.replace(now_ms) else {
+            return PomodoroTick::Unchanged;
+        };
+        if state.status != PomodoroStatus::Running {
+            self.carry_ms = 0;
+            return PomodoroTick::Unchanged;
+        }
+        let gap = now_ms.saturating_sub(last);
+        if gap > POMODORO_SUSPEND_GAP_MS {
+            return PomodoroTick::Unchanged;
+        }
+        self.carry_ms += gap;
+        let whole_seconds = self.carry_ms / 1_000;
+        self.carry_ms %= 1_000;
+        if whole_seconds == 0 {
+            return PomodoroTick::Unchanged;
+        }
+        let elapsed = u32::try_from(whole_seconds).unwrap_or(u32::MAX);
+        if state.tick_seconds(elapsed) {
+            self.carry_ms = 0;
+            PomodoroTick::Completed
+        } else {
+            PomodoroTick::Advanced
+        }
+    }
+
+    pub fn suspend(&mut self, state: &mut PomodoroState, now_ms: u64) -> PomodoroTick {
+        let tick = self.sync(state, now_ms);
+        self.last_sync_ms = None;
+        tick
+    }
+
+    pub fn resume(&mut self, now_ms: u64) {
+        self.last_sync_ms = Some(now_ms);
+    }
+
+    #[must_use]
+    pub fn next_wakeup_ms(&self, state: &PomodoroState, now_ms: u64) -> Option<u64> {
+        (state.status == PomodoroStatus::Running).then(|| now_ms + (1_000 - self.carry_ms.min(999)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running() -> (PomodoroState, PomodoroClock) {
+        let mut state = PomodoroState::new();
+        state.toggle_run();
+        let mut clock = PomodoroClock::default();
+        clock.restart(0);
+        (state, clock)
+    }
+
+    #[test]
+    fn clock_counts_whole_seconds_regardless_of_how_often_it_is_synced() {
+        let (mut coarse, mut coarse_clock) = running();
+        assert_eq!(
+            coarse_clock.sync(&mut coarse, 10_400),
+            PomodoroTick::Advanced
+        );
+        let (mut fine, mut fine_clock) = running();
+        for now in (8..=10_400).step_by(8) {
+            let _ = fine_clock.sync(&mut fine, now);
+        }
+        assert_eq!(coarse.remaining_seconds, 25 * 60 - 10);
+        assert_eq!(fine.remaining_seconds, coarse.remaining_seconds);
+    }
+
+    #[test]
+    fn clock_keeps_sub_second_remainder_between_syncs() {
+        let (mut state, mut clock) = running();
+        assert_eq!(clock.sync(&mut state, 600), PomodoroTick::Unchanged);
+        assert_eq!(clock.sync(&mut state, 1_200), PomodoroTick::Advanced);
+        assert_eq!(state.remaining_seconds, 25 * 60 - 1);
+        assert_eq!(clock.next_wakeup_ms(&state, 1_200), Some(2_000));
+    }
+
+    #[test]
+    fn paused_or_idle_timer_does_not_accumulate_time() {
+        let (mut state, mut clock) = running();
+        state.toggle_run();
+        assert_eq!(clock.sync(&mut state, 20_000), PomodoroTick::Unchanged);
+        assert_eq!(clock.next_wakeup_ms(&state, 20_000), None);
+        state.toggle_run();
+        clock.restart(20_000);
+        assert_eq!(clock.sync(&mut state, 21_000), PomodoroTick::Advanced);
+        assert_eq!(state.remaining_seconds, 25 * 60 - 1);
+    }
+
+    #[test]
+    fn system_sleep_does_not_consume_timer_time() {
+        let (mut state, mut clock) = running();
+        assert_eq!(clock.suspend(&mut state, 5_000), PomodoroTick::Advanced);
+        assert_eq!(clock.sync(&mut state, 3_600_000), PomodoroTick::Unchanged);
+        clock.resume(3_600_000);
+        assert_eq!(clock.sync(&mut state, 3_602_000), PomodoroTick::Advanced);
+        assert_eq!(state.remaining_seconds, 25 * 60 - 7);
+    }
+
+    #[test]
+    fn unannounced_long_gap_is_treated_as_sleep() {
+        let (mut state, mut clock) = running();
+        assert_eq!(
+            clock.sync(&mut state, POMODORO_SUSPEND_GAP_MS + 1),
+            PomodoroTick::Unchanged
+        );
+        assert_eq!(state.remaining_seconds, 25 * 60);
+        assert_eq!(
+            clock.sync(&mut state, POMODORO_SUSPEND_GAP_MS + 2_001),
+            PomodoroTick::Advanced
+        );
+        assert_eq!(state.remaining_seconds, 25 * 60 - 2);
+    }
+
+    #[test]
+    fn clock_reports_completion_exactly_once() {
+        let (mut state, mut clock) = running();
+        let mut now = 0;
+        let mut completions = 0;
+        while now < 26 * 60 * 1_000 {
+            now += 20_000;
+            if clock.sync(&mut state, now) == PomodoroTick::Completed {
+                completions += 1;
+            }
+        }
+        assert_eq!(completions, 1);
+        assert_eq!(state.status, PomodoroStatus::Alert);
+    }
 
     #[test]
     fn new_state_starts_at_25_minute_focus_idle() {

@@ -16,6 +16,12 @@ fn main() -> Result<()> {
     let Some(_instance) = otto_platform::InstanceGuard::acquire() else {
         return Ok(());
     };
+    let _ = otto_platform::restore_hidden_windows();
+    if std::env::args().any(|arg| arg == "--restore-shell") {
+        let _ = otto_platform::restore_shell_from_recovery();
+        return Ok(());
+    }
+    install_shell_recovery_panic_hook();
     otto_platform::enable_per_monitor_dpi();
     otto_platform::load_apple_fonts();
 
@@ -25,9 +31,20 @@ fn main() -> Result<()> {
         host::stop();
         return Err(error);
     }
-    let _ = otto_platform::install_os_event_hooks();
+    let _ = otto_platform::install_keyboard_hook();
     host::run_message_loop();
-    otto_platform::uninstall_os_event_hooks();
+    otto_platform::uninstall_keyboard_hook();
     host::stop();
     Ok(())
+}
+
+fn install_shell_recovery_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if cfg!(panic = "abort") {
+            let _ = otto_platform::restore_hidden_windows();
+            let _ = otto_platform::restore_shell_from_recovery();
+        }
+        default_hook(info);
+    }));
 }

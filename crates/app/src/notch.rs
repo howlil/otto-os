@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    HitTarget, MediaCommand, NotchAction, NotchExpandedTab, NotchHudKind, NotchHudState,
-    NotchLayoutInput, NowPlaying, PomodoroState, PomodoroStatus, smooth_damp,
+    HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
+    NotchHudState, NotchLayoutInput, NowPlaying, PomodoroClock, PomodoroState, PomodoroStatus,
+    PomodoroTick, animate_value,
 };
 
 const HUD_HOLD_MS: u64 = 1_650;
@@ -52,7 +53,8 @@ pub(crate) struct NotchController {
     hover_since: Option<Instant>,
     panel_trigger: PanelTrigger,
     alert_until: Option<Instant>,
-    pomodoro_elapsed_accum: Duration,
+    clock: PomodoroClock,
+    epoch: Instant,
     last_anim_instant: Instant,
     media: Option<NowPlaying>,
     notch_tab: NotchExpandedTab,
@@ -74,7 +76,8 @@ impl NotchController {
             hover_since: None,
             panel_trigger: PanelTrigger::Closed,
             alert_until: None,
-            pomodoro_elapsed_accum: Duration::ZERO,
+            clock: PomodoroClock::default(),
+            epoch: Instant::now(),
             last_anim_instant: Instant::now(),
             media,
             notch_tab,
@@ -82,6 +85,47 @@ impl NotchController {
             lyrics_expanded: false,
             lyrics: None,
         }
+    }
+
+    fn millis(&self, moment: Instant) -> u64 {
+        u64::try_from(moment.saturating_duration_since(self.epoch).as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn restart_clock(&mut self) {
+        let now_ms = self.millis(Instant::now());
+        self.clock.restart(now_ms);
+    }
+
+    pub(crate) fn sync_clock(&mut self, now: Instant) -> NotchUpdate {
+        let (changed, effect) = self.step_pomodoro_clock(now);
+        NotchUpdate { changed, effect }
+    }
+
+    pub(crate) fn suspend(&mut self, now: Instant) -> NotchUpdate {
+        let now_ms = self.millis(now);
+        let tick = self.clock.suspend(&mut self.pomodoro, now_ms);
+        let (changed, effect) = self.apply_tick(tick, now);
+        NotchUpdate { changed, effect }
+    }
+
+    pub(crate) fn resume(&mut self, now: Instant) {
+        let now_ms = self.millis(now);
+        self.clock.resume(now_ms);
+    }
+
+    pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        let now_ms = self.millis(now);
+        let pomodoro = self
+            .clock
+            .next_wakeup_ms(&self.pomodoro, now_ms)
+            .map(|at| self.epoch + Duration::from_millis(at));
+        let alert = self
+            .alert_until
+            .filter(|_| self.pomodoro.status == PomodoroStatus::Alert);
+        [pomodoro, alert, self.hud_until]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub(crate) fn layout_input(&self, control_center_enabled: bool) -> NotchLayoutInput {
@@ -198,7 +242,7 @@ impl NotchController {
             }
             NotchHotkey::TogglePomodoro => {
                 self.pomodoro.toggle_run();
-                self.pomodoro_elapsed_accum = Duration::ZERO;
+                self.restart_clock();
                 self.alert_until = None;
                 NotchUpdate {
                     changed: true,
@@ -284,7 +328,7 @@ impl NotchController {
             }
             _ => return NotchUpdate::default(),
         }
-        self.pomodoro_elapsed_accum = Duration::ZERO;
+        self.restart_clock();
         NotchUpdate {
             changed: true,
             effect: None,
@@ -369,13 +413,16 @@ impl NotchController {
         now: Instant,
         cursor_inside_notch: bool,
         panel_visible: bool,
+        motion: MotionPreference,
     ) -> NotchUpdate {
-        let raw_dt = now.duration_since(self.last_anim_instant);
-        let dt = raw_dt.as_secs_f32().clamp(0.001, 0.050);
+        let dt = now
+            .saturating_duration_since(self.last_anim_instant)
+            .as_secs_f32()
+            .clamp(0.001, 0.050);
         self.last_anim_instant = now;
         self.anim_phase = (self.anim_phase + dt) % 1000.0;
 
-        let (mut changed, effect) = self.step_pomodoro_clock(now, raw_dt);
+        let (mut changed, effect) = self.step_pomodoro_clock(now);
         self.step_hover_tracking(now, cursor_inside_notch, panel_visible);
 
         let hud_active = self.hud_until.is_some_and(|until| now < until);
@@ -392,70 +439,76 @@ impl NotchController {
             0.0
         };
 
-        let next_hud = smooth_damp(self.hud_expansion, target_hud, 18.0, dt);
-        let next_compact = smooth_damp(self.compact_expansion, target_compact, 16.0, dt);
-        let next_panel = smooth_damp(self.panel_expansion, target_panel, 20.0, dt);
+        let next_hud = animate_value(self.hud_expansion, target_hud, 18.0, dt, motion);
+        let next_compact = animate_value(self.compact_expansion, target_compact, 16.0, dt, motion);
+        let next_panel = animate_value(self.panel_expansion, target_panel, 20.0, dt, motion);
         let target_level = self
             .hud_kind
             .map_or(self.hud_level, NotchHudKind::target_level);
-        let next_level = smooth_damp(self.hud_level, target_level, 22.0, dt);
+        let next_level = animate_value(self.hud_level, target_level, 22.0, dt, motion);
 
-        if !hud_active && next_hud <= 0.002 {
-            self.hud_expansion = 0.0;
-            self.hud_kind = None;
-        } else if (next_hud - self.hud_expansion).abs() > 0.001 {
+        if !hud_active && next_hud <= 0.008 {
+            if self.hud_expansion != 0.0 || self.hud_kind.is_some() {
+                self.hud_expansion = 0.0;
+                self.hud_kind = None;
+                changed = true;
+            }
+        } else if (next_hud - self.hud_expansion).abs() > 0.0005 {
             self.hud_expansion = next_hud;
             changed = true;
         }
 
-        if (next_level - self.hud_level).abs() > 0.001 {
+        if (next_level - self.hud_level).abs() > 0.0005 {
             self.hud_level = next_level;
             changed = true;
         }
 
-        if (next_compact - self.compact_expansion).abs() > 0.001 {
-            self.compact_expansion = if next_compact <= 0.002 && target_compact == 0.0 {
-                0.0
-            } else {
-                next_compact
-            };
+        let resolved_compact = if next_compact <= 0.008 && target_compact < 0.5 {
+            0.0
+        } else if next_compact >= 0.995 && target_compact > 0.5 {
+            1.0
+        } else {
+            next_compact
+        };
+        if (resolved_compact - self.compact_expansion).abs() > 0.0005 {
+            self.compact_expansion = resolved_compact;
             changed = true;
         }
 
-        if (next_panel - self.panel_expansion).abs() > 0.001 {
-            self.panel_expansion = if next_panel <= 0.002 && target_panel == 0.0 {
-                0.0
-            } else {
-                next_panel
-            };
+        let resolved_panel = if next_panel <= 0.008 && target_panel < 0.5 {
+            0.0
+        } else if next_panel >= 0.995 && target_panel > 0.5 {
+            1.0
+        } else {
+            next_panel
+        };
+        if (resolved_panel - self.panel_expansion).abs() > 0.0005 {
+            self.panel_expansion = resolved_panel;
             changed = true;
         }
 
         NotchUpdate { changed, effect }
     }
 
-    fn step_pomodoro_clock(
-        &mut self,
-        now: Instant,
-        raw_dt: Duration,
-    ) -> (bool, Option<NotchEffect>) {
-        let mut changed = false;
-        let mut effect = None;
-        if self.pomodoro.status == PomodoroStatus::Running {
-            self.pomodoro_elapsed_accum += raw_dt;
-            let whole_secs = self.pomodoro_elapsed_accum.as_secs() as u32;
-            if whole_secs > 0 {
-                self.pomodoro_elapsed_accum -= Duration::from_secs(u64::from(whole_secs));
-                if self.pomodoro.tick_seconds(whole_secs) {
-                    effect = Some(NotchEffect::Platform(NotchAction::PlayPomodoroChime));
-                    self.alert_until = Some(now + Duration::from_millis(ALERT_HOLD_MS));
-                }
-                changed = true;
-            }
-        } else {
-            self.pomodoro_elapsed_accum = Duration::ZERO;
+    fn apply_tick(&mut self, tick: PomodoroTick, now: Instant) -> (bool, Option<NotchEffect>) {
+        if tick == PomodoroTick::Completed {
+            self.alert_until = Some(now + Duration::from_millis(ALERT_HOLD_MS));
+            return (
+                true,
+                Some(NotchEffect::Platform(NotchAction::PlayPomodoroChime)),
+            );
         }
+        (tick != PomodoroTick::Unchanged, None)
+    }
 
+    fn step_pomodoro_clock(&mut self, now: Instant) -> (bool, Option<NotchEffect>) {
+        let now_ms = self.millis(now);
+        let tick = self.clock.sync(&mut self.pomodoro, now_ms);
+        let (mut changed, effect) = self.apply_tick(tick, now);
+        if self.hud_until.is_some_and(|until| now >= until) {
+            self.hud_until = None;
+            changed = true;
+        }
         if self.pomodoro.status == PomodoroStatus::Alert
             && let Some(until) = self.alert_until
             && now >= until
@@ -499,8 +552,144 @@ impl NotchController {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotchController, NotchEffect, NotchHotkey};
-    use otto_core::{HitTarget, MediaCommand, NotchAction, NotchExpandedTab, NowPlaying};
+    use super::{ALERT_HOLD_MS, HUD_HOLD_MS, NotchController, NotchEffect, NotchHotkey};
+    use otto_core::{
+        HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
+        NowPlaying, PomodoroStatus,
+    };
+    use std::time::{Duration, Instant};
+
+    fn idle_notch() -> NotchController {
+        NotchController::new(None, NotchExpandedTab::Pomodoro)
+    }
+
+    #[test]
+    fn pomodoro_advances_from_clock_syncs_without_animation_frames() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        let _ = notch.sync_clock(start);
+        let _ = notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        notch.clock.restart(0);
+        let update = notch.sync_clock(start + Duration::from_secs(3));
+        assert!(update.changed);
+        assert_eq!(notch.pomodoro().remaining_seconds, 25 * 60 - 3);
+    }
+
+    #[test]
+    fn running_pomodoro_schedules_a_wakeup_at_the_next_second() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        assert_eq!(notch.next_deadline(start), None);
+        let _ = notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        notch.clock.restart(0);
+        assert_eq!(
+            notch.next_deadline(start),
+            Some(start + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn hud_hold_expires_through_its_deadline_and_collapses_fully() {
+        let mut notch = idle_notch();
+        notch.trigger_hud(NotchHudKind::Volume {
+            percent: 40,
+            muted: false,
+        });
+        let deadline = notch.next_deadline(Instant::now()).expect("hud deadline");
+        let mut now = deadline
+            .checked_sub(Duration::from_millis(HUD_HOLD_MS))
+            .expect("hud deadline follows its hold");
+        for _ in 0..40 {
+            now += Duration::from_millis(16);
+            let _ = notch.advance(now, false, false, MotionPreference::Full);
+        }
+        assert!(notch.hud_state().is_some_and(|hud| hud.expansion > 0.9));
+        let update = notch.sync_clock(deadline);
+        assert!(update.changed);
+        assert_eq!(notch.next_deadline(deadline), None);
+        let mut now = deadline;
+        for _ in 0..200 {
+            now += Duration::from_millis(16);
+            let _ = notch.advance(now, false, false, MotionPreference::Full);
+        }
+        assert!(notch.hud_state().is_none());
+        assert!(
+            !notch
+                .advance(now, false, false, MotionPreference::Full)
+                .changed
+        );
+    }
+
+    #[test]
+    fn completed_session_alert_dismisses_itself_at_its_deadline() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        let _ = notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        notch.clock.restart(0);
+        let mut now = start;
+        let mut chimes = 0;
+        while chimes == 0 && now < start + Duration::from_mins(30) {
+            now += Duration::from_secs(20);
+            if notch.sync_clock(now).effect.is_some() {
+                chimes += 1;
+            }
+        }
+        assert_eq!(chimes, 1);
+        assert_eq!(notch.pomodoro().status, PomodoroStatus::Alert);
+        let deadline = notch.next_deadline(now).expect("alert deadline");
+        assert!(deadline <= now + Duration::from_millis(ALERT_HOLD_MS));
+        assert!(notch.is_panel_target_open(now));
+        let update = notch.sync_clock(deadline);
+        assert!(update.changed);
+        assert_eq!(notch.pomodoro().status, PomodoroStatus::Idle);
+        assert!(!notch.is_panel_target_open(deadline));
+        assert_eq!(notch.next_deadline(deadline), None);
+    }
+
+    #[test]
+    fn panel_animation_reaches_exact_endpoints_and_then_stops_changing() {
+        let mut notch = idle_notch();
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        let mut now = Instant::now();
+        for _ in 0..400 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, false, true, MotionPreference::Full);
+        }
+        assert!((notch.panel_expansion() - 1.0).abs() < f32::EPSILON);
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        for _ in 0..400 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, false, true, MotionPreference::Full);
+        }
+        assert!(notch.panel_expansion().abs() < f32::EPSILON);
+        assert!(
+            !notch
+                .advance(now, false, false, MotionPreference::Full)
+                .changed
+        );
+    }
+
+    #[test]
+    fn reduced_motion_jumps_to_the_target_in_one_step() {
+        let mut notch = idle_notch();
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        let now = Instant::now() + Duration::from_millis(8);
+        let update = notch.advance(now, false, true, MotionPreference::Reduced);
+        assert!(update.changed);
+        assert!((notch.panel_expansion() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn sleep_does_not_consume_a_running_session() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        let _ = notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        notch.clock.restart(0);
+        let _ = notch.suspend(start + Duration::from_secs(2));
+        notch.resume(start + Duration::from_hours(2));
+        let _ = notch.sync_clock(start + Duration::from_hours(2) + Duration::from_secs(1));
+        assert_eq!(notch.pomodoro().remaining_seconds, 25 * 60 - 3);
+    }
 
     #[test]
     fn media_play_pause_updates_optimistic_state_and_returns_effect() {
@@ -591,7 +780,7 @@ mod tests {
         notch.compact_expansion = 1.0;
         notch.last_anim_instant = now;
 
-        let update = notch.advance(now, false, false);
+        let update = notch.advance(now, false, false, MotionPreference::Full);
 
         assert!(!update.changed);
     }

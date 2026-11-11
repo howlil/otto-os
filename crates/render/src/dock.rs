@@ -1,37 +1,29 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::ffi::c_void;
-use std::mem::size_of;
 
-use otto_core::{AppleIconKind, DockItemLayout, DockLayout, ResolvedTheme, scale};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use otto_core::{AppleIconKind, DockItemLayout, DockLayout, PixelLimits, ResolvedTheme, scale};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT,
-    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1Bitmap,
-    ID2D1DCRenderTarget, ID2D1Factory, ID2D1StrokeStyle,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1Bitmap, ID2D1DCRenderTarget,
+    ID2D1Factory, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_ALIGNMENT_CENTER,
     IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
-    HGDIOBJ, SelectObject,
-};
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::Result;
 use windows_numerics::Vector2;
 
+use crate::surface::{DibSurface, draw_on, upload_bgra_bitmap};
 use crate::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
@@ -73,6 +65,7 @@ pub struct DockRenderItem<'a> {
     pub apple_icon: Option<AppleIconKind>,
     pub running: bool,
     pub active: bool,
+    pub hidden: bool,
 }
 
 pub struct DockRenderer {
@@ -80,10 +73,7 @@ pub struct DockRenderer {
     target: ID2D1DCRenderTarget,
     stroke_style: ID2D1StrokeStyle,
     tooltip_format: IDWriteTextFormat,
-    dc: HDC,
-    dib: HBITMAP,
-    previous: HGDIOBJ,
-    size: (i32, i32),
+    surface: DibSurface,
     dpi: u32,
     font_px: f32,
     icons: HashMap<String, ID2D1Bitmap>,
@@ -124,22 +114,7 @@ impl DockRenderer {
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
 
-            let dc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width,
-                    biHeight: -height,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..BITMAPINFOHEADER::default()
-                },
-                ..BITMAPINFO::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let previous = SelectObject(dc, HGDIOBJ(dib.0));
+            let surface = DibSurface::new(width, height)?;
             let brushes = BrushPalette::new(&target)?;
 
             Ok(Self {
@@ -147,10 +122,7 @@ impl DockRenderer {
                 target,
                 stroke_style,
                 tooltip_format,
-                dc,
-                dib,
-                previous,
-                size: (width, height),
+                surface,
                 dpi,
                 font_px,
                 icons: HashMap::new(),
@@ -165,19 +137,8 @@ impl DockRenderer {
     }
 
     pub fn set_icon(&mut self, key: String, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
-        let props = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: PIXEL_FORMAT,
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        let bitmap = unsafe {
-            self.target.CreateBitmap(
-                D2D_SIZE_U { width, height },
-                Some(pixels.as_ptr().cast()),
-                width * 4,
-                &props,
-            )?
-        };
+        self.surface.bind(&self.target, self.surface.size())?;
+        let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
         self.icons.insert(key, bitmap);
         Ok(())
     }
@@ -195,32 +156,7 @@ impl DockRenderer {
         theme: ResolvedTheme,
     ) -> Result<()> {
         self.draw(layout, items, theme)?;
-        let (width, height) = self.size;
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        unsafe {
-            UpdateLayeredWindow(
-                HWND(hwnd as *mut c_void),
-                None,
-                Some(&POINT {
-                    x: origin.0,
-                    y: origin.1,
-                }),
-                Some(&SIZE {
-                    cx: width,
-                    cy: height,
-                }),
-                Some(self.dc),
-                Some(&POINT { x: 0, y: 0 }),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            )
-        }
+        self.surface.present(hwnd, origin)
     }
 
     fn draw(
@@ -230,94 +166,93 @@ impl DockRenderer {
         theme: ResolvedTheme,
     ) -> Result<()> {
         let palette = LiquidGlassPalette::for_theme(theme);
-        let (width, height) = self.size;
-        unsafe {
-            self.target.BindDC(
-                self.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
-            let clear = CLEAR;
-            self.target.Clear(Some(&raw const clear));
-            self.brushes.update_theme(&palette);
+        draw_on(
+            &self.target,
+            &self.surface,
+            self.surface.size(),
+            || unsafe {
+                let clear = CLEAR;
+                self.target.Clear(Some(&raw const clear));
+                self.brushes.update_theme(&palette);
 
-            if layout.pill.width > 0 && layout.pill.height > 0 {
-                self.draw_pill(layout, &palette);
-            }
-
-            if let Some(div_x) = layout.divider_x {
-                let div_brush = self.brushes.scratch(0, palette.dock_divider);
-                let pad_v = layout.pill.height as f32 * 0.20;
-                self.target.DrawLine(
-                    Vector2::new(div_x, layout.pill.y as f32 + pad_v),
-                    Vector2::new(div_x, layout.pill.bottom() as f32 - pad_v),
-                    div_brush,
-                    (scale(1, self.dpi) as f32).max(1.0),
-                    None,
-                );
-            }
-
-            let dot_brush = self.brushes.scratch(1, palette.dock_dot);
-            let active_dot_brush = &self.brushes.text_primary;
-
-            for (slot, item) in layout.items.iter().zip(items) {
-                if slot.opacity < 0.03 || slot.size < 2.0 {
-                    continue;
+                if layout.pill.width > 0 && layout.pill.height > 0 {
+                    self.draw_pill(layout, &palette);
                 }
-                if let Some(apple_kind) = item.apple_icon {
-                    self.draw_apple_icon(slot, apple_kind)?;
-                } else if let Some(bitmap) = self.icons.get(item.key) {
-                    let dest = D2D_RECT_F {
-                        left: slot.x,
-                        top: slot.y,
-                        right: slot.x + slot.size,
-                        bottom: slot.y + slot.size,
-                    };
-                    self.target.DrawBitmap(
-                        bitmap,
-                        Some(&raw const dest),
-                        slot.opacity,
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+
+                if let Some(div_x) = layout.divider_x {
+                    let div_brush = self.brushes.scratch(0, palette.dock_divider);
+                    let pad_v = layout.pill.height as f32 * 0.20;
+                    self.target.DrawLine(
+                        Vector2::new(div_x, layout.pill.y as f32 + pad_v),
+                        Vector2::new(div_x, layout.pill.bottom() as f32 - pad_v),
+                        div_brush,
+                        (scale(1, self.dpi) as f32).max(1.0),
                         None,
                     );
                 }
 
-                if item.running && slot.opacity > 0.5 {
-                    let r = layout.dot_radius;
-                    let (cx, cy) = slot.dot_center;
-                    let ellipse = D2D1_ELLIPSE {
-                        point: Vector2::new(cx, cy),
-                        radiusX: if item.active { r * 1.25 } else { r },
-                        radiusY: r,
-                    };
-                    let b = if item.active {
-                        active_dot_brush
-                    } else {
-                        dot_brush
-                    };
-                    self.target.FillEllipse(&ellipse, b);
+                let dot_brush = self.brushes.scratch(1, palette.dock_dot);
+                let active_dot_brush = &self.brushes.text_primary;
+
+                for (slot, item) in layout.items.iter().zip(items) {
+                    if slot.opacity < 0.03 || slot.size < 2.0 {
+                        continue;
+                    }
+                    let mut effective_slot = *slot;
+                    if item.hidden {
+                        effective_slot.opacity *= 0.55;
+                    }
+                    if let Some(apple_kind) = item.apple_icon {
+                        self.draw_apple_icon(&effective_slot, apple_kind)?;
+                    } else if let Some(bitmap) = self.icons.get(item.key) {
+                        let dest = D2D_RECT_F {
+                            left: effective_slot.x,
+                            top: effective_slot.y,
+                            right: effective_slot.x + effective_slot.size,
+                            bottom: effective_slot.y + effective_slot.size,
+                        };
+                        self.target.DrawBitmap(
+                            bitmap,
+                            Some(&raw const dest),
+                            effective_slot.opacity,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            None,
+                        );
+                    }
+
+                    if item.running && slot.opacity > 0.5 {
+                        let r = layout.dot_radius;
+                        let (cx, cy) = slot.dot_center;
+                        let ellipse = D2D1_ELLIPSE {
+                            point: Vector2::new(cx, cy),
+                            radiusX: if item.active { r * 1.25 } else { r },
+                            radiusY: r,
+                        };
+                        let b = if item.active {
+                            active_dot_brush
+                        } else if item.hidden {
+                            self.brushes.alpha_brush(1, palette.dock_dot, 0.45)
+                        } else {
+                            dot_brush
+                        };
+                        self.target.FillEllipse(&ellipse, b);
+                    }
                 }
-            }
 
-            if let Some(idx) = layout.hovered_index
-                && let (Some(slot), Some(item)) = (layout.items.get(idx), items.get(idx))
-            {
-                self.draw_tooltip(
-                    layout,
-                    slot.x + slot.size * 0.5,
-                    slot.y,
-                    item.title,
-                    &palette,
-                )?;
-            }
-
-            self.target.EndDraw(None, None)
-        }
+                if let Some(idx) = layout.hovered_index
+                    && let (Some(slot), Some(item)) = (layout.items.get(idx), items.get(idx))
+                {
+                    self.draw_tooltip(
+                        layout,
+                        slot.x + slot.size * 0.5,
+                        slot.y,
+                        item.title,
+                        &palette,
+                    )?;
+                }
+                Ok(())
+            },
+        )
     }
 
     fn squircle_bounds(slot: &DockItemLayout) -> (D2D1_ROUNDED_RECT, D2D1_ROUNDED_RECT) {
@@ -1062,7 +997,8 @@ impl DockRenderer {
         let h = layout.tooltip_height;
         let bottom = icon_top_y - layout.tooltip_gap;
         let top = (bottom - h).max(2.0);
-        let left = (center_x - est_w * 0.5).clamp(4.0, (self.size.0 as f32 - est_w - 4.0).max(4.0));
+        let left = (center_x - est_w * 0.5)
+            .clamp(4.0, (self.surface.size().0 as f32 - est_w - 4.0).max(4.0));
         let right = left + est_w;
         let radius = scale(6, self.dpi) as f32;
         let arrow_size = scale(5, self.dpi) as f32;
@@ -1109,15 +1045,5 @@ impl DockRenderer {
             );
         }
         Ok(())
-    }
-}
-
-impl Drop for DockRenderer {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.dc, self.previous);
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            let _ = DeleteDC(self.dc);
-        }
     }
 }

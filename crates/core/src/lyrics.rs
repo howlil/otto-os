@@ -73,6 +73,10 @@ impl LyricsSheet {
     }
 }
 
+pub const MAX_LRC_LINES: usize = 1_000;
+pub const MAX_LRC_TOTAL_TEXT_BYTES: usize = 131_072;
+pub const MAX_LRC_TIMESTAMPS_PER_LINE: usize = 16;
+
 fn parse_timestamp_ms(tag: &str) -> Option<u64> {
     let (min_str, sec_str) = tag.split_once(':')?;
     let mins: u64 = min_str.trim().parse().ok()?;
@@ -80,11 +84,22 @@ fn parse_timestamp_ms(tag: &str) -> Option<u64> {
     let (secs_int, frac_ms) = if let Some((sec, frac)) = sec_str.split_once('.') {
         let secs: u64 = sec.trim().parse().ok()?;
         let frac_trimmed = frac.trim();
-        let ms: u64 = match frac_trimmed.len() {
+        let mut digits = [0u32; 3];
+        let mut count = 0;
+        for ch in frac_trimmed.chars() {
+            if !ch.is_ascii_digit() {
+                return None;
+            }
+            if count < 3 {
+                digits[count] = ch.to_digit(10)?;
+            }
+            count += 1;
+        }
+        let ms = match count {
             0 => 0,
-            1 => frac_trimmed.parse::<u64>().ok()? * 100,
-            2 => frac_trimmed.parse::<u64>().ok()? * 10,
-            _ => frac_trimmed[..3].parse::<u64>().ok()?,
+            1 => u64::from(digits[0]) * 100,
+            2 => u64::from(digits[0] * 10 + digits[1]) * 10,
+            _ => u64::from(digits[0] * 100 + digits[1] * 10 + digits[2]),
         };
         (secs, ms)
     } else {
@@ -92,14 +107,20 @@ fn parse_timestamp_ms(tag: &str) -> Option<u64> {
         (secs, 0)
     };
 
-    Some(mins * 60_000 + secs_int * 1_000 + frac_ms)
+    mins.checked_mul(60_000)?
+        .checked_add(secs_int.checked_mul(1_000)?)?
+        .checked_add(frac_ms)
 }
 
 #[must_use]
 pub fn parse_lrc(content: &str) -> LyricsSheet {
     let mut collected = Vec::new();
+    let mut total_text_bytes = 0;
 
     for line in content.lines() {
+        if collected.len() >= MAX_LRC_LINES || total_text_bytes >= MAX_LRC_TOTAL_TEXT_BYTES {
+            break;
+        }
         let trimmed = line.trim();
         if !trimmed.starts_with('[') {
             continue;
@@ -111,7 +132,9 @@ pub fn parse_lrc(content: &str) -> LyricsSheet {
         while remaining.starts_with('[') {
             if let Some(close_idx) = remaining.find(']') {
                 let inside = &remaining[1..close_idx];
-                if let Some(ms) = parse_timestamp_ms(inside) {
+                if timestamps.len() < MAX_LRC_TIMESTAMPS_PER_LINE
+                    && let Some(ms) = parse_timestamp_ms(inside)
+                {
                     timestamps.push(ms);
                 }
                 remaining = remaining[close_idx + 1..].trim_start();
@@ -122,6 +145,12 @@ pub fn parse_lrc(content: &str) -> LyricsSheet {
 
         let text = remaining.trim().to_string();
         for ts in timestamps {
+            if collected.len() >= MAX_LRC_LINES
+                || total_text_bytes.saturating_add(text.len()) > MAX_LRC_TOTAL_TEXT_BYTES
+            {
+                break;
+            }
+            total_text_bytes += text.len();
             collected.push(LyricLine {
                 timestamp_ms: ts,
                 text: text.clone(),
@@ -223,5 +252,75 @@ mod tests {
         assert_eq!(sheet.lines[1].text, "Middle line");
         assert_eq!(sheet.lines[2].timestamp_ms, 30_000);
         assert_eq!(sheet.lines[2].text, "Repeated line");
+    }
+
+    #[test]
+    fn rejects_malformed_unicode_timestamp_without_panic() {
+        let input = "[00:00.éé]malformed line\n[00:01.00]valid line";
+        let sheet = parse_lrc(input);
+        assert_eq!(sheet.len(), 1);
+        assert_eq!(sheet.lines[0].timestamp_ms, 1_000);
+        assert_eq!(sheet.lines[0].text, "valid line");
+    }
+
+    #[test]
+    fn caps_allocation_amplification_from_repeated_timestamps() {
+        use std::fmt::Write;
+        let mut bomb = String::new();
+        for sec in 0..5000 {
+            let _ = write!(bomb, "[00:{:02}.00]", sec % 60);
+        }
+        bomb.push_str("Long text repeated many times across timestamps");
+        let sheet = parse_lrc(&bomb);
+        assert!(sheet.len() <= MAX_LRC_TIMESTAMPS_PER_LINE);
+    }
+
+    #[test]
+    fn caps_total_lines_and_text_bytes_across_the_document() {
+        use std::fmt::Write;
+        let mut many = String::new();
+        for index in 0..(MAX_LRC_LINES * 3) {
+            let _ = writeln!(many, "[{:02}:{:02}.00]line", index / 60, index % 60);
+        }
+        assert_eq!(parse_lrc(&many).len(), MAX_LRC_LINES);
+
+        let wide = "x".repeat(4_096);
+        let mut heavy = String::new();
+        for index in 0..200 {
+            let _ = writeln!(heavy, "[00:{:02}.00]{wide}", index % 60);
+        }
+        let total: usize = parse_lrc(&heavy)
+            .lines
+            .iter()
+            .map(|line| line.text.len())
+            .sum();
+        assert!(total <= MAX_LRC_TOTAL_TEXT_BYTES);
+    }
+
+    #[test]
+    fn survives_hostile_fragments_without_panicking() {
+        let fragments = [
+            "[",
+            "]",
+            "[]",
+            "[:]",
+            "[00:]",
+            "[:00]",
+            "[00:00.]",
+            "[99999999999999999999:00.00]x",
+            "[18446744073709551615:59.999]x",
+            "[00:18446744073709551615.00]x",
+            "[00:00.٣٤]x",
+            "[00:00.00",
+            "[[00:00.00]]x",
+            "[00:00.00][",
+            "[é:é.é]é",
+            "[00:00.00]🎵",
+        ];
+        for fragment in fragments {
+            let _ = parse_lrc(fragment);
+        }
+        let _ = parse_lrc(&fragments.join("\n"));
+        assert!(parse_lrc("[18446744073709551615:59.999]x").is_empty());
     }
 }

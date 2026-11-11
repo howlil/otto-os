@@ -1,31 +1,31 @@
 use std::mem::size_of;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::bar_controls::{BarControlAction, BarControlsController};
 use crate::host::RuntimeContext;
+use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    HitTarget, Layout, LyricsSheet, Metrics, NotchExpandedTab, NotchHudKind, NotchLayoutInput,
-    NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target,
-    parse_lrc, scale,
+    BarPointer, BarVisibility, HitTarget, Layout, Metrics, MotionPreference, NotchExpandedTab,
+    NotchHudKind, NotchLayoutInput, NotchPort, NowPlaying, compute_layout_with_notch,
+    detect_hud_event, is_top_bar_menu_target, scale,
 };
 use otto_platform::{
-    AppBar, PrimaryScreen, WindowsNotchPort, adjust_volume, current_process_id, cursor_position,
-    enable_backdrop_blur, foreground_app_snapshot, get_or_fetch_lyrics, load_cached_lyrics,
-    open_quick_settings, open_spotlight_search, primary_screen, read_system_status,
-    register_notch_hotkeys, step_display_brightness, suppress_native_osd, toggle_tray_overflow,
-    unregister_notch_hotkeys,
+    AppBar, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen, WindowsNotchPort,
+    adjust_volume, current_process_id, cursor_position, enable_backdrop_blur,
+    foreground_application, motion_preference, open_quick_settings, open_spotlight_search,
+    primary_screen, read_system_status, register_notch_hotkeys, restore_shell_from_recovery,
+    step_display_brightness, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
+    window_bounds,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowPos, ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
+    SetWindowPos, ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -33,68 +33,14 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const BLUR_TINT_ALPHA: f32 = 0.28;
 const STATUS_TIMER: usize = 1;
 const HUD_ANIM_TIMER: usize = 2;
+const DEADLINE_TIMER: usize = 3;
+const WM_POWERBROADCAST: u32 = 0x0218;
+const PBT_APMSUSPEND: usize = 0x0004;
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+const MIN_DEADLINE_MS: u128 = 10;
 const STATUS_POLL_MS: u32 = 120;
 const HUD_ANIM_MS: u32 = 8;
-
-struct LyricsRequest {
-    generation: u64,
-    title: String,
-    artist: String,
-    duration_ms: u64,
-    allow_online: bool,
-}
-
-struct LyricsResponse {
-    generation: u64,
-    title: String,
-    artist: String,
-    sheet: Option<LyricsSheet>,
-}
-
-struct ComApartmentGuard;
-
-impl ComApartmentGuard {
-    fn new() -> Option<Self> {
-        if unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_err() {
-            return None;
-        }
-        Some(Self)
-    }
-}
-
-impl Drop for ComApartmentGuard {
-    fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
-        }
-    }
-}
-
-fn lyrics_worker_loop(receiver: &Receiver<LyricsRequest>, sender: &Sender<LyricsResponse>) {
-    let com = ComApartmentGuard::new();
-    while let Ok(mut request) = receiver.recv() {
-        while let Ok(newer) = receiver.try_recv() {
-            request = newer;
-        }
-        let text = if com.is_some() {
-            get_or_fetch_lyrics(
-                &request.title,
-                &request.artist,
-                request.duration_ms,
-                request.allow_online,
-            )
-        } else {
-            load_cached_lyrics(&request.title, &request.artist)
-        };
-        let sheet = text.map(|s| parse_lrc(&s));
-        let _ = sender.send(LyricsResponse {
-            generation: request.generation,
-            title: request.title,
-            artist: request.artist,
-            sheet,
-        });
-    }
-}
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Bar {
@@ -115,15 +61,16 @@ pub(crate) struct Bar {
     tracking_bar_mouse: bool,
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
-    lyrics_receiver: Receiver<LyricsResponse>,
-    lyrics_sender: Sender<LyricsRequest>,
+    lyrics: LyricsService,
     lyrics_track: Option<(String, String)>,
     lyrics_generation: u64,
-    lyrics_worker: Option<JoinHandle<()>>,
     online_lyrics_enabled: bool,
     animating: bool,
     settle_ticks: u32,
     control_center_enabled: bool,
+    motion: MotionPreference,
+    visibility: BarVisibility,
+    shell_full_screen: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -136,8 +83,10 @@ pub fn start(
 ) -> Result<()> {
     let mut appbar = AppBar::register(hwnd);
     let own_pid = current_process_id();
-    let (active_app, active_hwnd) =
-        foreground_app_snapshot(own_pid).unwrap_or_else(|| (String::from("Finder"), 0));
+    let (active_app, active_window) = foreground_application(own_pid).map_or_else(
+        || (String::from("Finder"), None),
+        |foreground| (foreground.name, foreground.window),
+    );
     let metrics = Metrics::default();
     let screen = primary_screen();
     let notch_port = WindowsNotchPort;
@@ -149,7 +98,7 @@ pub fn start(
     };
     let notch = NotchController::new(media, notch_tab);
     let status = read_system_status();
-    let controls = BarControlsController::new(status, active_app.clone(), active_hwnd);
+    let controls = BarControlsController::new(status, active_app.clone(), active_window);
     let layout = compute_layout_with_notch(
         &metrics,
         screen.width,
@@ -182,23 +131,7 @@ pub fn start(
     appbar.reserve_top(screen.width, screen.height, layout.bar.height);
     register_notch_hotkeys(hwnd);
 
-    let (req_sender, req_receiver) = channel();
-    let (resp_sender, resp_receiver) = channel();
-    let lyrics_worker = thread::spawn(move || {
-        lyrics_worker_loop(&req_receiver, &resp_sender);
-    });
-    let mut lyrics_generation = 0u64;
-    let lyrics_track = notch.media().map(|m| (m.title.clone(), m.artist.clone()));
-    if let Some(m) = notch.media() {
-        lyrics_generation = 1;
-        let _ = req_sender.send(LyricsRequest {
-            generation: 1,
-            title: m.title.clone(),
-            artist: m.artist.clone(),
-            duration_ms: m.duration_ms,
-            allow_online: runtime.online_lyrics_enabled.get(),
-        });
-    }
+    let lyrics = LyricsService::start();
 
     let mut bar = Bar {
         hwnd,
@@ -218,15 +151,16 @@ pub fn start(
         tracking_bar_mouse: false,
         tracking_panel_mouse: false,
         maintain_ticks: 0,
-        lyrics_receiver: resp_receiver,
-        lyrics_sender: req_sender,
-        lyrics_track,
-        lyrics_generation,
-        lyrics_worker: Some(lyrics_worker),
+        lyrics,
+        lyrics_track: None,
+        lyrics_generation: 0,
         online_lyrics_enabled: runtime.online_lyrics_enabled.get(),
         animating: false,
         settle_ticks: 0,
         control_center_enabled,
+        motion: motion_preference(),
+        visibility: BarVisibility::default(),
+        shell_full_screen: false,
     };
     bar.place();
     bar.present(runtime);
@@ -250,13 +184,10 @@ pub fn stop(runtime: &RuntimeContext) {
         unsafe {
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), STATUS_TIMER);
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), HUD_ANIM_TIMER);
+            let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), DEADLINE_TIMER);
         }
         unregister_notch_hotkeys(bar.hwnd);
-        let (dummy_sender, _) = channel();
-        bar.lyrics_sender = dummy_sender;
-        if let Some(handle) = bar.lyrics_worker.take() {
-            let _ = handle.join();
-        }
+        bar.lyrics.shutdown();
     }
 }
 
@@ -269,6 +200,14 @@ pub fn handle_message(
 ) -> Option<LRESULT> {
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
+        WM_QUERYENDSESSION => Some(LRESULT(1)),
+        WM_ENDSESSION => {
+            if wparam.0 != 0 {
+                let _ = otto_platform::restore_hidden_windows();
+                let _ = restore_shell_from_recovery();
+            }
+            Some(LRESULT(0))
+        }
         WM_TIMER if wparam.0 == STATUS_TIMER => {
             with_bar(runtime, |bar| bar.tick(runtime));
             Some(LRESULT(0))
@@ -276,6 +215,24 @@ pub fn handle_message(
         WM_TIMER if wparam.0 == HUD_ANIM_TIMER => {
             with_bar(runtime, |bar| bar.step_hud_animation(runtime));
             Some(LRESULT(0))
+        }
+        WM_TIMER if wparam.0 == DEADLINE_TIMER => {
+            with_bar(runtime, |bar| bar.on_deadline(runtime));
+            Some(LRESULT(0))
+        }
+        otto_platform::APPBAR_CALLBACK_MESSAGE => {
+            if let Some(notification) =
+                otto_platform::classify_shell_notification(wparam.0, lparam.0)
+            {
+                with_bar(runtime, |bar| {
+                    bar.on_shell_notification(runtime, notification);
+                });
+            }
+            Some(LRESULT(0))
+        }
+        WM_POWERBROADCAST => {
+            with_bar(runtime, |bar| bar.on_power_event(runtime, wparam.0));
+            Some(LRESULT(1))
         }
         WM_HOTKEY => {
             with_bar(runtime, |bar| bar.on_hotkey(runtime, wparam.0 as i32));
@@ -340,23 +297,46 @@ pub fn repaint(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| bar.present(runtime));
 }
 
-pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
     with_bar(runtime, |bar| {
-        bar.online_lyrics_enabled = enabled;
-        bar.lyrics_generation = bar.lyrics_generation.wrapping_add(1);
-        if let Some(media) = bar.notch.media() {
-            let _ = bar.lyrics_sender.send(LyricsRequest {
-                generation: bar.lyrics_generation,
-                title: media.title.clone(),
-                artist: media.artist.clone(),
-                duration_ms: media.duration_ms,
-                allow_online: enabled,
-            });
+        if let Some(action) = BarControlsController::click_action(target) {
+            bar.perform(runtime, action);
         }
     });
 }
 
+pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.online_lyrics_enabled = enabled;
+        bar.lyrics_track = None;
+        bar.request_lyrics_for_current_track();
+    });
+}
+
 impl Bar {
+    fn request_lyrics_for_current_track(&mut self) {
+        let Some(media) = self.notch.media() else {
+            self.lyrics_track = None;
+            return;
+        };
+        let track = (media.title.clone(), media.artist.clone());
+        if track.0.trim().is_empty() || self.lyrics_track.as_ref() == Some(&track) {
+            return;
+        }
+        let generation = self.lyrics_generation.wrapping_add(1);
+        let accepted = self.lyrics.request(LyricsRequest {
+            generation,
+            title: track.0.clone(),
+            artist: track.1.clone(),
+            duration_ms: media.duration_ms,
+            allow_online: self.online_lyrics_enabled,
+        });
+        self.lyrics_generation = generation;
+        if accepted {
+            self.lyrics_track = Some(track);
+        }
+    }
+
     fn notch_input(&self) -> NotchLayoutInput {
         self.notch.layout_input(self.control_center_enabled)
     }
@@ -382,7 +362,80 @@ impl Bar {
         }
     }
 
+    fn on_shell_notification(
+        &mut self,
+        runtime: &RuntimeContext,
+        notification: otto_platform::ShellNotification,
+    ) {
+        match notification {
+            otto_platform::ShellNotification::PositionChanged => {
+                self.appbar.reserve_top(
+                    self.screen.width,
+                    self.screen.height,
+                    self.layout.bar.height,
+                );
+            }
+            otto_platform::ShellNotification::FullScreenApp(active) => {
+                self.shell_full_screen = active;
+                self.sync_full_screen(runtime);
+            }
+        }
+    }
+
+    fn foreground_covers_primary(&self) -> bool {
+        self.controls.active_window().is_some_and(|window| {
+            window.full_screen
+                && window_bounds(window.identity.hwnd).is_some_and(|frame| {
+                    frame.x <= 0
+                        && frame.y <= 0
+                        && frame.right() >= self.screen.width
+                        && frame.bottom() >= self.screen.height
+                })
+        })
+    }
+
+    fn sync_full_screen(&mut self, runtime: &RuntimeContext) {
+        let active = self.shell_full_screen || self.foreground_covers_primary();
+        if self.visibility.set_full_screen_app(active) {
+            self.apply_visibility(runtime);
+        }
+    }
+
+    fn track_reveal(&mut self, runtime: &RuntimeContext) {
+        let (x, y) = cursor_position();
+        let pointer = BarPointer {
+            on_bar_monitor: x >= 0 && x < self.screen.width && y >= 0 && y < self.screen.height,
+            y,
+        };
+        let popup_open = crate::menu::active_top_bar_target(runtime).is_some()
+            || crate::menu::is_control_center_open(runtime)
+            || crate::menu::is_calendar_open(runtime);
+        if self
+            .visibility
+            .track_pointer(pointer, self.layout.bar.height, popup_open)
+        {
+            self.apply_visibility(runtime);
+        }
+    }
+
+    fn apply_visibility(&mut self, runtime: &RuntimeContext) {
+        if self.visibility.is_visible() {
+            self.place();
+            self.present(runtime);
+            return;
+        }
+        crate::menu::close(runtime);
+        unsafe {
+            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
+            let _ = ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE);
+        }
+        self.panel_visible = false;
+    }
+
     fn place(&self) {
+        if !self.visibility.is_visible() {
+            return;
+        }
         let _ = unsafe {
             SetWindowPos(
                 HWND(self.hwnd as *mut _),
@@ -397,7 +450,7 @@ impl Bar {
     }
 
     fn sync_panel_visibility(&mut self) {
-        let should_show = self.notch.panel_expansion() > 0.002;
+        let should_show = self.notch.panel_expansion() > 0.005 && self.visibility.is_visible();
         if should_show {
             let _ = unsafe {
                 SetWindowPos(
@@ -464,6 +517,7 @@ impl Bar {
         ) {
             self.renderer = renderer;
         }
+        self.appbar.rebase(self.screen.width, self.screen.height);
         self.appbar.reserve_top(
             self.screen.width,
             self.screen.height,
@@ -476,6 +530,7 @@ impl Bar {
 
     fn tick(&mut self, runtime: &RuntimeContext) {
         self.maintain_ticks = self.maintain_ticks.wrapping_add(1);
+        self.track_reveal(runtime);
         if self.maintain_ticks.is_multiple_of(8) {
             suppress_native_osd();
             self.appbar.maintain(
@@ -483,7 +538,7 @@ impl Bar {
                 self.screen.height,
                 self.layout.bar.height,
             );
-            if self.panel_visible {
+            if self.panel_visible && self.visibility.is_visible() {
                 let _ = unsafe {
                     SetWindowPos(
                         HWND(self.panel_hwnd as *mut _),
@@ -498,22 +553,33 @@ impl Bar {
             }
         }
         let mut dirty = false;
-        while let Ok(response) = self.lyrics_receiver.try_recv() {
+        while let Some(response) = self.lyrics.poll() {
             if response.generation == self.lyrics_generation
                 && let Some(media) = self.notch.media()
                 && media.title == response.title
                 && media.artist == response.artist
             {
-                self.notch.set_lyrics(response.sheet);
+                self.notch.set_lyrics(match response.outcome {
+                    LyricsOutcome::Found { sheet, .. } => Some(sheet),
+                    LyricsOutcome::NotFound | LyricsOutcome::Failed => None,
+                });
                 dirty = true;
             }
         }
-        if let Some((app_name, app_hwnd)) = foreground_app_snapshot(self.own_pid)
-            && self.controls.apply_foreground(app_name, app_hwnd)
-        {
-            self.recompute_layout();
-            dirty = true;
+        if let Some(foreground) = foreground_application(self.own_pid) {
+            let change = self
+                .controls
+                .apply_foreground(foreground.name, foreground.window);
+            if change.app {
+                self.recompute_layout();
+                dirty = true;
+            }
+            if change.window && crate::menu::active_top_bar_target(runtime).is_some() {
+                crate::menu::close(runtime);
+                dirty = true;
+            }
         }
+        self.sync_full_screen(runtime);
         let latest = read_system_status();
         if let Some(event) = detect_hud_event(self.controls.status(), latest) {
             self.notch.trigger_hud(event);
@@ -528,39 +594,82 @@ impl Bar {
                 self.recompute_layout();
                 dirty = true;
             }
-            if let Some(media) = self.notch.media() {
-                let track_key = (media.title.clone(), media.artist.clone());
-                if !track_key.0.trim().is_empty() && self.lyrics_track.as_ref() != Some(&track_key)
-                {
-                    self.lyrics_track = Some(track_key.clone());
-                    self.lyrics_generation = self.lyrics_generation.wrapping_add(1);
-                    let _ = self.lyrics_sender.send(LyricsRequest {
-                        generation: self.lyrics_generation,
-                        title: track_key.0,
-                        artist: track_key.1,
-                        duration_ms: media.duration_ms,
-                        allow_online: self.online_lyrics_enabled,
-                    });
-                }
-            } else {
-                self.lyrics_track = None;
-            }
+            self.request_lyrics_for_current_track();
         }
-        let pomodoro_active = self.notch.pomodoro().is_compact_active();
-        if dirty || pomodoro_active {
+        self.motion = motion_preference();
+        if dirty {
+            self.ensure_anim_timer();
+            self.present(runtime);
+        }
+        self.schedule_deadline();
+    }
+
+    fn schedule_deadline(&self) {
+        let hwnd = Some(HWND(self.hwnd as *mut _));
+        let now = Instant::now();
+        match self.notch.next_deadline(now) {
+            Some(deadline) => {
+                let wait = deadline
+                    .saturating_duration_since(now)
+                    .as_millis()
+                    .max(MIN_DEADLINE_MS);
+                unsafe {
+                    SetTimer(
+                        hwnd,
+                        DEADLINE_TIMER,
+                        u32::try_from(wait).unwrap_or(u32::MAX),
+                        None,
+                    );
+                }
+            }
+            None => unsafe {
+                let _ = KillTimer(hwnd, DEADLINE_TIMER);
+            },
+        }
+    }
+
+    fn apply_notch_update(&mut self, runtime: &RuntimeContext, update: crate::notch::NotchUpdate) {
+        if let Some(NotchEffect::Platform(action)) = update.effect {
+            self.notch_port.execute(action);
+        }
+        if update.changed {
+            self.recompute_layout();
+            self.sync_panel_visibility();
+            self.present(runtime);
             self.ensure_anim_timer();
         }
-        if dirty {
-            self.present(runtime);
+    }
+
+    fn on_deadline(&mut self, runtime: &RuntimeContext) {
+        let update = self.notch.sync_clock(Instant::now());
+        self.apply_notch_update(runtime, update);
+        self.schedule_deadline();
+    }
+
+    fn on_power_event(&mut self, runtime: &RuntimeContext, event: usize) {
+        let now = Instant::now();
+        match event {
+            PBT_APMSUSPEND => {
+                let update = self.notch.suspend(now);
+                self.apply_notch_update(runtime, update);
+            }
+            PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => {
+                self.notch.resume(now);
+                self.schedule_deadline();
+            }
+            _ => {}
         }
     }
 
     fn step_hud_animation(&mut self, runtime: &RuntimeContext) {
         let now = Instant::now();
         let (cx, cy) = cursor_position();
-        let update =
-            self.notch
-                .advance(now, self.layout.notch.contains(cx, cy), self.panel_visible);
+        let update = self.notch.advance(
+            now,
+            self.layout.notch.contains(cx, cy),
+            self.panel_visible,
+            self.motion,
+        );
         if let Some(NotchEffect::Platform(action)) = update.effect {
             self.notch_port.execute(action);
         }
@@ -572,8 +681,10 @@ impl Bar {
         } else if self.settle_ticks > 0 {
             self.settle_ticks -= 1;
         } else {
+            self.sync_panel_visibility();
             self.stop_anim_timer();
         }
+        self.schedule_deadline();
     }
 
     fn on_hotkey(&mut self, runtime: &RuntimeContext, hotkey_id: i32) {
@@ -591,6 +702,7 @@ impl Bar {
             self.sync_panel_visibility();
             self.present(runtime);
         }
+        self.schedule_deadline();
     }
 
     fn ensure_mouse_tracking(&mut self, source_hwnd: isize) {
@@ -638,17 +750,8 @@ impl Bar {
             && let Some(hit) = target
             && is_top_bar_menu_target(hit)
             && hit != open_target
-            && let Some(slot) = self.layout.slot_rect(hit)
         {
-            crate::menu::open_top_bar_menu(
-                runtime,
-                self.hwnd,
-                hit,
-                slot.x,
-                self.layout.bar.height + 4,
-                self.controls.active_app(),
-                self.controls.active_hwnd(),
-            );
+            self.open_menu(runtime, hit, None);
         }
         if target != self.hovered {
             self.hovered = target;
@@ -726,7 +829,6 @@ impl Bar {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn on_left_click(
         &mut self,
         runtime: &RuntimeContext,
@@ -785,29 +887,55 @@ impl Bar {
             return;
         }
 
-        let Some(action) = BarControlsController::click_action(target) else {
+        if let Some(action) = BarControlsController::click_action(target) {
+            self.perform(runtime, action);
+        }
+    }
+
+    fn open_menu(&self, runtime: &RuntimeContext, target: HitTarget, anchor_x: Option<i32>) {
+        let Some(slot) = self.layout.menu_anchor_rect(target) else {
             return;
         };
+        crate::menu::open_top_bar_menu(
+            runtime,
+            &TopBarMenuRequest {
+                bar_hwnd: self.hwnd,
+                target,
+                anchor_x: anchor_x.unwrap_or(slot.x),
+                anchor_y: self.layout.bar.height + 4,
+                app_name: self.controls.active_app(),
+                window: self.controls.active_window(),
+                hidden: &self.layout.hidden_targets,
+            },
+        );
+    }
+
+    fn anchor_right(&self, target: HitTarget) -> i32 {
+        self.layout
+            .menu_anchor_rect(target)
+            .map_or(self.screen.width, |slot| slot.right())
+    }
+
+    fn perform(&mut self, runtime: &RuntimeContext, action: BarControlAction) {
         match action {
             BarControlAction::TopBarMenu(target) => {
                 if crate::menu::active_top_bar_target(runtime) == Some(target) {
                     crate::menu::close(runtime);
-                } else if let Some(slot) = self.layout.slot_rect(target) {
-                    crate::menu::open_top_bar_menu(
-                        runtime,
-                        self.hwnd,
-                        target,
-                        slot.x,
-                        self.layout.bar.height + 4,
-                        self.controls.active_app(),
-                        self.controls.active_hwnd(),
-                    );
+                } else {
+                    self.open_menu(runtime, target, None);
                 }
                 self.present(runtime);
             }
             BarControlAction::Tray => {
-                let anchor_x = self.layout.tray_slot.x + self.layout.tray_slot.width / 2;
-                toggle_tray_overflow(anchor_x, self.layout.bar.height, self.screen.width);
+                let anchor = self
+                    .layout
+                    .menu_anchor_rect(HitTarget::Tray)
+                    .unwrap_or(self.layout.tray_slot);
+                let _ = toggle_tray_overflow(
+                    anchor.x + anchor.width / 2,
+                    self.layout.bar.height,
+                    self.screen.width,
+                );
             }
             BarControlAction::ControlCenter => {
                 if !self.control_center_enabled {
@@ -816,11 +944,11 @@ impl Bar {
                 if crate::menu::is_control_center_open(runtime) {
                     crate::menu::close(runtime);
                 } else {
-                    let right = self
-                        .layout
-                        .slot_rect(HitTarget::ControlCenter)
-                        .map_or(self.screen.width, |slot| slot.right());
-                    crate::menu::open_control_center(runtime, right, self.layout.bar.height + 4);
+                    crate::menu::open_control_center(
+                        runtime,
+                        self.anchor_right(HitTarget::ControlCenter),
+                        self.layout.bar.height + 4,
+                    );
                 }
             }
             BarControlAction::QuickSettings => open_quick_settings(),
@@ -829,11 +957,11 @@ impl Bar {
                 if crate::menu::is_calendar_open(runtime) {
                     crate::menu::close(runtime);
                 } else {
-                    let right = self
-                        .layout
-                        .slot_rect(HitTarget::Clock)
-                        .map_or(self.screen.width, |slot| slot.right());
-                    crate::menu::open_calendar(runtime, right, self.layout.bar.height + 4);
+                    crate::menu::open_calendar(
+                        runtime,
+                        self.anchor_right(HitTarget::Clock),
+                        self.layout.bar.height + 4,
+                    );
                 }
             }
             BarControlAction::AdjustVolume(_) | BarControlAction::StepBrightness(_) => {}
@@ -854,15 +982,7 @@ impl Bar {
         } else {
             x
         };
-        crate::menu::open_top_bar_menu(
-            runtime,
-            self.hwnd,
-            HitTarget::Start,
-            anchor_x,
-            self.layout.bar.height + 4,
-            self.controls.active_app(),
-            self.controls.active_hwnd(),
-        );
+        self.open_menu(runtime, HitTarget::Start, Some(anchor_x));
         self.present(runtime);
     }
 

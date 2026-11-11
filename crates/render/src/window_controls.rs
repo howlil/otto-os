@@ -1,29 +1,20 @@
-use std::ffi::c_void;
-use std::mem::size_of;
-
-use otto_core::WindowControlsLayout;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use otto_core::{WindowControlsLayout, WindowControlsState};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
-    ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
-    HGDIOBJ, SelectObject,
-};
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::shared_d2d_factory;
+use crate::surface::{DibSurface, draw_on};
 
 const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
@@ -67,6 +58,18 @@ const GREEN_BORDER: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 0.161,
     a: 1.0,
 };
+const DISABLED_FILL: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.80,
+    g: 0.80,
+    b: 0.82,
+    a: 0.55,
+};
+const DISABLED_BORDER: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.55,
+    g: 0.55,
+    b: 0.58,
+    a: 0.55,
+};
 const GLYPH_DARK: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.22,
     g: 0.08,
@@ -82,18 +85,16 @@ pub struct WindowControlsRenderer {
     factory: ID2D1Factory,
     target: ID2D1DCRenderTarget,
     stroke_style: ID2D1StrokeStyle,
-    bg_brush: ID2D1SolidColorBrush,
     red_fill: ID2D1SolidColorBrush,
     red_border: ID2D1SolidColorBrush,
     yellow_fill: ID2D1SolidColorBrush,
     yellow_border: ID2D1SolidColorBrush,
     green_fill: ID2D1SolidColorBrush,
     green_border: ID2D1SolidColorBrush,
+    disabled_fill: ID2D1SolidColorBrush,
+    disabled_border: ID2D1SolidColorBrush,
     glyph_brush: ID2D1SolidColorBrush,
-    dc: HDC,
-    dib: HBITMAP,
-    previous: HGDIOBJ,
-    size: (i32, i32),
+    surface: DibSurface,
 }
 
 pub type TrafficLightRenderer = WindowControlsRenderer;
@@ -123,48 +124,32 @@ impl WindowControlsRenderer {
             };
             let stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
 
-            let bg_brush = target.CreateSolidColorBrush(&CLEAR, None)?;
             let red_fill = target.CreateSolidColorBrush(&RED_FILL, None)?;
             let red_border = target.CreateSolidColorBrush(&RED_BORDER, None)?;
             let yellow_fill = target.CreateSolidColorBrush(&YELLOW_FILL, None)?;
             let yellow_border = target.CreateSolidColorBrush(&YELLOW_BORDER, None)?;
             let green_fill = target.CreateSolidColorBrush(&GREEN_FILL, None)?;
             let green_border = target.CreateSolidColorBrush(&GREEN_BORDER, None)?;
+            let disabled_fill = target.CreateSolidColorBrush(&DISABLED_FILL, None)?;
+            let disabled_border = target.CreateSolidColorBrush(&DISABLED_BORDER, None)?;
             let glyph_brush = target.CreateSolidColorBrush(&GLYPH_DARK, None)?;
 
-            let dc = CreateCompatibleDC(None);
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width,
-                    biHeight: -height,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..BITMAPINFOHEADER::default()
-                },
-                ..BITMAPINFO::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-            let previous = SelectObject(dc, HGDIOBJ(dib.0));
+            let surface = DibSurface::new(width, height)?;
 
             Ok(Self {
                 factory,
                 target,
                 stroke_style,
-                bg_brush,
                 red_fill,
                 red_border,
                 yellow_fill,
                 yellow_border,
                 green_fill,
                 green_border,
+                disabled_fill,
+                disabled_border,
                 glyph_brush,
-                dc,
-                dib,
-                previous,
-                size: (width, height),
+                surface,
             })
         }
     }
@@ -174,106 +159,63 @@ impl WindowControlsRenderer {
         hwnd: isize,
         origin: (i32, i32),
         layout: &WindowControlsLayout,
-        titlebar_rgb: (u8, u8, u8),
+        state: WindowControlsState,
         maximized: bool,
         hovered: bool,
     ) -> Result<()> {
-        self.draw(layout, titlebar_rgb, maximized, hovered)?;
-        let (width, height) = self.size;
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        unsafe {
-            UpdateLayeredWindow(
-                HWND(hwnd as *mut c_void),
-                None,
-                Some(&POINT {
-                    x: origin.0,
-                    y: origin.1,
-                }),
-                Some(&SIZE {
-                    cx: width,
-                    cy: height,
-                }),
-                Some(self.dc),
-                Some(&POINT { x: 0, y: 0 }),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            )
-        }
+        self.draw(layout, state, maximized, hovered)?;
+        self.surface.present(hwnd, origin)
     }
 
     fn draw(
         &self,
         layout: &WindowControlsLayout,
-        titlebar_rgb: (u8, u8, u8),
+        state: WindowControlsState,
         maximized: bool,
         hovered: bool,
     ) -> Result<()> {
-        let (width, height) = self.size;
-        unsafe {
-            self.target.BindDC(
-                self.dc,
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                },
-            )?;
-            self.target.BeginDraw();
-            let clear = CLEAR;
-            self.target.Clear(Some(&raw const clear));
+        draw_on(
+            &self.target,
+            &self.surface,
+            self.surface.size(),
+            || unsafe {
+                let clear = CLEAR;
+                self.target.Clear(Some(&raw const clear));
 
-            let bg_color = D2D1_COLOR_F {
-                r: f32::from(titlebar_rgb.0) / 255.0,
-                g: f32::from(titlebar_rgb.1) / 255.0,
-                b: f32::from(titlebar_rgb.2) / 255.0,
-                a: 1.0,
-            };
-            self.bg_brush.SetColor(&bg_color);
-            if maximized {
-                let rect = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: width as f32,
-                    bottom: height as f32,
+                let [close_x, min_x, max_x] = layout.centers_x;
+                let cy = layout.center_y;
+                let r = layout.radius;
+
+                let pick = |enabled: bool,
+                            fill: &'_ ID2D1SolidColorBrush,
+                            border: &'_ ID2D1SolidColorBrush| {
+                    if enabled {
+                        (fill.clone(), border.clone())
+                    } else {
+                        (self.disabled_fill.clone(), self.disabled_border.clone())
+                    }
                 };
-                self.target.FillRectangle(&rect, &self.bg_brush);
-            } else {
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: width as f32,
-                        bottom: height as f32,
-                    },
-                    radiusX: 8.0,
-                    radiusY: 8.0,
-                };
-                self.target.FillRoundedRectangle(&rounded, &self.bg_brush);
-            }
+                let (fill, border) = pick(state.close, &self.red_fill, &self.red_border);
+                self.draw_circle(&fill, &border, close_x, cy, r);
+                let (fill, border) = pick(state.minimize, &self.yellow_fill, &self.yellow_border);
+                self.draw_circle(&fill, &border, min_x, cy, r);
+                let (fill, border) = pick(state.zoom, &self.green_fill, &self.green_border);
+                self.draw_circle(&fill, &border, max_x, cy, r);
 
-            let [max_x, min_x, close_x] = layout.centers_x;
-            let cy = layout.center_y;
-            let r = layout.radius;
-
-            self.draw_circle(&self.green_fill, &self.green_border, max_x, cy, r);
-            self.draw_circle(&self.yellow_fill, &self.yellow_border, min_x, cy, r);
-            self.draw_circle(&self.red_fill, &self.red_border, close_x, cy, r);
-
-            if hovered {
-                self.draw_zoom_glyph(&self.glyph_brush, max_x, cy, maximized)?;
-                self.draw_minimize_glyph(&self.glyph_brush, min_x, cy);
-                self.draw_close_glyph(&self.glyph_brush, close_x, cy);
-            }
-
-            self.target.EndDraw(None, None)
-        }
+                if hovered {
+                    if state.close {
+                        self.draw_close_glyph(&self.glyph_brush, close_x, cy);
+                    }
+                    if state.minimize {
+                        self.draw_minimize_glyph(&self.glyph_brush, min_x, cy);
+                    }
+                    if state.zoom {
+                        self.draw_zoom_glyph(&self.glyph_brush, max_x, cy, maximized)?;
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 
     unsafe fn draw_circle(
@@ -373,15 +315,5 @@ impl WindowControlsRenderer {
             self.target.FillGeometry(&path, brush, None);
         }
         Ok(())
-    }
-}
-
-impl Drop for WindowControlsRenderer {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.dc, self.previous);
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            let _ = DeleteDC(self.dc);
-        }
     }
 }

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs;
 use std::mem::size_of;
@@ -6,43 +5,43 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use otto_core::{
-    AppleIconKind, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN, CMD_DOCK_QUIT,
-    CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, MenuRow, Rect, TrafficLightAction, WindowControlAction,
-    is_blank_frame, select_dock_click_window,
+    AppCommand, AppInfo, AppleIconKind, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW,
+    CMD_DOCK_PIN, CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, Capability, CropRegion,
+    MenuRow, PixelLimits, Rect, StableOrder, WindowPresence, bgra_layout, crop_bgra, group_windows,
+    is_blank_frame, resize_bgra, scale_dimension,
 };
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED,
-    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute,
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED, DwmFlush,
+    DwmGetWindowAttribute, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, GetObjectW, GetPixel, HGDIOBJ,
-    ReleaseDC, SRCCOPY, SelectObject,
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, DIB_RGB_COLORS, DeleteObject, GetDIBits,
+    GetObjectW, HGDIOBJ, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    MonitorFromPoint, MonitorFromWindow, SRCCOPY,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
-use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
-};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_SYSICONINDEX, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO,
-    ShellExecuteW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP, SHFILEINFOW,
+    SHGFI_SYSICONINDEX, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, EnumWindows, GA_ROOTOWNER, GCLP_HICON, GW_OWNER,
-    GWL_EXSTYLE, GetAncestor, GetClassLongPtrW, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetIconInfo, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HICON, ICON_BIG, ICONINFO, IsIconic, IsWindowVisible, IsZoomed,
-    MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, PostMessageW, SC_MAXIMIZE, SC_MINIMIZE,
-    SC_RESTORE, SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CLOSE, WM_GETICON,
-    WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    EnumWindows, GA_ROOT, GCLP_HICON, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetClassLongPtrW,
+    GetClassNameW, GetCursorPos, GetForegroundWindow, GetIconInfo, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HICON, ICON_BIG, ICONINFO,
+    IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MINIMIZE, SC_RESTORE,
+    SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_GETICON,
+    WM_NULL, WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
-use windows::core::{BOOL, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
+use crate::gdi::{CaptureCanvas, ScreenDc};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+
+const MAX_OWNER_DEPTH: usize = 16;
 use crate::trash::is_recycle_bin_full;
 
 #[derive(Debug, Clone)]
@@ -50,6 +49,13 @@ pub struct IconBitmap {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackItem {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,23 +68,20 @@ pub enum DockItemKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DockEntry {
     pub key: String,
     pub title: String,
     pub kind: DockItemKind,
     pub apple_icon: Option<AppleIconKind>,
+    pub app: Option<AppInfo>,
     pub hwnds: Vec<isize>,
     pub window_titles: Vec<String>,
     pub running: bool,
     pub active: bool,
     pub pinned: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DockMenuAction {
-    TogglePin,
-    ToggleWindow,
-    QuitApp,
+    pub hidden: bool,
+    pub minimized: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +92,8 @@ pub struct ActiveWindowTarget {
     pub right: i32,
     pub bottom: i32,
     pub maximized: bool,
+    pub dpi: u32,
+    pub on_primary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,12 +123,17 @@ pub fn has_maximized_or_fullscreen_window(
         screen_width: i32,
         screen_height: i32,
         own_pid: u32,
+        primary_monitor: HMONITOR,
         found: bool,
     }
 
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
         if is_normal_visible_window(hwnd, probe.own_pid) {
+            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+            if monitor != probe.primary_monitor {
+                return BOOL(1);
+            }
             if unsafe { IsZoomed(hwnd) }.as_bool() {
                 probe.found = true;
                 return BOOL(0);
@@ -142,10 +152,14 @@ pub fn has_maximized_or_fullscreen_window(
         BOOL(1)
     }
 
+    let primary_monitor =
+        unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+
     let mut probe = Probe {
         screen_width,
         screen_height,
         own_pid,
+        primary_monitor,
         found: false,
     };
     unsafe {
@@ -155,42 +169,12 @@ pub fn has_maximized_or_fullscreen_window(
 }
 
 #[must_use]
-pub fn foreground_app_snapshot(own_pid: u32) -> Option<(String, isize)> {
-    let fg = unsafe { GetForegroundWindow() };
-    if fg.0.is_null() {
-        return None;
-    }
-    let root = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
-    let target = if root.0.is_null() { fg } else { root };
-    let mut pid = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(target, Some(&raw mut pid));
-    }
-    if pid == own_pid || pid == 0 {
-        return None;
-    }
-    let class = window_class_name(target);
-    if matches!(class.as_str(), "Progman" | "WorkerW") {
-        return Some((String::from("Finder"), 0));
-    }
-    if matches!(class.as_str(), "CabinetWClass" | "ExploreWClass") {
-        return Some((String::from("Finder"), target.0 as isize));
-    }
-    if is_shell_or_desktop_class(&class) {
-        return None;
-    }
-    let exe_path = process_image_path(pid)?;
-    Some((friendly_app_name(&exe_path), target.0 as isize))
-}
-
-#[must_use]
 pub fn active_window_target(own_pid: u32) -> Option<ActiveWindowTarget> {
-    let fg = unsafe { GetForegroundWindow() };
+    let fg = crate::os_events::current_foreground();
     if fg.0.is_null() {
         return None;
     }
-    let root = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
-    let target = if root.0.is_null() { fg } else { root };
+    let target = visible_root_owner(fg);
     if !is_normal_visible_window(target, own_pid) {
         return None;
     }
@@ -200,6 +184,9 @@ pub fn active_window_target(own_pid: u32) -> Option<ActiveWindowTarget> {
     }
     let maximized = unsafe { IsZoomed(target).as_bool() };
 
+    let (_, monitor_dpi) = window_and_monitor_dpi(target);
+    let monitor = unsafe { MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST) };
+    let primary = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
     Some(ActiveWindowTarget {
         hwnd: target.0 as isize,
         left: rect.left,
@@ -207,6 +194,8 @@ pub fn active_window_target(own_pid: u32) -> Option<ActiveWindowTarget> {
         right: rect.right,
         bottom: rect.bottom,
         maximized,
+        dpi: monitor_dpi,
+        on_primary: monitor == primary,
     })
 }
 
@@ -223,127 +212,189 @@ pub fn window_bounds(hwnd_val: isize) -> Option<Rect> {
     })
 }
 
+const CAPTURE_RESPONSIVENESS_PROBE_MS: u32 = 50;
+
 #[must_use]
 pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
     let hwnd = HWND(hwnd_val as *mut c_void);
-    let rect = window_bounds(hwnd_val)?;
-    if rect.width <= 0 || rect.height <= 0 {
+    let frame = window_bounds(hwnd_val)?;
+    let outer = outer_window_rect(hwnd).unwrap_or(frame);
+    let frame_layout = bgra_layout(
+        u32::try_from(frame.width).ok()?,
+        u32::try_from(frame.height).ok()?,
+        PixelLimits::WINDOW_SNAPSHOT,
+    )
+    .ok()?;
+    let canvas_layout = bgra_layout(
+        u32::try_from(outer.width.max(frame.width)).ok()?,
+        u32::try_from(outer.height.max(frame.height)).ok()?,
+        PixelLimits::WINDOW_SNAPSHOT,
+    )
+    .ok()?;
+    if !is_window_responsive(hwnd) {
         return None;
     }
-    unsafe {
-        let screen_dc = GetDC(None);
-        if screen_dc.0.is_null() {
-            return None;
-        }
-        let memory_dc = CreateCompatibleDC(Some(screen_dc));
-        if memory_dc.0.is_null() {
-            ReleaseDC(None, screen_dc);
-            return None;
-        }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: rect.width,
-                biHeight: -rect.height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..BITMAPINFOHEADER::default()
-            },
-            ..BITMAPINFO::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let Ok(bitmap) =
-            CreateDIBSection(Some(screen_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
-            let _ = DeleteDC(memory_dc);
-            ReleaseDC(None, screen_dc);
-            return None;
-        };
-        let previous = SelectObject(memory_dc, HGDIOBJ(bitmap.0));
+    let screen = ScreenDc::acquire()?;
+    let canvas = CaptureCanvas::create(&screen, canvas_layout)?;
 
-        let mut captured = false;
-        let mut pixels = vec![0u8; rect.width as usize * rect.height as usize * 4];
-        let mut header = info;
+    let (window_dpi, monitor_dpi) = window_and_monitor_dpi(hwnd);
+    let painted_length =
+        |length: i32| scale_dimension(u32::try_from(length).unwrap_or(0), window_dpi, monitor_dpi);
+    let printed_region = CropRegion {
+        x: painted_length(frame.x - outer.x).min(canvas_layout.width - 1),
+        y: painted_length(frame.y - outer.y).min(canvas_layout.height - 1),
+        width: painted_length(frame.width),
+        height: painted_length(frame.height),
+    };
+    let printed_layout = bgra_layout(
+        printed_region.width,
+        printed_region.height,
+        PixelLimits::WINDOW_SNAPSHOT,
+    )
+    .ok()?;
+    let printed = unsafe { PrintWindow(hwnd, canvas.dc(), PRINT_WINDOW_FLAGS(2)) }
+        .as_bool()
+        .then(|| crop_bgra(&canvas.copy_pixels(), canvas.layout(), printed_region))
+        .flatten()
+        .filter(|pixels| !is_blank_frame(printed_layout.width, printed_layout.height, pixels))
+        .and_then(|pixels| resize_bgra(&pixels, printed_layout, frame_layout));
 
-        if PrintWindow(hwnd, memory_dc, PRINT_WINDOW_FLAGS(2)).as_bool() {
-            let rows = GetDIBits(
-                memory_dc,
-                bitmap,
-                0,
-                rect.height as u32,
-                Some(pixels.as_mut_ptr().cast()),
-                &raw mut header,
-                DIB_RGB_COLORS,
-            );
-            if rows > 0 && !is_blank_frame(rect.width as u32, rect.height as u32, &pixels) {
-                captured = true;
-            }
-        }
+    let pixels = printed.or_else(|| copy_foreground_window(hwnd, &screen, &canvas, frame))?;
+    Some(WindowSnapshot {
+        rect: frame,
+        width: frame_layout.width,
+        height: frame_layout.height,
+        pixels: opaque(pixels),
+    })
+}
 
-        if !captured && GetForegroundWindow() == hwnd {
-            let blt_ok = BitBlt(
-                memory_dc,
-                0,
-                0,
-                rect.width,
-                rect.height,
-                Some(screen_dc),
-                rect.x,
-                rect.y,
-                SRCCOPY,
-            )
-            .is_ok();
-            if blt_ok {
-                let rows = GetDIBits(
-                    memory_dc,
-                    bitmap,
-                    0,
-                    rect.height as u32,
-                    Some(pixels.as_mut_ptr().cast()),
-                    &raw mut header,
-                    DIB_RGB_COLORS,
-                );
-                if rows > 0 && !is_blank_frame(rect.width as u32, rect.height as u32, &pixels) {
-                    captured = true;
-                }
-            }
-        }
-
-        let _ = SelectObject(memory_dc, previous);
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
-        let _ = DeleteDC(memory_dc);
-        ReleaseDC(None, screen_dc);
-
-        if !captured {
-            return None;
-        }
-
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-        Some(WindowSnapshot {
-            rect,
-            width: rect.width as u32,
-            height: rect.height as u32,
-            pixels,
-        })
+fn window_and_monitor_dpi(hwnd: HWND) -> (u32, u32) {
+    let window_dpi = unsafe { GetDpiForWindow(hwnd) };
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+    let monitor_dpi = if unsafe {
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
+    }
+    .is_ok()
+    {
+        dpi_x
+    } else {
+        window_dpi
+    };
+    if window_dpi == 0 || monitor_dpi == 0 {
+        (96, 96)
+    } else {
+        (window_dpi, monitor_dpi)
     }
 }
 
-#[must_use]
-pub fn set_window_cloaked(hwnd_val: isize, cloaked: bool) -> bool {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    let value = u32::from(cloaked);
+fn copy_foreground_window(
+    hwnd: HWND,
+    screen: &ScreenDc,
+    canvas: &CaptureCanvas,
+    frame: Rect,
+) -> Option<Vec<u8>> {
+    if unsafe { GetForegroundWindow() } != hwnd {
+        return None;
+    }
     unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAK,
-            (&raw const value).cast(),
+        BitBlt(
+            canvas.dc(),
+            0,
+            0,
+            frame.width,
+            frame.height,
+            Some(screen.handle()),
+            frame.x,
+            frame.y,
+            SRCCOPY,
+        )
+    }
+    .ok()?;
+    let region = CropRegion {
+        x: 0,
+        y: 0,
+        width: u32::try_from(frame.width).ok()?,
+        height: u32::try_from(frame.height).ok()?,
+    };
+    crop_bgra(&canvas.copy_pixels(), canvas.layout(), region)
+        .filter(|pixels| !is_blank_frame(region.width, region.height, pixels))
+}
+
+fn opaque(mut pixels: Vec<u8>) -> Vec<u8> {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    pixels
+}
+
+fn is_window_responsive(hwnd: HWND) -> bool {
+    let mut reply = 0usize;
+    unsafe {
+        !IsHungAppWindow(hwnd).as_bool()
+            && SendMessageTimeoutW(
+                hwnd,
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                CAPTURE_RESPONSIVENESS_PROBE_MS,
+                Some(&raw mut reply),
+            )
+            .0 != 0
+    }
+}
+
+fn outer_window_rect(hwnd: HWND) -> Option<Rect> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    (width > 0 && height > 0).then_some(Rect {
+        x: rect.left,
+        y: rect.top,
+        width,
+        height,
+    })
+}
+
+#[must_use]
+pub fn is_window_cloaked(hwnd_val: isize) -> bool {
+    let mut cloaked = 0u32;
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            HWND(hwnd_val as *mut c_void),
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
             size_of::<u32>() as u32,
         )
-        .is_ok()
+    };
+    read.is_ok() && cloaked != 0
+}
+
+fn suppress_transitions(hwnd_val: isize) -> bool {
+    use crate::hidden_windows::{Concealment, forget, record};
+    let Some(identity) = crate::window_model::current_identity(hwnd_val) else {
+        return false;
+    };
+    if !record(identity, Concealment::TransitionsDisabled) {
+        return false;
     }
+    let applied = set_dwm_transition_policy(HWND(hwnd_val as *mut c_void), false);
+    if !applied {
+        forget(hwnd_val, Concealment::TransitionsDisabled);
+    }
+    applied
+}
+
+pub(crate) fn release_transitions(hwnd_val: isize) -> bool {
+    let applied = set_dwm_transition_policy(HWND(hwnd_val as *mut c_void), true);
+    if applied {
+        crate::hidden_windows::forget(
+            hwnd_val,
+            crate::hidden_windows::Concealment::TransitionsDisabled,
+        );
+    }
+    applied
 }
 
 pub fn flush_compositor() {
@@ -352,8 +403,13 @@ pub fn flush_compositor() {
     }
 }
 
-pub fn set_window_transitions_enabled(hwnd_val: isize, enabled: bool) {
-    set_dwm_transition_policy(HWND(hwnd_val as *mut c_void), enabled);
+#[must_use]
+pub fn set_window_transitions_enabled(hwnd_val: isize, enabled: bool) -> bool {
+    if enabled {
+        release_transitions(hwnd_val)
+    } else {
+        suppress_transitions(hwnd_val)
+    }
 }
 
 #[must_use]
@@ -372,10 +428,11 @@ pub fn minimize_window_native(hwnd_val: isize) {
     post_minimize(hwnd);
 }
 
-pub fn minimize_window_native_quiet(hwnd_val: isize) {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    set_dwm_transition_policy(hwnd, false);
-    post_minimize(hwnd);
+#[must_use]
+pub fn minimize_window_native_quiet(hwnd_val: isize) -> bool {
+    let quiet = suppress_transitions(hwnd_val);
+    post_minimize(HWND(hwnd_val as *mut c_void));
+    quiet
 }
 
 fn post_minimize(hwnd: HWND) {
@@ -395,10 +452,11 @@ pub fn restore_window_native(hwnd_val: isize) {
     send_restore(hwnd);
 }
 
-pub fn restore_window_native_quiet(hwnd_val: isize) {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    set_dwm_transition_policy(hwnd, false);
-    send_restore(hwnd);
+#[must_use]
+pub fn restore_window_native_quiet(hwnd_val: isize) -> bool {
+    let quiet = suppress_transitions(hwnd_val);
+    send_restore(HWND(hwnd_val as *mut c_void));
+    quiet
 }
 
 fn send_restore(hwnd: HWND) {
@@ -417,64 +475,6 @@ fn send_restore(hwnd: HWND) {
 }
 
 #[must_use]
-pub fn sample_titlebar_rgb(target: ActiveWindowTarget, plate_width: i32) -> (u8, u8, u8) {
-    let base_x = (target.right - plate_width - 4).max(target.left + 20);
-    let sample_y = target.top + 5;
-    let c0 = sample_screen_rgb(base_x, sample_y);
-    let c1 = sample_screen_rgb((base_x - 8).max(target.left + 12), sample_y);
-    let c2 = sample_screen_rgb((base_x - 16).max(target.left + 8), sample_y);
-
-    let d01 = color_dist(c0, c1);
-    let d12 = color_dist(c1, c2);
-    let d02 = color_dist(c0, c2);
-    if d01 <= d12 && d01 <= d02 {
-        c0
-    } else if d12 <= d02 {
-        c1
-    } else {
-        c2
-    }
-}
-
-fn color_dist(a: (u8, u8, u8), b: (u8, u8, u8)) -> i32 {
-    (i32::from(a.0) - i32::from(b.0)).abs()
-        + (i32::from(a.1) - i32::from(b.1)).abs()
-        + (i32::from(a.2) - i32::from(b.2)).abs()
-}
-
-pub fn execute_window_control(hwnd_val: isize, action: WindowControlAction) {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    enable_dwm_transitions(hwnd);
-    unsafe {
-        match action {
-            WindowControlAction::Close => {
-                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-            WindowControlAction::Minimize => {
-                let _ = PostMessageW(
-                    Some(hwnd),
-                    WM_SYSCOMMAND,
-                    WPARAM(SC_MINIMIZE as usize),
-                    LPARAM(0),
-                );
-            }
-            WindowControlAction::ToggleMaximize => {
-                let cmd = if IsZoomed(hwnd).as_bool() {
-                    SC_RESTORE
-                } else {
-                    SC_MAXIMIZE
-                };
-                let _ = PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(cmd as usize), LPARAM(0));
-            }
-        }
-    }
-}
-
-pub fn execute_traffic_light(hwnd_val: isize, action: TrafficLightAction) {
-    execute_window_control(hwnd_val, action);
-}
-
-#[must_use]
 pub fn current_process_id() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
@@ -490,41 +490,88 @@ fn fixed_dock_entry(
         title: String::from(title),
         kind,
         apple_icon: Some(apple_icon),
+        app: None,
         hwnds: Vec::new(),
         window_titles: Vec::new(),
         running: false,
         active: false,
         pinned: true,
+        hidden: false,
+        minimized: false,
     }
 }
 
-#[must_use]
-pub fn collect_dock_entries(own_pid: u32) -> Vec<DockEntry> {
-    let pinned_list = load_pinned_apps();
-    let pinned_set: HashSet<String> = pinned_list.iter().map(|s| s.to_lowercase()).collect();
-    let fg_root = foreground_root_hwnd();
-    let raw_windows = enumerate_app_windows(own_pid);
+fn with_application(mut entry: DockEntry, app: AppInfo) -> DockEntry {
+    entry.hwnds = app
+        .primary_windows()
+        .map(|window| window.identity.hwnd)
+        .collect();
+    entry.window_titles = app
+        .primary_windows()
+        .map(|window| window.title.clone())
+        .collect();
+    entry.running = true;
+    entry.active = app.is_active();
+    entry.hidden = app.is_hidden();
+    entry.minimized = app.is_minimized();
+    entry.app = Some(app);
+    entry
+}
 
-    let mut finder_hwnds = Vec::new();
-    let mut finder_titles = Vec::new();
-    for win in &raw_windows {
-        if is_explorer_path(&win.exe_path) {
-            finder_hwnds.push(win.hwnd);
-            finder_titles.push(win.title.clone());
+fn application_entry(key: String, title: String, executable: String, pinned: bool) -> DockEntry {
+    DockEntry {
+        key,
+        title,
+        apple_icon: classify_apple_icon(&executable),
+        kind: DockItemKind::App {
+            exe_path: executable,
+        },
+        app: None,
+        hwnds: Vec::new(),
+        window_titles: Vec::new(),
+        running: false,
+        active: false,
+        pinned,
+        hidden: false,
+        minimized: false,
+    }
+}
+
+fn merge_finder_windows(apps: &mut Vec<AppInfo>) -> Option<AppInfo> {
+    let mut finder: Option<AppInfo> = None;
+    let mut index = 0;
+    while index < apps.len() {
+        if is_explorer_path(&apps[index].executable) {
+            let app = apps.remove(index);
+            match finder.as_mut() {
+                Some(existing) => existing.windows.extend(app.windows),
+                None => finder = Some(app),
+            }
+        } else {
+            index += 1;
         }
     }
+    finder
+}
 
+#[must_use]
+pub fn collect_dock_entries(own_pid: u32, order: &mut StableOrder) -> Vec<DockEntry> {
+    let pinned = available_pinned_apps();
+    let mut apps: Vec<AppInfo> = group_windows(crate::window_model::enumerate_windows(own_pid))
+        .into_iter()
+        .filter(AppInfo::has_primary_window)
+        .collect();
+
+    let finder = fixed_dock_entry(
+        "__finder__",
+        "Finder",
+        DockItemKind::Finder,
+        AppleIconKind::Finder,
+    );
     let mut entries = vec![
-        DockEntry {
-            key: String::from("__finder__"),
-            title: String::from("Finder"),
-            kind: DockItemKind::Finder,
-            apple_icon: Some(AppleIconKind::Finder),
-            running: !finder_hwnds.is_empty(),
-            active: fg_root.is_some_and(|fg| finder_hwnds.contains(&fg)),
-            pinned: true,
-            hwnds: finder_hwnds,
-            window_titles: finder_titles,
+        match merge_finder_windows(&mut apps) {
+            Some(app) => with_application(finder, app),
+            None => finder,
         },
         fixed_dock_entry(
             "__launchpad__",
@@ -534,32 +581,40 @@ pub fn collect_dock_entries(own_pid: u32) -> Vec<DockEntry> {
         ),
     ];
 
-    for exe in &pinned_list {
-        if is_explorer_path(exe) {
+    for pin in pinned {
+        if is_explorer_path(&pin.executable) || entries.iter().any(|entry| entry.key == pin.key) {
             continue;
         }
-        let key = exe.to_lowercase();
-        if entries.iter().any(|e| e.key == key) {
-            continue;
-        }
-        entries.push(DockEntry {
-            key,
-            title: friendly_app_name(exe),
-            apple_icon: classify_apple_icon(exe),
-            kind: DockItemKind::App {
-                exe_path: exe.clone(),
-            },
-            hwnds: Vec::new(),
-            window_titles: Vec::new(),
-            running: false,
-            active: false,
-            pinned: true,
+        let entry = application_entry(
+            pin.key.clone(),
+            friendly_app_name(&pin.executable),
+            pin.executable,
+            true,
+        );
+        let running = apps
+            .iter()
+            .position(|app| app.identity.key() == pin.key)
+            .map(|index| apps.remove(index));
+        entries.push(match running {
+            Some(app) => with_application(entry, app),
+            None => entry,
         });
     }
 
-    for win in raw_windows {
-        if !is_explorer_path(&win.exe_path) {
-            merge_running_window(&mut entries, win, &pinned_set, fg_root);
+    let keys: Vec<String> = apps.iter().map(|app| app.identity.key()).collect();
+    let mut unpinned: Vec<Option<AppInfo>> = apps.into_iter().map(Some).collect();
+    for index in order.arrange(&keys) {
+        if let Some(app) = unpinned.get_mut(index).and_then(Option::take) {
+            let title = if app.name.is_empty() {
+                app.windows
+                    .first()
+                    .map(|window| window.title.clone())
+                    .unwrap_or_default()
+            } else {
+                app.name.clone()
+            };
+            let entry = application_entry(app.identity.key(), title, app.executable.clone(), false);
+            entries.push(with_application(entry, app));
         }
     }
 
@@ -583,79 +638,15 @@ pub fn collect_dock_entries(own_pid: u32) -> Vec<DockEntry> {
     entries
 }
 
-fn merge_running_window(
-    entries: &mut Vec<DockEntry>,
-    win: RawWindow,
-    pinned_set: &HashSet<String>,
-    fg_root: Option<isize>,
-) {
-    let key = win.exe_path.to_lowercase();
-    if let Some(existing) = entries.iter_mut().find(|e| e.key == key) {
-        existing.hwnds.push(win.hwnd);
-        existing.window_titles.push(win.title);
-        existing.running = true;
-        if fg_root == Some(win.hwnd) {
-            existing.active = true;
-        }
-        return;
-    }
-    let pinned = pinned_set.contains(&key);
-    let title = friendly_app_name(&win.exe_path);
-    let apple_icon = classify_apple_icon(&win.exe_path);
-    entries.push(DockEntry {
-        key,
-        title: if title.is_empty() {
-            win.title.clone()
-        } else {
-            title
-        },
-        apple_icon,
-        kind: DockItemKind::App {
-            exe_path: win.exe_path,
-        },
-        hwnds: vec![win.hwnd],
-        window_titles: vec![win.title],
-        running: true,
-        active: fg_root == Some(win.hwnd),
-        pinned,
-    });
-}
-
-pub fn activate_or_launch(entry: &DockEntry) {
-    match &entry.kind {
-        DockItemKind::Finder => {
-            if entry.hwnds.len() > 1 {
-                if let Some(hwnd) = select_dock_click_window(&entry.hwnds, foreground_root_hwnd()) {
-                    focus_window_hwnd(hwnd);
-                }
-            } else if let Some(&hwnd) = entry.hwnds.first() {
-                toggle_window_hwnd(hwnd);
-            } else {
-                shell_open(w!("explorer.exe"));
-            }
-        }
-        DockItemKind::Launchpad => {
-            crate::actions::open_start_menu();
-        }
-        DockItemKind::Downloads => {
-            shell_open(w!("shell:Downloads"));
-        }
-        DockItemKind::Trash { .. } => {
-            shell_open(w!("shell:RecycleBinFolder"));
-        }
-        DockItemKind::App { exe_path } => {
-            if entry.hwnds.len() > 1 {
-                if let Some(hwnd) = select_dock_click_window(&entry.hwnds, foreground_root_hwnd()) {
-                    focus_window_hwnd(hwnd);
-                }
-            } else if let Some(&hwnd) = entry.hwnds.first() {
-                toggle_window_hwnd(hwnd);
-            } else {
-                let wide = to_wide(exe_path);
-                shell_open(PCWSTR(wide.as_ptr()));
-            }
-        }
-    }
+#[must_use]
+pub fn other_applications_visible(entries: &[DockEntry], key: &str) -> bool {
+    entries.iter().any(|entry| {
+        entry.key != key
+            && entry.app.as_ref().is_some_and(|app| {
+                app.primary_windows()
+                    .any(|window| window.presence == WindowPresence::Visible)
+            })
+    })
 }
 
 pub fn launch_new_instance(entry: &DockEntry) {
@@ -665,7 +656,11 @@ pub fn launch_new_instance(entry: &DockEntry) {
         DockItemKind::Downloads => shell_open(w!("shell:Downloads")),
         DockItemKind::Trash { .. } => shell_open(w!("shell:RecycleBinFolder")),
         DockItemKind::App { exe_path } => {
-            let wide = to_wide(exe_path);
+            let target = entry
+                .key
+                .strip_prefix(USER_MODEL_KEY_PREFIX)
+                .map_or_else(|| exe_path.clone(), |id| format!("shell:AppsFolder\\{id}"));
+            let wide = to_wide(&target);
             shell_open(PCWSTR(wide.as_ptr()));
         }
     }
@@ -692,47 +687,40 @@ pub fn focus_window_hwnd(hwnd_val: isize) {
     }
 }
 
+fn push_capable(rows: &mut Vec<MenuRow>, capability: Capability, id: usize, label: &str) {
+    match capability {
+        Capability::Available => rows.push(MenuRow::item(id, label, "")),
+        Capability::Unsupported => {}
+        Capability::TemporarilyUnavailable | Capability::Denied => {
+            rows.push(MenuRow::item_with_enabled(id, label, "", false));
+        }
+    }
+}
+
 #[must_use]
-pub fn build_dock_context_menu_rows(entry: &DockEntry) -> Vec<MenuRow> {
+pub fn build_dock_context_menu_rows(entry: &DockEntry, other_apps_visible: bool) -> Vec<MenuRow> {
     let mut rows = Vec::new();
-    let fg = foreground_root_hwnd();
-    for (idx, (&hwnd, title)) in entry
-        .hwnds
-        .iter()
-        .zip(&entry.window_titles)
-        .enumerate()
-        .take(8)
-    {
-        rows.push(MenuRow::check_item(
-            CMD_DOCK_WINDOW_BASE + idx,
-            truncate_menu_label(title, 34),
-            fg == Some(hwnd),
-            true,
-        ));
+    if let Some(app) = &entry.app {
+        for (index, window) in app.primary_windows().enumerate() {
+            rows.push(MenuRow::check_item(
+                CMD_DOCK_WINDOW_BASE + index,
+                truncate_menu_label(&window.title, 34),
+                window.active,
+                true,
+            ));
+        }
     }
     if !rows.is_empty() {
         rows.push(MenuRow::Separator);
     }
-
+    let open_label = if entry.running { "Show" } else { "Open" };
     match &entry.kind {
         DockItemKind::Finder => {
-            rows.push(MenuRow::item(
-                CMD_DOCK_NEW_WINDOW,
-                "New Finder Window",
-                "⌘N",
-            ));
-            rows.push(MenuRow::item(
-                CMD_DOCK_TOGGLE,
-                if entry.running {
-                    "Show / Minimize"
-                } else {
-                    "Open"
-                },
-                "",
-            ));
+            rows.push(MenuRow::item(CMD_DOCK_NEW_WINDOW, "New Finder Window", ""));
+            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, open_label, ""));
         }
         DockItemKind::Launchpad => {
-            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Launchpad", ""));
+            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Start", ""));
         }
         DockItemKind::Downloads => {
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Downloads", ""));
@@ -754,21 +742,27 @@ pub fn build_dock_context_menu_rows(entry: &DockEntry) -> Vec<MenuRow> {
                 entry.pinned,
                 true,
             ));
-            rows.push(MenuRow::item(CMD_DOCK_NEW_WINDOW, "New Window", ""));
-            rows.push(MenuRow::item(
-                CMD_DOCK_TOGGLE,
-                if entry.running {
-                    "Show / Minimize"
-                } else {
-                    "Open"
-                },
-                "",
-            ));
-            if entry.running {
+            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, open_label, ""));
+            if let Some(app) = &entry.app {
+                rows.push(MenuRow::item(CMD_DOCK_NEW_WINDOW, "Open New Instance", ""));
+                push_capable(
+                    &mut rows,
+                    app.capability(AppCommand::Hide, other_apps_visible),
+                    CMD_DOCK_HIDE,
+                    "Hide",
+                );
                 rows.push(MenuRow::Separator);
-                rows.push(MenuRow::item(CMD_DOCK_QUIT, "Quit", "⌘Q"));
+                push_capable(
+                    &mut rows,
+                    app.capability(AppCommand::Quit, other_apps_visible),
+                    CMD_DOCK_QUIT,
+                    "Quit",
+                );
             }
         }
+    }
+    while matches!(rows.last(), Some(MenuRow::Separator)) {
+        rows.pop();
     }
     rows
 }
@@ -787,76 +781,16 @@ pub fn toggle_pin_entry(entry: &DockEntry) {
     let DockItemKind::App { exe_path } = &entry.kind else {
         return;
     };
-    let mut list = load_pinned_apps();
-    let key = exe_path.to_lowercase();
-    if let Some(pos) = list.iter().position(|p| p.to_lowercase() == key) {
-        list.remove(pos);
+    let mut list = read_pinned_file();
+    if let Some(position) = list.iter().position(|pin| pin.key == entry.key) {
+        list.remove(position);
     } else {
-        list.push(exe_path.clone());
+        list.push(PinnedApp {
+            key: entry.key.clone(),
+            executable: exe_path.clone(),
+        });
     }
     save_pinned_apps(&list);
-}
-
-pub fn close_entry_windows(entry: &DockEntry) {
-    for &hwnd_val in &entry.hwnds {
-        let hwnd = HWND(hwnd_val as *mut c_void);
-        enable_dwm_transitions(hwnd);
-        unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-
-#[must_use]
-pub fn show_dock_context_menu(hwnd: isize, entry: &DockEntry) -> Option<DockMenuAction> {
-    const CMD_PIN: usize = 1;
-    const CMD_TOGGLE: usize = 2;
-    const CMD_QUIT_APP: usize = 3;
-
-    let hwnd = HWND(hwnd as *mut c_void);
-    unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        if matches!(entry.kind, DockItemKind::App { .. }) {
-            let pin_flags = if entry.pinned {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING | MF_UNCHECKED
-            };
-            let _ = AppendMenuW(menu, pin_flags, CMD_PIN, w!("Keep in Dock"));
-        }
-        if entry.running && !entry.hwnds.is_empty() {
-            let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, w!("Show / Minimize"));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT_APP, w!("Quit"));
-        } else if matches!(
-            entry.kind,
-            DockItemKind::Finder
-                | DockItemKind::Launchpad
-                | DockItemKind::Downloads
-                | DockItemKind::Trash { .. }
-        ) {
-            let _ = AppendMenuW(menu, MF_STRING, CMD_TOGGLE, w!("Open"));
-        }
-        let mut cursor = POINT::default();
-        let _ = GetCursorPos(&mut cursor);
-        let _ = SetForegroundWindow(hwnd);
-        let selected = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            cursor.x,
-            cursor.y,
-            None,
-            hwnd,
-            None,
-        );
-        let _ = DestroyMenu(menu);
-        match selected.0 as usize {
-            CMD_PIN => Some(DockMenuAction::TogglePin),
-            CMD_TOGGLE => Some(DockMenuAction::ToggleWindow),
-            CMD_QUIT_APP => Some(DockMenuAction::QuitApp),
-            _ => None,
-        }
-    }
 }
 
 #[must_use]
@@ -872,72 +806,24 @@ pub fn extract_dock_icon(entry: &DockEntry) -> Option<IconBitmap> {
     Some(normalize_to_macos_squircle(&raw))
 }
 
-struct RawWindow {
-    hwnd: isize,
-    title: String,
-    exe_path: String,
-}
-
-fn enumerate_app_windows(own_pid: u32) -> Vec<RawWindow> {
-    struct State {
-        own_pid: u32,
-        list: Vec<RawWindow>,
-    }
-
-    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let state = unsafe { &mut *(lparam.0 as *mut State) };
-        if let Some(win) = inspect_window(hwnd, state.own_pid) {
-            state.list.push(win);
-        }
-        BOOL(1)
-    }
-
-    let mut state = State {
-        own_pid,
-        list: Vec::new(),
-    };
-    unsafe {
-        let _ = EnumWindows(Some(visit), LPARAM(&raw mut state as isize));
-    }
-    state.list
-}
-
 fn enable_dwm_transitions(hwnd: HWND) {
-    set_dwm_transition_policy(hwnd, true);
+    let _ = release_transitions(hwnd.0 as isize);
 }
 
-fn set_dwm_transition_policy(hwnd: HWND, enabled: bool) {
+pub(crate) fn set_dwm_transition_policy(hwnd: HWND, enabled: bool) -> bool {
     let disable = u32::from(!enabled);
     unsafe {
-        let _ = DwmSetWindowAttribute(
+        DwmSetWindowAttribute(
             hwnd,
             DWMWA_TRANSITIONS_FORCEDISABLED,
             (&raw const disable).cast(),
             size_of::<u32>() as u32,
-        );
-    }
-}
-
-fn sample_screen_rgb(px: i32, py: i32) -> (u8, u8, u8) {
-    unsafe {
-        let dc = GetDC(None);
-        if dc.0.is_null() {
-            return (32, 33, 36);
-        }
-        let color = GetPixel(dc, px, py).0;
-        ReleaseDC(None, dc);
-        if color == u32::MAX {
-            return (32, 33, 36);
-        }
-        (
-            (color & 0xFF) as u8,
-            ((color >> 8) & 0xFF) as u8,
-            ((color >> 16) & 0xFF) as u8,
         )
+        .is_ok()
     }
 }
 
-fn window_class_name(hwnd: HWND) -> String {
+pub(crate) fn window_class_name(hwnd: HWND) -> String {
     let mut buf = [0u16; 128];
     let len = unsafe { GetClassNameW(hwnd, &mut buf) };
     if len <= 0 {
@@ -947,7 +833,7 @@ fn window_class_name(hwnd: HWND) -> String {
     }
 }
 
-fn is_shell_or_desktop_class(class: &str) -> bool {
+pub(crate) fn is_shell_or_desktop_class(class: &str) -> bool {
     matches!(
         class,
         "Progman"
@@ -963,7 +849,7 @@ fn is_shell_or_desktop_class(class: &str) -> bool {
     )
 }
 
-fn visible_window_rect(hwnd: HWND) -> RECT {
+pub(crate) fn visible_window_rect(hwnd: HWND) -> RECT {
     let mut rect = RECT::default();
     let hr = unsafe {
         DwmGetWindowAttribute(
@@ -1013,106 +899,24 @@ fn is_normal_visible_window(hwnd: HWND, own_pid: u32) -> bool {
     }
 }
 
-fn inspect_window(hwnd: HWND, own_pid: u32) -> Option<RawWindow> {
-    unsafe {
-        if !IsWindowVisible(hwnd).as_bool() {
-            return None;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
-        if pid == own_pid || pid == 0 {
-            return None;
-        }
-        let class = window_class_name(hwnd);
-        if is_shell_or_desktop_class(&class) {
-            return None;
-        }
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let app_window = ex_style & WS_EX_APPWINDOW.0 != 0;
-        let tool_window = ex_style & WS_EX_TOOLWINDOW.0 != 0;
-        let no_activate = ex_style & WS_EX_NOACTIVATE.0 != 0;
-        let has_owner = GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.0.is_null());
-        if no_activate || (!app_window && (tool_window || has_owner)) {
-            return None;
-        }
-        let mut cloaked = 0u32;
-        let _ = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAKED,
-            (&raw mut cloaked).cast(),
-            size_of::<u32>() as u32,
-        );
-        if cloaked != 0 {
-            return None;
-        }
-        let title_len = GetWindowTextLengthW(hwnd);
-        if title_len <= 0 {
-            return None;
-        }
-        let exe_path = process_image_path(pid)?;
-        if is_explorer_path(&exe_path) && class != "CabinetWClass" && class != "ExploreWClass" {
-            return None;
-        }
-        let mut buf = vec![0u16; title_len as usize + 1];
-        let copied = GetWindowTextW(hwnd, &mut buf);
-        let title = String::from_utf16_lossy(&buf[..copied.max(0) as usize]);
-        Some(RawWindow {
-            hwnd: hwnd.0 as isize,
-            title,
-            exe_path,
-        })
+pub(crate) fn visible_root_owner(window: HWND) -> HWND {
+    let mut current = unsafe { GetAncestor(window, GA_ROOT) };
+    if current.0.is_null() {
+        current = window;
     }
-}
-
-fn process_image_path(pid: u32) -> Option<String> {
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            PWSTR(buf.as_mut_ptr()),
-            &raw mut len,
-        )
-        .is_ok();
-        let _ = CloseHandle(process);
-        ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    for _ in 0..MAX_OWNER_DEPTH {
+        let owner = unsafe { GetWindow(current, GW_OWNER) }.unwrap_or_default();
+        if owner.0.is_null() || !unsafe { IsWindowVisible(owner) }.as_bool() {
+            break;
+        }
+        current = owner;
     }
+    current
 }
 
 fn foreground_root_hwnd() -> Option<isize> {
-    let root = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) };
-    (!root.0.is_null()).then_some(root.0 as isize)
-}
-
-fn toggle_window_hwnd(hwnd_val: isize) {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    enable_dwm_transitions(hwnd);
-    unsafe {
-        if IsIconic(hwnd).as_bool() {
-            let _ = SendMessageTimeoutW(
-                hwnd,
-                WM_SYSCOMMAND,
-                WPARAM(SC_RESTORE as usize),
-                LPARAM(0),
-                SMTO_ABORTIFHUNG,
-                80,
-                None,
-            );
-            let _ = SetForegroundWindow(hwnd);
-        } else if foreground_root_hwnd() == Some(hwnd_val) {
-            let _ = PostMessageW(
-                Some(hwnd),
-                WM_SYSCOMMAND,
-                WPARAM(SC_MINIMIZE as usize),
-                LPARAM(0),
-            );
-        } else {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-        }
-    }
+    let foreground = crate::os_events::current_foreground();
+    (!foreground.0.is_null()).then(|| visible_root_owner(foreground).0 as isize)
 }
 
 fn shell_open(target: PCWSTR) {
@@ -1184,7 +988,7 @@ fn is_sparse_jumbo_icon(bmp: &IconBitmap) -> bool {
 fn window_icon_bitmap(hwnd_val: isize) -> Option<IconBitmap> {
     let hwnd = HWND(hwnd_val as *mut c_void);
     let mut result = 0usize;
-    let (handle, owned) = unsafe {
+    let handle = unsafe {
         let _ = SendMessageTimeoutW(
             hwnd,
             WM_GETICON,
@@ -1195,22 +999,16 @@ fn window_icon_bitmap(hwnd_val: isize) -> Option<IconBitmap> {
             Some(&raw mut result),
         );
         if result == 0 {
-            (GetClassLongPtrW(hwnd, GCLP_HICON), false)
+            GetClassLongPtrW(hwnd, GCLP_HICON)
         } else {
-            (result, true)
+            result
         }
     };
     if handle == 0 {
         return None;
     }
     let hicon = HICON(handle as *mut c_void);
-    let bmp = hicon_to_bitmap(hicon);
-    if owned {
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
-        }
-    }
-    bmp
+    hicon_to_bitmap(hicon)
 }
 
 fn hicon_to_bitmap(hicon: HICON) -> Option<IconBitmap> {
@@ -1236,9 +1034,12 @@ unsafe fn read_color_bitmap(info: &ICONINFO) -> Option<IconBitmap> {
             Some((&raw mut bitmap).cast()),
         );
         let (width, height) = (bitmap.bmWidth, bitmap.bmHeight);
-        if width <= 0 || height <= 0 {
-            return None;
-        }
+        let layout = bgra_layout(
+            u32::try_from(width).ok()?,
+            u32::try_from(height).ok()?,
+            PixelLimits::ICON,
+        )
+        .ok()?;
         let mut header = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -1251,18 +1052,17 @@ unsafe fn read_color_bitmap(info: &ICONINFO) -> Option<IconBitmap> {
             },
             ..BITMAPINFO::default()
         };
-        let mut pixels = vec![0u8; width as usize * height as usize * 4];
-        let screen = GetDC(None);
+        let mut pixels = vec![0u8; layout.byte_len];
+        let screen = ScreenDc::acquire()?;
         let rows = GetDIBits(
-            screen,
+            screen.handle(),
             info.hbmColor,
             0,
-            height as u32,
+            layout.height,
             Some(pixels.as_mut_ptr().cast()),
             &raw mut header,
             DIB_RGB_COLORS,
         );
-        ReleaseDC(None, screen);
         if rows == 0 {
             return None;
         }
@@ -1502,14 +1302,14 @@ fn classify_apple_icon(exe_path: &str) -> Option<AppleIconKind> {
     }
 }
 
-fn is_explorer_path(path: &str) -> bool {
+pub(crate) fn is_explorer_path(path: &str) -> bool {
     Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.eq_ignore_ascii_case("explorer.exe"))
 }
 
-fn friendly_app_name(exe_path: &str) -> String {
+pub(crate) fn friendly_app_name(exe_path: &str) -> String {
     let stem = Path::new(exe_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1554,33 +1354,259 @@ fn to_wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
-fn pinned_config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("otto-os").join("pinned.txt"))
+const USER_MODEL_KEY_PREFIX: &str = "aumid:";
+const MAX_PINNED_APPS: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedApp {
+    pub key: String,
+    pub executable: String,
 }
 
-fn load_pinned_apps() -> Vec<String> {
-    let Some(path) = pinned_config_path() else {
-        return Vec::new();
+fn parse_pinned_line(line: &str) -> Option<PinnedApp> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if line.starts_with(USER_MODEL_KEY_PREFIX) {
+        let (key, executable) = line.split_once('|')?;
+        return (!executable.trim().is_empty() && key.len() > USER_MODEL_KEY_PREFIX.len()).then(
+            || PinnedApp {
+                key: String::from(key.trim()),
+                executable: String::from(executable.trim()),
+            },
+        );
+    }
+    Some(PinnedApp {
+        key: line.to_lowercase(),
+        executable: String::from(line),
+    })
+}
+
+fn parse_pinned(content: &str) -> Vec<PinnedApp> {
+    let mut pins: Vec<PinnedApp> = Vec::new();
+    for pin in content.lines().filter_map(parse_pinned_line) {
+        if pins.len() >= MAX_PINNED_APPS {
+            break;
+        }
+        if !pins.iter().any(|known| known.key == pin.key) {
+            pins.push(pin);
+        }
+    }
+    pins
+}
+
+fn format_pinned(pins: &[PinnedApp]) -> String {
+    let mut body = String::new();
+    for pin in pins {
+        if pin.key.starts_with(USER_MODEL_KEY_PREFIX) {
+            body.push_str(&pin.key);
+            body.push('|');
+        }
+        body.push_str(&pin.executable);
+        body.push('\n');
+    }
+    body
+}
+
+fn move_pin(pins: &mut Vec<PinnedApp>, moved_key: &str, target_key: &str) -> bool {
+    let Some(from) = pins.iter().position(|pin| pin.key == moved_key) else {
+        return false;
     };
-    let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
+    let Some(to) = pins.iter().position(|pin| pin.key == target_key) else {
+        return false;
     };
-    content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && Path::new(line).exists())
-        .map(String::from)
+    if from == to {
+        return false;
+    }
+    let pin = pins.remove(from);
+    pins.insert(to, pin);
+    true
+}
+
+fn pinned_config_path() -> Option<PathBuf> {
+    crate::file::data_dir().map(|dir| dir.join("pinned.txt"))
+}
+
+fn read_pinned_file() -> Vec<PinnedApp> {
+    pinned_config_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|content| parse_pinned(&content))
+        .unwrap_or_default()
+}
+
+fn available_pinned_apps() -> Vec<PinnedApp> {
+    read_pinned_file()
+        .into_iter()
+        .filter(|pin| Path::new(&pin.executable).exists())
         .collect()
 }
 
-fn save_pinned_apps(apps: &[String]) {
+#[must_use]
+pub fn remove_pinned_app(key: &str) -> bool {
+    let mut list = read_pinned_file();
+    let before = list.len();
+    list.retain(|pin| pin.key != key);
+    list.len() != before && save_pinned_apps(&list)
+}
+
+#[must_use]
+pub fn reorder_pinned_apps(moved_key: &str, target_key: &str) -> bool {
+    let mut list = read_pinned_file();
+    move_pin(&mut list, moved_key, target_key) && save_pinned_apps(&list)
+}
+
+#[must_use]
+pub fn read_downloads_stack_items(max_items: usize) -> Vec<StackItem> {
+    let Some(base) = std::env::var_os("USERPROFILE") else {
+        return Vec::new();
+    };
+    let downloads_dir = PathBuf::from(base).join("Downloads");
+    let Ok(entries) = fs::read_dir(downloads_dir) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.eq_ignore_ascii_case("desktop.ini") {
+            continue;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        items.push((modified, StackItem { path, name, is_dir }));
+    }
+    items.sort_by_key(|b| std::cmp::Reverse(b.0));
+    items
+        .into_iter()
+        .take(max_items)
+        .map(|(_, item)| item)
+        .collect()
+}
+
+pub fn enable_drag_accept_files(hwnd_val: isize) {
+    let hwnd = HWND(hwnd_val as *mut c_void);
+    unsafe {
+        DragAcceptFiles(hwnd, true);
+    }
+}
+
+#[must_use]
+pub fn extract_dropped_files(hdrop_val: usize) -> ((i32, i32), Vec<String>) {
+    let hdrop = HDROP(hdrop_val as *mut c_void);
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = DragQueryPoint(hdrop, &raw mut pt);
+        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+        let mut files = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            DragQueryFileW(hdrop, i, Some(&mut buf));
+            let s = String::from_utf16_lossy(&buf[..len]);
+            if !s.is_empty() {
+                files.push(s);
+            }
+        }
+        DragFinish(hdrop);
+        ((pt.x, pt.y), files)
+    }
+}
+
+pub fn open_file_with_dock_entry(entry: &DockEntry, file_path: &str) {
+    match &entry.kind {
+        DockItemKind::App { exe_path } => {
+            let wide_exe = to_wide(exe_path);
+            let wide_file = to_wide(file_path);
+            unsafe {
+                let _ = ShellExecuteW(
+                    None,
+                    w!("open"),
+                    PCWSTR(wide_exe.as_ptr()),
+                    PCWSTR(wide_file.as_ptr()),
+                    PCWSTR::null(),
+                    SW_SHOW,
+                );
+            }
+        }
+        DockItemKind::Trash { .. } => {
+            let _ = crate::trash::recycle_path(file_path);
+        }
+        DockItemKind::Finder | DockItemKind::Downloads => {
+            let wide_file = to_wide(&format!("/select,\"{file_path}\""));
+            unsafe {
+                let _ = ShellExecuteW(
+                    None,
+                    w!("open"),
+                    w!("explorer.exe"),
+                    PCWSTR(wide_file.as_ptr()),
+                    PCWSTR::null(),
+                    SW_SHOW,
+                );
+            }
+        }
+        DockItemKind::Launchpad => {}
+    }
+}
+
+fn save_pinned_apps(apps: &[PinnedApp]) -> bool {
     let Some(path) = pinned_config_path() else {
-        return;
+        return false;
     };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let body = apps.join("\n");
-    let _ = fs::write(path, body);
+    crate::file::replace_file_atomically(&path, format_pinned(apps).as_bytes()).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PinnedApp, format_pinned, move_pin, parse_pinned};
+
+    fn pin(key: &str, executable: &str) -> PinnedApp {
+        PinnedApp {
+            key: String::from(key),
+            executable: String::from(executable),
+        }
+    }
+
+    #[test]
+    fn pinned_file_round_trips_executables_and_packaged_identities() {
+        let pins = vec![
+            pin("c:\\tools\\app.exe", "C:\\Tools\\App.exe"),
+            pin(
+                "aumid:Vendor.App_abc!Main",
+                "C:\\Program Files\\WindowsApps\\app.exe",
+            ),
+        ];
+        assert_eq!(parse_pinned(&format_pinned(&pins)), pins);
+    }
+
+    #[test]
+    fn legacy_plain_path_lines_are_still_accepted() {
+        let pins = parse_pinned("C:\\Tools\\App.exe\n\n  C:\\Other\\Tool.exe  \n");
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[0].key, "c:\\tools\\app.exe");
+        assert_eq!(pins[1].executable, "C:\\Other\\Tool.exe");
+    }
+
+    #[test]
+    fn duplicate_and_malformed_pins_are_dropped() {
+        let pins = parse_pinned("C:\\a.exe\nc:\\A.EXE\naumid:\naumid:Only.Id\naumid:X|\n");
+        assert_eq!(pins, vec![pin("c:\\a.exe", "C:\\a.exe")]);
+    }
+
+    #[test]
+    fn reordering_uses_keys_so_unavailable_pins_keep_their_place() {
+        let mut pins = vec![pin("a", "a"), pin("missing", "missing"), pin("b", "b")];
+        assert!(move_pin(&mut pins, "b", "a"));
+        let keys: Vec<&str> = pins.iter().map(|pin| pin.key.as_str()).collect();
+        assert_eq!(keys, ["b", "a", "missing"]);
+        assert!(!move_pin(&mut pins, "b", "b"));
+        assert!(!move_pin(&mut pins, "b", "unknown"));
+        assert_eq!(pins.len(), 3);
+    }
 }

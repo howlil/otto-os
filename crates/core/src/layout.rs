@@ -23,6 +23,51 @@ impl Rect {
     pub const fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.width <= 0 || self.height <= 0
+    }
+
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return *other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Self {
+            x,
+            y,
+            width: self.right().max(other.right()) - x,
+            height: self.bottom().max(other.bottom()) - y,
+        }
+    }
+
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        (right > x && bottom > y).then_some(Self {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        })
+    }
+
+    #[must_use]
+    pub fn contains_rect(&self, other: &Self) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.right() <= self.right()
+            && other.bottom() <= self.bottom()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +79,7 @@ pub enum HitTarget {
     ViewMenu,
     WindowMenu,
     HelpMenu,
+    MenuOverflow,
     Notch,
     PomodoroPhase,
     PomodoroPlayPause,
@@ -103,6 +149,7 @@ pub struct Metrics {
     pub view_slot_width: i32,
     pub window_slot_width: i32,
     pub help_slot_width: i32,
+    pub overflow_slot_width: i32,
     pub left_slot_gap: i32,
     pub tray_slot_width: i32,
     pub status_slot_width: i32,
@@ -135,6 +182,7 @@ impl Metrics {
         view_slot_width: 42,
         window_slot_width: 60,
         help_slot_width: 42,
+        overflow_slot_width: 26,
         left_slot_gap: 2,
         tray_slot_width: 28,
         status_slot_width: 108,
@@ -186,6 +234,8 @@ pub struct Layout {
     pub view_slot: Rect,
     pub window_slot: Rect,
     pub help_slot: Rect,
+    pub overflow_slot: Rect,
+    pub hidden_targets: Vec<HitTarget>,
     pub tray_slot: Rect,
     pub status_slot: Rect,
     pub search_slot: Rect,
@@ -259,6 +309,8 @@ impl Layout {
             Some(HitTarget::WindowMenu)
         } else if self.help_slot.contains(x, y) {
             Some(HitTarget::HelpMenu)
+        } else if self.overflow_slot.contains(x, y) {
+            Some(HitTarget::MenuOverflow)
         } else if self.notch.contains(x, y) {
             Some(HitTarget::Notch)
         } else if self.tray_slot.contains(x, y) {
@@ -277,6 +329,19 @@ impl Layout {
     }
 
     #[must_use]
+    pub fn is_hidden(&self, target: HitTarget) -> bool {
+        self.hidden_targets.contains(&target)
+    }
+
+    #[must_use]
+    pub fn menu_anchor_rect(&self, target: HitTarget) -> Option<Rect> {
+        if self.is_hidden(target) {
+            return Some(self.overflow_slot);
+        }
+        self.slot_rect(target)
+    }
+
+    #[must_use]
     pub const fn slot_rect(&self, target: HitTarget) -> Option<Rect> {
         match target {
             HitTarget::Start => Some(self.start_slot),
@@ -286,6 +351,7 @@ impl Layout {
             HitTarget::ViewMenu => Some(self.view_slot),
             HitTarget::WindowMenu => Some(self.window_slot),
             HitTarget::HelpMenu => Some(self.help_slot),
+            HitTarget::MenuOverflow => Some(self.overflow_slot),
             HitTarget::Notch
             | HitTarget::PomodoroPhase
             | HitTarget::PomodoroPlayPause
@@ -330,26 +396,158 @@ fn estimate_app_slot_points(metrics: &Metrics, app_name: &str) -> i32 {
     text_pts.clamp(metrics.app_slot_min_width, metrics.app_slot_max_width)
 }
 
-fn place_left_slot(cursor: &mut i32, width: i32, gap: i32, max_right: i32, height: i32) -> Rect {
-    let x = (*cursor).min(max_right);
-    let clamped_width = width.min((max_right - x).max(0));
-    *cursor = (x + clamped_width + gap).min(max_right);
-    Rect {
-        x,
-        y: 0,
-        width: clamped_width,
-        height,
+const LEFT_TARGETS: [HitTarget; 7] = [
+    HitTarget::Start,
+    HitTarget::AppMenu,
+    HitTarget::FileMenu,
+    HitTarget::EditMenu,
+    HitTarget::ViewMenu,
+    HitTarget::WindowMenu,
+    HitTarget::HelpMenu,
+];
+
+const RIGHT_VISUAL_ORDER: [HitTarget; 5] = [
+    HitTarget::Clock,
+    HitTarget::ControlCenter,
+    HitTarget::Search,
+    HitTarget::QuickSettings,
+    HitTarget::Tray,
+];
+
+const RIGHT_KEEP_PRIORITY: [HitTarget; 5] = [
+    HitTarget::Clock,
+    HitTarget::ControlCenter,
+    HitTarget::QuickSettings,
+    HitTarget::Search,
+    HitTarget::Tray,
+];
+
+struct SlotRow {
+    slots: Vec<(HitTarget, Rect)>,
+    hidden: Vec<HitTarget>,
+    overflow: Rect,
+}
+
+impl SlotRow {
+    fn rect(&self, target: HitTarget) -> Rect {
+        self.slots
+            .iter()
+            .find(|(candidate, _)| *candidate == target)
+            .map_or(self.overflow_anchor(), |(_, rect)| *rect)
+    }
+
+    const fn overflow_anchor(&self) -> Rect {
+        Rect {
+            x: self.overflow.x,
+            y: 0,
+            width: 0,
+            height: self.overflow.height,
+        }
     }
 }
 
-fn place_right_slot(cursor: &mut i32, width: i32, gap: i32, min_left: i32, height: i32) -> Rect {
-    let x = (*cursor - width).max(min_left);
-    *cursor = x - gap;
-    Rect {
-        x,
+fn resolve_right_slots(
+    widths: &[(HitTarget, i32)],
+    gap: i32,
+    left_limit: i32,
+    right_edge: i32,
+    height: i32,
+) -> (Vec<(HitTarget, Rect)>, Vec<HitTarget>) {
+    let available = (right_edge - left_limit).max(0);
+    let width_of = |target: HitTarget| {
+        widths
+            .iter()
+            .find(|(candidate, _)| *candidate == target)
+            .map_or(0, |(_, width)| *width)
+    };
+    let mut kept = Vec::new();
+    let mut hidden = Vec::new();
+    let mut used = 0;
+    for target in RIGHT_KEEP_PRIORITY {
+        let width = width_of(target);
+        if width <= 0 {
+            continue;
+        }
+        let needed = if kept.is_empty() { width } else { width + gap };
+        if used + needed <= available {
+            used += needed;
+            kept.push(target);
+        } else {
+            hidden.push(target);
+        }
+    }
+    let mut cursor = right_edge;
+    let mut slots = Vec::new();
+    for target in RIGHT_VISUAL_ORDER {
+        if !kept.contains(&target) {
+            continue;
+        }
+        let width = width_of(target);
+        slots.push((
+            target,
+            Rect {
+                x: cursor - width,
+                y: 0,
+                width,
+                height,
+            },
+        ));
+        cursor -= width + gap;
+    }
+    (slots, hidden)
+}
+
+struct LeftSlotInput<'a> {
+    widths: &'a [i32; 7],
+    overflow_width: i32,
+    gap: i32,
+    start: i32,
+    limit: i32,
+    height: i32,
+    force_overflow: bool,
+}
+
+fn resolve_left_slots(input: &LeftSlotInput<'_>) -> SlotRow {
+    let total: i32 = input.widths.iter().sum::<i32>() + input.gap * 6;
+    let needs_overflow = input.force_overflow || input.start + total > input.limit;
+    let reserved = if needs_overflow {
+        input.overflow_width + input.gap
+    } else {
+        0
+    };
+    let mut cursor = input.start;
+    let mut slots = Vec::new();
+    let mut hidden = Vec::new();
+    for (target, width) in LEFT_TARGETS.into_iter().zip(*input.widths) {
+        if hidden.is_empty() && cursor + width + reserved <= input.limit {
+            slots.push((
+                target,
+                Rect {
+                    x: cursor,
+                    y: 0,
+                    width,
+                    height: input.height,
+                },
+            ));
+            cursor += width + input.gap;
+        } else {
+            hidden.push(target);
+        }
+    }
+    let overflow = Rect {
+        x: cursor.min(input.limit),
         y: 0,
-        width,
-        height,
+        width: if needs_overflow {
+            input.overflow_width.min((input.limit - cursor).max(0))
+        } else {
+            0
+        },
+        height: input.height,
+    };
+    SlotRow {
+        slots,
+        hidden,
+        overflow,
     }
 }
 
@@ -640,34 +838,61 @@ pub fn compute_layout_with_notch(
 
     let controls = compute_expanded_notch_controls(notch, dpi, notch_input.lyrics_expanded);
 
-    let left_limit = (notch.x - left_gap).max(padding);
-    let mut lx = padding;
-    let mut next_left =
-        |pts: i32| place_left_slot(&mut lx, scale(pts, dpi), left_gap, left_limit, bar_height);
-
-    let start_slot = next_left(metrics.start_slot_width);
-    let app_slot = next_left(estimate_app_slot_points(metrics, app_name));
-    let file_slot = next_left(metrics.file_slot_width);
-    let edit_slot = next_left(metrics.edit_slot_width);
-    let view_slot = next_left(metrics.view_slot_width);
-    let window_slot = next_left(metrics.window_slot_width);
-    let help_slot = next_left(metrics.help_slot_width);
-
-    let right_limit = notch.right();
-    let mut rx = screen_width - padding;
-    let mut next_right =
-        |pts: i32| place_right_slot(&mut rx, scale(pts, dpi), right_gap, right_limit, bar_height);
-
-    let clock_slot = next_right(metrics.clock_slot_width);
     let control_center_width = if notch_input.control_center_enabled {
         metrics.control_center_slot_width
     } else {
         0
     };
-    let control_center_slot = next_right(control_center_width);
-    let search_slot = next_right(metrics.search_slot_width);
-    let status_slot = next_right(metrics.status_slot_width);
-    let tray_slot = next_right(metrics.tray_slot_width);
+    let right_widths = [
+        (HitTarget::Clock, scale(metrics.clock_slot_width, dpi)),
+        (HitTarget::ControlCenter, scale(control_center_width, dpi)),
+        (HitTarget::Search, scale(metrics.search_slot_width, dpi)),
+        (
+            HitTarget::QuickSettings,
+            scale(metrics.status_slot_width, dpi),
+        ),
+        (HitTarget::Tray, scale(metrics.tray_slot_width, dpi)),
+    ];
+    let (right_slots, right_hidden) = resolve_right_slots(
+        &right_widths,
+        right_gap,
+        notch.right() + right_gap,
+        screen_width - padding,
+        bar_height,
+    );
+    let left_widths = [
+        scale(metrics.start_slot_width, dpi),
+        scale(estimate_app_slot_points(metrics, app_name), dpi),
+        scale(metrics.file_slot_width, dpi),
+        scale(metrics.edit_slot_width, dpi),
+        scale(metrics.view_slot_width, dpi),
+        scale(metrics.window_slot_width, dpi),
+        scale(metrics.help_slot_width, dpi),
+    ];
+    let mut row = resolve_left_slots(&LeftSlotInput {
+        widths: &left_widths,
+        overflow_width: scale(metrics.overflow_slot_width, dpi),
+        gap: left_gap,
+        start: padding,
+        limit: (notch.x - left_gap).max(padding),
+        height: bar_height,
+        force_overflow: !right_hidden.is_empty(),
+    });
+    row.slots.extend(right_slots);
+    row.hidden.extend(right_hidden);
+
+    let start_slot = row.rect(HitTarget::Start);
+    let app_slot = row.rect(HitTarget::AppMenu);
+    let file_slot = row.rect(HitTarget::FileMenu);
+    let edit_slot = row.rect(HitTarget::EditMenu);
+    let view_slot = row.rect(HitTarget::ViewMenu);
+    let window_slot = row.rect(HitTarget::WindowMenu);
+    let help_slot = row.rect(HitTarget::HelpMenu);
+    let clock_slot = row.rect(HitTarget::Clock);
+    let control_center_slot = row.rect(HitTarget::ControlCenter);
+    let search_slot = row.rect(HitTarget::Search);
+    let status_slot = row.rect(HitTarget::QuickSettings);
+    let tray_slot = row.rect(HitTarget::Tray);
 
     let corner_pts = lerp_points(
         metrics.notch_corner_radius,
@@ -714,6 +939,8 @@ pub fn compute_layout_with_notch(
         view_slot,
         window_slot,
         help_slot,
+        overflow_slot: row.overflow,
+        hidden_targets: row.hidden,
         tray_slot,
         status_slot,
         search_slot,
@@ -1022,6 +1249,124 @@ mod tests {
         assert_eq!(layout.hit_test(750, 16), None);
     }
 
+    const EVERY_SLOT: [HitTarget; 12] = [
+        HitTarget::Start,
+        HitTarget::AppMenu,
+        HitTarget::FileMenu,
+        HitTarget::EditMenu,
+        HitTarget::ViewMenu,
+        HitTarget::WindowMenu,
+        HitTarget::HelpMenu,
+        HitTarget::Tray,
+        HitTarget::QuickSettings,
+        HitTarget::Search,
+        HitTarget::ControlCenter,
+        HitTarget::Clock,
+    ];
+
+    fn assert_every_item_reachable(layout: &Layout) {
+        let mut visible: Vec<Rect> = Vec::new();
+        for target in EVERY_SLOT {
+            let rect = layout.slot_rect(target).unwrap();
+            if layout.is_hidden(target) {
+                assert_eq!(rect.width, 0, "{target:?} is hidden but still has width");
+                assert!(layout.overflow_slot.width > 0, "{target:?} has no overflow");
+                continue;
+            }
+            assert!(
+                rect.width > 0,
+                "{target:?} is neither visible nor in overflow"
+            );
+            assert_eq!(
+                layout.hit_test(rect.x + rect.width / 2, rect.height / 2),
+                Some(target)
+            );
+            visible.push(rect);
+        }
+        if layout.overflow_slot.width > 0 {
+            let slot = layout.overflow_slot;
+            assert_eq!(
+                layout.hit_test(slot.x + slot.width / 2, slot.height / 2),
+                Some(HitTarget::MenuOverflow)
+            );
+            visible.push(slot);
+        }
+        visible.push(Rect {
+            height: layout.bar.height,
+            ..layout.notch
+        });
+        visible.sort_by_key(|rect| rect.x);
+        for pair in visible.windows(2) {
+            assert!(
+                pair[0].right() <= pair[1].x,
+                "{:?} overlaps {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(visible.first().unwrap().x >= 0);
+        assert!(visible.last().unwrap().right() <= layout.bar.width);
+    }
+
+    #[test]
+    fn wide_screens_show_every_slot_without_overflow() {
+        for (width, dpi) in [(1920, 96), (2560, 144), (3840, 192)] {
+            let layout = compute_layout_for_app(&M, width, dpi, "Finder");
+            assert!(layout.hidden_targets.is_empty(), "{width}@{dpi}");
+            assert_eq!(layout.overflow_slot.width, 0);
+            assert_every_item_reachable(&layout);
+        }
+    }
+
+    #[test]
+    fn small_and_high_scale_screens_keep_every_item_reachable() {
+        for (width, dpi) in [
+            (1366, 96),
+            (1366, 144),
+            (1280, 120),
+            (1024, 96),
+            (1024, 144),
+            (800, 96),
+            (1920, 240),
+            (1280, 192),
+        ] {
+            for app_name in ["Finder", "Visual Studio Installer"] {
+                let layout = compute_layout_for_app(&M, width, dpi, app_name);
+                assert_every_item_reachable(&layout);
+            }
+        }
+    }
+
+    #[test]
+    fn widened_notch_never_overlaps_menu_slots() {
+        for (width, dpi) in [(1366, 144), (1024, 96), (1920, 96)] {
+            let layout = compute_layout_with_notch(
+                &M,
+                width,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    hud_expansion: 1.0,
+                    compact_expansion: 1.0,
+                    ..NotchLayoutInput::default()
+                },
+            );
+            assert_every_item_reachable(&layout);
+        }
+    }
+
+    #[test]
+    fn hidden_items_anchor_their_menus_at_the_overflow_slot() {
+        let layout = compute_layout_for_app(&M, 800, 96, "Finder");
+        assert!(!layout.hidden_targets.is_empty());
+        let hidden = layout.hidden_targets[0];
+        assert_eq!(layout.menu_anchor_rect(hidden), Some(layout.overflow_slot));
+        assert_eq!(
+            layout.menu_anchor_rect(HitTarget::Start),
+            Some(layout.start_slot)
+        );
+    }
+
     #[test]
     fn disabled_control_center_has_no_hit_target() {
         let layout = compute_layout_with_notch(
@@ -1035,6 +1380,7 @@ mod tests {
             },
         );
         assert_eq!(layout.control_center_slot.width, 0);
+        assert!(!layout.is_hidden(HitTarget::ControlCenter));
         assert_eq!(layout.hit_test(layout.control_center_slot.x, 16), None);
     }
 }

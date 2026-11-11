@@ -3,14 +3,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use otto_core::{BatteryStatus, ClockTime, SystemStatus};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
-use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoUninitialize,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -25,7 +19,6 @@ const IOCTL_VIDEO_QUERY_SUPPORTED_BRIGHTNESS: u32 = 0x0023_0494;
 const IOCTL_VIDEO_QUERY_DISPLAY_BRIGHTNESS: u32 = 0x0023_0498;
 const IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS: u32 = 0x0023_049C;
 
-static FALLBACK_VOLUME: AtomicU8 = AtomicU8::new(50);
 static FALLBACK_BRIGHTNESS: AtomicU8 = AtomicU8::new(80);
 
 #[repr(C)]
@@ -63,7 +56,7 @@ pub fn read_system_status() -> SystemStatus {
             minute: now.wMinute as u8,
         };
 
-        let (volume, muted) = read_volume_and_mute();
+        let (volume, muted) = crate::audio::read_volume_and_mute();
         let brightness = read_brightness();
         let caps_lock = (GetKeyState(i32::from(VK_CAPITAL.0)) & 1) != 0;
 
@@ -76,50 +69,6 @@ pub fn read_system_status() -> SystemStatus {
             caps_lock,
         }
     }
-}
-
-#[must_use]
-pub fn step_system_volume(wheel_delta: i16) -> Option<(u8, bool)> {
-    let step: i32 = match wheel_delta.cmp(&0) {
-        std::cmp::Ordering::Greater => 5,
-        std::cmp::Ordering::Less => -5,
-        std::cmp::Ordering::Equal => return None,
-    };
-    let current = with_audio_endpoint(|endpoint| {
-        let current = unsafe { endpoint.GetMasterVolumeLevelScalar() }
-            .unwrap_or(0.5)
-            .clamp(0.0, 1.0);
-        Some(current)
-    })?;
-    let current_pct = (current * 100.0).round() as i32;
-    set_system_volume((current_pct + step).clamp(0, 100) as u8)
-}
-
-#[must_use]
-pub fn set_system_volume(percent: u8) -> Option<(u8, bool)> {
-    let next_pct = percent.min(100);
-    with_audio_endpoint(|endpoint| unsafe {
-        let _ = endpoint.SetMasterVolumeLevelScalar(f32::from(next_pct) / 100.0, std::ptr::null());
-        let muted = next_pct == 0;
-        let _ = endpoint.SetMute(muted, std::ptr::null());
-        FALLBACK_VOLUME.store(next_pct, Ordering::Relaxed);
-        Some((next_pct, muted))
-    })
-}
-
-#[must_use]
-pub fn toggle_system_mute() -> Option<(u8, bool)> {
-    with_audio_endpoint(|endpoint| unsafe {
-        let current_mute = endpoint
-            .GetMute()
-            .unwrap_or(windows::core::BOOL(0))
-            .as_bool();
-        let next_mute = !current_mute;
-        let _ = endpoint.SetMute(next_mute, std::ptr::null());
-        let current = endpoint.GetMasterVolumeLevelScalar().unwrap_or(0.5);
-        let pct = (current * 100.0).round() as u8;
-        Some((pct, next_mute))
-    })
 }
 
 #[must_use]
@@ -163,22 +112,6 @@ pub fn set_display_brightness(percent: u8) -> u8 {
         }
     }
     target
-}
-
-fn read_volume_and_mute() -> (u8, bool) {
-    let Some((pct, muted)) = with_audio_endpoint(|endpoint| unsafe {
-        let scalar = endpoint
-            .GetMasterVolumeLevelScalar()
-            .unwrap_or(0.5)
-            .clamp(0.0, 1.0);
-        let muted = endpoint.GetMute().is_ok_and(windows::core::BOOL::as_bool);
-        let pct = (scalar * 100.0).round() as u8;
-        Some((pct, muted))
-    }) else {
-        return (FALLBACK_VOLUME.load(Ordering::Relaxed), false);
-    };
-    FALLBACK_VOLUME.store(pct, Ordering::Relaxed);
-    (pct, muted)
 }
 
 fn read_brightness() -> u8 {
@@ -254,34 +187,4 @@ unsafe fn snap_supported_brightness(handle: HANDLE, target: u8) -> u8 {
         .copied()
         .min_by_key(|&lvl| (i32::from(lvl) - i32::from(target)).abs())
         .unwrap_or(target)
-}
-
-struct ComApartmentGuard;
-
-impl ComApartmentGuard {
-    fn new() -> Option<Self> {
-        if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
-            return None;
-        }
-        Some(Self)
-    }
-}
-
-impl Drop for ComApartmentGuard {
-    fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
-        }
-    }
-}
-
-fn with_audio_endpoint<T>(operation: impl FnOnce(&IAudioEndpointVolume) -> Option<T>) -> Option<T> {
-    let _com = ComApartmentGuard::new()?;
-    let endpoint = unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).ok()?;
-        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-        device.Activate(CLSCTX_INPROC_SERVER, None).ok()?
-    };
-    operation(&endpoint)
 }

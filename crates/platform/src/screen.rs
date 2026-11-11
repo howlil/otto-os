@@ -32,3 +32,47 @@ pub fn primary_screen() -> PrimaryScreen {
         }
     }
 }
+
+#[must_use]
+pub fn monitor_work_area_at(x: i32, y: i32) -> otto_core::Rect {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO};
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..MONITORINFO::default()
+    };
+    let found = unsafe {
+        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        GetMonitorInfoW(monitor, &raw mut info).as_bool()
+    };
+    if !found {
+        let primary = primary_screen();
+        return otto_core::Rect {
+            x: 0,
+            y: 0,
+            width: primary.width,
+            height: primary.height,
+        };
+    }
+    otto_core::Rect {
+        x: info.rcWork.left,
+        y: info.rcWork.top,
+        width: info.rcWork.right - info.rcWork.left,
+        height: info.rcWork.bottom - info.rcWork.top,
+    }
+}
+
+#[must_use]
+pub fn virtual_screen() -> otto_core::Rect {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+    unsafe {
+        otto_core::Rect {
+            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    }
+}
