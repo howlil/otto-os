@@ -1060,7 +1060,12 @@ function Run-GenieFlow {
             throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
         }
         [OttoE2ENative]::MoveCursor($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
-        Start-Sleep -Milliseconds 150
+        Start-Sleep -Milliseconds 300
+        $settled = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+        if (-not $settled -or [OttoE2EWindowState]::Foreground() -ne $form.Handle -or
+            [Math]::Abs($settled.Left - $form.Left) -gt $tolerance -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
+            throw 'Focus or window controls moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
+        }
         Save-Screenshot 'genie' '00-before-minimize' | Out-Null
         [OttoE2ENative]::Click($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
         $overlaySeen = $false
@@ -1076,19 +1081,18 @@ function Run-GenieFlow {
             Start-Sleep -Milliseconds 800
             throw "The Genie overlay never appeared after the minimize button was pressed. (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) controls=$($controls.Left),$($controls.Top) probe=$($form.Left),$($form.Top))"
         }
-        Start-Sleep -Milliseconds 100
-        $flightShot = Save-Screenshot 'genie' '01-genie-in-flight'
-        if (-not (Get-OttoWindow $process.Id 'OttoGenie' $true)) {
-            throw "The Genie overlay finished before the in-flight frame was captured ($flightShot)."
-        }
-        Write-Output "CHECKPOINT_PASS scenario=genie name=01-genie-in-flight screenshot=$flightShot"
         $dockIcon = $null
+        $frames = 0
         $deadline = (Get-Date).AddMilliseconds(3000)
         while ((Get-Date) -lt $deadline) {
             $overlay = Get-OttoWindow $process.Id 'OttoGenie' $true
-            if ($overlay) { $dockIcon = $overlay } elseif ($dockIcon) { break }
+            if ($overlay) { $dockIcon = $overlay; $frames++ } elseif ($dockIcon) { break }
             Start-Sleep -Milliseconds 10
         }
+        if ($frames -lt 3) {
+            throw "The Genie minimize overlay was observed in only $frames polls; the animation did not run."
+        }
+        Write-Output "CHECKPOINT_PASS scenario=genie name=01-genie-in-flight overlay_polls=$frames"
         Wait-Until { [OttoE2EWindowState]::IsIconic($form.Handle) } 'probe window to end minimized' 3000
         Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after the animation' 3000
         Record-Checkpoint $process '02-minimized' 'Window is minimized and no overlay remains.'
@@ -1103,16 +1107,28 @@ function Run-GenieFlow {
         $dockWindow = Get-OttoWindow $process.Id 'OttoDockBar' $true
         $iconCenterX = [int](($dockIcon.Left + $dockIcon.Right) / 2)
         $iconCenterY = $dockWindow.Bottom - (Convert-ToScaled 6) - (Convert-ToScaled 12) - (Convert-ToScaled 24)
-        [OttoE2ENative]::MoveCursor($iconCenterX, $dockWindow.Bottom - 1)
-        Start-Sleep -Milliseconds 700
-        [OttoE2ENative]::MoveCursor($iconCenterX, $iconCenterY)
-        Start-Sleep -Milliseconds 400
-        [OttoE2ENative]::Click($iconCenterX, $iconCenterY)
-        Wait-Until { $null -ne (Get-OttoWindow $process.Id 'OttoGenie' $true) } 'Genie overlay to start the restore animation' 1500 -Detail {
-            $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
-            "clicked=$iconCenterX,$iconCenterY icon=$($dockIcon.Left),$($dockIcon.Top),$($dockIcon.Right),$($dockIcon.Bottom) dock=$($dock.Left),$($dock.Top),$($dock.Right),$($dock.Bottom) iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) visible=$([OttoE2EWindowState]::IsWindowVisible($form.Handle))"
+        $restoreStarted = $false
+        for ($attempt = 0; $attempt -lt 3 -and -not $restoreStarted; $attempt++) {
+            [OttoE2ENative]::MoveCursor($iconCenterX, $dockWindow.Bottom - 1)
+            Start-Sleep -Milliseconds 700
+            [OttoE2ENative]::MoveCursor($iconCenterX, $iconCenterY)
+            Start-Sleep -Milliseconds 400
+            [OttoE2ENative]::Click($iconCenterX, $iconCenterY)
+            $deadline = (Get-Date).AddMilliseconds(1500)
+            while ((Get-Date) -lt $deadline) {
+                if (Get-OttoWindow $process.Id 'OttoGenie' $true) {
+                    $restoreStarted = $true
+                    break
+                }
+                if (-not [OttoE2EWindowState]::IsIconic($form.Handle)) {
+                    throw 'The probe window was restored without the Genie animation.'
+                }
+                Start-Sleep -Milliseconds 10
+            }
         }
-        Start-Sleep -Milliseconds 40
+        if (-not $restoreStarted) {
+            throw "Clicking the Dock icon never started a restore (clicked=$iconCenterX,$iconCenterY dock=$($dockWindow.Left),$($dockWindow.Top),$($dockWindow.Right),$($dockWindow.Bottom))."
+        }
         Record-Checkpoint $process '03-restore-in-flight' 'Genie overlay grows from the Dock back to the window frame.' 'OttoGenie'
         Wait-Until { -not [OttoE2EWindowState]::IsIconic($form.Handle) -and [OttoE2EWindowState]::IsWindowVisible($form.Handle) } 'probe window to be restored' 3000
         Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after restoring' 3000
