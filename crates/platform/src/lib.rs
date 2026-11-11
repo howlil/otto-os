@@ -43,7 +43,10 @@ pub use media::{
 };
 pub use motion::motion_preference;
 pub use notch::WindowsNotchPort;
-pub use os_events::{install_os_event_hooks, suppress_native_osd, uninstall_os_event_hooks};
+pub use os_events::{
+    install_os_event_hooks, install_window_tracking_hook, suppress_native_osd,
+    uninstall_os_event_hooks, uninstall_window_tracking_hook,
+};
 pub use screen::{PrimaryScreen, enable_per_monitor_dpi, primary_screen};
 pub use status::{
     read_system_status, set_display_brightness, set_system_volume, step_display_brightness,

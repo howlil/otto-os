@@ -8,7 +8,8 @@ use otto_core::{
 };
 use otto_platform::{
     ActiveWindowTarget, active_window_target, current_process_id, execute_window_control,
-    motion_preference, primary_screen, sample_titlebar_rgb,
+    install_window_tracking_hook, motion_preference, primary_screen, sample_titlebar_rgb,
+    uninstall_window_tracking_hook,
 };
 use otto_render::WindowControlsRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -21,13 +22,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::Result;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
-const WINDOW_CONTROLS_POLL_TIMER: usize = 20;
-const WINDOW_CONTROLS_POLL_MS: u32 = 25;
+const WM_APP_WINDOW_SYNC: u32 = 0x8000 + 20;
+const WINDOW_CONTROLS_ANIM_TIMER: usize = 20;
+const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
 
 thread_local! {
     static WINDOW_CONTROLS: RefCell<Option<WindowControls>> = const { RefCell::new(None) };
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct WindowControls {
     hwnd: isize,
     own_pid: u32,
@@ -38,10 +41,10 @@ struct WindowControls {
     render_origin: (f32, f32),
     titlebar_rgb: (u8, u8, u8),
     settle_ticks: u8,
-    idle_counter: u8,
     hovered: bool,
     visible: bool,
     tracking_mouse: bool,
+    animating: bool,
     motion: MotionPreference,
     motion_metrics: MotionMetrics,
     last_tick: Instant,
@@ -64,36 +67,29 @@ pub fn start(hwnd: isize) -> Result<()> {
         render_origin: (0.0, 0.0),
         titlebar_rgb: (32, 33, 36),
         settle_ticks: 0,
-        idle_counter: 0,
         hovered: false,
         visible: false,
         tracking_mouse: false,
+        animating: false,
         motion: motion_preference(),
         motion_metrics: MotionMetrics::default(),
         last_tick: Instant::now(),
     };
+    install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
     wc.sync_target();
-
-    unsafe {
-        SetTimer(
-            Some(HWND(hwnd as *mut _)),
-            WINDOW_CONTROLS_POLL_TIMER,
-            WINDOW_CONTROLS_POLL_MS,
-            None,
-        );
-    }
 
     WINDOW_CONTROLS.with(|cell| *cell.borrow_mut() = Some(wc));
     Ok(())
 }
 
 pub fn stop() {
+    uninstall_window_tracking_hook();
     WINDOW_CONTROLS.with(|cell| {
         if let Some(controls) = cell.borrow_mut().take() {
             unsafe {
                 let _ = KillTimer(
                     Some(HWND(controls.hwnd as *mut _)),
-                    WINDOW_CONTROLS_POLL_TIMER,
+                    WINDOW_CONTROLS_ANIM_TIMER,
                 );
             }
         }
@@ -108,8 +104,12 @@ pub fn handle_message(
 ) -> Option<LRESULT> {
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
-        WM_TIMER if wparam.0 == WINDOW_CONTROLS_POLL_TIMER => {
+        WM_APP_WINDOW_SYNC => {
             with_window_controls(WindowControls::sync_target);
+            Some(LRESULT(0))
+        }
+        WM_TIMER if wparam.0 == WINDOW_CONTROLS_ANIM_TIMER => {
+            with_window_controls(WindowControls::tick_animation);
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
@@ -188,69 +188,122 @@ impl WindowControls {
         self.last_tick = now;
         self.motion = motion_preference();
         let next = active_window_target(self.own_pid);
-        match next {
-            Some(target) => {
-                let previous_target = self.target;
-                let target_changed = previous_target != Some(target);
-                let window_changed =
-                    previous_target.is_none_or(|current| current.hwnd != target.hwnd);
-                let desired_origin = self.target_origin(target);
-                self.target = Some(target);
-                let was_invisible = !self.visible;
-                if was_invisible || window_changed {
-                    self.render_origin = desired_origin;
-                    self.visible = true;
-                    unsafe {
-                        let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
-                    }
-                } else {
-                    self.render_origin.0 = animate_value(
-                        self.render_origin.0,
-                        desired_origin.0,
-                        self.motion_metrics.window_controls_follow_rate,
-                        dt,
-                        self.motion,
-                    );
-                    self.render_origin.1 = animate_value(
-                        self.render_origin.1,
-                        desired_origin.1,
-                        self.motion_metrics.window_controls_follow_rate,
-                        dt,
-                        self.motion,
-                    );
+        if let Some(target) = next {
+            let previous_target = self.target;
+            let target_changed = previous_target != Some(target);
+            let window_changed = previous_target.is_none_or(|current| current.hwnd != target.hwnd);
+            let desired_origin = self.target_origin(target);
+            self.target = Some(target);
+            let was_invisible = !self.visible;
+            if was_invisible || window_changed {
+                self.render_origin = desired_origin;
+                self.visible = true;
+                unsafe {
+                    let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
                 }
-                let origin_changed = self.render_origin != desired_origin;
-                if target_changed {
-                    self.titlebar_rgb = sample_titlebar_rgb(target, self.layout.width);
-                    self.settle_ticks = 20;
-                    self.idle_counter = 0;
-                }
-                if target_changed || origin_changed || was_invisible {
-                    self.present();
-                } else {
-                    self.idle_counter = self.idle_counter.wrapping_add(1);
-                    let should_resample = if self.settle_ticks > 0 {
-                        self.settle_ticks -= 1;
-                        self.settle_ticks.is_multiple_of(2)
-                    } else {
-                        self.idle_counter.is_multiple_of(20)
-                    };
-                    if should_resample {
-                        let sampled = sample_titlebar_rgb(target, self.layout.width);
-                        if sampled != self.titlebar_rgb {
-                            self.titlebar_rgb = sampled;
-                            self.present();
-                        }
-                    }
+            } else {
+                self.render_origin.0 = animate_value(
+                    self.render_origin.0,
+                    desired_origin.0,
+                    self.motion_metrics.window_controls_follow_rate,
+                    dt,
+                    self.motion,
+                );
+                self.render_origin.1 = animate_value(
+                    self.render_origin.1,
+                    desired_origin.1,
+                    self.motion_metrics.window_controls_follow_rate,
+                    dt,
+                    self.motion,
+                );
+            }
+            let origin_changed = self.render_origin != desired_origin;
+            if target_changed {
+                self.titlebar_rgb = sample_titlebar_rgb(target, self.layout.width);
+                self.settle_ticks = 20;
+            }
+            if target_changed || origin_changed || was_invisible {
+                self.present();
+            }
+            if origin_changed || self.settle_ticks > 0 {
+                self.ensure_anim_timer();
+            } else {
+                self.stop_anim_timer();
+            }
+        } else {
+            self.stop_anim_timer();
+            if self.visible {
+                self.visible = false;
+                self.hovered = false;
+                self.target = None;
+                unsafe {
+                    let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
                 }
             }
-            None => {
-                if self.visible {
-                    self.visible = false;
-                    self.hovered = false;
-                    self.target = None;
-                    let _ = unsafe { ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE) };
+        }
+    }
+
+    fn tick_animation(&mut self) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.last_tick)
+            .as_secs_f32()
+            .clamp(0.001, 0.050);
+        self.last_tick = now;
+        let Some(target) = self.target else {
+            self.stop_anim_timer();
+            return;
+        };
+        let desired_origin = self.target_origin(target);
+        self.render_origin.0 = animate_value(
+            self.render_origin.0,
+            desired_origin.0,
+            self.motion_metrics.window_controls_follow_rate,
+            dt,
+            self.motion,
+        );
+        self.render_origin.1 = animate_value(
+            self.render_origin.1,
+            desired_origin.1,
+            self.motion_metrics.window_controls_follow_rate,
+            dt,
+            self.motion,
+        );
+        let origin_changed = self.render_origin != desired_origin;
+        if self.settle_ticks > 0 {
+            self.settle_ticks -= 1;
+            if self.settle_ticks.is_multiple_of(2) {
+                let sampled = sample_titlebar_rgb(target, self.layout.width);
+                if sampled != self.titlebar_rgb {
+                    self.titlebar_rgb = sampled;
                 }
+            }
+        }
+        self.present();
+        if !origin_changed && self.settle_ticks == 0 {
+            self.stop_anim_timer();
+        }
+    }
+
+    fn ensure_anim_timer(&mut self) {
+        if !self.animating {
+            self.animating = true;
+            unsafe {
+                SetTimer(
+                    Some(HWND(self.hwnd as *mut _)),
+                    WINDOW_CONTROLS_ANIM_TIMER,
+                    WINDOW_CONTROLS_ANIM_MS,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn stop_anim_timer(&mut self) {
+        if self.animating {
+            self.animating = false;
+            unsafe {
+                let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), WINDOW_CONTROLS_ANIM_TIMER);
             }
         }
     }
