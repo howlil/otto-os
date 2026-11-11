@@ -681,6 +681,18 @@ function Stop-Otto($process) {
         @(Get-OttoWindows $process.Id | Where-Object { $_.Visible }).Count -eq 0
     } 'Otto windows to be destroyed after shutdown' 4000
     $script:ownedProcess = $null
+    Assert-NoCrash $process
+}
+
+function Assert-NoCrash($process) {
+    $pidHex = '0x{0:X}' -f $process.Id
+    $crash = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = $process.StartTime } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match 'otto-os\.exe' -and $_.Message -match "Faulting process id: $pidHex" } |
+        Select-Object -First 1
+    if ($crash) {
+        $module = [regex]::Match($crash.Message, 'Faulting module name: ([^,]+)').Groups[1].Value
+        throw "Otto process $($process.Id) crashed during its lifetime (module $module)."
+    }
 }
 
 function Open-ControlCenter($process) {

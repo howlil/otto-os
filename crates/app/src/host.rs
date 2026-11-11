@@ -778,6 +778,7 @@ impl Host {
                 let _ = DestroyWindow(surfaces.bar);
             }
         }
+        otto_render::release_shared_factories();
         for (_, state) in &mut self.states {
             *state = PluginState::Disabled;
         }

@@ -171,11 +171,18 @@ pub struct Renderer {
     cached_cover_art: RefCell<Option<CachedCoverArt>>,
 }
 
+thread_local! {
+    static D2D_FACTORY: RefCell<Option<ID2D1Factory>> = const { RefCell::new(None) };
+    static DWRITE_FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
+}
+
+pub fn release_shared_factories() {
+    let _ = D2D_FACTORY.try_with(|cell| cell.borrow_mut().take());
+    let _ = DWRITE_FACTORY.try_with(|cell| cell.borrow_mut().take());
+}
+
 pub(crate) fn shared_d2d_factory() -> Result<ID2D1Factory> {
-    thread_local! {
-        static FACTORY: RefCell<Option<ID2D1Factory>> = const { RefCell::new(None) };
-    }
-    FACTORY.with(|cell| {
+    D2D_FACTORY.with(|cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
             let factory: ID2D1Factory =
@@ -190,10 +197,7 @@ pub(crate) fn shared_d2d_factory() -> Result<ID2D1Factory> {
 }
 
 pub(crate) fn shared_dwrite_factory() -> Result<IDWriteFactory> {
-    thread_local! {
-        static FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
-    }
-    FACTORY.with(|cell| {
+    DWRITE_FACTORY.with(|cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
             let factory: IDWriteFactory =
