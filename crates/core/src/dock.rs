@@ -430,7 +430,8 @@ fn fit_dock(
     };
     let total_items = app_count + right_items;
     let max_allowed_w = max_dock_width(screen_width);
-    let needed_w = natural.width(total_items);
+    let needed_w =
+        natural.width(total_items) + magnification_extra_width(metrics, natural.base_icon);
     if total_items == 0 || needed_w <= max_allowed_w {
         return natural;
     }
@@ -450,6 +451,10 @@ fn max_dock_width(screen_width: i32) -> f32 {
     (screen_width as f32 - SCREEN_EDGE_ALLOWANCE).max(MIN_DOCK_WIDTH)
 }
 
+fn magnification_extra_width(metrics: &DockMetrics, base_icon: f32) -> f32 {
+    (metrics.max_scale - 1.0).max(0.0) * metrics.magnify_radius_slots * base_icon
+}
+
 #[must_use]
 pub fn dock_capacity(
     metrics: &DockMetrics,
@@ -459,7 +464,8 @@ pub fn dock_capacity(
 ) -> usize {
     let fits = |apps: usize| {
         let total = apps + right_items;
-        fit_dock(metrics, screen_width, dpi, apps, right_items).width(total)
+        let fitted = fit_dock(metrics, screen_width, dpi, apps, right_items);
+        fitted.width(total) + magnification_extra_width(metrics, fitted.base_icon)
             <= max_dock_width(screen_width) + 0.5
     };
     (1..=MAX_DOCK_SLOTS)
@@ -556,6 +562,10 @@ mod tests {
 
     const M: DockMetrics = DockMetrics::MACOS_SONOMA;
 
+    fn footprint(fitted: &FittedDock, total_items: usize) -> f32 {
+        fitted.width(total_items) + magnification_extra_width(&M, fitted.base_icon)
+    }
+
     fn sample_input(cursor_x: Option<f32>, mag_strength: f32) -> DockInput<'static> {
         DockInput {
             screen_width: 1920,
@@ -640,9 +650,9 @@ mod tests {
         let capacity = dock_capacity(&M, 800, 96, 2);
         assert!(capacity > 10);
         let fitted = fit_dock(&M, 800, 96, capacity, 2);
-        assert!(fitted.width(capacity + 2) <= 800.0 - 32.0 + 0.5);
+        assert!(footprint(&fitted, capacity + 2) <= 800.0 - 32.0 + 0.5);
         let over = fit_dock(&M, 800, 96, capacity + 1, 2);
-        assert!(over.width(capacity + 3) > 800.0 - 32.0 + 0.5);
+        assert!(footprint(&over, capacity + 3) > 800.0 - 32.0 + 0.5);
         assert!(dock_capacity(&M, 2240, 144, 2) > dock_capacity(&M, 800, 96, 2) / 2);
     }
 
@@ -769,12 +779,96 @@ mod tests {
                     let capacity = dock_capacity(&M, screen_width, dpi, right_items);
                     if capacity > 0 {
                         let fitted = fit_dock(&M, screen_width, dpi, capacity, right_items);
-                        assert!(fitted.width(capacity + right_items) <= limit);
+                        assert!(footprint(&fitted, capacity + right_items) <= limit);
                     }
                     if capacity < MAX_DOCK_SLOTS {
                         let over = fit_dock(&M, screen_width, dpi, capacity + 1, right_items);
-                        assert!(over.width(capacity + 1 + right_items) > limit);
+                        assert!(footprint(&over, capacity + 1 + right_items) > limit);
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_magnification_capacity_ignores_the_extra_width() {
+        let flat = DockMetrics {
+            max_scale: 1.0,
+            ..M
+        };
+        for screen_width in (0..=3840).step_by(160) {
+            for dpi in [96_u32, 144, 192, 288] {
+                for right_items in 0..=3 {
+                    let limit = max_dock_width(screen_width) + 0.5;
+                    let expected = (1..=MAX_DOCK_SLOTS)
+                        .take_while(|&apps| {
+                            fit_dock(&flat, screen_width, dpi, apps, right_items)
+                                .width(apps + right_items)
+                                <= limit
+                        })
+                        .last()
+                        .unwrap_or(0);
+                    assert_eq!(
+                        dock_capacity(&flat, screen_width, dpi, right_items),
+                        expected,
+                        "width {screen_width} dpi {dpi} right {right_items}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn magnification_never_increases_capacity() {
+        let flat = DockMetrics {
+            max_scale: 1.0,
+            ..M
+        };
+        for screen_width in (0..=3840).step_by(160) {
+            for dpi in [96_u32, 144, 192, 288] {
+                for right_items in 0..=3 {
+                    assert!(
+                        dock_capacity(&M, screen_width, dpi, right_items)
+                            <= dock_capacity(&flat, screen_width, dpi, right_items)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_magnified_dock_never_leaves_the_screen() {
+        for screen_width in [800_i32, 1280, 1920, 2240, 3840] {
+            for dpi in [96_u32, 144, 192, 288] {
+                let right_items = 2;
+                let capacity = dock_capacity(&M, screen_width, dpi, right_items);
+                if capacity == 0 {
+                    continue;
+                }
+                let mut cursor = 0.0_f32;
+                while cursor <= screen_width as f32 {
+                    let layout = compute_dock_layout(
+                        &M,
+                        DockInput {
+                            screen_width,
+                            dpi,
+                            app_count: capacity,
+                            right_count: right_items,
+                            has_trash: true,
+                            cursor_x: Some(cursor),
+                            mag_strength: 1.0,
+                            bounce_offsets: &[],
+                            item_presence: &[],
+                            hide_progress: 0.0,
+                        },
+                    );
+                    assert!(
+                        layout.pill.x >= 0 && layout.pill.right() <= screen_width,
+                        "width {screen_width} dpi {dpi} cursor {cursor}: pill {}..{}",
+                        layout.pill.x,
+                        layout.pill.right()
+                    );
+                    cursor += 24.0;
                 }
             }
         }
