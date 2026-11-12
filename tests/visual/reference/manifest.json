@@ -1,0 +1,34 @@
+﻿{
+    "version":  1,
+    "tolerance":  4,
+    "spreadMax":  6,
+    "recordedAt":  "2026-11-12T15:45:26.4006419Z",
+    "recordedDpi":  144,
+    "recordedWallpaper":  "C:\\Users\\howlil\\Downloads\\macos-monterey-wwdc-21-stock-5k-3840x2160-5584.jpg",
+    "modes":  {
+                  "dark-opaque":  {
+                                      "bar-empty":  [
+                                                        28,
+                                                        28,
+                                                        33
+                                                    ],
+                                      "dock-pill":  [
+                                                        69,
+                                                        22,
+                                                        164
+                                                    ]
+                                  },
+                  "light-opaque":  {
+                                       "bar-empty":  [
+                                                         240,
+                                                         240,
+                                                         245
+                                                     ],
+                                       "dock-pill":  [
+                                                         69,
+                                                         22,
+                                                         164
+                                                     ]
+                                   }
+              }
+}

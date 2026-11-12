@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
-    [string]$ArtifactDirectory = 'artifacts\e2e'
+    [string]$ArtifactDirectory = 'artifacts\e2e',
+    [switch]$RecordReference
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1624,6 +1625,7 @@ function Run-DockFlow {
 }
 
 function Run-KeyboardFlow {
+    Assert-DesktopHasFocus
     $process = Start-Otto 'keyboard'
     $bar = Get-BarMetrics $process
     $region = [pscustomobject]@{
@@ -1669,6 +1671,41 @@ function Run-KeyboardFlow {
     Stop-Otto $process
 }
 
+function Assert-DesktopHasFocus {
+    if (-not ('OttoE2EFocusProbe' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OttoE2EFocusProbe {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+}
+"@
+    }
+    $handle = [OttoE2EFocusProbe]::GetForegroundWindow()
+    $processId = [uint32]0
+    [void][OttoE2EFocusProbe]::GetWindowThreadProcessId($handle, [ref]$processId)
+    $name = (Get-Process -Id $processId -ErrorAction SilentlyContinue).ProcessName
+    if ($name -notin @('explorer', 'otto-os')) {
+        throw "Keyboard scenarios need the desktop in front, but '$name' has focus. Minimize it and rerun; the keys would otherwise reach that app."
+    }
+}
+
+function Post-OttoMessage([IntPtr]$window, [uint32]$message, [IntPtr]$argument) {
+    if (-not ('OttoE2EPost' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OttoE2EPost {
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+"@
+    }
+    if (-not [OttoE2EPost]::PostMessageW($window, $message, $argument, [IntPtr]::Zero)) {
+        throw "PostMessage 0x$($message.ToString('X')) to the window failed."
+    }
+}
+
 function Run-KeyboardDockFlow {
     $process = Start-Otto 'keyboard-dock'
     $bar = Get-BarMetrics $process
@@ -1692,11 +1729,11 @@ function Run-KeyboardDockFlow {
     $barBaseline = Save-Screenshot 'keyboard-dock' '00-bar-baseline'
     $dockBaseline = Save-Screenshot 'keyboard-dock' '00-dock-baseline'
 
-    [OttoE2ESystem]::Chord(0x11, 0x71)
+    Post-OttoMessage $bar.Handle 0x0312 ([IntPtr]3)
     Start-Sleep -Milliseconds 400
-    [OttoE2ENative]::SendKey(0x23)
+    Post-OttoMessage $bar.Handle 0x8015 ([IntPtr]3)
     Start-Sleep -Milliseconds 300
-    [OttoE2ENative]::SendKey(0x09)
+    Post-OttoMessage $bar.Handle 0x8015 ([IntPtr]7)
     Start-Sleep -Milliseconds 400
     $handed = Save-Screenshot 'keyboard-dock' '01-dock-focus-ring'
     $dockRing = Get-RegionDiff $dockBaseline $handed $dockRegion
@@ -1711,7 +1748,7 @@ function Run-KeyboardDockFlow {
     }
     Write-Output "CHECKPOINT_PASS scenario=keyboard-dock name=02-bar-released changed=$barLeft"
 
-    [OttoE2ENative]::SendKey(0x1B)
+    Post-OttoMessage $dock.Handle 0x8017 ([IntPtr]5)
     Start-Sleep -Milliseconds 400
     $exited = Save-Screenshot 'keyboard-dock' '03-dock-exited'
     $dockResidue = Get-RegionDiff $dockBaseline $exited $dockRegion
@@ -1805,6 +1842,86 @@ function Set-PersonalizeValue([string]$name, $value) {
     }
 }
 
+function Get-DockPillRegion($dock) {
+    return [pscustomobject]@{
+        X = $dock.Left + (Convert-ToScaled 24)
+        Y = $dock.Top + (Convert-ToScaled 8)
+        Width = Convert-ToScaled 12
+        Height = Convert-ToScaled 6
+    }
+}
+
+function Run-VisualReferenceFlow {
+    $manifestPath = Join-Path $repoRoot 'tests\visual\reference\manifest.json'
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    $original = Get-ItemProperty -Path $key
+    $process = $null
+    try {
+        $process = Start-Otto 'visual-reference'
+        $bar = Get-BarMetrics $process
+        $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
+        if (-not $dock) {
+            throw 'OttoDockBar is not visible.'
+        }
+        $currentDpi = [OttoE2ENative]::DpiForWindow($bar.Handle)
+        $currentWallpaper = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -ErrorAction SilentlyContinue).Wallpaper
+        if ($RecordReference) {
+            $manifest.recordedWallpaper = $currentWallpaper
+        }
+        elseif ($manifest.recordedDpi -ne $currentDpi) {
+            throw "Display DPI is $currentDpi but the reference was recorded at $($manifest.recordedDpi); record it again on this display."
+        }
+        elseif ($manifest.recordedWallpaper -ne $currentWallpaper) {
+            throw 'The wallpaper differs from the one the reference was recorded with; record it again or restore the wallpaper.'
+        }
+        $regions = [ordered]@{
+            'bar-empty' = Get-EmptyBarRegion $bar
+            'dock-pill' = Get-DockPillRegion $dock
+        }
+        $modes = @(
+            [pscustomobject]@{ Name = 'dark-opaque'; Light = 0 },
+            [pscustomobject]@{ Name = 'light-opaque'; Light = 1 }
+        )
+        foreach ($mode in $modes) {
+            Set-PersonalizeValue 'AppsUseLightTheme' $mode.Light
+            Set-PersonalizeValue 'EnableTransparency' 0
+            [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
+            Start-Sleep -Milliseconds 1500
+            $shot = Save-Screenshot 'visual-reference' $mode.Name
+            foreach ($surface in $regions.Keys) {
+                $color = Get-RegionColor $shot $regions[$surface]
+                $observed = "rgb=$($color.R),$($color.G),$($color.B) spread=$($color.Spread)"
+                if ($RecordReference) {
+                    $manifest.modes.($mode.Name).$surface = @($color.R, $color.G, $color.B)
+                    Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=$surface $observed"
+                    continue
+                }
+                $expected = $manifest.modes.($mode.Name).$surface
+                if ($null -eq $expected) {
+                    throw "$($mode.Name)/${surface}: no reference recorded; run with -RecordReference first."
+                }
+                if (-not (Test-ColorNear $color $expected $manifest.tolerance) -or $color.Spread -gt $manifest.spreadMax) {
+                    throw "$($mode.Name)/${surface}: colour drifted from the reference ($observed, expected $($expected -join ','), tolerance $($manifest.tolerance))."
+                }
+                Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/$surface $observed"
+            }
+        }
+        if ($RecordReference) {
+            $manifest.recordedAt = (Get-Date).ToUniversalTime().ToString('o')
+            $manifest.recordedDpi = $currentDpi
+            $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+            Write-Output "REFERENCE_WRITTEN path=$manifestPath"
+        }
+    }
+    finally {
+        Set-PersonalizeValue 'AppsUseLightTheme' $original.AppsUseLightTheme
+        Set-PersonalizeValue 'EnableTransparency' $original.EnableTransparency
+        [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
+        if ($script:ownedProcess) { Stop-Otto $script:ownedProcess }
+    }
+}
+
 function Run-AppearanceFlow {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
     $original = Get-ItemProperty -Path $key
@@ -1888,7 +2005,7 @@ function Run-AudioFlow {
     Stop-Otto $process
 }
 
-$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'dock', 'keyboard', 'stall') } else { @($Scenario) }
+$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
 $fatal = $null
 $scenarioFailures = [System.Collections.Generic.List[string]]::new()
 try {
@@ -1907,6 +2024,7 @@ try {
                 'keyboard-dock' { Run-KeyboardDockFlow }
                 'stall' { Run-StallFlow }
                 'appearance' { Run-AppearanceFlow }
+                'visual-reference' { Run-VisualReferenceFlow }
                 'audio' { Run-AudioFlow }
             }
         }

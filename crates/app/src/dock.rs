@@ -990,9 +990,8 @@ impl Dock {
 
     fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
         stop_routing_if_targets(self.hwnd);
-        if self.focus.exit() {
-            self.present(runtime);
-        }
+        self.focus.exit();
+        self.present(runtime);
     }
 
     fn sync_keyboard_focus(&mut self, runtime: &RuntimeContext) {

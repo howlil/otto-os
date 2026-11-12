@@ -54,6 +54,7 @@ const STATUS_IDLE_MS: u32 = 1000;
 const STATUS_IDLE_AFTER_TICKS: u32 = 16;
 const MEDIA_EVERY_TICKS: u8 = 4;
 const MAINTAIN_EVERY_TICKS: u8 = 8;
+const IDLE_PERIODIC_MULTIPLIER: u8 = 2;
 const HUD_ANIM_MS: u32 = 8;
 
 #[allow(clippy::struct_excessive_bools)]
@@ -675,7 +676,16 @@ impl Bar {
     }
 
     fn periodic_due(&self, every_ticks: u8) -> bool {
-        self.cadence.is_idle() || self.maintain_ticks.is_multiple_of(every_ticks)
+        self.maintain_ticks
+            .is_multiple_of(every_ticks.saturating_mul(self.idle_multiplier()))
+    }
+
+    fn idle_multiplier(&self) -> u8 {
+        if self.cadence.is_idle() {
+            IDLE_PERIODIC_MULTIPLIER
+        } else {
+            1
+        }
     }
 
     fn hidden_for_full_screen(&self) -> bool {
@@ -919,9 +929,8 @@ impl Bar {
 
     fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
         stop_routing_if_targets(self.hwnd);
-        if self.focus.exit() {
-            self.present(runtime);
-        }
+        self.focus.exit();
+        self.present(runtime);
     }
 
     fn sync_keyboard_focus(&mut self, runtime: &RuntimeContext) {

@@ -160,6 +160,13 @@ mod tests {
     }
 
     #[test]
+    fn exiting_after_escape_reports_nothing_left_to_clear() {
+        let mut focus = at(1);
+        assert_eq!(focus.handle(BarKey::Exit, 5), DockFocusOutcome::Exited);
+        assert!(!focus.exit());
+    }
+
+    #[test]
     fn a_vanished_item_moves_focus_back_to_the_first() {
         let mut focus = at(4);
         assert!(focus.revalidate(3));
