@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs;
+use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -816,16 +818,10 @@ pub fn toggle_pin_entry(entry: &DockEntry) {
     let DockItemKind::App { exe_path } = &entry.kind else {
         return;
     };
-    let mut list = read_pinned_file();
-    if let Some(position) = list.iter().position(|pin| pin.key == entry.key) {
-        list.remove(position);
-    } else {
-        list.push(PinnedApp {
-            key: entry.key.clone(),
-            executable: exe_path.clone(),
-        });
-    }
-    save_pinned_apps(&list);
+    let Some(pins) = read_pinned_file() else {
+        return;
+    };
+    save_pinned_apps(&toggled_pins(pins, &entry.key, exe_path));
 }
 
 #[must_use]
@@ -1405,12 +1401,13 @@ fn parse_pinned_line(line: &str) -> Option<PinnedApp> {
     }
     if line.starts_with(USER_MODEL_KEY_PREFIX) {
         let (key, executable) = line.split_once('|')?;
-        return (!executable.trim().is_empty() && key.len() > USER_MODEL_KEY_PREFIX.len()).then(
-            || PinnedApp {
-                key: String::from(key.trim()),
-                executable: String::from(executable.trim()),
-            },
-        );
+        let key = key.trim();
+        let executable = executable.trim();
+        let has_identity = key.len() > USER_MODEL_KEY_PREFIX.len();
+        return (has_identity && !executable.is_empty()).then(|| PinnedApp {
+            key: String::from(key),
+            executable: String::from(executable),
+        });
     }
     Some(PinnedApp {
         key: line.to_lowercase(),
@@ -1419,14 +1416,22 @@ fn parse_pinned_line(line: &str) -> Option<PinnedApp> {
 }
 
 fn parse_pinned(content: &str) -> Vec<PinnedApp> {
-    let mut pins: Vec<PinnedApp> = Vec::new();
-    for pin in content.lines().filter_map(parse_pinned_line) {
-        if pins.len() >= MAX_PINNED_APPS {
-            break;
-        }
-        if !pins.iter().any(|known| known.key == pin.key) {
-            pins.push(pin);
-        }
+    let mut seen = HashSet::new();
+    content
+        .lines()
+        .filter_map(parse_pinned_line)
+        .filter(|pin| seen.insert(pin.key.clone()))
+        .collect()
+}
+
+fn toggled_pins(mut pins: Vec<PinnedApp>, key: &str, executable: &str) -> Vec<PinnedApp> {
+    if let Some(position) = pins.iter().position(|pin| pin.key == key) {
+        pins.remove(position);
+    } else if pins.len() < MAX_PINNED_APPS {
+        pins.push(PinnedApp {
+            key: String::from(key),
+            executable: String::from(executable),
+        });
     }
     pins
 }
@@ -1463,15 +1468,22 @@ fn pinned_config_path() -> Option<PathBuf> {
     crate::file::data_dir().map(|dir| dir.join("pinned.txt"))
 }
 
-fn read_pinned_file() -> Vec<PinnedApp> {
-    pinned_config_path()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .map(|content| parse_pinned(&content))
-        .unwrap_or_default()
+fn pinned_from_read(read: io::Result<String>) -> Option<Vec<PinnedApp>> {
+    match read {
+        Ok(content) => Some(parse_pinned(&content)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+fn read_pinned_file() -> Option<Vec<PinnedApp>> {
+    let path = pinned_config_path()?;
+    pinned_from_read(fs::read_to_string(path))
 }
 
 fn available_pinned_apps() -> Vec<PinnedApp> {
     read_pinned_file()
+        .unwrap_or_default()
         .into_iter()
         .filter(|pin| Path::new(&pin.executable).exists())
         .collect()
@@ -1479,7 +1491,9 @@ fn available_pinned_apps() -> Vec<PinnedApp> {
 
 #[must_use]
 pub fn remove_pinned_app(key: &str) -> bool {
-    let mut list = read_pinned_file();
+    let Some(mut list) = read_pinned_file() else {
+        return false;
+    };
     let before = list.len();
     list.retain(|pin| pin.key != key);
     list.len() != before && save_pinned_apps(&list)
@@ -1487,7 +1501,9 @@ pub fn remove_pinned_app(key: &str) -> bool {
 
 #[must_use]
 pub fn reorder_pinned_apps(moved_key: &str, target_key: &str) -> bool {
-    let mut list = read_pinned_file();
+    let Some(mut list) = read_pinned_file() else {
+        return false;
+    };
     move_pin(&mut list, moved_key, target_key) && save_pinned_apps(&list)
 }
 
@@ -1600,8 +1616,8 @@ fn save_pinned_apps(apps: &[PinnedApp]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DockEntry, DockItemKind, PinnedApp, build_dock_context_menu_rows, format_pinned, move_pin,
-        parse_pinned, window_covers_dock,
+        DockEntry, DockItemKind, MAX_PINNED_APPS, PinnedApp, build_dock_context_menu_rows,
+        format_pinned, move_pin, parse_pinned, pinned_from_read, toggled_pins, window_covers_dock,
     };
     use otto_core::{
         AppIdentity, CMD_DOCK_WINDOW_BASE, MenuRow, WindowIdentity, WindowInfo, WindowPresence,
@@ -1724,6 +1740,60 @@ mod tests {
     fn duplicate_and_malformed_pins_are_dropped() {
         let pins = parse_pinned("C:\\a.exe\nc:\\A.EXE\naumid:\naumid:Only.Id\naumid:X|\n");
         assert_eq!(pins, vec![pin("c:\\a.exe", "C:\\a.exe")]);
+    }
+
+    #[test]
+    fn blank_identity_pins_are_dropped_and_identities_are_trimmed() {
+        let pins = parse_pinned("aumid:   |C:\\a.exe\naumid:Vendor.App!Main  |  C:\\b.exe  \n");
+        assert_eq!(
+            pins,
+            vec![PinnedApp {
+                key: String::from("aumid:Vendor.App!Main"),
+                executable: String::from("C:\\b.exe"),
+            }]
+        );
+    }
+
+    #[test]
+    fn unreadable_pin_file_is_never_treated_as_an_empty_list() {
+        assert_eq!(
+            pinned_from_read(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            pinned_from_read(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not utf-8",
+            ))),
+            None
+        );
+        assert_eq!(
+            pinned_from_read(Ok(String::from("C:\\a.exe\n"))).map(|pins| pins.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn long_pin_lists_survive_a_rewrite_and_only_new_pins_are_capped() {
+        let lines: Vec<String> = (0..MAX_PINNED_APPS + 2)
+            .map(|index| format!("C:\\Apps\\app{index}.exe"))
+            .collect();
+        let text = lines.join("\n");
+        let pins = parse_pinned(&text);
+        assert_eq!(pins.len(), MAX_PINNED_APPS + 2);
+        assert_eq!(parse_pinned(&format_pinned(&pins)), pins);
+        let added = toggled_pins(pins.clone(), "c:\\new\\tool.exe", "C:\\new\\tool.exe");
+        assert_eq!(added.len(), MAX_PINNED_APPS + 2);
+        let first = pins[0].key.clone();
+        let removed = toggled_pins(pins, &first, "");
+        assert_eq!(removed.len(), MAX_PINNED_APPS + 1);
+    }
+
+    #[test]
+    fn toggling_a_pin_adds_it_then_removes_it() {
+        let added = toggled_pins(Vec::new(), "c:\\a.exe", "C:\\a.exe");
+        assert_eq!(added, vec![pin("c:\\a.exe", "C:\\a.exe")]);
+        assert!(toggled_pins(added, "c:\\a.exe", "C:\\a.exe").is_empty());
     }
 
     #[test]
