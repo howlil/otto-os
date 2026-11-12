@@ -68,23 +68,9 @@ impl LyricsSheet {
 
     #[must_use]
     pub fn active_line_index(&self, position_ms: u64) -> Option<usize> {
-        if self.lines.is_empty() || position_ms < self.lines[0].timestamp_ms {
-            return None;
-        }
-
-        match self
-            .lines
-            .binary_search_by_key(&position_ms, |line| line.timestamp_ms)
-        {
-            Ok(idx) => Some(idx),
-            Err(idx) => {
-                if idx == 0 {
-                    None
-                } else {
-                    Some(idx - 1)
-                }
-            }
-        }
+        self.lines
+            .partition_point(|line| line.timestamp_ms <= position_ms)
+            .checked_sub(1)
     }
 
     #[must_use]
@@ -273,6 +259,33 @@ mod tests {
         assert_eq!(sheet.active_line(39_999), Some("Chorus"));
         assert_eq!(sheet.active_line(40_000), Some("Outro"));
         assert_eq!(sheet.active_line(99_999), Some("Outro"));
+    }
+
+    #[test]
+    fn active_line_is_the_last_line_started_when_timestamps_repeat() {
+        let sheet = LyricsSheet::new(vec![
+            LyricLine {
+                timestamp_ms: 10_000,
+                text: "Before".into(),
+            },
+            LyricLine {
+                timestamp_ms: 20_000,
+                text: "Duet A".into(),
+            },
+            LyricLine {
+                timestamp_ms: 20_000,
+                text: "Duet B".into(),
+            },
+            LyricLine {
+                timestamp_ms: 30_000,
+                text: "After".into(),
+            },
+        ]);
+
+        assert_eq!(sheet.active_line_index(9_999), None);
+        assert_eq!(sheet.active_line_index(20_000), Some(2));
+        assert_eq!(sheet.active_line(25_000), Some("Duet B"));
+        assert_eq!(sheet.active_line(30_000), Some("After"));
     }
 
     #[test]

@@ -148,25 +148,16 @@ impl DockPreferences {
 
     #[must_use]
     pub fn parse_config(contents: &str) -> Self {
-        let value = |key: &str| {
-            contents
-                .lines()
-                .find_map(|line| line.strip_prefix(key))
-                .map(str::trim)
-        };
-        let flag = |key: &str, fallback: bool| {
-            value(key).map_or(fallback, |text| text.eq_ignore_ascii_case("true"))
-        };
         let defaults = Self::default();
         Self {
             position: DockPosition::Bottom,
-            magnification: flag("dock_magnification=", defaults.magnification),
-            icon_size: value("dock_icon_size=")
+            magnification: config_flag(contents, "dock_magnification", defaults.magnification),
+            icon_size: config_value(contents, "dock_icon_size")
                 .and_then(|text| text.parse::<i32>().ok())
                 .map_or(defaults.icon_size, |size| {
                     size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX)
                 }),
-            autohide: flag("dock_autohide=", defaults.autohide),
+            autohide: config_flag(contents, "dock_autohide", defaults.autohide),
         }
     }
 
@@ -176,6 +167,21 @@ impl DockPreferences {
             "dock_autohide={}\ndock_magnification={}\ndock_icon_size={}\n",
             self.autohide, self.magnification, self.icon_size
         )
+    }
+}
+
+fn config_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then_some(value.trim())
+    })
+}
+
+fn config_flag(contents: &str, key: &str, fallback: bool) -> bool {
+    match config_value(contents, key) {
+        Some(text) if text.eq_ignore_ascii_case("true") => true,
+        Some(text) if text.eq_ignore_ascii_case("false") => false,
+        _ => fallback,
     }
 }
 
@@ -696,6 +702,82 @@ mod tests {
         assert_eq!(huge.icon_size, 80);
         let junk = DockPreferences::parse_config("dock_icon_size=abc\ndock_autohide=yes\n");
         assert_eq!(junk, DockPreferences::default());
+    }
+
+    #[test]
+    fn config_tolerates_spacing_line_endings_and_first_value_wins() {
+        let prefs = DockPreferences::parse_config(
+            "  dock_icon_size = 64 \r\n\tdock_autohide=true\r\ndock_icon_size=40\r\n",
+        );
+        assert_eq!(prefs.icon_size, DOCK_ICON_LARGE);
+        assert!(prefs.autohide);
+    }
+
+    #[test]
+    fn malformed_flags_keep_their_defaults_instead_of_turning_off() {
+        assert!(DockPreferences::parse_config("dock_magnification=yes\n").magnification);
+        assert!(!DockPreferences::parse_config("dock_autohide=maybe\n").autohide);
+        assert!(DockPreferences::parse_config("dock_autohide=TRUE\n").autohide);
+        assert!(!DockPreferences::parse_config("dock_magnification= FALSE \n").magnification);
+    }
+
+    #[test]
+    fn overflow_edges_for_no_single_and_exact_capacity_apps() {
+        assert_eq!(
+            split_dock_overflow(0, 0),
+            DockOverflow {
+                visible_apps: 0,
+                hidden_apps: 0
+            }
+        );
+        assert_eq!(
+            split_dock_overflow(1, 0),
+            DockOverflow {
+                visible_apps: 0,
+                hidden_apps: 1
+            }
+        );
+        assert_eq!(
+            split_dock_overflow(1, 1),
+            DockOverflow {
+                visible_apps: 1,
+                hidden_apps: 0
+            }
+        );
+        assert_eq!(
+            split_dock_overflow(2, 1),
+            DockOverflow {
+                visible_apps: 0,
+                hidden_apps: 2
+            }
+        );
+        assert_eq!(
+            split_dock_overflow(5, 5),
+            DockOverflow {
+                visible_apps: 5,
+                hidden_apps: 0
+            }
+        );
+    }
+
+    #[test]
+    fn capacity_fits_and_is_maximal_across_screen_widths_and_dpi() {
+        for screen_width in (0..=3840).step_by(160) {
+            for dpi in [96_u32, 144, 192, 288] {
+                for right_items in 0..=3 {
+                    let limit = max_dock_width(screen_width) + 0.5;
+                    let capacity = dock_capacity(&M, screen_width, dpi, right_items);
+                    if capacity > 0 {
+                        let fitted = fit_dock(&M, screen_width, dpi, capacity, right_items);
+                        assert!(fitted.width(capacity + right_items) <= limit);
+                    }
+                    if capacity < MAX_DOCK_SLOTS {
+                        let over = fit_dock(&M, screen_width, dpi, capacity + 1, right_items);
+                        assert!(over.width(capacity + 1 + right_items) > limit);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

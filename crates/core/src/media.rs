@@ -444,6 +444,50 @@ mod tests {
     }
 
     #[test]
+    fn rate_extrapolation_is_capped_and_a_zero_rate_holds_the_position() {
+        let huge = NowPlaying {
+            playback_rate_permille: u32::MAX,
+            ..playing_track(0, 10_000_000)
+        };
+        assert_eq!(huge.position_at(11_000), 16_000);
+        let frozen = NowPlaying {
+            playback_rate_permille: 0,
+            ..playing_track(30_000, 120_000)
+        };
+        assert_eq!(frozen.position_at(60_000), 30_000);
+    }
+
+    #[test]
+    fn a_timeline_stamp_in_the_future_holds_until_it_is_reached() {
+        let skewed = NowPlaying {
+            position_updated_unix_ms: Some(15_000),
+            ..playing_track(30_000, 120_000)
+        };
+        assert_eq!(skewed.position_at(10_000), 30_000);
+        assert_eq!(skewed.position_at(15_000), 30_000);
+        assert_eq!(skewed.position_at(17_000), 32_000);
+    }
+
+    #[test]
+    fn duration_and_capability_changes_present_differently() {
+        let shown = playing_track(10_000, 120_000);
+        let longer = NowPlaying {
+            duration_ms: 240_000,
+            ..shown.clone()
+        };
+        let restricted = NowPlaying {
+            capabilities: MediaCapabilities {
+                next: false,
+                ..MediaCapabilities::ALL
+            },
+            ..shown.clone()
+        };
+        assert!(!shown.presents_like(&longer, 10_000));
+        assert!(!shown.presents_like(&restricted, 10_000));
+        assert!(shown.presents_like(&shown, 10_000));
+    }
+
+    #[test]
     fn live_streams_keep_counting_and_are_not_seekable() {
         let live = playing_track(5_000, 0);
         assert!(!live.has_known_duration());
@@ -493,6 +537,7 @@ mod tests {
         assert_eq!(seek_target_ms(0.5, 200_000), 100_000);
         assert_eq!(seek_target_ms(1.4, 200_000), 200_000);
         assert_eq!(seek_target_ms(-0.2, 200_000), 0);
+        assert_eq!(seek_target_ms(f32::NAN, 200_000), 0);
     }
 
     #[test]

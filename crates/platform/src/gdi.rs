@@ -103,6 +103,9 @@ pub(crate) struct CaptureCanvas {
 
 impl CaptureCanvas {
     pub(crate) fn create(screen: &ScreenDc, layout: BgraLayout) -> Option<Self> {
+        if !layout.is_consistent() {
+            return None;
+        }
         let dc = MemoryDc::compatible_with(screen)?;
         let dib = DibSection::create(screen, layout)?;
         let previous = unsafe { SelectObject(dc.0, HGDIOBJ(dib.bitmap.0)) };
@@ -138,5 +141,78 @@ impl Drop for CaptureCanvas {
         unsafe {
             SelectObject(self.dc.0, self.previous);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::{PixelLimits, bgra_layout};
+    use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources};
+
+    const CYCLES: usize = 200;
+
+    fn gdi_object_count() -> u32 {
+        unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
+    }
+
+    fn acquire_screen() -> ScreenDc {
+        ScreenDc::acquire().expect("the desktop screen DC should be available")
+    }
+
+    fn capture_once(screen: &ScreenDc, layout: BgraLayout) {
+        let canvas = CaptureCanvas::create(screen, layout).expect("canvas should be created");
+        assert_eq!(canvas.copy_pixels().len(), layout.byte_len);
+    }
+
+    #[test]
+    fn repeated_canvas_cycles_do_not_grow_the_gdi_object_count() {
+        let layout = bgra_layout(64, 32, PixelLimits::ICON).unwrap();
+        let screen = acquire_screen();
+        capture_once(&screen, layout);
+        let before = gdi_object_count();
+        for _ in 0..CYCLES {
+            capture_once(&screen, layout);
+        }
+        let growth = gdi_object_count().saturating_sub(before);
+        assert!(
+            growth < CYCLES as u32 / 2,
+            "GDI object count grew by {growth} over {CYCLES} canvas cycles"
+        );
+    }
+
+    #[test]
+    fn failed_dib_allocation_releases_the_memory_dc_it_was_given() {
+        let oversized = bgra_layout(
+            1 << 20,
+            1 << 20,
+            PixelLimits {
+                max_dimension: 1 << 20,
+                max_bytes: usize::MAX,
+            },
+        )
+        .expect("the layout itself is well formed on 64-bit targets");
+        let screen = acquire_screen();
+        let before = gdi_object_count();
+        for _ in 0..CYCLES / 4 {
+            assert!(CaptureCanvas::create(&screen, oversized).is_none());
+        }
+        let growth = gdi_object_count().saturating_sub(before);
+        assert!(
+            growth < CYCLES as u32 / 2,
+            "GDI object count grew by {growth} after failed canvas allocations"
+        );
+    }
+
+    #[test]
+    fn canvas_refuses_a_layout_that_contradicts_its_own_size() {
+        let screen = acquire_screen();
+        let lying = BgraLayout {
+            width: 4,
+            height: 4,
+            stride: 64,
+            byte_len: 256,
+        };
+        assert!(CaptureCanvas::create(&screen, lying).is_none());
     }
 }

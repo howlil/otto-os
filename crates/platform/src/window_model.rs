@@ -307,6 +307,10 @@ fn read_traits(hwnd: HWND, style: u32, facts: &ProcessFacts) -> WindowTraits {
     }
 }
 
+fn is_recorded_hidden(recorded: &[WindowIdentity], candidate: &WindowIdentity) -> bool {
+    recorded.iter().any(|known| known.is_same_window(candidate))
+}
+
 struct Inspection<'a> {
     own_process_id: u32,
     foreground: isize,
@@ -331,11 +335,19 @@ fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<WindowInfo> {
     let title = window_title(hwnd)?;
     let handle = hwnd.0 as isize;
     let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
-    let recorded_hidden = context.hidden.iter().any(|known| known.hwnd == handle);
-    if (!visible && !recorded_hidden) || is_shell_cloaked(hwnd) {
+    if is_shell_cloaked(hwnd) {
         return None;
     }
     let owner_facts = cached_process_facts(context.cache, process_id)?;
+    let identity = WindowIdentity {
+        hwnd: handle,
+        process_id,
+        thread_id,
+        generation: owner_facts.generation,
+    };
+    if !visible && !is_recorded_hidden(context.hidden, &identity) {
+        return None;
+    }
     let app_facts = if class == FRAME_HOST_CLASS {
         let hosted = hosted_process_id(hwnd, process_id)?;
         cached_process_facts(context.cache, hosted)?
@@ -365,12 +377,7 @@ fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<WindowInfo> {
         AppIdentity::user_model_id,
     );
     Some(WindowInfo {
-        identity: WindowIdentity {
-            hwnd: handle,
-            process_id,
-            thread_id,
-            generation: owner_facts.generation,
-        },
+        identity,
         app,
         app_name: friendly_app_name(&app_facts.executable),
         traits: read_traits(hwnd, style, &app_facts),
@@ -634,9 +641,7 @@ pub fn execute_window_command(
             focus_window_hwnd(target.hwnd);
             CommandOutcome::Completed
         }
-        WindowCommand::Close => {
-            post_outcome(unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) })
-        }
+        WindowCommand::Close => post_close(hwnd),
         WindowCommand::Minimize => post_system_command(hwnd, SC_MINIMIZE),
         WindowCommand::Zoom => post_system_command(
             hwnd,
@@ -652,13 +657,22 @@ pub fn execute_window_command(
     }
 }
 
-fn summarize(completed: usize, denied: usize) -> CommandOutcome {
-    if completed > 0 {
-        CommandOutcome::Completed
-    } else if denied > 0 {
-        CommandOutcome::Denied
-    } else {
-        CommandOutcome::TargetGone
+fn summarize(outcomes: impl IntoIterator<Item = CommandOutcome>) -> CommandOutcome {
+    outcomes
+        .into_iter()
+        .max_by_key(|outcome| outcome_priority(*outcome))
+        .unwrap_or(CommandOutcome::TargetGone)
+}
+
+const fn outcome_priority(outcome: CommandOutcome) -> u8 {
+    match outcome {
+        CommandOutcome::Completed => 6,
+        CommandOutcome::Denied => 5,
+        CommandOutcome::TemporarilyUnavailable => 4,
+        CommandOutcome::TimedOut => 3,
+        CommandOutcome::Cancelled => 2,
+        CommandOutcome::Unsupported => 1,
+        CommandOutcome::TargetGone => 0,
     }
 }
 
@@ -684,18 +698,12 @@ fn hide_windows<'a>(
     windows: impl Iterator<Item = &'a WindowInfo>,
     own_process_id: u32,
 ) -> CommandOutcome {
-    let (mut completed, mut denied) = (0, 0);
-    for stale in windows.filter(|window| window.presence != WindowPresence::Hidden) {
-        let Some(live) = live_window(stale.identity, own_process_id) else {
-            continue;
-        };
-        match hide_window(&live) {
-            CommandOutcome::Completed => completed += 1,
-            CommandOutcome::Denied => denied += 1,
-            _ => {}
-        }
-    }
-    summarize(completed, denied)
+    summarize(
+        windows
+            .filter(|window| window.presence != WindowPresence::Hidden)
+            .filter_map(|stale| live_window(stale.identity, own_process_id))
+            .map(|live| hide_window(&live)),
+    )
 }
 
 #[must_use]
@@ -714,41 +722,40 @@ pub fn hide_other_applications(keep: &AppIdentity, own_process_id: u32) -> Comma
 
 #[must_use]
 pub fn show_application(app: &AppInfo, own_process_id: u32) -> CommandOutcome {
-    let mut shown = 0;
-    let mut first = None;
-    for stale in &app.windows {
-        if let Some(live) = live_window(stale.identity, own_process_id) {
-            unhide(&live);
-            first.get_or_insert(live.identity.hwnd);
-            shown += 1;
-        }
+    let live: Vec<WindowInfo> = app
+        .windows
+        .iter()
+        .filter_map(|stale| live_window(stale.identity, own_process_id))
+        .collect();
+    for window in &live {
+        unhide(window);
     }
-    if let Some(hwnd) = first {
-        focus_window_hwnd(hwnd);
+    if let Some(first) = live.first() {
+        focus_window_hwnd(first.identity.hwnd);
     }
-    summarize(shown, 0)
+    summarize(live.iter().map(|_| CommandOutcome::Completed))
 }
 
 #[must_use]
 pub fn quit_application(app: &AppInfo, own_process_id: u32) -> CommandOutcome {
-    let (mut completed, mut denied) = (0, 0);
-    for stale in app.primary_windows() {
-        let Some(live) = live_window(stale.identity, own_process_id) else {
-            continue;
-        };
-        if !live.capability(WindowCommand::Close).is_available() {
-            denied += usize::from(live.traits.elevated);
-            continue;
-        }
-        unhide(&live);
-        let hwnd = HWND(live.identity.hwnd as *mut c_void);
-        match post_outcome(unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }) {
-            CommandOutcome::Completed => completed += 1,
-            CommandOutcome::Denied => denied += 1,
-            _ => {}
-        }
+    summarize(
+        app.primary_windows()
+            .filter_map(|stale| live_window(stale.identity, own_process_id))
+            .map(|live| close_window(&live)),
+    )
+}
+
+fn close_window(window: &WindowInfo) -> CommandOutcome {
+    if let Some(blocked) = CommandOutcome::from_capability(window.capability(WindowCommand::Close))
+    {
+        return blocked;
     }
-    summarize(completed, denied)
+    unhide(window);
+    post_close(HWND(window.identity.hwnd as *mut c_void))
+}
+
+fn post_close(hwnd: HWND) -> CommandOutcome {
+    post_outcome(unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) })
 }
 
 fn identity_is_live(identity: WindowIdentity) -> bool {
@@ -1054,10 +1061,10 @@ mod fixture_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        filetime_value, is_full_screen, summarize, tile_rect, uses_full_screen_shortcut,
-        window_role,
+        filetime_value, is_full_screen, is_recorded_hidden, summarize, tile_rect,
+        uses_full_screen_shortcut, window_role,
     };
-    use otto_core::{CommandOutcome, Rect};
+    use otto_core::{CommandOutcome, Rect, WindowIdentity};
     use windows::Win32::Foundation::{FILETIME, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_POPUP};
 
@@ -1118,9 +1125,58 @@ mod tests {
     }
 
     #[test]
-    fn batch_outcome_prefers_success_then_denial_then_absence() {
-        assert_eq!(summarize(1, 3), CommandOutcome::Completed);
-        assert_eq!(summarize(0, 2), CommandOutcome::Denied);
-        assert_eq!(summarize(0, 0), CommandOutcome::TargetGone);
+    fn batch_outcome_prefers_success_then_denial_then_blockage_then_absence() {
+        assert_eq!(
+            summarize([CommandOutcome::Denied, CommandOutcome::Completed]),
+            CommandOutcome::Completed
+        );
+        assert_eq!(
+            summarize([
+                CommandOutcome::TemporarilyUnavailable,
+                CommandOutcome::Denied
+            ]),
+            CommandOutcome::Denied
+        );
+        assert_eq!(
+            summarize([
+                CommandOutcome::Unsupported,
+                CommandOutcome::TemporarilyUnavailable
+            ]),
+            CommandOutcome::TemporarilyUnavailable
+        );
+        assert_eq!(
+            summarize([CommandOutcome::Unsupported]),
+            CommandOutcome::Unsupported
+        );
+        assert_eq!(
+            summarize(Vec::<CommandOutcome>::new()),
+            CommandOutcome::TargetGone
+        );
+    }
+
+    #[test]
+    fn hidden_ledger_entry_matches_only_the_same_window_of_the_same_process() {
+        let recorded = WindowIdentity {
+            hwnd: 100,
+            process_id: 7,
+            thread_id: 8,
+            generation: 900,
+        };
+        let ledger = [recorded];
+        assert!(is_recorded_hidden(&ledger, &recorded));
+        let reused_handle_other_process = WindowIdentity {
+            process_id: 9,
+            ..recorded
+        };
+        let reused_handle_restarted_process = WindowIdentity {
+            generation: 901,
+            ..recorded
+        };
+        assert!(!is_recorded_hidden(&ledger, &reused_handle_other_process));
+        assert!(!is_recorded_hidden(
+            &ledger,
+            &reused_handle_restarted_process
+        ));
+        assert!(!is_recorded_hidden(&[], &recorded));
     }
 }
