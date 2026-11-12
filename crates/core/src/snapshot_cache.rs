@@ -120,6 +120,36 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_exactly_at_the_byte_budget_evicts_every_other_entry() {
+        let mut cache = SnapshotCache::new(SMALL);
+        assert!(cache.insert(1, (), 30));
+        assert!(cache.insert(2, (), 30));
+        assert!(cache.insert(3, (), 100));
+        assert_eq!(cache.keys(), vec![3]);
+        assert_eq!(cache.total_bytes(), 100);
+    }
+
+    #[test]
+    fn oversized_replacement_drops_the_stale_snapshot_for_its_key() {
+        let mut cache = SnapshotCache::new(SMALL);
+        assert!(cache.insert(1, "old", 10));
+        assert!(cache.insert(2, "other", 10));
+        assert!(!cache.insert(1, "new", 101));
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.keys(), vec![2]);
+    }
+
+    #[test]
+    fn zero_entry_budget_stores_nothing() {
+        let mut cache = SnapshotCache::new(SnapshotBudget {
+            max_entries: 0,
+            max_bytes: 100,
+        });
+        assert!(!cache.insert(1, (), 10));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
     fn replacing_a_key_does_not_double_count_its_bytes() {
         let mut cache = SnapshotCache::new(SMALL);
         assert!(cache.insert(1, "old", 60));

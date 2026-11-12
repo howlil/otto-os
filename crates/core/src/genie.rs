@@ -2,6 +2,7 @@ use crate::Rect;
 
 const STRIP_COUNT: usize = 128;
 const BOUNDS_PADDING: i32 = 2;
+const ENVELOPE_SAMPLES: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenieDirection {
@@ -22,6 +23,16 @@ impl GenieGeometry {
 
     #[must_use]
     pub fn destination_bounds(&self) -> Option<Rect> {
+        let covered = self.covered_bounds()?;
+        Some(Rect {
+            x: covered.x - BOUNDS_PADDING,
+            y: covered.y - BOUNDS_PADDING,
+            width: covered.width + 2 * BOUNDS_PADDING,
+            height: covered.height + 2 * BOUNDS_PADDING,
+        })
+    }
+
+    fn covered_bounds(&self) -> Option<Rect> {
         let first = self.strips.first()?;
         let mut left = first.destination_left;
         let mut top = first.destination_top;
@@ -35,10 +46,10 @@ impl GenieGeometry {
             bottom = bottom.max(strip.destination_top + strip.destination_height);
         }
 
-        let x = left.floor() as i32 - BOUNDS_PADDING;
-        let y = top.floor() as i32 - BOUNDS_PADDING;
-        let right = right.ceil() as i32 + BOUNDS_PADDING;
-        let bottom = bottom.ceil() as i32 + BOUNDS_PADDING;
+        let x = left.floor() as i32;
+        let y = top.floor() as i32;
+        let right = right.ceil() as i32;
+        let bottom = bottom.ceil() as i32;
         Some(Rect {
             x,
             y,
@@ -77,7 +88,7 @@ pub fn compute_genie_geometry(
         return GenieGeometry::empty();
     }
 
-    let transition_progress = transition_progress.clamp(0.0, 1.0);
+    let transition_progress = normalized_transition(transition_progress);
     let warp_progress = match direction {
         GenieDirection::Minimize => transition_progress,
         GenieDirection::Restore => 1.0 - transition_progress,
@@ -121,9 +132,11 @@ fn compute_warp_geometry(source: Rect, target: Rect, progress: f32) -> GenieGeom
         let bottom = pair[1];
         let destination_left = top.left.min(bottom.left);
         let destination_right = top.right.max(bottom.right);
+        let source_top = source_height * index as f32 / STRIP_COUNT as f32;
+        let source_bottom = source_height * (index + 1) as f32 / STRIP_COUNT as f32;
         strips.push(GenieStrip {
-            source_top: source_height * index as f32 / STRIP_COUNT as f32,
-            source_height: (source_height / STRIP_COUNT as f32).max(1.0),
+            source_top,
+            source_height: source_bottom - source_top,
             destination_left,
             destination_top: top.y,
             destination_width: (destination_right - destination_left).max(1.0),
@@ -197,6 +210,14 @@ fn normalized_progress(progress: f32, delay: f32) -> f32 {
     }
 }
 
+fn normalized_transition(progress: f32) -> f32 {
+    if progress.is_nan() {
+        0.0
+    } else {
+        progress.clamp(0.0, 1.0)
+    }
+}
+
 fn smooth_step(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
@@ -247,12 +268,21 @@ pub fn genie_canvas(window: Rect, dock: Rect, virtual_screen: Rect) -> Option<Re
     if window.is_empty() || dock.is_empty() {
         return None;
     }
-    window.union(&dock).intersection(&virtual_screen)
+    warp_envelope(window, dock).intersection(&virtual_screen)
+}
+
+fn warp_envelope(window: Rect, dock: Rect) -> Rect {
+    (0..=ENVELOPE_SAMPLES)
+        .map(|step| compute_warp_geometry(window, dock, step as f32 / ENVELOPE_SAMPLES as f32))
+        .filter_map(|geometry| geometry.covered_bounds())
+        .fold(window.union(&dock), |envelope, bounds| {
+            envelope.union(&bounds)
+        })
 }
 
 #[cfg(test)]
 mod canvas_tests {
-    use super::genie_canvas;
+    use super::{ENVELOPE_SAMPLES, GenieDirection, compute_genie_geometry, genie_canvas};
     use crate::layout::Rect;
 
     const fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
@@ -306,6 +336,30 @@ mod canvas_tests {
     fn empty_window_or_dock_has_no_canvas() {
         assert!(genie_canvas(rect(0, 0, 0, 10), rect(0, 0, 10, 10), VIRTUAL).is_none());
         assert!(genie_canvas(rect(0, 0, 10, 10), rect(0, 0, 10, 0), VIRTUAL).is_none());
+    }
+
+    #[test]
+    fn canvas_contains_every_warped_strip_in_both_directions() {
+        let cases = [
+            (rect(-1700, 120, 900, 700), rect(1200, 1340, 64, 64)),
+            (rect(120, 80, 900, 640), rect(930, 900, 72, 72)),
+            (rect(200, -380, 800, 300), rect(900, 1340, 64, 64)),
+        ];
+        for (window, dock) in cases {
+            let canvas = genie_canvas(window, dock, VIRTUAL).unwrap();
+            for direction in [GenieDirection::Minimize, GenieDirection::Restore] {
+                for step in 0..=ENVELOPE_SAMPLES {
+                    let progress = step as f32 / ENVELOPE_SAMPLES as f32;
+                    let bounds = compute_genie_geometry(window, dock, progress, direction)
+                        .covered_bounds()
+                        .unwrap();
+                    assert!(
+                        canvas.contains_rect(&bounds),
+                        "progress {progress} {direction:?} bounds {bounds:?} canvas {canvas:?}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -390,6 +444,56 @@ mod tests {
         assert!(bounds.height < 1_400);
         assert!(bounds.x > 0);
         assert!(bounds.y > 0);
+    }
+
+    #[test]
+    fn non_finite_progress_starts_the_transition() {
+        let start = compute_genie_geometry(SOURCE, TARGET, 0.0, GenieDirection::Minimize);
+        let nan = compute_genie_geometry(SOURCE, TARGET, f32::NAN, GenieDirection::Minimize);
+        assert_eq!(nan, start);
+        assert!(nan.strips.iter().all(|strip| {
+            [
+                strip.source_top,
+                strip.source_height,
+                strip.destination_left,
+                strip.destination_top,
+                strip.destination_width,
+                strip.destination_height,
+                strip.opacity,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        }));
+    }
+
+    #[test]
+    fn progress_outside_the_unit_interval_is_clamped() {
+        let below = compute_genie_geometry(SOURCE, TARGET, -3.0, GenieDirection::Minimize);
+        let above = compute_genie_geometry(SOURCE, TARGET, 7.0, GenieDirection::Minimize);
+        assert_eq!(
+            below,
+            compute_genie_geometry(SOURCE, TARGET, 0.0, GenieDirection::Minimize)
+        );
+        assert_eq!(
+            above,
+            compute_genie_geometry(SOURCE, TARGET, 1.0, GenieDirection::Minimize)
+        );
+    }
+
+    #[test]
+    fn strip_source_ranges_tile_a_short_snapshot_exactly() {
+        let short = Rect {
+            height: 50,
+            ..SOURCE
+        };
+        let geometry = compute_genie_geometry(short, TARGET, 0.5, GenieDirection::Minimize);
+        let mut cursor = 0.0_f32;
+        for strip in &geometry.strips {
+            assert!((strip.source_top - cursor).abs() < 0.001);
+            assert!(strip.source_height > 0.0);
+            cursor = strip.source_top + strip.source_height;
+        }
+        assert!((cursor - short.height as f32).abs() < 0.001);
     }
 
     #[test]
