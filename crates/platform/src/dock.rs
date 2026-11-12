@@ -65,6 +65,7 @@ pub enum DockItemKind {
     App { exe_path: String },
     Downloads,
     Trash { is_full: bool },
+    Overflow { hidden: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +114,26 @@ pub fn cursor_position() -> (i32, i32) {
     (pt.x, pt.y)
 }
 
+const COVER_WIDTH_SLACK: i32 = 12;
+const COVER_HEIGHT_SLACK: i32 = 56;
+const COVER_BOTTOM_SLACK: i32 = 8;
+
+fn window_covers_dock(
+    on_primary: bool,
+    zoomed: bool,
+    rect: RECT,
+    screen_width: i32,
+    screen_height: i32,
+) -> bool {
+    if !on_primary {
+        return false;
+    }
+    zoomed
+        || (rect.right - rect.left >= screen_width - COVER_WIDTH_SLACK
+            && rect.bottom - rect.top >= screen_height - COVER_HEIGHT_SLACK
+            && rect.bottom >= screen_height - COVER_BOTTOM_SLACK)
+}
+
 #[must_use]
 pub fn has_maximized_or_fullscreen_window(
     screen_width: i32,
@@ -131,20 +152,20 @@ pub fn has_maximized_or_fullscreen_window(
         let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
         if is_normal_visible_window(hwnd, probe.own_pid) {
             let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-            if monitor != probe.primary_monitor {
-                return BOOL(1);
-            }
-            if unsafe { IsZoomed(hwnd) }.as_bool() {
-                probe.found = true;
-                return BOOL(0);
-            }
-            let rect = visible_window_rect(hwnd);
-            let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top;
-            if width >= probe.screen_width - 12
-                && height >= probe.screen_height - 56
-                && rect.bottom >= probe.screen_height - 8
-            {
+            let on_primary = monitor == probe.primary_monitor;
+            let zoomed = on_primary && unsafe { IsZoomed(hwnd) }.as_bool();
+            let rect = if on_primary {
+                visible_window_rect(hwnd)
+            } else {
+                RECT::default()
+            };
+            if window_covers_dock(
+                on_primary,
+                zoomed,
+                rect,
+                probe.screen_width,
+                probe.screen_height,
+            ) {
                 probe.found = true;
                 return BOOL(0);
             }
@@ -479,6 +500,18 @@ pub fn current_process_id() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
 
+pub const OVERFLOW_ENTRY_KEY: &str = "__overflow__";
+
+#[must_use]
+pub fn overflow_dock_entry(hidden: usize) -> DockEntry {
+    fixed_dock_entry(
+        OVERFLOW_ENTRY_KEY,
+        &format!("{hidden} More Apps"),
+        DockItemKind::Overflow { hidden },
+        AppleIconKind::Folder,
+    )
+}
+
 fn fixed_dock_entry(
     key: &str,
     title: &str,
@@ -653,6 +686,7 @@ pub fn launch_new_instance(entry: &DockEntry) {
     match &entry.kind {
         DockItemKind::Finder => shell_open(w!("explorer.exe")),
         DockItemKind::Launchpad => crate::actions::open_start_menu(),
+        DockItemKind::Overflow { .. } => {}
         DockItemKind::Downloads => shell_open(w!("shell:Downloads")),
         DockItemKind::Trash { .. } => shell_open(w!("shell:RecycleBinFolder")),
         DockItemKind::App { exe_path } => {
@@ -719,6 +753,7 @@ pub fn build_dock_context_menu_rows(entry: &DockEntry, other_apps_visible: bool)
             rows.push(MenuRow::item(CMD_DOCK_NEW_WINDOW, "New Finder Window", ""));
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, open_label, ""));
         }
+        DockItemKind::Overflow { .. } => {}
         DockItemKind::Launchpad => {
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Start", ""));
         }
@@ -1548,7 +1583,7 @@ pub fn open_file_with_dock_entry(entry: &DockEntry, file_path: &str) {
                 );
             }
         }
-        DockItemKind::Launchpad => {}
+        DockItemKind::Launchpad | DockItemKind::Overflow { .. } => {}
     }
 }
 
@@ -1564,7 +1599,99 @@ fn save_pinned_apps(apps: &[PinnedApp]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PinnedApp, format_pinned, move_pin, parse_pinned};
+    use super::{
+        DockEntry, DockItemKind, PinnedApp, build_dock_context_menu_rows, format_pinned, move_pin,
+        parse_pinned, window_covers_dock,
+    };
+    use otto_core::{
+        AppIdentity, CMD_DOCK_WINDOW_BASE, MenuRow, WindowIdentity, WindowInfo, WindowPresence,
+        WindowRole, WindowTraits, group_windows,
+    };
+    use windows::Win32::Foundation::RECT;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn windows_on_another_monitor_never_hide_the_dock() {
+        let full = rect(0, 0, 1920, 1080);
+        assert!(!window_covers_dock(false, true, full, 1920, 1080));
+        assert!(!window_covers_dock(false, false, full, 1920, 1080));
+        assert!(window_covers_dock(
+            true,
+            true,
+            rect(0, 0, 10, 10),
+            1920,
+            1080
+        ));
+        assert!(window_covers_dock(true, false, full, 1920, 1080));
+        assert!(!window_covers_dock(
+            true,
+            false,
+            rect(0, 0, 1200, 800),
+            1920,
+            1080
+        ));
+    }
+
+    fn window(hwnd: isize) -> WindowInfo {
+        WindowInfo {
+            identity: WindowIdentity {
+                hwnd,
+                process_id: 7,
+                thread_id: 8,
+                generation: 9,
+            },
+            app: AppIdentity::executable("editor.exe"),
+            app_name: String::from("Editor"),
+            executable: String::from("editor.exe"),
+            title: format!("Document {hwnd}"),
+            role: WindowRole::Primary,
+            presence: WindowPresence::Visible,
+            zoomed: false,
+            full_screen: false,
+            active: false,
+            traits: WindowTraits::STANDARD,
+        }
+    }
+
+    #[test]
+    fn every_window_of_a_busy_app_is_listed_in_the_dock_menu() {
+        let app = group_windows((1..=12).map(window).collect()).remove(0);
+        let entry = DockEntry {
+            key: String::from("editor.exe"),
+            title: String::from("Editor"),
+            kind: DockItemKind::App {
+                exe_path: String::from("editor.exe"),
+            },
+            apple_icon: None,
+            app: Some(app),
+            hwnds: (1..=12).collect(),
+            window_titles: Vec::new(),
+            running: true,
+            active: false,
+            pinned: false,
+            hidden: false,
+            minimized: false,
+        };
+        let rows = build_dock_context_menu_rows(&entry, true);
+        let window_ids: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Item { id, .. } if *id >= CMD_DOCK_WINDOW_BASE => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(window_ids.len(), 12);
+        assert_eq!(window_ids[8], CMD_DOCK_WINDOW_BASE + 8);
+        assert_eq!(window_ids[11], CMD_DOCK_WINDOW_BASE + 11);
+    }
 
     fn pin(key: &str, executable: &str) -> PinnedApp {
         PinnedApp {

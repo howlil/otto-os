@@ -404,6 +404,35 @@ public static class OttoE2ESystem
         mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);
     }
 
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+
+    public static void Restore(IntPtr window)
+    {
+        ShowWindow(window, 9);
+        SetForegroundWindow(window);
+    }
+
+    public static void LeftDown(int x, int y)
+    {
+        SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(40);
+        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+    }
+
+    public static void DragTo(int fromX, int fromY, int x, int y, int steps)
+    {
+        for (int step = 1; step <= steps; step++)
+        {
+            SetCursorPos(fromX + (x - fromX) * step / steps, fromY + (y - fromY) * step / steps);
+            System.Threading.Thread.Sleep(15);
+        }
+    }
+
+    public static void LeftUp()
+    {
+        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+    }
+
     public static void HoldKey(byte key, int milliseconds)
     {
         keybd_event(key, 0, 0, UIntPtr.Zero);
@@ -1548,6 +1577,38 @@ function Run-DockFlow {
             $now -ne $before
         } 'Keep in Dock to update the pinned list (TogglePin effect)' 3000
         Write-Output 'CHECKPOINT_PASS scenario=dock name=08-pinned-list-updated'
+
+        $pinned = Get-Content -LiteralPath $pinnedPath -Raw
+        [OttoE2ESystem]::Restore($pinForm.Handle)
+        Wait-Until { -not [OttoE2EWindowState]::IsIconic($pinForm.Handle) -and [OttoE2EWindowState]::IsWindowVisible($pinForm.Handle) } 'pinned probe to restore' 3000
+        Start-Sleep -Milliseconds 400
+        $pinnedMinimized = Invoke-GenieMinimize $process $pinForm 'dock'
+        Wait-Until { [OttoE2EWindowState]::IsIconic($pinForm.Handle) } 'pinned probe to minimize again' 3000
+        Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after the pinned probe minimized' 3000
+        Start-Sleep -Milliseconds 600
+        $pinnedPoint = Get-DockIconPoint $process $pinnedMinimized.Icon
+        $liftY = $pinnedPoint.Y - (Convert-ToScaled 160)
+
+        Show-DockAt $pinnedPoint
+        [OttoE2ESystem]::LeftDown($pinnedPoint.X, $pinnedPoint.Y)
+        [OttoE2ESystem]::DragTo($pinnedPoint.X, $pinnedPoint.Y, $pinnedPoint.X, $liftY, 20)
+        Start-Sleep -Milliseconds 200
+        [OttoE2ESystem]::HoldKey(0x1B, 350)
+        Start-Sleep -Milliseconds 200
+        [OttoE2ESystem]::LeftUp()
+        Start-Sleep -Milliseconds 1200
+        if ((Get-Content -LiteralPath $pinnedPath -Raw) -ne $pinned) {
+            throw 'Cancelling a Dock drag with Escape changed the pinned list.'
+        }
+        Write-Output 'CHECKPOINT_PASS scenario=dock name=09-cancelled-drag-keeps-pins'
+
+        Show-DockAt $pinnedPoint
+        [OttoE2ESystem]::LeftDown($pinnedPoint.X, $pinnedPoint.Y)
+        [OttoE2ESystem]::DragTo($pinnedPoint.X, $pinnedPoint.Y, $pinnedPoint.X, $liftY, 20)
+        Start-Sleep -Milliseconds 200
+        [OttoE2ESystem]::LeftUp()
+        Wait-Until { (Get-Content -LiteralPath $pinnedPath -Raw) -ne $pinned } 'dragging a pinned icon out of the Dock to unpin it' 3000
+        Write-Output 'CHECKPOINT_PASS scenario=dock name=10-drag-out-unpins'
     }
     finally {
         Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue

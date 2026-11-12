@@ -3,14 +3,14 @@ use std::time::{Duration, Instant};
 use crate::host::RuntimeContext;
 use otto_core::{
     AppMenuState, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY, CMD_CC_BRIGHTNESS, CMD_CC_VOLUME,
-    CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, Capability, CommandOutcome,
-    ControlCenterEffect, ControlCenterPort, DownloadsEffect, EstimatedMenuText, HitTarget,
-    MenuAnchor, MenuContext, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics,
-    PopupMenuPlacement, Rect, ThemeChange, WindowCommand, WindowInfo, WindowMenuEffect,
-    WindowMenuState, build_calendar_rows, build_control_center_rows, build_menu_overflow_rows,
-    build_top_bar_menu_rows, build_window_tiling_menu_rows, compute_popup_menu_layout,
-    control_center_effect, downloads_effect, overflow_menu_target, scale, shift_month,
-    window_menu_effect,
+    CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, Capability,
+    CommandOutcome, ControlCenterEffect, ControlCenterPort, DownloadsEffect, EstimatedMenuText,
+    HitTarget, MenuAnchor, MenuContext, MenuRow, MenuTextMeasure, PopupMenuLayout,
+    PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowCommand, WindowInfo,
+    WindowMenuEffect, WindowMenuState, build_calendar_rows, build_control_center_rows,
+    build_menu_overflow_rows, build_top_bar_menu_rows, build_window_tiling_menu_rows,
+    compute_popup_menu_layout, control_center_effect, dock_overflow_choice, downloads_effect,
+    overflow_menu_target, scale, shift_month, window_menu_effect,
 };
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
@@ -69,6 +69,9 @@ enum MenuSource {
     },
     DownloadsStack {
         items: Vec<StackItem>,
+    },
+    DockOverflow {
+        entries: Vec<DockEntry>,
     },
 }
 
@@ -229,6 +232,32 @@ pub fn open_dock_menu(
 ) {
     let rows = build_dock_context_menu_rows(&entry, other_apps_visible);
     let source = MenuSource::Dock { entry, target_rect };
+    with_menu(runtime, |menu| {
+        menu.open(
+            runtime,
+            MenuAnchor::AboveDock { center_x, bottom_y },
+            rows,
+            source,
+        );
+    });
+}
+
+pub fn open_dock_overflow_menu(
+    runtime: &RuntimeContext,
+    center_x: i32,
+    bottom_y: i32,
+    entries: Vec<DockEntry>,
+) {
+    let mut rows = vec![MenuRow::heading("More Apps"), MenuRow::Separator];
+    for (index, entry) in entries.iter().enumerate() {
+        let marker = if entry.running { "\u{2022} " } else { "" };
+        rows.push(MenuRow::item(
+            CMD_DOCK_OVERFLOW_BASE + index,
+            format!("{marker}{}", entry.title),
+            "",
+        ));
+    }
+    let source = MenuSource::DockOverflow { entries };
     with_menu(runtime, |menu| {
         menu.open(
             runtime,
@@ -561,6 +590,11 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
         },
         MenuSource::WindowControls { window } => {
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));
+        }
+        MenuSource::DockOverflow { entries } => {
+            if let Some(index) = dock_overflow_choice(cmd, entries.len()) {
+                crate::dock::activate_overflow_entry(runtime, &entries[index]);
+            }
         }
         MenuSource::DownloadsStack { items } => match downloads_effect(cmd, items.len()) {
             Some(DownloadsEffect::OpenFolder) => open_downloads_folder(),

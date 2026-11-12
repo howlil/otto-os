@@ -12,6 +12,13 @@ use crate::theme::ThemeMode;
 
 pub const CMD_DOWNLOADS_OPEN_FOLDER: usize = 200;
 pub const CMD_DOWNLOADS_ITEM_BASE: usize = 300;
+pub const CMD_DOCK_OVERFLOW_BASE: usize = 400;
+
+#[must_use]
+pub fn dock_overflow_choice(cmd: usize, hidden_count: usize) -> Option<usize> {
+    cmd.checked_sub(CMD_DOCK_OVERFLOW_BASE)
+        .filter(|index| *index < hidden_count)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockEffect {
@@ -382,6 +389,26 @@ mod tests {
         assert_eq!(
             window_menu_effect(CMD_CC_THEME_TOGGLE, false),
             WindowMenuEffect::CycleTheme
+        );
+    }
+
+    #[test]
+    fn overflow_rows_pick_an_existing_hidden_app() {
+        assert_eq!(
+            super::dock_overflow_choice(super::CMD_DOCK_OVERFLOW_BASE, 3),
+            Some(0)
+        );
+        assert_eq!(
+            super::dock_overflow_choice(super::CMD_DOCK_OVERFLOW_BASE + 2, 3),
+            Some(2)
+        );
+        assert_eq!(
+            super::dock_overflow_choice(super::CMD_DOCK_OVERFLOW_BASE + 3, 3),
+            None
+        );
+        assert_eq!(
+            super::dock_overflow_choice(super::CMD_DOCK_OVERFLOW_BASE - 1, 3),
+            None
         );
     }
 

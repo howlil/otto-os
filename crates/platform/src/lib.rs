@@ -39,15 +39,15 @@ pub use audio::{set_system_volume, shutdown_audio_task, step_system_volume, togg
 pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
 pub use control_center::WindowsControlCenter;
 pub use dock::{
-    ActiveWindowTarget, DockEntry, DockItemKind, IconBitmap, PinnedApp, StackItem, WindowSnapshot,
-    active_window_target, build_dock_context_menu_rows, capture_window, collect_dock_entries,
-    current_process_id, cursor_position, enable_drag_accept_files, extract_dock_icon,
-    extract_dropped_files, flush_compositor, focus_window_hwnd, has_maximized_or_fullscreen_window,
-    is_window_cloaked, is_window_foreground, is_window_minimized, launch_new_instance,
-    minimize_window_native, minimize_window_native_quiet, open_file_with_dock_entry,
-    other_applications_visible, read_downloads_stack_items, remove_pinned_app, reorder_pinned_apps,
-    restore_window_native, restore_window_native_quiet, set_window_transitions_enabled,
-    toggle_pin_entry, window_bounds,
+    ActiveWindowTarget, DockEntry, DockItemKind, IconBitmap, OVERFLOW_ENTRY_KEY, PinnedApp,
+    StackItem, WindowSnapshot, active_window_target, build_dock_context_menu_rows, capture_window,
+    collect_dock_entries, current_process_id, cursor_position, enable_drag_accept_files,
+    extract_dock_icon, extract_dropped_files, flush_compositor, focus_window_hwnd,
+    has_maximized_or_fullscreen_window, is_window_cloaked, is_window_foreground,
+    is_window_minimized, launch_new_instance, minimize_window_native, minimize_window_native_quiet,
+    open_file_with_dock_entry, other_applications_visible, overflow_dock_entry,
+    read_downloads_stack_items, remove_pinned_app, reorder_pinned_apps, restore_window_native,
+    restore_window_native_quiet, set_window_transitions_enabled, toggle_pin_entry, window_bounds,
 };
 pub use file::{DATA_DIR_OVERRIDE, data_dir, replace_file_atomically};
 pub use instance::InstanceGuard;

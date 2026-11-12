@@ -31,14 +31,15 @@ pub use bar_visibility::{BarPointer, BarVisibility};
 pub use calendar::{days_in_month, month_cells, month_title, shift_month, weekday_of};
 pub use change_gate::ChangeGate;
 pub use dock::{
-    AppleIconKind, DockInput, DockItemLayout, DockLayout, DockMetrics, DockPosition,
-    DockPreferences, compute_dock_layout, select_dock_click_window, smooth_damp, step_toward,
+    AppleIconKind, DockInput, DockItemLayout, DockLayout, DockMetrics, DockOverflow, DockPosition,
+    DockPreferences, compute_dock_layout, dock_capacity, select_dock_click_window, smooth_damp,
+    split_dock_overflow, step_toward,
 };
 pub use effects::{
-    CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, ControlCenterEffect, DockDropEffect,
-    DockDropInput, DockEffect, DownloadsEffect, ThemeChange, WindowMenuEffect,
-    control_center_effect, dock_activation_effect, dock_command_effect, dock_drop_effect,
-    downloads_effect, window_menu_effect,
+    CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER,
+    ControlCenterEffect, DockDropEffect, DockDropInput, DockEffect, DownloadsEffect, ThemeChange,
+    WindowMenuEffect, control_center_effect, dock_activation_effect, dock_command_effect,
+    dock_drop_effect, dock_overflow_choice, downloads_effect, window_menu_effect,
 };
 pub use genie::{
     GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry, genie_canvas, is_blank_frame,

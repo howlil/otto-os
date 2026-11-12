@@ -7,16 +7,17 @@ use otto_core::{
     ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockInput, DockLayout,
     DockMetrics, MotionMetrics, MotionPreference, Rect, StableOrder, WindowCommand, WindowIdentity,
     advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout,
-    dock_activation_effect, dock_command_effect, dock_drop_effect, scale,
+    dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, scale,
+    split_dock_overflow,
 };
 use otto_platform::{
     DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
     cursor_position, empty_recycle_bin, enable_drag_accept_files, execute_window_command,
     extract_dock_icon, extract_dropped_files, has_maximized_or_fullscreen_window, hide_application,
     is_escape_down, is_window_minimized, launch_new_instance, motion_preference,
-    open_file_with_dock_entry, other_applications_visible, primary_screen, quit_application,
-    remove_pinned_app, reorder_pinned_apps, show_application, shutdown_recycle_bin_task,
-    signal_command_failure, toggle_pin_entry, window_change_generations,
+    open_file_with_dock_entry, other_applications_visible, overflow_dock_entry, primary_screen,
+    quit_application, remove_pinned_app, reorder_pinned_apps, show_application,
+    shutdown_recycle_bin_task, signal_command_failure, toggle_pin_entry, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -291,6 +292,10 @@ fn show_window(runtime: &RuntimeContext, window: WindowIdentity, target: Option<
     ));
 }
 
+pub fn activate_overflow_entry(runtime: &RuntimeContext, entry: &DockEntry) {
+    activate_entry(runtime, entry, None);
+}
+
 fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target: Option<Rect>) {
     execute_dock_effect(
         runtime,
@@ -412,6 +417,40 @@ impl Dock {
     }
 
     fn combined_entries(&self) -> Vec<DockEntry> {
+        self.displayed_entries().0
+    }
+
+    fn displayed_entries(&self) -> (Vec<DockEntry>, Vec<DockEntry>) {
+        let mut all = self.all_entries();
+        let right_items = all
+            .iter()
+            .rev()
+            .take_while(|entry| {
+                matches!(
+                    entry.kind,
+                    DockItemKind::Downloads | DockItemKind::Trash { .. }
+                )
+            })
+            .count();
+        let app_count = all.len() - right_items;
+        let capacity = dock_capacity(
+            &self.metrics,
+            self.screen.width,
+            self.screen.dpi,
+            right_items,
+        );
+        let split = split_dock_overflow(app_count, capacity);
+        if split.hidden_apps == 0 {
+            return (all, Vec::new());
+        }
+        let right = all.split_off(app_count);
+        let hidden = all.split_off(split.visible_apps);
+        all.push(overflow_dock_entry(hidden.len()));
+        all.extend(right);
+        (all, hidden)
+    }
+
+    fn all_entries(&self) -> Vec<DockEntry> {
         if self.closing_entries.is_empty() {
             return self.entries.clone();
         }
@@ -840,14 +879,22 @@ impl Dock {
         let Some(entry) = all.get(idx).cloned() else {
             return;
         };
-        if matches!(entry.kind, DockItemKind::Downloads) {
+        if matches!(
+            entry.kind,
+            DockItemKind::Downloads | DockItemKind::Overflow { .. }
+        ) {
             let Some(slot) = self.layout.items.get(idx).copied() else {
                 return;
             };
             let (origin_x, origin_y) = self.window_origin();
             let center_x = origin_x + (slot.x + slot.size * 0.5).round() as i32;
             let bottom_y = origin_y + slot.y.round() as i32 - scale(10, self.screen.dpi);
-            crate::menu::open_downloads_stack_menu(runtime, center_x, bottom_y);
+            if matches!(entry.kind, DockItemKind::Downloads) {
+                crate::menu::open_downloads_stack_menu(runtime, center_x, bottom_y);
+            } else {
+                let hidden = self.displayed_entries().1;
+                crate::menu::open_dock_overflow_menu(runtime, center_x, bottom_y, hidden);
+            }
             return;
         }
         if self.motion.allows_motion()

@@ -185,42 +185,29 @@ pub fn smooth_damp(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
 #[allow(clippy::too_many_lines)]
 pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockLayout {
     let dpi = input.dpi;
-    let mut base_icon = scale(metrics.base_icon_size, dpi) as f32;
-    let mut gap = scale(metrics.icon_gap, dpi) as f32;
-    let mut pad_x = scale(metrics.pad_x, dpi) as f32;
-    let mut pad_top = scale(metrics.pad_top, dpi) as f32;
-    let mut pad_bottom = scale(metrics.pad_bottom, dpi) as f32;
-    let mut corner_radius = scale(metrics.corner_radius, dpi) as f32;
     let bottom_margin = scale(metrics.bottom_margin, dpi) as f32;
     let right_items = input.right_count.max(usize::from(input.has_trash));
-    let mut divider_w = if right_items > 0 && input.app_count > 0 {
-        scale(metrics.divider_slot_width, dpi) as f32
-    } else {
-        0.0
-    };
+    let FittedDock {
+        base_icon,
+        gap,
+        pad_x,
+        pad_top,
+        pad_bottom,
+        corner_radius,
+        divider_w,
+    } = fit_dock(
+        metrics,
+        input.screen_width,
+        dpi,
+        input.app_count,
+        right_items,
+    );
     let dot_radius = scale(metrics.dot_radius, dpi).max(2) as f32;
     let tooltip_gap = scale(metrics.tooltip_gap, dpi) as f32;
     let tooltip_height = scale(metrics.tooltip_height, dpi) as f32;
     let max_bounce = scale(metrics.bounce_height, dpi) as f32;
 
     let total_items = input.app_count + right_items;
-    if total_items > 0 {
-        let unscaled_content_w = total_items as f32 * base_icon
-            + (total_items.saturating_sub(1) as f32) * gap
-            + divider_w;
-        let max_allowed_w = (input.screen_width as f32 - 32.0).max(120.0);
-        let needed_w = unscaled_content_w + pad_x * 2.0;
-        if needed_w > max_allowed_w {
-            let shrink = (max_allowed_w / needed_w).clamp(0.35, 1.0);
-            base_icon = (base_icon * shrink).max(16.0);
-            gap = (gap * shrink).max(2.0);
-            pad_x = (pad_x * shrink).max(4.0);
-            pad_top = (pad_top * shrink).max(4.0);
-            pad_bottom = (pad_bottom * shrink).max(4.0);
-            corner_radius = (corner_radius * shrink).max(6.0);
-            divider_w *= shrink;
-        }
-    }
 
     let max_icon = base_icon * metrics.max_scale;
     let unmag_pill_h = pad_top + base_icon + pad_bottom;
@@ -310,6 +297,111 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
         tooltip_height,
         items,
         hovered_index,
+    }
+}
+
+const SCREEN_EDGE_ALLOWANCE: f32 = 32.0;
+const MIN_DOCK_WIDTH: f32 = 120.0;
+const MAX_DOCK_SLOTS: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FittedDock {
+    base_icon: f32,
+    gap: f32,
+    pad_x: f32,
+    pad_top: f32,
+    pad_bottom: f32,
+    corner_radius: f32,
+    divider_w: f32,
+}
+
+impl FittedDock {
+    fn width(&self, total_items: usize) -> f32 {
+        total_items as f32 * self.base_icon
+            + total_items.saturating_sub(1) as f32 * self.gap
+            + self.divider_w
+            + self.pad_x * 2.0
+    }
+}
+
+fn fit_dock(
+    metrics: &DockMetrics,
+    screen_width: i32,
+    dpi: u32,
+    app_count: usize,
+    right_items: usize,
+) -> FittedDock {
+    let natural = FittedDock {
+        base_icon: scale(metrics.base_icon_size, dpi) as f32,
+        gap: scale(metrics.icon_gap, dpi) as f32,
+        pad_x: scale(metrics.pad_x, dpi) as f32,
+        pad_top: scale(metrics.pad_top, dpi) as f32,
+        pad_bottom: scale(metrics.pad_bottom, dpi) as f32,
+        corner_radius: scale(metrics.corner_radius, dpi) as f32,
+        divider_w: if right_items > 0 && app_count > 0 {
+            scale(metrics.divider_slot_width, dpi) as f32
+        } else {
+            0.0
+        },
+    };
+    let total_items = app_count + right_items;
+    let max_allowed_w = max_dock_width(screen_width);
+    let needed_w = natural.width(total_items);
+    if total_items == 0 || needed_w <= max_allowed_w {
+        return natural;
+    }
+    let shrink = (max_allowed_w / needed_w).clamp(0.35, 1.0);
+    FittedDock {
+        base_icon: (natural.base_icon * shrink).max(16.0),
+        gap: (natural.gap * shrink).max(2.0),
+        pad_x: (natural.pad_x * shrink).max(4.0),
+        pad_top: (natural.pad_top * shrink).max(4.0),
+        pad_bottom: (natural.pad_bottom * shrink).max(4.0),
+        corner_radius: (natural.corner_radius * shrink).max(6.0),
+        divider_w: natural.divider_w * shrink,
+    }
+}
+
+fn max_dock_width(screen_width: i32) -> f32 {
+    (screen_width as f32 - SCREEN_EDGE_ALLOWANCE).max(MIN_DOCK_WIDTH)
+}
+
+#[must_use]
+pub fn dock_capacity(
+    metrics: &DockMetrics,
+    screen_width: i32,
+    dpi: u32,
+    right_items: usize,
+) -> usize {
+    let fits = |apps: usize| {
+        let total = apps + right_items;
+        fit_dock(metrics, screen_width, dpi, apps, right_items).width(total)
+            <= max_dock_width(screen_width) + 0.5
+    };
+    (1..=MAX_DOCK_SLOTS)
+        .take_while(|&apps| fits(apps))
+        .last()
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DockOverflow {
+    pub visible_apps: usize,
+    pub hidden_apps: usize,
+}
+
+#[must_use]
+pub fn split_dock_overflow(app_count: usize, capacity: usize) -> DockOverflow {
+    if app_count <= capacity {
+        return DockOverflow {
+            visible_apps: app_count,
+            hidden_apps: 0,
+        };
+    }
+    let visible_apps = capacity.saturating_sub(1);
+    DockOverflow {
+        visible_apps,
+        hidden_apps: app_count - visible_apps,
     }
 }
 
@@ -457,6 +549,55 @@ mod tests {
         assert_eq!(select_dock_click_window(&windows, Some(202)), Some(303));
         assert_eq!(select_dock_click_window(&windows, Some(303)), Some(101));
         assert_eq!(select_dock_click_window(&[101], Some(101)), Some(101));
+    }
+
+    #[test]
+    fn capacity_is_the_most_apps_that_fit_at_the_smallest_icon_size() {
+        let capacity = dock_capacity(&M, 800, 96, 2);
+        assert!(capacity > 10);
+        let fitted = fit_dock(&M, 800, 96, capacity, 2);
+        assert!(fitted.width(capacity + 2) <= 800.0 - 32.0 + 0.5);
+        let over = fit_dock(&M, 800, 96, capacity + 1, 2);
+        assert!(over.width(capacity + 3) > 800.0 - 32.0 + 0.5);
+        assert!(dock_capacity(&M, 2240, 144, 2) > dock_capacity(&M, 800, 96, 2) / 2);
+    }
+
+    #[test]
+    fn overflow_keeps_every_app_reachable_through_one_slot() {
+        assert_eq!(
+            split_dock_overflow(10, 20),
+            DockOverflow {
+                visible_apps: 10,
+                hidden_apps: 0
+            }
+        );
+        assert_eq!(
+            split_dock_overflow(20, 20),
+            DockOverflow {
+                visible_apps: 20,
+                hidden_apps: 0
+            }
+        );
+        let full = split_dock_overflow(25, 20);
+        assert_eq!(full.visible_apps, 19);
+        assert_eq!(full.hidden_apps, 6);
+        assert_eq!(full.visible_apps + 1, 20);
+        assert_eq!(full.visible_apps + full.hidden_apps, 25);
+    }
+
+    #[test]
+    fn a_full_dock_with_its_overflow_slot_stays_on_screen() {
+        let capacity = dock_capacity(&M, 800, 96, 2);
+        let split = split_dock_overflow(capacity + 40, capacity);
+        let mut input = sample_input(None, 0.0);
+        input.screen_width = 800;
+        input.app_count = split.visible_apps + 1;
+        input.right_count = 2;
+        let layout = compute_dock_layout(&M, input);
+        assert!(layout.pill.x >= 0);
+        assert!(layout.pill.x + layout.pill.width <= 800);
+        let last = layout.items.last().unwrap();
+        assert!(last.x + last.size <= 800.0);
     }
 
     #[test]
