@@ -36,12 +36,20 @@ pub struct IslandTargets {
 impl IslandInputs {
     #[must_use]
     pub fn compact_content(&self) -> Option<CompactContent> {
-        let content = if self.focus_active {
-            CompactContent::Focus
-        } else {
-            CompactContent::Media(self.media.clone()?)
-        };
-        (self.dismissed.as_ref() != Some(&content)).then_some(content)
+        let focus = self
+            .focus_active
+            .then_some(CompactContent::Focus)
+            .filter(|content| self.is_not_dismissed(content));
+        focus.or_else(|| {
+            self.media
+                .as_ref()
+                .map(|track| CompactContent::Media(track.clone()))
+                .filter(|content| self.is_not_dismissed(content))
+        })
+    }
+
+    fn is_not_dismissed(&self, content: &CompactContent) -> bool {
+        self.dismissed.as_ref() != Some(content)
     }
 }
 
@@ -160,6 +168,22 @@ mod tests {
             resolve_island(&inputs),
             IslandMode::Compact(CompactContent::Focus)
         );
+    }
+
+    #[test]
+    fn dismissing_focus_reveals_the_media_underneath() {
+        let mut inputs = IslandInputs {
+            focus_active: true,
+            media: Some(track("Song")),
+            dismissed: Some(CompactContent::Focus),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Compact(CompactContent::Media(track("Song")))
+        );
+        inputs.media = None;
+        assert_eq!(resolve_island(&inputs), IslandMode::Collapsed);
     }
 
     #[test]

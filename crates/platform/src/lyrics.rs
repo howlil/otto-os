@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::Chars;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -78,6 +79,31 @@ fn url_encode(input: &str) -> String {
     out
 }
 
+fn read_hex_quad(chars: &mut Chars<'_>) -> Option<u32> {
+    let mut code = 0;
+    for _ in 0..4 {
+        code = code * 16 + chars.next()?.to_digit(16)?;
+    }
+    Some(code)
+}
+
+fn read_unicode_escape(chars: &mut Chars<'_>) -> Option<char> {
+    let unit = read_hex_quad(chars)?;
+    if !(0xD800..=0xDBFF).contains(&unit) {
+        return char::from_u32(unit);
+    }
+    let mut lookahead = chars.clone();
+    if lookahead.next() != Some('\\') || lookahead.next() != Some('u') {
+        return None;
+    }
+    let low = read_hex_quad(&mut lookahead)?;
+    if !(0xDC00..=0xDFFF).contains(&low) {
+        return None;
+    }
+    *chars = lookahead;
+    char::from_u32(0x1_0000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
+}
+
 fn parse_json_quoted_string(after: &str) -> Option<String> {
     if !after.starts_with('"') {
         return None;
@@ -97,14 +123,8 @@ fn parse_json_quoted_string(after: &str) -> Option<String> {
                 'r' => result.push('\r'),
                 't' => result.push('\t'),
                 'u' => {
-                    let mut hex = String::new();
-                    for _ in 0..4 {
-                        hex.push(chars.next()?);
-                    }
-                    if let Ok(code) = u32::from_str_radix(&hex, 16)
-                        && let Some(c) = char::from_u32(code)
-                    {
-                        result.push(c);
+                    if let Some(decoded) = read_unicode_escape(&mut chars) {
+                        result.push(decoded);
                     }
                 }
                 other => {
@@ -522,6 +542,20 @@ mod tests {
         let json = r#"{"id":42,"trackName":"Song","artistName":"Band","syncedLyrics":"[00:10.00] Line one\n[00:15.50] Line two","plainLyrics":"Line one\nLine two"}"#;
         let lrc = extract_synced_lyrics_from_json(json).unwrap();
         assert_eq!(lrc, "[00:10.00] Line one\n[00:15.50] Line two");
+    }
+
+    #[test]
+    fn json_surrogate_pairs_decode_to_non_bmp_characters() {
+        let paired = r#"{"syncedLyrics":"[00:01.00] Music 🎵 done"}"#;
+        assert_eq!(
+            extract_synced_lyrics_from_json(paired).as_deref(),
+            Some("[00:01.00] Music \u{1F3B5} done")
+        );
+        let lone = r#"{"syncedLyrics":"[00:01.00] a\ud83cb\udfb5c"}"#;
+        assert_eq!(
+            extract_synced_lyrics_from_json(lone).as_deref(),
+            Some("[00:01.00] abc")
+        );
     }
 
     #[test]
