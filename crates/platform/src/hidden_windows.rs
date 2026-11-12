@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use otto_core::WindowIdentity;
 
@@ -45,8 +45,27 @@ impl LedgerEntry {
 
 static LEDGER: Mutex<Vec<LedgerEntry>> = Mutex::new(Vec::new());
 
+fn lock_ledger() -> MutexGuard<'static, Vec<LedgerEntry>> {
+    LEDGER.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn ledger_path() -> Option<PathBuf> {
     crate::file::data_dir().map(|dir| dir.join(LEDGER_FILE))
+}
+
+fn upsert(entries: &mut Vec<LedgerEntry>, entry: LedgerEntry) -> bool {
+    if let Some(known) = entries
+        .iter_mut()
+        .find(|known| known.same_slot(entry.identity.hwnd, entry.kind))
+    {
+        *known = entry;
+        return true;
+    }
+    if entries.len() >= MAX_LEDGER_ENTRIES {
+        return false;
+    }
+    entries.push(entry);
+    true
 }
 
 fn parse_entry(line: &str) -> Option<LedgerEntry> {
@@ -68,15 +87,7 @@ fn parse_entry(line: &str) -> Option<LedgerEntry> {
 fn parse_ledger(content: &str) -> Vec<LedgerEntry> {
     let mut entries: Vec<LedgerEntry> = Vec::new();
     for entry in content.lines().filter_map(parse_entry) {
-        if entries.len() >= MAX_LEDGER_ENTRIES {
-            break;
-        }
-        if !entries
-            .iter()
-            .any(|known| known.same_slot(entry.identity.hwnd, entry.kind))
-        {
-            entries.push(entry);
-        }
+        upsert(&mut entries, entry);
     }
     entries
 }
@@ -114,27 +125,16 @@ fn persist(entries: &[LedgerEntry]) {
 }
 
 pub(crate) fn record(identity: WindowIdentity, kind: Concealment) -> bool {
-    let Ok(mut ledger) = LEDGER.lock() else {
-        return false;
-    };
-    if ledger
-        .iter()
-        .any(|known| known.same_slot(identity.hwnd, kind))
-    {
-        return true;
-    }
-    if ledger.len() >= MAX_LEDGER_ENTRIES {
+    let mut ledger = lock_ledger();
+    if !upsert(&mut ledger, LedgerEntry { identity, kind }) {
         return false;
     }
-    ledger.push(LedgerEntry { identity, kind });
     persist(&ledger);
     true
 }
 
 pub(crate) fn forget(hwnd: isize, kind: Concealment) {
-    let Ok(mut ledger) = LEDGER.lock() else {
-        return;
-    };
+    let mut ledger = lock_ledger();
     let before = ledger.len();
     ledger.retain(|known| !known.same_slot(hwnd, kind));
     if ledger.len() != before {
@@ -143,23 +143,15 @@ pub(crate) fn forget(hwnd: isize, kind: Concealment) {
 }
 
 pub(crate) fn recorded(kind: Concealment) -> Vec<WindowIdentity> {
-    LEDGER
-        .lock()
-        .map(|ledger| {
-            ledger
-                .iter()
-                .filter(|entry| entry.kind == kind)
-                .map(|entry| entry.identity)
-                .collect()
-        })
-        .unwrap_or_default()
+    lock_ledger()
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .map(|entry| entry.identity)
+        .collect()
 }
 
 pub(crate) fn take_all() -> Vec<LedgerEntry> {
-    let mut entries = LEDGER
-        .lock()
-        .map(|mut ledger| std::mem::take(&mut *ledger))
-        .unwrap_or_default();
+    let mut entries = std::mem::take(&mut *lock_ledger());
     if let Some(path) = ledger_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
             for entry in parse_ledger(&content) {
@@ -180,6 +172,7 @@ pub(crate) fn take_all() -> Vec<LedgerEntry> {
 mod tests {
     use super::{
         Concealment, LedgerEntry, MAX_LEDGER_ENTRIES, format_ledger, parse_entry, parse_ledger,
+        upsert,
     };
     use otto_core::WindowIdentity;
 
@@ -239,5 +232,56 @@ mod tests {
             let _ = writeln!(text, "{hwnd},42,43,7");
         }
         assert_eq!(parse_ledger(&text).len(), MAX_LEDGER_ENTRIES);
+    }
+
+    fn entry_with_generation(hwnd: isize, generation: u64, kind: Concealment) -> LedgerEntry {
+        LedgerEntry {
+            identity: WindowIdentity {
+                hwnd,
+                process_id: 42,
+                thread_id: 43,
+                generation,
+            },
+            kind,
+        }
+    }
+
+    #[test]
+    fn later_line_for_a_reused_handle_wins_over_stale_identity() {
+        let parsed = parse_ledger("5,42,43,7,h\n5,42,43,9,h\n");
+        assert_eq!(
+            parsed,
+            vec![entry_with_generation(5, 9, Concealment::Hidden)]
+        );
+    }
+
+    #[test]
+    fn upsert_replaces_identity_of_an_existing_slot() {
+        let mut entries = vec![entry_with_generation(5, 7, Concealment::Hidden)];
+        assert!(upsert(
+            &mut entries,
+            entry_with_generation(5, 9, Concealment::Hidden)
+        ));
+        assert_eq!(
+            entries,
+            vec![entry_with_generation(5, 9, Concealment::Hidden)]
+        );
+    }
+
+    #[test]
+    fn upsert_refuses_new_slots_once_full_but_still_updates_known_ones() {
+        let mut entries: Vec<LedgerEntry> = (1..=MAX_LEDGER_ENTRIES as isize)
+            .map(|hwnd| entry_with_generation(hwnd, 7, Concealment::Hidden))
+            .collect();
+        assert!(!upsert(
+            &mut entries,
+            entry_with_generation(-1, 7, Concealment::Hidden)
+        ));
+        assert!(upsert(
+            &mut entries,
+            entry_with_generation(1, 8, Concealment::Hidden)
+        ));
+        assert_eq!(entries.len(), MAX_LEDGER_ENTRIES);
+        assert_eq!(entries[0].identity.generation, 8);
     }
 }
