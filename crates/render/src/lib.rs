@@ -2706,36 +2706,123 @@ unsafe fn create_text_format(
 
 #[cfg(test)]
 mod resource_tests {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use super::{
-        DockRenderer, GenieRenderer, PopupMenuRenderer, Renderer, WindowControlsRenderer,
-        release_shared_factories,
+        DockRenderer, GenieRenderer, PIXEL_FORMAT, PopupMenuRenderer, Renderer,
+        WindowControlsRenderer, release_shared_factories, shared_d2d_factory,
     };
-    use crate::surface::DibSurface;
-    use otto_core::Rect;
-    use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources};
+    use crate::surface::{DibSurface, DrawSession, draw_on, upload_bgra_bitmap};
+    use otto_core::{PixelLimits, Rect};
+    use windows::Win32::Foundation::E_INVALIDARG;
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1_RENDER_TARGET_USAGE_NONE, ID2D1DCRenderTarget,
+    };
+    use windows::Win32::System::Threading::{
+        GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
+    };
+    use windows::core::{IUnknown, Interface};
 
     const ROUNDS: usize = 3;
     const IMPOSSIBLE: i32 = 1 << 20;
+    const SURFACE_SIZE: (i32, i32) = (64, 48);
+    const BITMAP_SIDE: u32 = 16;
+    const SHORT_RUN_CYCLES: usize = 100;
+    const LONG_RUN_CYCLES: usize = 10_000;
 
-    fn gdi_objects() -> u32 {
-        unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    struct SerialResourceTest {
+        _lock: MutexGuard<'static, ()>,
     }
 
-    fn assert_no_growth(label: &str, before: u32) {
-        let after = gdi_objects();
-        assert!(
-            after <= before,
-            "{label}: GDI objects grew from {before} to {after}"
-        );
+    impl SerialResourceTest {
+        fn begin() -> Self {
+            Self {
+                _lock: SERIAL.lock().unwrap_or_else(PoisonError::into_inner),
+            }
+        }
+    }
+
+    impl Drop for SerialResourceTest {
+        fn drop(&mut self) {
+            release_shared_factories();
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct GuiCounts {
+        gdi: u32,
+        user: u32,
+    }
+
+    impl GuiCounts {
+        fn now() -> Self {
+            let process = unsafe { GetCurrentProcess() };
+            unsafe {
+                Self {
+                    gdi: GetGuiResources(process, GR_GDIOBJECTS),
+                    user: GetGuiResources(process, GR_USEROBJECTS),
+                }
+            }
+        }
+
+        fn assert_no_growth(self, label: &str) {
+            let after = Self::now();
+            assert!(
+                after.gdi <= self.gdi,
+                "{label}: GDI objects grew from {} to {}",
+                self.gdi,
+                after.gdi
+            );
+            assert!(
+                after.user <= self.user,
+                "{label}: USER objects grew from {} to {}",
+                self.user,
+                after.user
+            );
+        }
+    }
+
+    fn observed_refs<T: Interface>(object: &T) -> u32 {
+        let unknown: IUnknown = object.cast().expect("IUnknown view");
+        let vtable = unknown.vtable();
+        unsafe {
+            let count = (vtable.AddRef)(unknown.as_raw());
+            (vtable.Release)(unknown.as_raw());
+            count
+        }
+    }
+
+    fn dc_target() -> ID2D1DCRenderTarget {
+        let properties = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: PIXEL_FORMAT,
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let factory = shared_d2d_factory().expect("shared factory");
+        unsafe { factory.CreateDCRenderTarget(&properties) }.expect("DC render target")
     }
 
     fn exercise_successful_constructions() {
         for _ in 0..ROUNDS {
-            drop(DibSurface::new(320, 200).expect("surface"));
-            drop(WindowControlsRenderer::new(108, 42).expect("window controls"));
-            drop(DockRenderer::new(800, 160, 96).expect("dock"));
-            drop(PopupMenuRenderer::new(144).expect("popup menu"));
-            drop(
+            construct_each_renderer_once();
+        }
+    }
+
+    const RENDERER_KINDS: usize = 6;
+
+    fn construct_renderer(kind: usize) {
+        match kind % RENDERER_KINDS {
+            0 => drop(DibSurface::new(320, 200).expect("surface")),
+            1 => drop(WindowControlsRenderer::new(108, 42).expect("window controls")),
+            2 => drop(DockRenderer::new(800, 160, 96).expect("dock")),
+            3 => drop(PopupMenuRenderer::new(144).expect("popup menu")),
+            4 => drop(
                 GenieRenderer::new(Rect {
                     x: -200,
                     y: 0,
@@ -2743,9 +2830,13 @@ mod resource_tests {
                     height: 480,
                 })
                 .expect("genie"),
-            );
-            drop(Renderer::new(1920, 48, 600, 432, 144, 0.0).expect("bar"));
+            ),
+            _ => drop(Renderer::new(1920, 48, 600, 432, 144, 0.0).expect("bar")),
         }
+    }
+
+    fn construct_each_renderer_once() {
+        (0..RENDERER_KINDS).for_each(construct_renderer);
     }
 
     fn exercise_failed_constructions() {
@@ -2766,16 +2857,145 @@ mod resource_tests {
         }
     }
 
+    fn upload_one_bitmap(target: &ID2D1DCRenderTarget, pixels: &[u8]) {
+        drop(
+            upload_bgra_bitmap(target, BITMAP_SIDE, BITMAP_SIDE, pixels, PixelLimits::ICON)
+                .expect("bitmap upload"),
+        );
+    }
+
+    fn bitmap_pixels() -> Vec<u8> {
+        vec![0xFFu8; (BITMAP_SIDE * BITMAP_SIDE * 4) as usize]
+    }
+
+    fn surface_draw_and_upload_cycle(target: &ID2D1DCRenderTarget, pixels: &[u8]) {
+        let surface = DibSurface::new(SURFACE_SIZE.0, SURFACE_SIZE.1).expect("surface");
+        draw_on(target, &surface, SURFACE_SIZE, || Ok(())).expect("draw");
+        upload_one_bitmap(target, pixels);
+    }
+
+    fn steady_across_cycles(
+        label: &str,
+        target: &ID2D1DCRenderTarget,
+        cycles: usize,
+        cycle: impl Fn(&ID2D1DCRenderTarget),
+    ) {
+        cycle(target);
+        let baseline = GuiCounts::now();
+        let refs = observed_refs(target);
+        for _ in 0..cycles {
+            cycle(target);
+        }
+        baseline.assert_no_growth(label);
+        assert_eq!(
+            observed_refs(target),
+            refs,
+            "{label} changed the target reference count"
+        );
+    }
+
     #[test]
     fn constructing_and_dropping_renderers_releases_every_gdi_object() {
+        let _serial = SerialResourceTest::begin();
         exercise_successful_constructions();
         exercise_failed_constructions();
-        let baseline = gdi_objects();
+        let baseline = GuiCounts::now();
         exercise_successful_constructions();
-        assert_no_growth("successful constructions", baseline);
+        baseline.assert_no_growth("successful constructions");
         exercise_failed_constructions();
-        assert_no_growth("failed constructions", baseline);
+        baseline.assert_no_growth("failed constructions");
         release_shared_factories();
-        assert_no_growth("factory release", baseline);
+        baseline.assert_no_growth("factory release");
+    }
+
+    #[test]
+    fn abandoned_draw_session_ends_the_draw_and_leaves_the_target_usable() {
+        let _serial = SerialResourceTest::begin();
+        let target = dc_target();
+        let surface = DibSurface::new(SURFACE_SIZE.0, SURFACE_SIZE.1).expect("surface");
+        drop(DrawSession::begin(&target, &surface, SURFACE_SIZE).expect("warm-up session"));
+        draw_on(&target, &surface, SURFACE_SIZE, || Ok(())).expect("warm-up draw");
+        let baseline = GuiCounts::now();
+        let refs = observed_refs(&target);
+        for _ in 0..ROUNDS {
+            drop(DrawSession::begin(&target, &surface, SURFACE_SIZE).expect("session"));
+        }
+        draw_on(&target, &surface, SURFACE_SIZE, || Ok(()))
+            .expect("target draws after abandoned sessions");
+        baseline.assert_no_growth("abandoned draw sessions");
+        assert_eq!(
+            observed_refs(&target),
+            refs,
+            "abandoned draw sessions changed the target reference count"
+        );
+    }
+
+    #[test]
+    fn rejected_bitmap_uploads_fail_before_any_resource_is_created() {
+        let _serial = SerialResourceTest::begin();
+        let target = dc_target();
+        let limits = PixelLimits {
+            max_dimension: 16,
+            max_bytes: 64,
+        };
+        let pixels = vec![0u8; 256];
+        let rejected = [(0, 4, 64), (4, 0, 64), (17, 1, 68), (4, 4, 63), (8, 4, 128)];
+        let baseline = GuiCounts::now();
+        let refs = observed_refs(&target);
+        for _ in 0..ROUNDS {
+            for (width, height, length) in rejected {
+                let error = upload_bgra_bitmap(&target, width, height, &pixels[..length], limits)
+                    .expect_err("oversized or undersized upload must be rejected");
+                assert_eq!(
+                    error.code(),
+                    E_INVALIDARG,
+                    "{width}x{height} with {length} bytes"
+                );
+            }
+        }
+        baseline.assert_no_growth("rejected bitmap uploads");
+        assert_eq!(
+            observed_refs(&target),
+            refs,
+            "rejected bitmap uploads changed the target reference count"
+        );
+    }
+
+    #[test]
+    fn repeated_bitmap_uploads_release_every_bitmap() {
+        let _serial = SerialResourceTest::begin();
+        let target = dc_target();
+        let pixels = bitmap_pixels();
+        steady_across_cycles("repeated bitmap uploads", &target, SHORT_RUN_CYCLES, |dc| {
+            upload_one_bitmap(dc, &pixels);
+        });
+    }
+
+    #[test]
+    #[ignore = "10,000 renderer cycles (about 16 minutes); run with `cargo test -p otto-render -- --ignored`"]
+    fn ten_thousand_renderer_cycles_keep_gdi_and_user_objects_flat() {
+        let _serial = SerialResourceTest::begin();
+        construct_each_renderer_once();
+        let baseline = GuiCounts::now();
+        for cycle in 0..LONG_RUN_CYCLES {
+            construct_renderer(cycle);
+        }
+        baseline.assert_no_growth("10,000 renderer cycles");
+        release_shared_factories();
+        baseline.assert_no_growth("factory release after 10,000 renderer cycles");
+    }
+
+    #[test]
+    #[ignore = "10,000 surface, draw and bitmap cycles; run with `cargo test -p otto-render -- --ignored`"]
+    fn ten_thousand_surface_draw_and_bitmap_cycles_keep_gdi_and_user_objects_flat() {
+        let _serial = SerialResourceTest::begin();
+        let target = dc_target();
+        let pixels = bitmap_pixels();
+        steady_across_cycles(
+            "10,000 surface, draw and bitmap cycles",
+            &target,
+            LONG_RUN_CYCLES,
+            |dc| surface_draw_and_upload_cycle(dc, &pixels),
+        );
     }
 }
