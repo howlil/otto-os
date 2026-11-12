@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'stall', 'appearance', 'audio')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e'
@@ -1669,6 +1669,59 @@ function Run-KeyboardFlow {
     Stop-Otto $process
 }
 
+function Run-KeyboardDockFlow {
+    $process = Start-Otto 'keyboard-dock'
+    $bar = Get-BarMetrics $process
+    $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
+    if (-not $dock) {
+        throw 'OttoDockBar is not visible.'
+    }
+    $barRegion = [pscustomobject]@{
+        X = $bar.Left
+        Y = $bar.Top
+        Width = Convert-ToScaled 56
+        Height = $bar.Height
+    }
+    $dockRegion = [pscustomobject]@{
+        X = $dock.Left
+        Y = $dock.Top
+        Width = $dock.Width
+        Height = $dock.Height
+    }
+    Start-Sleep -Milliseconds 600
+    $barBaseline = Save-Screenshot 'keyboard-dock' '00-bar-baseline'
+    $dockBaseline = Save-Screenshot 'keyboard-dock' '00-dock-baseline'
+
+    [OttoE2ESystem]::Chord(0x11, 0x71)
+    Start-Sleep -Milliseconds 400
+    [OttoE2ENative]::SendKey(0x23)
+    Start-Sleep -Milliseconds 300
+    [OttoE2ENative]::SendKey(0x09)
+    Start-Sleep -Milliseconds 400
+    $handed = Save-Screenshot 'keyboard-dock' '01-dock-focus-ring'
+    $dockRing = Get-RegionDiff $dockBaseline $handed $dockRegion
+    if ($dockRing -lt 40) {
+        throw "Tab from the last bar slot did not draw a focus ring on the Dock (changed pixels: $dockRing)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard-dock name=01-dock-focus-ring changed=$dockRing"
+
+    $barLeft = Get-RegionDiff $barBaseline $handed $barRegion
+    if ($barLeft -gt 10) {
+        throw "Bar focus ring stayed on after focus moved to the Dock (changed pixels: $barLeft)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard-dock name=02-bar-released changed=$barLeft"
+
+    [OttoE2ENative]::SendKey(0x1B)
+    Start-Sleep -Milliseconds 400
+    $exited = Save-Screenshot 'keyboard-dock' '03-dock-exited'
+    $dockResidue = Get-RegionDiff $dockBaseline $exited $dockRegion
+    if ($dockResidue -gt 10) {
+        throw "Escape did not clear the Dock focus ring (changed pixels: $dockResidue)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard-dock name=03-dock-exited changed=$dockResidue"
+    Stop-Otto $process
+}
+
 function Start-TypingProbe([string]$title) {
     $formScript = Join-Path $artifactRoot 'typing-probe.ps1'
     @"
@@ -1851,6 +1904,7 @@ try {
                 'genie' { Run-GenieFlow }
                 'dock' { Run-DockFlow }
                 'keyboard' { Run-KeyboardFlow }
+                'keyboard-dock' { Run-KeyboardDockFlow }
                 'stall' { Run-StallFlow }
                 'appearance' { Run-AppearanceFlow }
                 'audio' { Run-AudioFlow }
