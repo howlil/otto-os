@@ -13,8 +13,13 @@ mod window_controls;
 use windows::core::Result;
 
 fn main() -> Result<()> {
-    let Some(_instance) = otto_platform::InstanceGuard::acquire() else {
-        return Ok(());
+    let _instance = match otto_platform::InstanceGuard::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            eprintln!("otto-os: could not create the single-instance lock: {error}");
+            return Err(error);
+        }
     };
     let _ = otto_platform::restore_hidden_windows();
     if std::env::args().any(|arg| arg == "--restore-shell") {
