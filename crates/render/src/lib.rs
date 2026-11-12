@@ -16,9 +16,9 @@ pub use theme::{BrushPalette, LiquidGlassPalette};
 pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
 
 use otto_core::{
-    Appearance, HitTarget, Layout, LyricsView, NotchExpandedTab, NotchHudKind, NotchHudState,
-    NowPlaying, PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ShapeTokens, SystemStatus,
-    scale,
+    Appearance, HitTarget, Layout, LyricsView, MediaCapabilities, MediaCommand, NotchExpandedTab,
+    NotchHudKind, NotchHudState, NowPlaying, PomodoroPhase, PomodoroState, PomodoroStatus, Rect,
+    ShapeTokens, SystemStatus, scale, unsupported_reason,
 };
 use surface::DibSurface;
 use windows::Win32::Foundation::E_FAIL;
@@ -400,12 +400,15 @@ impl Renderer {
         panel_hwnd: isize,
         layout: &Layout,
         hovered: Option<HitTarget>,
+        focused: Option<HitTarget>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
         lyrics: LyricsView<'_>,
     ) -> Result<()> {
-        self.draw_panel(layout, hovered, pomodoro, media, anim_phase, lyrics)?;
+        self.draw_panel(
+            layout, hovered, focused, pomodoro, media, anim_phase, lyrics,
+        )?;
         self.panel_surface.present_sized(
             panel_hwnd,
             (layout.panel_window.x, layout.panel_window.y),
@@ -780,7 +783,13 @@ impl Renderer {
             bottom: art_rect.bottom() as f32,
         };
 
-        if let Some(active_lyric) = lyrics.sheet.and_then(|l| l.active_line(media.position_ms)) {
+        let disabled_reason =
+            hovered.and_then(|target| Self::disabled_transport_reason(target, media.capabilities));
+        if let Some(reason) = disabled_reason {
+            self.draw_text(reason, &self.text_caption, artist_rect, muted);
+        } else if let Some(active_lyric) =
+            lyrics.sheet.and_then(|l| l.active_line(media.position_ms))
+        {
             let lyric_brush = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.95 * alpha);
             self.draw_text(active_lyric, &self.text_caption, artist_rect, lyric_brush);
         } else {
@@ -807,6 +816,43 @@ impl Renderer {
 
         self.draw_media_action_buttons(layout, offset_x, alpha, hovered, media, fg)?;
         Ok(())
+    }
+
+    fn draw_control_focus_ring(&self, rect: Rect, brush: &ID2D1SolidColorBrush) {
+        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
+        let stroke = shape.focus_ring_width as f32;
+        let grow = scale(3, self.dpi) as f32 + stroke * 0.5;
+        let ring = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.x as f32 - grow,
+                top: rect.y as f32 - grow,
+                right: rect.right() as f32 + grow,
+                bottom: rect.bottom() as f32 + grow,
+            },
+            radiusX: rect.width as f32 * 0.5 + grow,
+            radiusY: rect.height as f32 * 0.5 + grow,
+        };
+        unsafe {
+            self.target.DrawRoundedRectangle(&ring, brush, stroke, None);
+        }
+    }
+
+    fn disabled_transport_reason(
+        target: HitTarget,
+        capabilities: MediaCapabilities,
+    ) -> Option<&'static str> {
+        match target {
+            HitTarget::MediaPlayPause if !capabilities.play_pause => {
+                Some(unsupported_reason(MediaCommand::TogglePlayPause))
+            }
+            HitTarget::MediaPrevious if !capabilities.previous => {
+                Some(unsupported_reason(MediaCommand::Previous))
+            }
+            HitTarget::MediaNext if !capabilities.next => {
+                Some(unsupported_reason(MediaCommand::Next))
+            }
+            _ => None,
+        }
     }
 
     fn draw_lyrics_toggle_button(&self, rect: Rect, alpha: f32, hovered: bool, expanded: bool) {
@@ -945,7 +991,7 @@ impl Renderer {
         muted_brush: &ID2D1SolidColorBrush,
     ) {
         let track_h = scale(4, self.dpi) as f32;
-        let track_y = seekbar_rect.y as f32 + scale(2, self.dpi) as f32;
+        let track_y = seekbar_rect.y as f32 + (seekbar_rect.height as f32 - track_h) * 0.5;
         let track_rect = D2D_RECT_F {
             left: seekbar_rect.x as f32,
             top: track_y,

@@ -1,4 +1,5 @@
 use crate::layout::{HitTarget, Layout};
+use crate::media::NotchExpandedTab;
 
 const KEYBOARD_CANDIDATES: [HitTarget; 13] = [
     HitTarget::Start,
@@ -31,7 +32,39 @@ impl Layout {
         targets.sort_by_key(|(x, _)| *x);
         targets.into_iter().map(|(_, target)| target).collect()
     }
+
+    #[must_use]
+    pub fn keyboard_targets_with_media(&self, media_present: bool) -> Vec<HitTarget> {
+        let mut targets = self.keyboard_targets();
+        let showing_media = media_present && self.active_tab == NotchExpandedTab::Media;
+        targets.extend(
+            NOTCH_KEYBOARD_CANDIDATES
+                .into_iter()
+                .filter(|target| self.notch_control_rect(*target).is_some())
+                .filter(|target| match target {
+                    HitTarget::NotchTabPomodoro => true,
+                    HitTarget::PomodoroPlayPause
+                    | HitTarget::PomodoroReset
+                    | HitTarget::PomodoroSkip => !showing_media,
+                    _ => media_present,
+                }),
+        );
+        targets
+    }
 }
+
+const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 10] = [
+    HitTarget::NotchTabPomodoro,
+    HitTarget::PomodoroPlayPause,
+    HitTarget::PomodoroReset,
+    HitTarget::PomodoroSkip,
+    HitTarget::NotchTabMedia,
+    HitTarget::MediaLyricsToggle,
+    HitTarget::MediaPrevious,
+    HitTarget::MediaPlayPause,
+    HitTarget::MediaNext,
+    HitTarget::MediaSeekbar,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarKey {
@@ -167,7 +200,73 @@ impl BarFocus {
 #[cfg(test)]
 mod tests {
     use super::{BarFocus, BarFocusOutcome, BarKey};
-    use crate::layout::{HitTarget, Metrics, compute_layout_for_app};
+    use crate::layout::{
+        HitTarget, Metrics, NotchLayoutInput, compute_layout_for_app, compute_layout_with_notch,
+    };
+    use crate::media::NotchExpandedTab;
+
+    fn open_media_layout(media_tab: bool) -> crate::layout::Layout {
+        compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                hud_expansion: 0.0,
+                compact_expansion: 0.0,
+                panel_expansion: 1.0,
+                alert_mode: false,
+                active_tab: if media_tab {
+                    NotchExpandedTab::Media
+                } else {
+                    NotchExpandedTab::Pomodoro
+                },
+                control_center_enabled: true,
+                lyrics_expanded: false,
+            },
+        )
+    }
+
+    #[test]
+    fn notch_media_controls_join_keyboard_order_only_on_the_open_media_tab() {
+        let media = open_media_layout(true);
+        let targets = media.keyboard_targets_with_media(true);
+        assert_eq!(
+            &targets[targets.len() - 7..],
+            &[
+                HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabMedia,
+                HitTarget::MediaLyricsToggle,
+                HitTarget::MediaPrevious,
+                HitTarget::MediaPlayPause,
+                HitTarget::MediaNext,
+                HitTarget::MediaSeekbar,
+            ]
+        );
+        let without_media = media.keyboard_targets_with_media(false);
+        assert!(!without_media.contains(&HitTarget::MediaPlayPause));
+        assert!(!without_media.contains(&HitTarget::NotchTabMedia));
+        assert!(without_media.contains(&HitTarget::NotchTabPomodoro));
+
+        let pomodoro_targets = open_media_layout(false).keyboard_targets_with_media(true);
+        assert!(pomodoro_targets.contains(&HitTarget::NotchTabMedia));
+        assert!(pomodoro_targets.contains(&HitTarget::PomodoroPlayPause));
+        assert!(pomodoro_targets.contains(&HitTarget::PomodoroReset));
+        assert!(pomodoro_targets.contains(&HitTarget::PomodoroSkip));
+        assert!(!pomodoro_targets.contains(&HitTarget::MediaPlayPause));
+        assert!(
+            !media
+                .keyboard_targets_with_media(true)
+                .contains(&HitTarget::PomodoroPlayPause)
+        );
+
+        let closed = compute_layout_for_app(&Metrics::MACBOOK_PRO_14, 1920, 96, "Finder");
+        assert!(
+            !closed
+                .keyboard_targets_with_media(true)
+                .contains(&HitTarget::MediaPlayPause)
+        );
+    }
 
     #[test]
     fn keyboard_order_follows_the_visible_slots_left_to_right() {

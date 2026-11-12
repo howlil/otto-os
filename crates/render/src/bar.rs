@@ -101,10 +101,12 @@ impl Renderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_panel(
         &self,
         layout: &Layout,
         hovered: Option<HitTarget>,
+        focused: Option<HitTarget>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
@@ -181,6 +183,14 @@ impl Renderer {
                         pomodoro,
                     );
                     self.draw_expanded_pomodoro(layout, offset_x, alpha, hovered, pomodoro)?;
+                }
+
+                if let Some(rect) = focused.and_then(|target| layout.notch_control_rect(target)) {
+                    let ring_brush = &self.brushes.alpha_brush(super::FOREGROUND, 0.9 * alpha);
+                    self.draw_control_focus_ring(
+                        super::translate_rect(rect, -offset_x),
+                        ring_brush,
+                    );
                 }
             }
             Ok(())

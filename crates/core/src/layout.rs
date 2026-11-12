@@ -375,6 +375,30 @@ impl Layout {
     }
 }
 
+impl Layout {
+    #[must_use]
+    pub fn notch_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        if self.panel_expansion <= 0.55 || self.alert_mode {
+            return None;
+        }
+        let rect = match target {
+            HitTarget::NotchTabPomodoro => self.notch_tab_pomodoro,
+            HitTarget::NotchTabMedia => self.notch_tab_media,
+            HitTarget::PomodoroPlayPause => self.pomodoro_play_button,
+            HitTarget::PomodoroReset => self.pomodoro_reset_button,
+            HitTarget::PomodoroSkip => self.pomodoro_skip_button,
+            _ if self.active_tab != NotchExpandedTab::Media => return None,
+            HitTarget::MediaPrevious => self.media_prev_button,
+            HitTarget::MediaPlayPause => self.media_play_button,
+            HitTarget::MediaNext => self.media_next_button,
+            HitTarget::MediaLyricsToggle => self.media_lyrics_toggle,
+            HitTarget::MediaSeekbar => self.media_seekbar,
+            _ => return None,
+        };
+        (!rect.is_empty()).then_some(rect)
+    }
+}
+
 #[must_use]
 pub const fn scale(points: i32, dpi: u32) -> i32 {
     (points * dpi as i32 + 48) / 96
@@ -664,8 +688,8 @@ fn compute_expanded_notch_controls(
         height: play_size,
     };
 
-    let media_art_size = scale(44, dpi);
-    let media_art_y = scale(36, dpi);
+    let media_art_size = scale(40, dpi);
+    let media_art_y = scale(32, dpi);
     let media_cover_art = Rect {
         x: notch.x + pad_x,
         y: media_art_y,
@@ -673,20 +697,20 @@ fn compute_expanded_notch_controls(
         height: media_art_size,
     };
 
-    let lyrics_toggle_size = scale(22, dpi);
+    let lyrics_toggle_size = scale(24, dpi);
     let media_lyrics_toggle = Rect {
         x: notch.right() - pad_x - scale(52, dpi),
-        y: scale(46, dpi),
+        y: scale(40, dpi),
         width: lyrics_toggle_size,
         height: lyrics_toggle_size,
     };
 
-    let media_seekbar_h = scale(14, dpi);
+    let media_seekbar_h = scale(24, dpi);
     let media_seekbar_w = notch.width - pad_x * 2;
 
     let (media_lyrics_drawer, media_seekbar_y, media_row_cy) = if lyrics_expanded {
         let drawer_y = scale(86, dpi);
-        let drawer_h = scale(130, dpi);
+        let drawer_h = scale(124, dpi);
         (
             Rect {
                 x: notch.x + pad_x,
@@ -694,8 +718,8 @@ fn compute_expanded_notch_controls(
                 width: media_seekbar_w,
                 height: drawer_h,
             },
-            scale(220, dpi),
-            scale(256, dpi),
+            scale(214, dpi),
+            scale(258, dpi),
         )
     } else {
         (
@@ -705,8 +729,8 @@ fn compute_expanded_notch_controls(
                 width: 0,
                 height: 0,
             },
-            scale(90, dpi),
-            scale(122, dpi),
+            scale(76, dpi),
+            scale(121, dpi),
         )
     };
 
@@ -1092,6 +1116,35 @@ mod tests {
         );
         assert!(layout.media_prev_button.right() < layout.media_play_button.x);
         assert!(layout.media_play_button.right() < layout.media_next_button.x);
+    }
+
+    #[test]
+    fn expanded_media_controls_meet_target_size_and_fit_notch() {
+        for lyrics_expanded in [false, true] {
+            let layout = compute_layout_with_notch(
+                &M,
+                1920,
+                96,
+                "Finder",
+                NotchLayoutInput {
+                    hud_expansion: 0.0,
+                    compact_expansion: 0.0,
+                    panel_expansion: 1.0,
+                    alert_mode: false,
+                    active_tab: NotchExpandedTab::Media,
+                    control_center_enabled: true,
+                    lyrics_expanded,
+                },
+            );
+            assert!(layout.media_lyrics_toggle.width >= 24);
+            assert!(layout.media_lyrics_toggle.height >= 24);
+            assert!(layout.media_seekbar.height >= 24);
+            assert!(layout.media_prev_button.width >= 24);
+            assert!(layout.media_next_button.width >= 24);
+            assert!(layout.media_play_button.width >= 24);
+            assert!(layout.media_play_button.bottom() <= layout.notch.height - 4);
+            assert!(layout.media_cover_art.bottom() <= layout.media_seekbar.y);
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ impl LyricsStatus {
             Self::NotFound {
                 searched_online: false,
             } => "Lirik tersimpan tidak ada \u{b7} aktifkan lirik online",
-            Self::Failed => "Lirik gagal dimuat",
+            Self::Failed => "Lirik gagal dimuat \u{b7} coba lagi nanti",
         }
     }
 
@@ -195,7 +195,10 @@ mod tests {
     fn lyrics_status_explains_why_no_lines_are_shown() {
         assert!(LyricsStatus::Loading.is_pending());
         assert!(!LyricsStatus::Failed.is_pending());
-        assert_eq!(LyricsStatus::Failed.placeholder(), "Lirik gagal dimuat");
+        assert_eq!(
+            LyricsStatus::Failed.placeholder(),
+            "Lirik gagal dimuat \u{b7} coba lagi nanti"
+        );
         assert_eq!(
             LyricsStatus::NotFound {
                 searched_online: true

@@ -67,9 +67,9 @@ pub use material::{
     SystemAppearance,
 };
 pub use media::{
-    MediaCapabilities, MediaCommand, NORMAL_PLAYBACK_RATE_PERMILLE, NotchExpandedTab, NowPlaying,
-    PendingSeek, SEEK_CONFIRM_TOLERANCE_MS, SEEK_READBACK_TIMEOUT_MS, SeekReadback, TrackKey,
-    reconcile_seek, seek_target_ms,
+    KEYBOARD_SEEK_STEP_MS, MediaCapabilities, MediaCommand, NORMAL_PLAYBACK_RATE_PERMILLE,
+    NotchExpandedTab, NowPlaying, PendingSeek, SEEK_CONFIRM_TOLERANCE_MS, SEEK_READBACK_TIMEOUT_MS,
+    SeekReadback, TrackKey, reconcile_seek, seek_target_ms, unsupported_reason,
 };
 pub use menu::*;
 pub use motion::{

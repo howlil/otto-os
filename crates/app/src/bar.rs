@@ -885,12 +885,20 @@ impl Bar {
         self.schedule_deadline();
     }
 
+    fn keyboard_targets(&self) -> Vec<HitTarget> {
+        let media_present = self
+            .notch
+            .display_media(crate::notch::unix_now_ms())
+            .is_some();
+        self.layout.keyboard_targets_with_media(media_present)
+    }
+
     fn enter_keyboard_focus(&mut self, runtime: &RuntimeContext) {
         if !self.visibility.is_visible() {
             return;
         }
         crate::menu::close(runtime);
-        let targets = self.layout.keyboard_targets();
+        let targets = self.keyboard_targets();
         if self.focus.enter(&targets).is_some() && route_bar_keys(self.hwnd, WM_APP_BAR_KEY) {
             self.present(runtime);
         } else {
@@ -903,7 +911,7 @@ impl Bar {
             stop_routing_if_targets(self.hwnd);
             return;
         }
-        let targets = self.layout.keyboard_targets();
+        let targets = self.keyboard_targets();
         let entered = if from_end {
             self.focus.enter_last(&targets)
         } else {
@@ -929,13 +937,13 @@ impl Bar {
         }
         if !routes_keys_to(self.hwnd) || !self.visibility.is_visible() {
             self.leave_keyboard_focus(runtime);
-        } else if self.focus.revalidate(&self.layout.keyboard_targets()) {
+        } else if self.focus.revalidate(&self.keyboard_targets()) {
             self.present(runtime);
         }
     }
 
     fn on_bar_key(&mut self, runtime: &RuntimeContext, key: BarKey) {
-        let targets = self.layout.keyboard_targets();
+        let targets = self.keyboard_targets();
         if let Some(from_end) = self.focus.dock_handoff(key, &targets)
             && crate::dock::keyboard_entry_count(runtime) > 0
         {
@@ -944,9 +952,20 @@ impl Bar {
             self.present(runtime);
             return;
         }
+        if self.focus.current() == Some(HitTarget::MediaSeekbar)
+            && let Some(delta_ms) = keyboard_seek_delta(key)
+        {
+            self.seek_from_keyboard(runtime, delta_ms);
+            return;
+        }
         match self.focus.handle(key, &targets) {
             BarFocusOutcome::Moved(_) => self.present(runtime),
             BarFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
+            BarFocusOutcome::Unchanged | BarFocusOutcome::Activate(HitTarget::MediaSeekbar) => {}
+            BarFocusOutcome::Activate(target) if is_notch_target(target) => {
+                self.run_notch_target(runtime, target);
+                self.present(runtime);
+            }
             BarFocusOutcome::Activate(target) => {
                 self.leave_keyboard_focus(runtime);
                 self.present(runtime);
@@ -954,7 +973,6 @@ impl Bar {
                     self.perform(runtime, action);
                 }
             }
-            BarFocusOutcome::Unchanged => {}
         }
     }
 
@@ -1108,6 +1126,30 @@ impl Bar {
         }
     }
 
+    fn seek_from_keyboard(&mut self, runtime: &RuntimeContext, delta_ms: i64) {
+        let update = self
+            .notch
+            .handle_seek_step(delta_ms, crate::notch::unix_now_ms());
+        if let Some(NotchEffect::Platform(action)) = update.effect {
+            self.notch_port.execute(action);
+        }
+        if update.changed {
+            self.present(runtime);
+        }
+    }
+
+    fn run_notch_target(&mut self, runtime: &RuntimeContext, target: HitTarget) {
+        let update = self.notch.handle_click(target);
+        if let Some(NotchEffect::Platform(action)) = update.effect {
+            self.notch_port.execute(action);
+        }
+        if update.changed {
+            self.recompute_layout();
+            self.sync_panel_visibility();
+            self.present(runtime);
+        }
+    }
+
     fn on_left_click(
         &mut self,
         runtime: &RuntimeContext,
@@ -1135,32 +1177,8 @@ impl Bar {
             return;
         }
 
-        let notch_target = matches!(
-            target,
-            HitTarget::Notch
-                | HitTarget::PomodoroPhase
-                | HitTarget::PomodoroPlayPause
-                | HitTarget::PomodoroReset
-                | HitTarget::PomodoroSkip
-                | HitTarget::PomodoroStartNext
-                | HitTarget::PomodoroExtendFive
-                | HitTarget::NotchTabPomodoro
-                | HitTarget::NotchTabMedia
-                | HitTarget::MediaPlayPause
-                | HitTarget::MediaPrevious
-                | HitTarget::MediaNext
-                | HitTarget::MediaLyricsToggle
-        );
-        if notch_target {
-            let update = self.notch.handle_click(target);
-            if let Some(NotchEffect::Platform(action)) = update.effect {
-                self.notch_port.execute(action);
-            }
-            if update.changed {
-                self.recompute_layout();
-                self.sync_panel_visibility();
-                self.present(runtime);
-            }
+        if is_notch_target(target) {
+            self.run_notch_target(runtime, target);
             return;
         }
 
@@ -1296,6 +1314,7 @@ impl Bar {
                 self.panel_hwnd,
                 &self.layout,
                 hovered,
+                self.focus.current(),
                 self.notch.pomodoro(),
                 media.as_ref(),
                 self.notch.anim_phase(),
@@ -1303,6 +1322,33 @@ impl Bar {
             );
         }
     }
+}
+
+fn keyboard_seek_delta(key: BarKey) -> Option<i64> {
+    match key {
+        BarKey::Previous => Some(-otto_core::KEYBOARD_SEEK_STEP_MS),
+        BarKey::Next => Some(otto_core::KEYBOARD_SEEK_STEP_MS),
+        _ => None,
+    }
+}
+
+fn is_notch_target(target: HitTarget) -> bool {
+    matches!(
+        target,
+        HitTarget::Notch
+            | HitTarget::PomodoroPhase
+            | HitTarget::PomodoroPlayPause
+            | HitTarget::PomodoroReset
+            | HitTarget::PomodoroSkip
+            | HitTarget::PomodoroStartNext
+            | HitTarget::PomodoroExtendFive
+            | HitTarget::NotchTabPomodoro
+            | HitTarget::NotchTabMedia
+            | HitTarget::MediaPlayPause
+            | HitTarget::MediaPrevious
+            | HitTarget::MediaNext
+            | HitTarget::MediaLyricsToggle
+    )
 }
 
 pub fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) {

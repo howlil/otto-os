@@ -1,6 +1,7 @@
 pub const NORMAL_PLAYBACK_RATE_PERMILLE: u32 = 1_000;
 const MAX_PLAYBACK_RATE_PERMILLE: u32 = 16_000;
 pub const POSITION_DRIFT_TOLERANCE_MS: u64 = 750;
+pub const KEYBOARD_SEEK_STEP_MS: i64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -27,6 +28,16 @@ impl MediaCapabilities {
             MediaCommand::Previous => self.previous,
             MediaCommand::Seek(_) => self.seek,
         }
+    }
+}
+
+#[must_use]
+pub const fn unsupported_reason(command: MediaCommand) -> &'static str {
+    match command {
+        MediaCommand::TogglePlayPause => "Sumber ini tidak bisa diputar atau dijeda",
+        MediaCommand::Next => "Sumber ini tidak mendukung lagu berikutnya",
+        MediaCommand::Previous => "Sumber ini tidak mendukung lagu sebelumnya",
+        MediaCommand::Seek(_) => "Sumber ini tidak mendukung pencarian posisi",
     }
 }
 

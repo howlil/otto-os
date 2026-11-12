@@ -465,6 +465,18 @@ impl NotchController {
         false
     }
 
+    pub(crate) fn handle_seek_step(&mut self, delta_ms: i64, now_unix_ms: i64) -> NotchUpdate {
+        let Some(media) = self
+            .display_media(now_unix_ms)
+            .filter(NowPlaying::is_seekable)
+        else {
+            return NotchUpdate::default();
+        };
+        let target_ms = (media.position_ms as i64 + delta_ms).clamp(0, media.duration_ms as i64);
+        let ratio = target_ms as f32 / media.duration_ms as f32;
+        self.handle_seekbar_click(ratio, now_unix_ms)
+    }
+
     pub(crate) fn handle_seekbar_click(&mut self, ratio: f32, now_unix_ms: i64) -> NotchUpdate {
         let Some(media) = self.media.as_mut().filter(|media| media.is_seekable()) else {
             return NotchUpdate::default();

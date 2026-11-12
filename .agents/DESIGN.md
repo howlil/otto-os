@@ -20,6 +20,10 @@ Motion values live in `otto-core::motion`; app and render layers do not duplicat
 
 Every transition is time-based, reversible from its current value, and safe to settle immediately when reduced motion is enabled. Genie locks one Dock target, uses shared strip boundaries on one bounded overlay, and restores through the exact inverse path.
 
+## Patterns
+
+Notch media controls (Now Playing tab) hit at 24 px minimum; the visual track may be smaller and is centered in its hit rect. Controls in the expanded notch keep at least 4 px between hit rects and never cross the notch curve. Dimmed or unsupported controls must name the reason.
+
 ## State
 
 Platform observation owns the truth about external windows. App state owns local animation progress. Core owns interpolation and resolved geometry.
@@ -29,3 +33,5 @@ Closing feedback must recover if the target window remains visible, for example 
 ## Accessibility
 
 Read Windows client-area animation and UI-effects preferences. Reduced motion removes bounce and interpolation while preserving the same actions and final states.
+
+Notch controls join the bar keyboard order only while the expanded panel is open: the Pomodoro tab always, the Media tab and media controls only when media is present. Pomodoro play, reset, and skip are reachable while the Pomodoro tab shows. Tabs, lyrics toggle, previous, play/pause, next, and the seekbar are reachable on the Media tab; Left and Right seek by 5 s while the seekbar is focused. Each focused control draws a focus ring and activates through the same path as a click.
