@@ -14,6 +14,7 @@ impl Renderer {
         status: SystemStatus,
         app_name: &str,
         hovered: Option<HitTarget>,
+        focused: Option<HitTarget>,
         hud: Option<NotchHudState>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
@@ -55,6 +56,10 @@ impl Renderer {
 
             if let Some(target_slot) = hovered.and_then(|t| layout.slot_rect(t)) {
                 self.draw_slot_pill(target_slot, &self.brushes.hover);
+            }
+            if let Some(focus_slot) = focused.and_then(|t| layout.slot_rect(t)) {
+                self.draw_slot_pill(focus_slot, &self.brushes.hover);
+                self.draw_slot_focus_ring(focus_slot, &self.brushes.text_primary);
             }
 
             let fg = &self.brushes.text_primary;

@@ -1,4 +1,5 @@
 mod app_model;
+mod bar_focus;
 mod bar_visibility;
 mod calendar;
 mod change_gate;
@@ -23,6 +24,7 @@ pub use app_model::{
     WindowCommand, WindowIdentity, WindowInfo, WindowPresence, WindowRole, WindowTraits,
     decide_activation, group_windows,
 };
+pub use bar_focus::{BarFocus, BarFocusOutcome, BarKey};
 pub use bar_visibility::{BarPointer, BarVisibility};
 pub use calendar::{days_in_month, month_cells, month_title, shift_month, weekday_of};
 pub use change_gate::ChangeGate;

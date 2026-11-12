@@ -262,4 +262,28 @@ mod tests {
         assert!(layout.centers_x[1] < layout.centers_x[2]);
         assert_eq!(layout.hit_test(2, 2), None);
     }
+
+    #[test]
+    fn layout_follows_each_monitor_dpi_so_mixed_dpi_controls_stay_aligned() {
+        let metrics = WindowControlsMetrics::MACOS_SONOMA;
+        for dpi in [96, 120, 144, 192] {
+            let layout = compute_window_controls_layout(&metrics, dpi);
+            assert_eq!(layout.width, scale(metrics.width, dpi));
+            assert_eq!(layout.height, scale(metrics.height, dpi));
+            assert_eq!(layout.offset_y, scale(metrics.offset_y, dpi));
+            let last_edge = layout.centers_x[2] + layout.radius;
+            assert!(last_edge <= layout.width as f32, "dpi {dpi}");
+            assert!(layout.center_y + layout.radius <= layout.height as f32);
+            let cy = layout.center_y as i32;
+            assert_eq!(
+                layout.hit_test(layout.centers_x[2] as i32, cy),
+                Some(WindowControlAction::ToggleMaximize),
+                "dpi {dpi}"
+            );
+        }
+        let standard = compute_window_controls_layout(&metrics, 96);
+        let high = compute_window_controls_layout(&metrics, 192);
+        assert_eq!(high.width, standard.width * 2);
+        assert!((high.radius - standard.radius * 2.0).abs() <= 1.0);
+    }
 }

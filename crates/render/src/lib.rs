@@ -378,6 +378,7 @@ impl Renderer {
         status: SystemStatus,
         app_name: &str,
         hovered: Option<HitTarget>,
+        focused: Option<HitTarget>,
         hud: Option<NotchHudState>,
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
@@ -385,7 +386,7 @@ impl Renderer {
         theme: ResolvedTheme,
     ) -> Result<()> {
         self.draw_bar(
-            layout, status, app_name, hovered, hud, pomodoro, media, anim_phase, theme,
+            layout, status, app_name, hovered, focused, hud, pomodoro, media, anim_phase, theme,
         )?;
         self.bar_surface.present(hwnd, origin)
     }
@@ -1848,6 +1849,27 @@ impl Renderer {
         };
         unsafe {
             self.target.FillRoundedRectangle(&rect, brush);
+        }
+    }
+
+    fn draw_slot_focus_ring(&self, slot: Rect, brush: &ID2D1SolidColorBrush) {
+        let pad_y = scale(3, self.dpi) as f32;
+        let radius = scale(7, self.dpi) as f32;
+        let stroke = scale(2, self.dpi).max(2) as f32;
+        let inset = stroke * 0.5;
+        let rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: slot.x as f32 + inset,
+                top: slot.y as f32 + pad_y + inset,
+                right: slot.right() as f32 - inset,
+                bottom: slot.bottom() as f32 - pad_y - inset,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target
+                .DrawRoundedRectangle(&rect, brush, stroke, &self.stroke_style);
         }
     }
 

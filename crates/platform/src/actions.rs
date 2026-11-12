@@ -26,9 +26,10 @@ use windows::Win32::System::Power::SetSuspendState;
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_KEYUP, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, SendInput, UnregisterHotKey,
-    VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_F1, VK_LBUTTON, VK_LCONTROL, VK_LSHIFT, VK_LWIN,
-    VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_UP,
+    KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput,
+    UnregisterHotKey, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_F1, VK_F2, VK_LBUTTON, VK_LCONTROL,
+    VK_LSHIFT, VK_LWIN, VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN, VK_TAB, VK_UP,
+    VK_VOLUME_DOWN, VK_VOLUME_UP,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -50,6 +51,7 @@ const FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub const HOTKEY_TOGGLE_NOTCH: i32 = 1;
 pub const HOTKEY_TOGGLE_POMODORO: i32 = 2;
+pub const HOTKEY_FOCUS_BAR: i32 = 3;
 
 const fn vk_char(ch: u8) -> VIRTUAL_KEY {
     VIRTUAL_KEY(ch as u16)
@@ -132,6 +134,12 @@ pub fn register_notch_hotkeys(hwnd: isize) {
             modifiers,
             u32::from(b'P'),
         );
+        let _ = RegisterHotKey(
+            Some(handle),
+            HOTKEY_FOCUS_BAR,
+            MOD_CONTROL | MOD_NOREPEAT,
+            u32::from(VK_F2.0),
+        );
     }
 }
 
@@ -140,6 +148,7 @@ pub fn unregister_notch_hotkeys(hwnd: isize) {
     unsafe {
         let _ = UnregisterHotKey(Some(handle), HOTKEY_TOGGLE_NOTCH);
         let _ = UnregisterHotKey(Some(handle), HOTKEY_TOGGLE_POMODORO);
+        let _ = UnregisterHotKey(Some(handle), HOTKEY_FOCUS_BAR);
     }
 }
 

@@ -6,17 +6,18 @@ use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    BarPointer, BarVisibility, ChangeGate, HitTarget, Layout, Metrics, MotionPreference,
-    NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort, NowPlaying,
-    compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target, scale,
+    BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate, HitTarget, Layout,
+    Metrics, MotionPreference, NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort,
+    NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target, scale,
 };
 use otto_platform::{
     AppBar, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen, WindowsNotchPort,
     adjust_volume, current_process_id, cursor_position, enable_backdrop_blur,
-    foreground_application, motion_preference, open_quick_settings, open_spotlight_search,
-    primary_screen, read_system_status, register_notch_hotkeys, restore_shell_from_recovery,
-    step_display_brightness, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
-    window_bounds, window_change_generations,
+    foreground_application, is_routing_bar_keys, motion_preference, open_quick_settings,
+    open_spotlight_search, primary_screen, read_system_status, register_notch_hotkeys,
+    restore_shell_from_recovery, route_bar_keys, step_display_brightness, stop_routing_bar_keys,
+    suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys, window_bounds,
+    window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -41,6 +42,7 @@ const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const MIN_DEADLINE_MS: u128 = 10;
 const STATUS_POLL_MS: u32 = 120;
 const FOREGROUND_FALLBACK_TICKS: u32 = 8;
+const WM_APP_BAR_KEY: u32 = 0x8000 + 21;
 const HUD_ANIM_MS: u32 = 8;
 
 #[allow(clippy::struct_excessive_bools)]
@@ -63,6 +65,7 @@ pub(crate) struct Bar {
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
     foreground_gate: ChangeGate,
+    focus: BarFocus,
     lyrics: LyricsService,
     lyrics_track: Option<(String, String)>,
     lyrics_generation: u64,
@@ -154,6 +157,7 @@ pub fn start(
         tracking_panel_mouse: false,
         maintain_ticks: 0,
         foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
+        focus: BarFocus::default(),
         lyrics,
         lyrics_track: None,
         lyrics_generation: 0,
@@ -190,6 +194,7 @@ pub fn stop(runtime: &RuntimeContext) {
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), DEADLINE_TIMER);
         }
         unregister_notch_hotkeys(bar.hwnd);
+        stop_routing_bar_keys();
         bar.lyrics.shutdown();
     }
 }
@@ -239,6 +244,12 @@ pub fn handle_message(
         }
         WM_HOTKEY => {
             with_bar(runtime, |bar| bar.on_hotkey(runtime, wparam.0 as i32));
+            Some(LRESULT(0))
+        }
+        WM_APP_BAR_KEY => {
+            if let Some(key) = BarKey::from_code(wparam.0) {
+                with_bar(runtime, |bar| bar.on_bar_key(runtime, key));
+            }
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
@@ -586,6 +597,7 @@ impl Bar {
             }
         }
         self.sync_full_screen(runtime);
+        self.sync_keyboard_focus(runtime);
         let latest = read_system_status();
         if let Some(event) = detect_hud_event(self.controls.status(), latest) {
             self.notch.trigger_hud(event);
@@ -693,7 +705,62 @@ impl Bar {
         self.schedule_deadline();
     }
 
+    fn enter_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        if !self.visibility.is_visible() {
+            return;
+        }
+        crate::menu::close(runtime);
+        let targets = self.layout.keyboard_targets();
+        if self.focus.enter(&targets).is_some() && route_bar_keys(self.hwnd, WM_APP_BAR_KEY) {
+            self.present(runtime);
+        } else {
+            self.focus.exit();
+        }
+    }
+
+    fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        stop_routing_bar_keys();
+        if self.focus.exit() {
+            self.present(runtime);
+        }
+    }
+
+    fn sync_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        if !self.focus.is_active() {
+            return;
+        }
+        if !is_routing_bar_keys() || !self.visibility.is_visible() {
+            self.leave_keyboard_focus(runtime);
+        } else if self.focus.revalidate(&self.layout.keyboard_targets()) {
+            self.present(runtime);
+        }
+    }
+
+    fn on_bar_key(&mut self, runtime: &RuntimeContext, key: BarKey) {
+        let targets = self.layout.keyboard_targets();
+        match self.focus.handle(key, &targets) {
+            BarFocusOutcome::Moved(_) => self.present(runtime),
+            BarFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
+            BarFocusOutcome::Activate(target) => {
+                self.leave_keyboard_focus(runtime);
+                self.present(runtime);
+                if let Some(action) = BarControlsController::click_action(target) {
+                    self.perform(runtime, action);
+                }
+            }
+            BarFocusOutcome::Unchanged => {}
+        }
+    }
+
     fn on_hotkey(&mut self, runtime: &RuntimeContext, hotkey_id: i32) {
+        if hotkey_id == otto_platform::HOTKEY_FOCUS_BAR {
+            if self.focus.is_active() {
+                self.leave_keyboard_focus(runtime);
+            } else {
+                self.enter_keyboard_focus(runtime);
+            }
+            return;
+        }
         self.ensure_anim_timer();
         let Some(hotkey) = (match hotkey_id {
             otto_platform::HOTKEY_TOGGLE_NOTCH => Some(NotchHotkey::ToggleNotch),
@@ -843,6 +910,7 @@ impl Bar {
         raw_y: i32,
     ) {
         self.ensure_anim_timer();
+        self.leave_keyboard_focus(runtime);
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
         let Some(target) = self.layout.hit_test(x, y) else {
             return;
@@ -1004,6 +1072,7 @@ impl Bar {
             self.controls.status(),
             self.controls.active_app(),
             hovered,
+            self.focus.current(),
             self.notch.hud_state(),
             self.notch.pomodoro(),
             self.notch.media(),

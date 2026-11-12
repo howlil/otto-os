@@ -1,16 +1,22 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use otto_core::BarKey;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_VOLUME_DOWN,
+    VK_VOLUME_MUTE, VK_VOLUME_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+    PostMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
 };
 
 use crate::audio::{is_available, step_system_volume, toggle_system_mute};
@@ -21,8 +27,12 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const INJECTED_FLAG: u32 = 0x10;
 const WHEEL_UP: i16 = 120;
 const WHEEL_DOWN: i16 = -120;
+const ROUTE_IDLE_LIMIT_MS: u64 = 15_000;
 
 static HOOK_THREAD: Mutex<Option<HookThread>> = Mutex::new(None);
+static ROUTE_TARGET: AtomicIsize = AtomicIsize::new(0);
+static ROUTE_MESSAGE: AtomicU32 = AtomicU32::new(0);
+static ROUTE_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 
 struct HookThread {
     thread_id: u32,
@@ -48,6 +58,85 @@ fn volume_key(virtual_key: u32, flags: u32) -> Option<VolumeKey> {
     }
 }
 
+fn bar_key(virtual_key: u32, flags: u32) -> Option<BarKey> {
+    if flags & INJECTED_FLAG != 0 {
+        return None;
+    }
+    let key = u16::try_from(virtual_key).ok()?;
+    match key {
+        key if key == VK_LEFT.0 => Some(BarKey::Previous),
+        key if key == VK_RIGHT.0 => Some(BarKey::Next),
+        key if key == VK_HOME.0 => Some(BarKey::First),
+        key if key == VK_END.0 => Some(BarKey::Last),
+        key if key == VK_RETURN.0 || key == VK_SPACE.0 || key == VK_DOWN.0 => {
+            Some(BarKey::Activate)
+        }
+        key if key == VK_ESCAPE.0 => Some(BarKey::Exit),
+        _ => None,
+    }
+}
+
+fn now_ms() -> u64 {
+    unsafe { GetTickCount64() }
+}
+
+const fn route_live(deadline_ms: u64, now_ms: u64) -> bool {
+    deadline_ms != 0 && now_ms < deadline_ms
+}
+
+#[must_use]
+pub fn route_bar_keys(target_hwnd: isize, message: u32) -> bool {
+    let installed = HOOK_THREAD.lock().is_ok_and(|guard| guard.is_some());
+    if !installed {
+        return false;
+    }
+    ROUTE_MESSAGE.store(message, Ordering::Release);
+    ROUTE_TARGET.store(target_hwnd, Ordering::Release);
+    ROUTE_DEADLINE_MS.store(now_ms() + ROUTE_IDLE_LIMIT_MS, Ordering::Release);
+    true
+}
+
+pub fn stop_routing_bar_keys() {
+    ROUTE_TARGET.store(0, Ordering::Release);
+    ROUTE_DEADLINE_MS.store(0, Ordering::Release);
+}
+
+#[must_use]
+pub fn is_routing_bar_keys() -> bool {
+    ROUTE_TARGET.load(Ordering::Acquire) != 0
+        && route_live(ROUTE_DEADLINE_MS.load(Ordering::Acquire), now_ms())
+}
+
+fn route_bar_key(key: BarKey, key_down: bool) -> bool {
+    let target = ROUTE_TARGET.load(Ordering::Acquire);
+    if target == 0 {
+        return false;
+    }
+    let now = now_ms();
+    if !route_live(ROUTE_DEADLINE_MS.load(Ordering::Acquire), now) {
+        stop_routing_bar_keys();
+        return false;
+    }
+    if !key_down {
+        return true;
+    }
+    ROUTE_DEADLINE_MS.store(now + ROUTE_IDLE_LIMIT_MS, Ordering::Release);
+    let message = ROUTE_MESSAGE.load(Ordering::Acquire);
+    let posted = unsafe {
+        PostMessageW(
+            Some(HWND(target as *mut _)),
+            message,
+            WPARAM(key.code()),
+            LPARAM(0),
+        )
+    };
+    if posted.is_err() {
+        stop_routing_bar_keys();
+        return false;
+    }
+    true
+}
+
 fn is_key_down(message: usize) -> bool {
     message == WM_KEYDOWN as usize || message == WM_SYSKEYDOWN as usize
 }
@@ -65,6 +154,9 @@ fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
         return false;
     }
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    if let Some(key) = bar_key(event.vkCode, event.flags.0) {
+        return route_bar_key(key, is_key_down(wparam.0));
+    }
     let Some(key) = volume_key(event.vkCode, event.flags.0) else {
         return false;
     };
@@ -129,6 +221,7 @@ pub fn install_keyboard_hook() -> bool {
 }
 
 pub fn uninstall_keyboard_hook() {
+    stop_routing_bar_keys();
     let Some(thread) = HOOK_THREAD.lock().ok().and_then(|mut guard| guard.take()) else {
         return;
     };
@@ -141,11 +234,13 @@ pub fn uninstall_keyboard_hook() {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_THREAD, INJECTED_FLAG, VolumeKey, install_keyboard_hook, is_key_down,
-        uninstall_keyboard_hook, volume_key,
+        HOOK_THREAD, INJECTED_FLAG, VolumeKey, bar_key, install_keyboard_hook, is_key_down,
+        is_routing_bar_keys, route_bar_keys, route_live, uninstall_keyboard_hook, volume_key,
     };
+    use otto_core::BarKey;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_A, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+        VK_A, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
+        VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN};
 
@@ -179,10 +274,40 @@ mod tests {
     }
 
     #[test]
-    fn hook_thread_state_is_released_after_uninstall() {
+    fn maps_navigation_keys_to_bar_keys() {
+        let key = |vk: u16| bar_key(u32::from(vk), 0);
+        assert_eq!(key(VK_LEFT.0), Some(BarKey::Previous));
+        assert_eq!(key(VK_RIGHT.0), Some(BarKey::Next));
+        assert_eq!(key(VK_HOME.0), Some(BarKey::First));
+        assert_eq!(key(VK_END.0), Some(BarKey::Last));
+        assert_eq!(key(VK_RETURN.0), Some(BarKey::Activate));
+        assert_eq!(key(VK_SPACE.0), Some(BarKey::Activate));
+        assert_eq!(key(VK_DOWN.0), Some(BarKey::Activate));
+        assert_eq!(key(VK_ESCAPE.0), Some(BarKey::Exit));
+        assert_eq!(key(VK_TAB.0), None);
+        assert_eq!(bar_key(u32::from(VK_LEFT.0), INJECTED_FLAG), None);
+    }
+
+    #[test]
+    fn routing_expires_at_its_deadline() {
+        assert!(!route_live(0, 10));
+        assert!(route_live(100, 99));
+        assert!(!route_live(100, 100));
+    }
+
+    #[test]
+    fn hook_and_key_routing_are_released_after_uninstall() {
+        uninstall_keyboard_hook();
+        assert!(!route_bar_keys(1, 0x8001));
+        assert!(!is_routing_bar_keys());
         let installed = install_keyboard_hook();
         assert_eq!(HOOK_THREAD.lock().unwrap().is_some(), installed);
+        if installed {
+            assert!(route_bar_keys(1, 0x8001));
+            assert!(is_routing_bar_keys());
+        }
         uninstall_keyboard_hook();
         assert!(HOOK_THREAD.lock().unwrap().is_none());
+        assert!(!is_routing_bar_keys());
     }
 }
