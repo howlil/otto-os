@@ -137,19 +137,21 @@ impl BarFocus {
             self.current = None;
             return BarFocusOutcome::Exited;
         }
+        let Some(index) = targets.iter().position(|target| *target == current) else {
+            let first = targets[0];
+            self.current = Some(first);
+            return BarFocusOutcome::Moved(first);
+        };
         if key == BarKey::Activate {
             self.current = None;
             return BarFocusOutcome::Activate(current);
         }
         let last = targets.len() - 1;
-        let index = targets.iter().position(|target| *target == current);
         let next = match key {
             BarKey::First => 0,
             BarKey::Last => last,
-            BarKey::Next | BarKey::NextTab => index.map_or(0, |index| (index + 1) % targets.len()),
-            BarKey::Previous | BarKey::PreviousTab => {
-                index.map_or(last, |index| index.checked_sub(1).unwrap_or(last))
-            }
+            BarKey::Next | BarKey::NextTab => (index + 1) % targets.len(),
+            BarKey::Previous | BarKey::PreviousTab => index.checked_sub(1).unwrap_or(last),
             BarKey::Activate | BarKey::Exit => return BarFocusOutcome::Unchanged,
         };
         let target = targets[next];
@@ -310,6 +312,36 @@ mod tests {
             Some(true)
         );
         assert_eq!(focus.dock_handoff(BarKey::Next, &TARGETS), None);
+    }
+
+    #[test]
+    fn a_vanished_focus_recovers_to_the_first_target_instead_of_activating_it() {
+        let mut focus = focused();
+        let remaining = [HitTarget::AppMenu, HitTarget::ControlCenter];
+        assert_eq!(
+            focus.handle(BarKey::Activate, &remaining),
+            BarFocusOutcome::Moved(HitTarget::AppMenu)
+        );
+        assert_eq!(focus.current(), Some(HitTarget::AppMenu));
+        assert_eq!(
+            focus.handle(BarKey::Activate, &remaining),
+            BarFocusOutcome::Activate(HitTarget::AppMenu)
+        );
+    }
+
+    #[test]
+    fn a_single_target_bar_hands_off_on_both_tabs_and_keeps_focus_otherwise() {
+        let only = [HitTarget::Clock];
+        let mut focus = BarFocus::default();
+        focus.enter(&only);
+        assert_eq!(focus.dock_handoff(BarKey::NextTab, &only), Some(false));
+        assert_eq!(focus.dock_handoff(BarKey::PreviousTab, &only), Some(true));
+        assert_eq!(focus.dock_handoff(BarKey::Next, &only), None);
+        assert_eq!(
+            focus.handle(BarKey::NextTab, &only),
+            BarFocusOutcome::Unchanged
+        );
+        assert!(focus.is_active());
     }
 
     #[test]

@@ -56,6 +56,10 @@ impl DockFocus {
             self.current = None;
             return DockFocusOutcome::Exited;
         }
+        if current >= count {
+            self.current = Some(0);
+            return DockFocusOutcome::Moved(0);
+        }
         if key == BarKey::Activate {
             self.current = None;
             return DockFocusOutcome::Activate(current);
@@ -164,6 +168,24 @@ mod tests {
         let mut focus = at(1);
         assert_eq!(focus.handle(BarKey::Exit, 5), DockFocusOutcome::Exited);
         assert!(!focus.exit());
+    }
+
+    #[test]
+    fn a_stale_index_is_never_reported_past_the_end_of_the_dock() {
+        let mut focus = at(4);
+        assert_eq!(
+            focus.handle(BarKey::Previous, 3),
+            DockFocusOutcome::Moved(0)
+        );
+        assert_eq!(focus.current(), Some(0));
+        let mut focus = at(4);
+        assert_eq!(
+            focus.handle(BarKey::Activate, 3),
+            DockFocusOutcome::Moved(0)
+        );
+        assert!(focus.is_active());
+        let mut focus = at(4);
+        assert_eq!(focus.handle(BarKey::Exit, 0), DockFocusOutcome::Exited);
     }
 
     #[test]
