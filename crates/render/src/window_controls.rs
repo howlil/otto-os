@@ -1,4 +1,4 @@
-use otto_core::{WindowControlsLayout, WindowControlsState};
+use otto_core::{Appearance, Rgba, WindowControlsLayout, WindowControlsState};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_PIXEL_FORMAT,
@@ -76,6 +76,15 @@ const GLYPH_DARK: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 0.04,
     a: 0.90,
 };
+const fn d2d(color: Rgba) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: color.a,
+    }
+}
+
 const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
     format: DXGI_FORMAT_B8G8R8A8_UNORM,
     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
@@ -154,6 +163,7 @@ impl WindowControlsRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn present(
         &self,
         hwnd: isize,
@@ -162,9 +172,55 @@ impl WindowControlsRenderer {
         state: WindowControlsState,
         maximized: bool,
         hovered: bool,
+        appearance: Appearance,
     ) -> Result<()> {
-        self.draw(layout, state, maximized, hovered)?;
+        let high_contrast = self.apply_appearance(&appearance);
+        self.draw(layout, state, maximized, hovered || high_contrast)?;
         self.surface.present(hwnd, origin)
+    }
+
+    fn apply_appearance(&self, appearance: &Appearance) -> bool {
+        let colors = match appearance.contrast {
+            Some(system) => [
+                d2d(system.window),
+                d2d(system.window_text),
+                d2d(system.window),
+                d2d(system.window_text),
+                d2d(system.window),
+                d2d(system.window_text),
+                d2d(system.window),
+                d2d(system.gray_text),
+                d2d(system.window_text),
+            ],
+            None => [
+                RED_FILL,
+                RED_BORDER,
+                YELLOW_FILL,
+                YELLOW_BORDER,
+                GREEN_FILL,
+                GREEN_BORDER,
+                DISABLED_FILL,
+                DISABLED_BORDER,
+                GLYPH_DARK,
+            ],
+        };
+        let brushes = [
+            &self.red_fill,
+            &self.red_border,
+            &self.yellow_fill,
+            &self.yellow_border,
+            &self.green_fill,
+            &self.green_border,
+            &self.disabled_fill,
+            &self.disabled_border,
+            &self.glyph_brush,
+        ];
+        for (brush, color) in brushes.into_iter().zip(colors) {
+            unsafe {
+                brush.SetColor(&raw const color);
+            }
+        }
+        appearance.contrast.is_some()
     }
 
     fn draw(

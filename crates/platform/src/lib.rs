@@ -72,7 +72,10 @@ pub use screen::{
     PrimaryScreen, enable_per_monitor_dpi, monitor_work_area_at, primary_screen, virtual_screen,
 };
 pub use status::{read_system_status, set_display_brightness, step_display_brightness};
-pub use theme::{is_high_contrast_active, is_system_in_dark_mode, is_transparency_enabled};
+pub use theme::{
+    is_high_contrast_active, is_system_in_dark_mode, is_transparency_enabled,
+    read_system_appearance, system_contrast_colors,
+};
 pub use trash::{empty_recycle_bin, is_recycle_bin_full, shutdown_recycle_bin_task};
 pub use window_model::{
     ApplicationContext, ForegroundApplication, application_of, enumerate_windows,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
-use otto_core::{AppleIconKind, DockItemLayout, DockLayout, PixelLimits, ResolvedTheme, scale};
+use otto_core::{Appearance, AppleIconKind, DockItemLayout, DockLayout, PixelLimits, scale};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
@@ -153,9 +153,9 @@ impl DockRenderer {
         origin: (i32, i32),
         layout: &DockLayout,
         items: &[DockRenderItem<'_>],
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
-        self.draw(layout, items, theme)?;
+        self.draw(layout, items, appearance)?;
         self.surface.present(hwnd, origin)
     }
 
@@ -163,9 +163,9 @@ impl DockRenderer {
         &self,
         layout: &DockLayout,
         items: &[DockRenderItem<'_>],
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
-        let palette = LiquidGlassPalette::for_theme(theme);
+        let palette = LiquidGlassPalette::for_appearance(&appearance);
         draw_on(
             &self.target,
             &self.surface,
@@ -180,7 +180,7 @@ impl DockRenderer {
                 }
 
                 if let Some(div_x) = layout.divider_x {
-                    let div_brush = self.brushes.scratch(0, palette.dock_divider);
+                    let div_brush = &self.brushes.color_brush(palette.dock_divider);
                     let pad_v = layout.pill.height as f32 * 0.20;
                     self.target.DrawLine(
                         Vector2::new(div_x, layout.pill.y as f32 + pad_v),
@@ -191,7 +191,7 @@ impl DockRenderer {
                     );
                 }
 
-                let dot_brush = self.brushes.scratch(1, palette.dock_dot);
+                let dot_brush = &self.brushes.color_brush(palette.dock_dot);
                 let active_dot_brush = &self.brushes.text_primary;
 
                 for (slot, item) in layout.items.iter().zip(items) {
@@ -231,7 +231,7 @@ impl DockRenderer {
                         let b = if item.active {
                             active_dot_brush
                         } else if item.hidden {
-                            self.brushes.alpha_brush(1, palette.dock_dot, 0.45)
+                            &self.brushes.alpha_brush(palette.dock_dot, 0.45)
                         } else {
                             dot_brush
                         };
@@ -290,7 +290,7 @@ impl DockRenderer {
     fn draw_apple_icon(&self, slot: &DockItemLayout, kind: AppleIconKind) -> Result<()> {
         let (tile, shadow) = Self::squircle_bounds(slot);
         unsafe {
-            let shadow_brush = self.brushes.scratch(0, ICON_SHADOW);
+            let shadow_brush = &self.brushes.color_brush(ICON_SHADOW);
             self.target.FillRoundedRectangle(&shadow, shadow_brush);
 
             match kind {
@@ -307,7 +307,7 @@ impl DockRenderer {
                 AppleIconKind::Folder => self.draw_folder_tile(&tile),
             }
 
-            let rim_brush = self.brushes.scratch(1, ICON_RIM);
+            let rim_brush = &self.brushes.color_brush(ICON_RIM);
             self.target
                 .DrawRoundedRectangle(&tile, rim_brush, 1.1, None);
         }
@@ -321,9 +321,9 @@ impl DockRenderer {
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let light_blue = self.brushes.scratch(2, rgb(138, 214, 255, 1.0));
-            let deep_blue = self.brushes.scratch(3, rgb(28, 120, 242, 1.0));
-            let feature = self.brushes.scratch(4, rgb(20, 44, 84, 0.96));
+            let light_blue = &self.brushes.color_brush(rgb(138, 214, 255, 1.0));
+            let deep_blue = &self.brushes.color_brush(rgb(28, 120, 242, 1.0));
+            let feature = &self.brushes.color_brush(rgb(20, 44, 84, 0.96));
 
             self.target.FillRoundedRectangle(tile, light_blue);
 
@@ -408,10 +408,10 @@ impl DockRenderer {
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let plate = self.brushes.scratch(2, rgb(232, 236, 242, 1.0));
-            let bin_fill = self.brushes.scratch(3, rgb(180, 188, 198, 1.0));
-            let bin_dark = self.brushes.scratch(4, rgb(104, 112, 124, 0.95));
-            let rim_light = self.brushes.scratch(5, rgb(248, 250, 252, 1.0));
+            let plate = &self.brushes.color_brush(rgb(232, 236, 242, 1.0));
+            let bin_fill = &self.brushes.color_brush(rgb(180, 188, 198, 1.0));
+            let bin_dark = &self.brushes.color_brush(rgb(104, 112, 124, 0.95));
+            let rim_light = &self.brushes.color_brush(rgb(248, 250, 252, 1.0));
 
             self.target.FillRoundedRectangle(tile, plate);
 
@@ -440,8 +440,8 @@ impl DockRenderer {
             self.target.FillEllipse(&rim_ellipse, rim_light);
 
             if is_full {
-                let paper_fill = self.brushes.scratch(6, rgb(252, 250, 244, 0.98));
-                let paper_crease = self.brushes.scratch(7, rgb(156, 164, 176, 0.90));
+                let paper_fill = &self.brushes.color_brush(rgb(252, 250, 244, 0.98));
+                let paper_crease = &self.brushes.color_brush(rgb(156, 164, 176, 0.90));
                 let blobs = [
                     (cx - w * 0.11, top_y + h * 0.01, w * 0.095, h * 0.075),
                     (cx + w * 0.09, top_y + h * 0.02, w * 0.10, h * 0.08),
@@ -488,7 +488,7 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let plate = self.brushes.scratch(2, rgb(38, 42, 52, 1.0));
+            let plate = &self.brushes.color_brush(rgb(38, 42, 52, 1.0));
             self.target.FillRoundedRectangle(tile, plate);
 
             let colors = [
@@ -514,7 +514,7 @@ impl DockRenderer {
                 let row = (idx / 3) as f32;
                 let cell_x = start_x + col * (cell + gap);
                 let cell_y = start_y + row * (cell + gap);
-                let brush = self.brushes.scratch(3, *color);
+                let brush = &self.brushes.color_brush(*color);
                 let mini = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
                         left: cell_x,
@@ -537,9 +537,9 @@ impl DockRenderer {
         let cy = r.top + h * 0.5;
 
         unsafe {
-            let bg = self.brushes.scratch(2, rgb(24, 30, 42, 1.0));
-            let cyan = self.brushes.scratch(3, rgb(36, 172, 242, 1.0));
-            let deep_cyan = self.brushes.scratch(4, rgb(0, 120, 212, 1.0));
+            let bg = &self.brushes.color_brush(rgb(24, 30, 42, 1.0));
+            let cyan = &self.brushes.color_brush(rgb(36, 172, 242, 1.0));
+            let deep_cyan = &self.brushes.color_brush(rgb(0, 120, 212, 1.0));
 
             self.target.FillRoundedRectangle(tile, bg);
 
@@ -587,7 +587,7 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let coral = self.brushes.scratch(2, rgb(250, 45, 72, 1.0));
+            let coral = &self.brushes.color_brush(rgb(250, 45, 72, 1.0));
             let white = &self.brushes.white;
 
             self.target.FillRoundedRectangle(tile, coral);
@@ -645,10 +645,10 @@ impl DockRenderer {
         let cx = r.left + w * 0.5;
 
         unsafe {
-            let plate = self.brushes.scratch(2, rgb(238, 244, 252, 1.0));
-            let back_blue = self.brushes.scratch(3, rgb(42, 152, 240, 1.0));
-            let front_blue = self.brushes.scratch(4, rgb(96, 194, 255, 1.0));
-            let arrow_brush = self.brushes.scratch(5, rgb(24, 118, 210, 0.92));
+            let plate = &self.brushes.color_brush(rgb(238, 244, 252, 1.0));
+            let back_blue = &self.brushes.color_brush(rgb(42, 152, 240, 1.0));
+            let front_blue = &self.brushes.color_brush(rgb(96, 194, 255, 1.0));
+            let arrow_brush = &self.brushes.color_brush(rgb(24, 118, 210, 0.92));
 
             self.target.FillRoundedRectangle(tile, plate);
 
@@ -722,9 +722,9 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let outer = self.brushes.scratch(2, rgb(58, 62, 70, 1.0));
-            let inner = self.brushes.scratch(3, rgb(24, 26, 31, 1.0));
-            let glyph = self.brushes.scratch(4, rgb(245, 247, 250, 0.96));
+            let outer = &self.brushes.color_brush(rgb(58, 62, 70, 1.0));
+            let inner = &self.brushes.color_brush(rgb(24, 26, 31, 1.0));
+            let glyph = &self.brushes.color_brush(rgb(245, 247, 250, 0.96));
 
             self.target.FillRoundedRectangle(tile, outer);
             let pad = (w * 0.055).max(1.8);
@@ -772,9 +772,9 @@ impl DockRenderer {
         let cy = r.top + (r.bottom - r.top) * 0.5;
 
         unsafe {
-            let plate = self.brushes.scratch(2, rgb(208, 213, 221, 1.0));
-            let well = self.brushes.scratch(3, rgb(58, 62, 70, 1.0));
-            let gear = self.brushes.scratch(4, rgb(218, 223, 230, 0.96));
+            let plate = &self.brushes.color_brush(rgb(208, 213, 221, 1.0));
+            let well = &self.brushes.color_brush(rgb(58, 62, 70, 1.0));
+            let gear = &self.brushes.color_brush(rgb(218, 223, 230, 0.96));
 
             self.target.FillRoundedRectangle(tile, plate);
 
@@ -826,10 +826,10 @@ impl DockRenderer {
         let cy = r.top + (r.bottom - r.top) * 0.5;
 
         unsafe {
-            let plate = self.brushes.scratch(2, rgb(250, 252, 255, 1.0));
-            let dial = self.brushes.scratch(3, rgb(24, 132, 247, 1.0));
-            let white = self.brushes.scratch(4, rgb(255, 255, 255, 0.95));
-            let red = self.brushes.scratch(5, rgb(255, 59, 48, 0.98));
+            let plate = &self.brushes.color_brush(rgb(250, 252, 255, 1.0));
+            let dial = &self.brushes.color_brush(rgb(24, 132, 247, 1.0));
+            let white = &self.brushes.color_brush(rgb(255, 255, 255, 0.95));
+            let red = &self.brushes.color_brush(rgb(255, 59, 48, 0.98));
 
             self.target.FillRoundedRectangle(tile, plate);
 
@@ -892,9 +892,9 @@ impl DockRenderer {
         let h = r.bottom - r.top;
 
         unsafe {
-            let paper = self.brushes.scratch(2, rgb(252, 251, 247, 1.0));
-            let header = self.brushes.scratch(3, rgb(245, 184, 41, 1.0));
-            let rule = self.brushes.scratch(4, rgb(214, 212, 206, 1.0));
+            let paper = &self.brushes.color_brush(rgb(252, 251, 247, 1.0));
+            let header = &self.brushes.color_brush(rgb(245, 184, 41, 1.0));
+            let rule = &self.brushes.color_brush(rgb(214, 212, 206, 1.0));
 
             self.target.FillRoundedRectangle(tile, paper);
 
@@ -971,9 +971,9 @@ impl DockRenderer {
             radiusY: (r - 1.0).max(1.0),
         };
         unsafe {
-            let fill = self.brushes.scratch(2, palette.dock_fill);
-            let outer_border = self.brushes.scratch(3, palette.dock_outer_border);
-            let inner_border = self.brushes.scratch(4, palette.dock_inner_border);
+            let fill = &self.brushes.color_brush(palette.dock_fill);
+            let outer_border = &self.brushes.color_brush(palette.dock_outer_border);
+            let inner_border = &self.brushes.color_brush(palette.dock_inner_border);
 
             self.target.FillRoundedRectangle(&outer, fill);
             self.target
@@ -1015,9 +1015,9 @@ impl DockRenderer {
         };
 
         unsafe {
-            let bg = self.brushes.scratch(2, palette.menu_fill);
-            let border = self.brushes.scratch(3, palette.dock_inner_border);
-            let text_brush = self.brushes.scratch(4, palette.text_primary);
+            let bg = &self.brushes.color_brush(palette.menu_fill);
+            let border = &self.brushes.color_brush(palette.dock_inner_border);
+            let text_brush = &self.brushes.color_brush(palette.text_primary);
 
             self.target.FillRoundedRectangle(&pill, bg);
             self.target.DrawRoundedRectangle(&pill, border, 1.0, None);

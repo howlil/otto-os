@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    Capability, CommandOutcome, Metrics, MotionMetrics, MotionPreference, WindowCommand,
-    WindowControlAction, WindowControlsLayout, WindowControlsMetrics, WindowControlsState,
-    WindowInfo, accepts_window_controls, animate_value, compute_window_controls_layout, scale,
-    window_controls_top,
+    Appearance, Capability, CommandOutcome, Metrics, MotionMetrics, MotionPreference,
+    WindowCommand, WindowControlAction, WindowControlsLayout, WindowControlsMetrics,
+    WindowControlsState, WindowInfo, accepts_window_controls, animate_value,
+    compute_window_controls_layout, scale, window_controls_top,
 };
 use otto_platform::{
     ActiveWindowTarget, acknowledge_window_sync, active_window_target, current_process_id,
@@ -38,6 +38,7 @@ const FOREGROUND_CHECK_MS: u32 = 500;
 pub(crate) struct WindowControls {
     hwnd: isize,
     own_pid: u32,
+    appearance: Appearance,
     renderer: WindowControlsRenderer,
     metrics: WindowControlsMetrics,
     layout: WindowControlsLayout,
@@ -67,6 +68,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let mut wc = WindowControls {
         hwnd,
         own_pid,
+        appearance: crate::theme_state::appearance(runtime),
         renderer,
         metrics,
         layout,
@@ -173,6 +175,15 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
+}
+
+pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
+    with_window_controls(runtime, |controls| {
+        controls.appearance = appearance;
+        if controls.visible {
+            controls.present();
+        }
+    });
 }
 
 fn with_window_controls(runtime: &RuntimeContext, action: impl FnOnce(&mut WindowControls)) {
@@ -513,6 +524,7 @@ impl WindowControls {
             self.state,
             target.maximized,
             self.hovered,
+            self.appearance,
         );
         unsafe {
             let _ = SetWindowPos(

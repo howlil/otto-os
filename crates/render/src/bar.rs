@@ -1,8 +1,8 @@
 use super::surface::draw_on;
 use super::{CLEAR, LiquidGlassPalette, Renderer};
 use otto_core::{
-    HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudState, NowPlaying, PomodoroState,
-    PomodoroStatus, Rect, ResolvedTheme, SystemStatus,
+    Appearance, HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudState, NowPlaying,
+    PomodoroState, PomodoroStatus, Rect, SystemStatus,
 };
 use windows::core::Result;
 
@@ -19,9 +19,9 @@ impl Renderer {
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
-        let palette = LiquidGlassPalette::for_theme(theme);
+        let palette = LiquidGlassPalette::for_appearance(&appearance);
         let surface = &self.bar_surface;
         draw_on(&self.target, surface, surface.size(), || unsafe {
             let clear = palette.bar_background;

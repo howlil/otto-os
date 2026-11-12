@@ -8,6 +8,7 @@ mod effects;
 mod genie;
 mod layout;
 mod lyrics;
+mod material;
 mod media;
 mod menu;
 mod motion;
@@ -48,6 +49,10 @@ pub use layout::{
 pub use lyrics::{
     LyricLine, LyricsSheet, MAX_LRC_LINES, MAX_LRC_TIMESTAMPS_PER_LINE, MAX_LRC_TOTAL_TEXT_BYTES,
     parse_lrc,
+};
+pub use material::{
+    Appearance, ContrastColors, InteractionState, MaterialVariant, SemanticColors, ShapeTokens,
+    SystemAppearance,
 };
 pub use media::{MediaCommand, NotchExpandedTab, NowPlaying};
 pub use menu::*;

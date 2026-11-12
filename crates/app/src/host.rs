@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Error, PCWSTR, Result, w};
 
 use crate::{bar, dock, genie, menu, window_controls};
-use otto_core::ThemeMode;
+use otto_core::{SystemAppearance, ThemeMode};
 use otto_platform::{
     replace_file_atomically, restore_hidden_windows, shutdown_audio_task, shutdown_media_task,
 };
@@ -367,6 +367,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) window_controls: RefCell<Option<window_controls::WindowControls>>,
     pub(crate) genie: RefCell<Option<genie::Genie>>,
     pub(crate) theme_mode: Cell<ThemeMode>,
+    pub(crate) system_appearance: Cell<SystemAppearance>,
     pub(crate) online_lyrics_enabled: Cell<bool>,
     pub(crate) pending_online_lyrics: Cell<Option<bool>>,
 }
@@ -380,6 +381,7 @@ impl RuntimeContext {
             window_controls: RefCell::new(None),
             genie: RefCell::new(None),
             theme_mode: Cell::new(ThemeMode::Auto),
+            system_appearance: Cell::new(SystemAppearance::DEFAULT),
             online_lyrics_enabled: Cell::new(online_lyrics_enabled),
             pending_online_lyrics: Cell::new(None),
         }
@@ -424,6 +426,9 @@ pub fn start(blur: bool) -> Result<()> {
         shutting_down: false,
         runtime: RuntimeContext::new(online_lyrics_enabled),
     };
+    host.runtime
+        .system_appearance
+        .set(otto_platform::read_system_appearance());
     if let Err(error) = host.initialize() {
         host.shutdown();
         return Err(error);

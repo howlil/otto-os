@@ -1,5 +1,5 @@
 use crate::host::RuntimeContext;
-use otto_core::{ResolvedTheme, ThemeMode};
+use otto_core::{Appearance, ThemeMode};
 
 pub fn theme_mode(runtime: &RuntimeContext) -> ThemeMode {
     runtime.theme_mode.get()
@@ -16,15 +16,24 @@ pub fn cycle_theme_mode(runtime: &RuntimeContext) -> ThemeMode {
     next
 }
 
-pub fn resolved_theme(runtime: &RuntimeContext) -> ResolvedTheme {
-    let system_dark = otto_platform::is_system_in_dark_mode();
-    theme_mode(runtime).resolve(system_dark)
+pub fn appearance(runtime: &RuntimeContext) -> Appearance {
+    runtime.system_appearance.get().resolve(theme_mode(runtime))
+}
+
+pub fn refresh_system_appearance(runtime: &RuntimeContext) {
+    let latest = otto_platform::read_system_appearance();
+    if latest != runtime.system_appearance.get() {
+        runtime.system_appearance.set(latest);
+        refresh_theme(runtime);
+    }
 }
 
 pub fn refresh_theme(runtime: &RuntimeContext) {
-    crate::bar::repaint(runtime);
+    let appearance = appearance(runtime);
+    crate::bar::apply_appearance(runtime, appearance);
     crate::dock::repaint(runtime);
     crate::menu::repaint(runtime);
+    crate::window_controls::apply_appearance(runtime, appearance);
 }
 
 #[cfg(test)]
@@ -42,5 +51,19 @@ mod tests {
         assert_eq!(theme_mode(&runtime), ThemeMode::Light);
         assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Auto);
         assert_eq!(theme_mode(&runtime), ThemeMode::Auto);
+    }
+
+    #[test]
+    fn appearance_combines_the_system_snapshot_with_the_user_mode() {
+        let runtime = RuntimeContext::new(false);
+        runtime.system_appearance.set(otto_core::SystemAppearance {
+            dark: true,
+            transparency: false,
+            contrast: None,
+        });
+        set_theme_mode(&runtime, ThemeMode::Light);
+        let resolved = appearance(&runtime);
+        assert_eq!(resolved.theme, otto_core::ResolvedTheme::Light);
+        assert_eq!(resolved.variant(), otto_core::MaterialVariant::Opaque);
     }
 }

@@ -882,7 +882,13 @@ impl PopupMenu {
         let Some(renderer) = self.renderer.as_ref() else {
             return;
         };
-        let theme = crate::theme_state::resolved_theme(runtime);
-        let _ = renderer.present(self.hwnd, &self.layout, &self.rows, self.hovered_row, theme);
+        let appearance = crate::theme_state::appearance(runtime);
+        let _ = renderer.present(
+            self.hwnd,
+            &self.layout,
+            &self.rows,
+            self.hovered_row,
+            appearance,
+        );
     }
 }

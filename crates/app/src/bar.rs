@@ -6,27 +6,29 @@ use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate, HitTarget, Layout,
-    Metrics, MotionPreference, NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort,
-    NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target, scale,
+    Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate,
+    HitTarget, Layout, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind, NotchLayoutInput,
+    NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target,
+    scale,
 };
 use otto_platform::{
-    AppBar, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen, WindowsNotchPort,
-    adjust_volume, current_process_id, cursor_position, enable_backdrop_blur,
-    foreground_application, is_routing_bar_keys, motion_preference, open_quick_settings,
-    open_spotlight_search, primary_screen, read_system_status, register_notch_hotkeys,
-    restore_shell_from_recovery, route_bar_keys, step_display_brightness, stop_routing_bar_keys,
-    suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys, window_bounds,
-    window_change_generations,
+    AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
+    WindowsNotchPort, adjust_volume, apply_backdrop_material, current_process_id, cursor_position,
+    enable_backdrop_blur, foreground_application, is_routing_bar_keys, motion_preference,
+    open_quick_settings, open_spotlight_search, primary_screen, read_system_status,
+    register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys, step_display_brightness,
+    stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
+    window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowPos, ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUERYENDSESSION,
-    WM_RBUTTONUP, WM_TIMER,
+    SetWindowPos, ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED,
+    WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER,
 };
 use windows::core::Result;
 
@@ -56,6 +58,7 @@ pub(crate) struct Bar {
     screen: PrimaryScreen,
     metrics: Metrics,
     tint: f32,
+    backdrop_requested: bool,
     layout: Layout,
     controls: BarControlsController,
     notch_port: WindowsNotchPort,
@@ -111,7 +114,8 @@ pub fn start(
         &active_app,
         notch.layout_input(control_center_enabled),
     );
-    let tint = if blur && enable_backdrop_blur(hwnd) {
+    let appearance = crate::theme_state::appearance(runtime);
+    let tint = if blur && appearance.uses_backdrop() && enable_backdrop_blur(hwnd) {
         BLUR_TINT_ALPHA
     } else {
         0.0
@@ -148,6 +152,7 @@ pub fn start(
         screen,
         metrics,
         tint,
+        backdrop_requested: blur,
         layout,
         controls,
         notch_port,
@@ -281,6 +286,10 @@ pub fn handle_message(
             with_bar(runtime, |bar| bar.rebuild(runtime));
             Some(LRESULT(0))
         }
+        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_DWMCOLORIZATIONCOLORCHANGED => {
+            crate::theme_state::refresh_system_appearance(runtime);
+            None
+        }
         _ => None,
     }
 }
@@ -307,15 +316,25 @@ pub fn refresh_plugin_layout(runtime: &RuntimeContext, control_center_enabled: b
     });
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
-    with_bar(runtime, |bar| bar.present(runtime));
-}
-
 pub fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
     with_bar(runtime, |bar| {
         if let Some(action) = BarControlsController::click_action(target) {
             bar.perform(runtime, action);
         }
+    });
+}
+
+pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
+    with_bar(runtime, |bar| {
+        if bar.backdrop_requested {
+            let material = if appearance.uses_backdrop() {
+                BackdropMaterial::Acrylic
+            } else {
+                BackdropMaterial::None
+            };
+            let _ = apply_backdrop_material(bar.hwnd, material);
+        }
+        bar.present(runtime);
     });
 }
 
@@ -1064,7 +1083,7 @@ impl Bar {
         let hovered = self
             .hovered
             .or_else(|| crate::menu::active_top_bar_target(runtime));
-        let theme = crate::theme_state::resolved_theme(runtime);
+        let appearance = crate::theme_state::appearance(runtime);
         let _ = self.renderer.present(
             self.hwnd,
             (0, 0),
@@ -1077,7 +1096,7 @@ impl Bar {
             self.notch.pomodoro(),
             self.notch.media(),
             self.notch.anim_phase(),
-            theme,
+            appearance,
         );
         if self.panel_visible {
             let _ = self.renderer.present_panel(

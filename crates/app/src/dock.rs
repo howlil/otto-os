@@ -995,13 +995,13 @@ impl Dock {
                 hidden: e.hidden,
             })
             .collect();
-        let theme = crate::theme_state::resolved_theme(runtime);
+        let appearance = crate::theme_state::appearance(runtime);
         let _ = self.renderer.present(
             self.hwnd,
             self.window_origin(),
             &self.layout,
             &render_items,
-            theme,
+            appearance,
         );
     }
 }

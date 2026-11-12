@@ -1,6 +1,6 @@
 use otto_core::{
-    EstimatedMenuText, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuRowLayout,
-    ResolvedTheme, month_cells, month_title, scale,
+    Appearance, EstimatedMenuText, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuRowLayout,
+    month_cells, month_title, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
@@ -134,12 +134,12 @@ impl PopupMenuRenderer {
         layout: &PopupMenuLayout,
         rows: &[MenuRow],
         hovered_row: Option<usize>,
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
         let (max_width, max_height) = self.surface.size();
         let width = layout.window.width.clamp(1, max_width);
         let height = layout.window.height.clamp(1, max_height);
-        self.draw(width, height, layout, rows, hovered_row, theme)?;
+        self.draw(width, height, layout, rows, hovered_row, appearance)?;
         self.surface
             .present_sized(hwnd, (layout.window.x, layout.window.y), (width, height))
     }
@@ -151,9 +151,9 @@ impl PopupMenuRenderer {
         layout: &PopupMenuLayout,
         rows: &[MenuRow],
         hovered_row: Option<usize>,
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
-        let palette = LiquidGlassPalette::for_theme(theme);
+        let palette = LiquidGlassPalette::for_appearance(&appearance);
         draw_on(&self.target, &self.surface, (width, height), || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
@@ -264,7 +264,7 @@ impl PopupMenuRenderer {
                 } => {
                     let is_hovered = *enabled && hovered_row == Some(row_layout.index);
                     if is_hovered {
-                        let hover_brush = self.brushes.scratch(0, palette.menu_hover_fill);
+                        let hover_brush = &self.brushes.color_brush(palette.menu_hover_fill);
                         let pill = D2D1_ROUNDED_RECT {
                             rect: D2D_RECT_F {
                                 left: row_layout.rect.x as f32,
@@ -278,7 +278,9 @@ impl PopupMenuRenderer {
                         self.target.FillRoundedRectangle(&pill, hover_brush);
                     }
 
-                    let fg = if *enabled {
+                    let fg = if is_hovered {
+                        &self.brushes.on_accent
+                    } else if *enabled {
                         &self.brushes.text_primary
                     } else {
                         &self.brushes.text_disabled
@@ -351,9 +353,9 @@ impl PopupMenuRenderer {
         let col_w = (row.rect.width as f32 - inset * 2.0) / 7.0;
         let top = row.rect.y as f32;
         unsafe {
-            let text = self.brushes.scratch(0, palette.text_primary);
-            let dim = self.brushes.scratch(1, palette.text_muted);
-            let accent = self.brushes.scratch(2, palette.toggle_active);
+            let text = &self.brushes.color_brush(palette.text_primary);
+            let dim = &self.brushes.color_brush(palette.text_muted);
+            let accent = &self.brushes.color_brush(palette.toggle_active);
 
             let title_rect = D2D_RECT_F {
                 left: left + scale(4, self.dpi) as f32,
@@ -443,7 +445,7 @@ impl PopupMenuRenderer {
         let fill_right = left + (right - left) * fraction;
         let radius = track_h * 0.5;
         unsafe {
-            let text = self.brushes.scratch(0, palette.text_primary);
+            let text = &self.brushes.color_brush(palette.text_primary);
             let label_rect = D2D_RECT_F {
                 left,
                 top: row.rect.y as f32 + scale(4, self.dpi) as f32,
@@ -460,7 +462,7 @@ impl PopupMenuRenderer {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
             let percent_wide: Vec<u16> = format!("{value}%").encode_utf16().collect();
-            let percent_brush = self.brushes.scratch(1, palette.text_muted);
+            let percent_brush = &self.brushes.color_brush(palette.text_muted);
             self.target.DrawText(
                 &percent_wide,
                 &self.shortcut_format,
@@ -480,7 +482,7 @@ impl PopupMenuRenderer {
                 radiusX: radius,
                 radiusY: radius,
             };
-            let track_brush = self.brushes.scratch(2, palette.slider_track);
+            let track_brush = &self.brushes.color_brush(palette.slider_track);
             self.target.FillRoundedRectangle(&track, track_brush);
             if fill_right > left + 0.5 {
                 let fill = D2D1_ROUNDED_RECT {
@@ -493,7 +495,7 @@ impl PopupMenuRenderer {
                     radiusX: radius,
                     radiusY: radius,
                 };
-                let fill_brush = self.brushes.scratch(3, palette.slider_fill);
+                let fill_brush = &self.brushes.color_brush(palette.slider_fill);
                 self.target.FillRoundedRectangle(&fill, fill_brush);
             }
         }
@@ -521,8 +523,8 @@ impl PopupMenuRenderer {
             radiusY: (radius - 1.0).max(1.0),
         };
         unsafe {
-            let fill = self.brushes.scratch(0, palette.menu_fill);
-            let outer_border = self.brushes.scratch(1, palette.menu_outer_border);
+            let fill = &self.brushes.color_brush(palette.menu_fill);
+            let outer_border = &self.brushes.color_brush(palette.menu_outer_border);
             let inner_border = &self.brushes.specular_rim;
             self.target.FillRoundedRectangle(&outer, fill);
             self.target

@@ -1,5 +1,10 @@
 use std::mem::size_of;
 
+use otto_core::{ContrastColors, Rgba, SystemAppearance};
+use windows::Win32::Graphics::Gdi::{
+    COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
@@ -85,5 +90,32 @@ pub fn is_high_contrast_active() -> bool {
         (hc.dwFlags.0 & HCF_HIGHCONTRASTON.0) != 0
     } else {
         false
+    }
+}
+
+fn system_color(index: SYS_COLOR_INDEX) -> Rgba {
+    let value = unsafe { GetSysColor(index) };
+    let channel = |shift: u32| f32::from(((value >> shift) & 0xFF) as u8) / 255.0;
+    Rgba::new(channel(0), channel(8), channel(16), 1.0)
+}
+
+#[must_use]
+pub fn system_contrast_colors() -> Option<ContrastColors> {
+    is_high_contrast_active().then(|| ContrastColors {
+        window: system_color(COLOR_WINDOW),
+        window_text: system_color(COLOR_WINDOWTEXT),
+        highlight: system_color(COLOR_HIGHLIGHT),
+        highlight_text: system_color(COLOR_HIGHLIGHTTEXT),
+        gray_text: system_color(COLOR_GRAYTEXT),
+        button_face: system_color(COLOR_BTNFACE),
+    })
+}
+
+#[must_use]
+pub fn read_system_appearance() -> SystemAppearance {
+    SystemAppearance {
+        dark: is_system_in_dark_mode(),
+        transparency: is_transparency_enabled(),
+        contrast: system_contrast_colors(),
     }
 }

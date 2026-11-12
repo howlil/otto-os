@@ -16,8 +16,9 @@ pub use theme::{BrushPalette, LiquidGlassPalette};
 pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
 
 use otto_core::{
-    HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState, NowPlaying,
-    PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ResolvedTheme, SystemStatus, scale,
+    Appearance, HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState,
+    NowPlaying, PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ShapeTokens, SystemStatus,
+    scale,
 };
 use surface::DibSurface;
 use windows::Win32::Foundation::E_FAIL;
@@ -383,10 +384,11 @@ impl Renderer {
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
-        theme: ResolvedTheme,
+        appearance: Appearance,
     ) -> Result<()> {
         self.draw_bar(
-            layout, status, app_name, hovered, focused, hud, pomodoro, media, anim_phase, theme,
+            layout, status, app_name, hovered, focused, hud, pomodoro, media, anim_phase,
+            appearance,
         )?;
         self.bar_surface.present(hwnd, origin)
     }
@@ -437,9 +439,9 @@ impl Renderer {
         let note_cx = n.x as f32 + scale(18, self.dpi) as f32;
         let note_r = scale(6, self.dpi) as f32;
 
-        let accent = self.brushes.alpha_brush(0, MUSIC_ACCENT, 0.96 * alpha);
-        let fg = self.brushes.alpha_brush(1, FOREGROUND, 0.92 * alpha);
-        let eq_brush = self.brushes.alpha_brush(2, EQUALIZER_GREEN, 0.96 * alpha);
+        let accent = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.96 * alpha);
+        let fg = &self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
+        let eq_brush = &self.brushes.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha);
 
         self.draw_music_note_glyph(note_cx, cy, note_r, accent);
 
@@ -470,9 +472,9 @@ impl Renderer {
         let stroke = (scale(2, self.dpi) as f32).max(1.6);
         let accent_color = phase_accent_color(pomodoro.phase);
 
-        let accent = self.brushes.alpha_brush(0, accent_color, 0.96 * alpha);
-        let track = self.brushes.alpha_brush(1, FOREGROUND, 0.22 * alpha);
-        let eq_brush = self.brushes.alpha_brush(2, EQUALIZER_GREEN, 0.96 * alpha);
+        let accent = &self.brushes.alpha_brush(accent_color, 0.96 * alpha);
+        let track = &self.brushes.alpha_brush(FOREGROUND, 0.22 * alpha);
+        let eq_brush = &self.brushes.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha);
 
         self.draw_progress_ring(
             ring_cx,
@@ -508,8 +510,8 @@ impl Renderer {
         let accent_color = phase_accent_color(pomodoro.phase);
 
         unsafe {
-            let accent = self.brushes.alpha_brush(0, accent_color, 0.96 * alpha);
-            let track = self.brushes.alpha_brush(1, FOREGROUND, 0.22 * alpha);
+            let accent = &self.brushes.alpha_brush(accent_color, 0.96 * alpha);
+            let track = &self.brushes.alpha_brush(FOREGROUND, 0.22 * alpha);
 
             self.draw_progress_ring(
                 ring_cx,
@@ -573,14 +575,14 @@ impl Renderer {
             } else {
                 0.06 * alpha
             };
-            let pomo_brush = self.brushes.alpha_brush(0, FOREGROUND, pomo_alpha);
+            let pomo_brush = &self.brushes.alpha_brush(FOREGROUND, pomo_alpha);
             self.draw_rounded_box(pomo_rect, pomo_rect.height as f32 * 0.5, pomo_brush);
 
             let accent_color = phase_accent_color(pomodoro.phase);
             let dot_x = pomo_rect.x as f32 + scale(10, self.dpi) as f32;
             let dot_mid_y = pomo_rect.y as f32 + pomo_rect.height as f32 * 0.5;
             let dot_r = scale(3, self.dpi) as f32;
-            let accent = self.brushes.alpha_brush(1, accent_color, alpha);
+            let accent = &self.brushes.alpha_brush(accent_color, alpha);
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: Vector2::new(dot_x, dot_mid_y),
@@ -590,8 +592,7 @@ impl Renderer {
                 accent,
             );
 
-            let pomo_text_brush = self.brushes.alpha_brush(
-                2,
+            let pomo_text_brush = &self.brushes.alpha_brush(
                 FOREGROUND,
                 if pomo_active {
                     0.96 * alpha
@@ -622,12 +623,12 @@ impl Renderer {
                 } else {
                     0.06 * alpha
                 };
-                let media_brush = self.brushes.alpha_brush(3, FOREGROUND, media_alpha);
+                let media_brush = &self.brushes.alpha_brush(FOREGROUND, media_alpha);
                 self.draw_rounded_box(media_rect, media_rect.height as f32 * 0.5, media_brush);
 
                 let m_dot_x = media_rect.x as f32 + scale(10, self.dpi) as f32;
                 let m_dot_mid_y = media_rect.y as f32 + media_rect.height as f32 * 0.5;
-                let m_accent = self.brushes.alpha_brush(4, MUSIC_ACCENT, alpha);
+                let m_accent = &self.brushes.alpha_brush(MUSIC_ACCENT, alpha);
                 self.draw_music_note_glyph(
                     m_dot_x,
                     m_dot_mid_y,
@@ -635,8 +636,7 @@ impl Renderer {
                     m_accent,
                 );
 
-                let media_text_brush = self.brushes.alpha_brush(
-                    5,
+                let media_text_brush = &self.brushes.alpha_brush(
                     FOREGROUND,
                     if media_active {
                         0.96 * alpha
@@ -696,11 +696,11 @@ impl Renderer {
         let art_rect = translate_rect(layout.media_cover_art, -offset_x);
         let seekbar_rect = translate_rect(layout.media_seekbar, -offset_x);
 
-        let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
-        let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.55 * alpha);
-        let tile_bg = self.brushes.alpha_brush(2, MUSIC_ACCENT, 0.18 * alpha);
-        let tile_icon = self.brushes.alpha_brush(3, MUSIC_ACCENT, 0.96 * alpha);
-        let eq_brush = self.brushes.alpha_brush(4, EQUALIZER_GREEN, 0.96 * alpha);
+        let fg = &self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let muted = &self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
+        let tile_bg = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.18 * alpha);
+        let tile_icon = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.96 * alpha);
+        let eq_brush = &self.brushes.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha);
 
         let mut drawn_art = false;
         if let Some(thumb) = media.thumbnail.as_ref()
@@ -725,7 +725,7 @@ impl Renderer {
                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
                     None,
                 );
-                let rim_brush = self.brushes.alpha_brush(5, FOREGROUND, 0.15 * alpha);
+                let rim_brush = &self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha);
                 self.target
                     .DrawRoundedRectangle(&squircle, rim_brush, 1.0, None);
             }
@@ -780,7 +780,7 @@ impl Renderer {
         };
 
         if let Some(active_lyric) = lyrics.and_then(|l| l.active_line(media.position_ms)) {
-            let lyric_brush = self.brushes.alpha_brush(6, MUSIC_ACCENT, 0.95 * alpha);
+            let lyric_brush = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.95 * alpha);
             self.draw_text(active_lyric, &self.text_caption, artist_rect, lyric_brush);
         } else {
             self.draw_text(
@@ -824,7 +824,7 @@ impl Renderer {
         } else {
             0.10 * alpha
         };
-        let bg_brush = self.brushes.alpha_brush(7, bg_color, bg_alpha);
+        let bg_brush = &self.brushes.alpha_brush(bg_color, bg_alpha);
         self.draw_rounded_box(rect, radius, bg_brush);
 
         let glyph_color = if expanded || hovered {
@@ -832,7 +832,7 @@ impl Renderer {
         } else {
             rgb(200, 205, 215, 1.0)
         };
-        let glyph_brush = self.brushes.alpha_brush(0, glyph_color, 0.92 * alpha);
+        let glyph_brush = &self.brushes.alpha_brush(glyph_color, 0.92 * alpha);
         let glyph_rect = D2D_RECT_F {
             left: rect.x as f32,
             top: rect.y as f32,
@@ -851,10 +851,10 @@ impl Renderer {
         anim_phase: f32,
     ) {
         let radius = scale(12, self.dpi) as f32;
-        let bg_brush = self.brushes.alpha_brush(1, FOREGROUND, 0.07 * alpha);
+        let bg_brush = &self.brushes.alpha_brush(FOREGROUND, 0.07 * alpha);
         self.draw_rounded_box(drawer_rect, radius, bg_brush);
 
-        let border_brush = self.brushes.alpha_brush(2, FOREGROUND, 0.12 * alpha);
+        let border_brush = &self.brushes.alpha_brush(FOREGROUND, 0.12 * alpha);
         let rounded = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: drawer_rect.x as f32,
@@ -893,13 +893,13 @@ impl Renderer {
                         width: (rect.right - rect.left + pill_pad_x * 2.0) as i32,
                         height: (line_h + pill_pad_y * 2.0) as i32,
                     };
-                    let pill_brush = self.brushes.alpha_brush(5, FOREGROUND, 0.12 * alpha);
+                    let pill_brush = &self.brushes.alpha_brush(FOREGROUND, 0.12 * alpha);
                     self.draw_rounded_box(pill_rect, scale(8, self.dpi) as f32, pill_brush);
 
-                    let active_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.98 * alpha);
+                    let active_brush = &self.brushes.alpha_brush(FOREGROUND, 0.98 * alpha);
                     self.draw_text(&line.text, &self.text_alert_title, rect, active_brush);
                 } else {
-                    let inactive_brush = self.brushes.alpha_brush(4, FOREGROUND, 0.35 * alpha);
+                    let inactive_brush = &self.brushes.alpha_brush(FOREGROUND, 0.35 * alpha);
                     self.draw_text(&line.text, &self.text_caption, rect, inactive_brush);
                 }
             }
@@ -911,7 +911,7 @@ impl Renderer {
                 bottom: drawer_rect.bottom() as f32,
             };
             if media.title.trim().is_empty() {
-                let empty_brush = self.brushes.alpha_brush(3, FOREGROUND, 0.45 * alpha);
+                let empty_brush = &self.brushes.alpha_brush(FOREGROUND, 0.45 * alpha);
                 self.draw_text(
                     "Tidak ada media diputar",
                     &self.text_caption,
@@ -920,7 +920,7 @@ impl Renderer {
                 );
             } else {
                 let pulse = 0.35 + 0.30 * (anim_phase * TAU).sin().abs();
-                let pulse_brush = self.brushes.alpha_brush(3, FOREGROUND, pulse * alpha);
+                let pulse_brush = &self.brushes.alpha_brush(FOREGROUND, pulse * alpha);
                 self.draw_text(
                     "Memuat lirik...",
                     &self.text_caption,
@@ -959,13 +959,13 @@ impl Renderer {
 
         unsafe {
             let track_alpha = if hovered { 0.28 * alpha } else { 0.16 * alpha };
-            let track_brush = self.brushes.alpha_brush(5, FOREGROUND, track_alpha);
+            let track_brush = &self.brushes.alpha_brush(FOREGROUND, track_alpha);
             let fill_color = if hovered {
                 brighten(MUSIC_ACCENT, 0.14)
             } else {
                 MUSIC_ACCENT
             };
-            let fill_brush = self.brushes.alpha_brush(6, fill_color, 0.95 * alpha);
+            let fill_brush = &self.brushes.alpha_brush(fill_color, 0.95 * alpha);
 
             let track_radius = track_h * 0.5;
             let track_box = Rect {
@@ -1044,7 +1044,7 @@ impl Renderer {
         } else {
             0.14 * alpha
         };
-        let prev_fill = self.brushes.alpha_brush(5, FOREGROUND, prev_alpha);
+        let prev_fill = &self.brushes.alpha_brush(FOREGROUND, prev_alpha);
         self.draw_circle_button(prev_rect, prev_fill);
         self.draw_previous_glyph(
             prev_rect.x as f32 + prev_rect.width as f32 * 0.5,
@@ -1059,8 +1059,8 @@ impl Renderer {
         } else {
             MUSIC_ACCENT
         };
-        let play_fill = self.brushes.alpha_brush(6, play_color, alpha);
-        let dark_icon = self.brushes.alpha_brush(7, BLACK, 0.92 * alpha);
+        let play_fill = &self.brushes.alpha_brush(play_color, alpha);
+        let dark_icon = &self.brushes.alpha_brush(BLACK, 0.92 * alpha);
         self.draw_circle_button(play_rect, play_fill);
         let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
         let play_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
@@ -1075,7 +1075,7 @@ impl Renderer {
         } else {
             0.14 * alpha
         };
-        let next_fill = self.brushes.alpha_brush(8, FOREGROUND, next_alpha);
+        let next_fill = &self.brushes.alpha_brush(FOREGROUND, next_alpha);
         self.draw_circle_button(next_rect, next_fill);
         self.draw_skip_glyph(
             next_rect.x as f32 + next_rect.width as f32 * 0.5,
@@ -1098,10 +1098,10 @@ impl Renderer {
         let local_right = (layout.notch.right() - offset_x) as f32;
         let accent_color = phase_accent_color(pomodoro.phase);
 
-        let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
-        let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.48 * alpha);
-        let track = self.brushes.alpha_brush(2, FOREGROUND, 0.15 * alpha);
-        let accent = self.brushes.alpha_brush(3, accent_color, alpha);
+        let fg = &self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let muted = &self.brushes.alpha_brush(FOREGROUND, 0.48 * alpha);
+        let track = &self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha);
+        let accent = &self.brushes.alpha_brush(accent_color, alpha);
 
         let dot_mid_y = scale(17, self.dpi) as f32;
         self.draw_session_dots(
@@ -1180,8 +1180,8 @@ impl Renderer {
         } else {
             accent_color
         };
-        let play_fill = self.brushes.alpha_brush(4, play_fill_color, alpha);
-        let dark_icon = self.brushes.alpha_brush(5, BLACK, 0.92 * alpha);
+        let play_fill = &self.brushes.alpha_brush(play_fill_color, alpha);
+        let dark_icon = &self.brushes.alpha_brush(BLACK, 0.92 * alpha);
         self.draw_circle_button(play_rect, play_fill);
         let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
         let play_mid_y = play_rect.y as f32 + play_rect.height as f32 * 0.5;
@@ -1196,7 +1196,7 @@ impl Renderer {
         } else {
             0.14 * alpha
         };
-        let reset_fill = self.brushes.alpha_brush(6, FOREGROUND, reset_alpha);
+        let reset_fill = &self.brushes.alpha_brush(FOREGROUND, reset_alpha);
         self.draw_circle_button(reset_rect, reset_fill);
         self.draw_reset_glyph(
             reset_rect.x as f32 + reset_rect.width as f32 * 0.5,
@@ -1210,7 +1210,7 @@ impl Renderer {
         } else {
             0.14 * alpha
         };
-        let skip_fill = self.brushes.alpha_brush(7, FOREGROUND, skip_alpha);
+        let skip_fill = &self.brushes.alpha_brush(FOREGROUND, skip_alpha);
         self.draw_circle_button(skip_rect, skip_fill);
         self.draw_skip_glyph(
             skip_rect.x as f32 + skip_rect.width as f32 * 0.5,
@@ -1235,11 +1235,11 @@ impl Renderer {
         let accent_color = phase_accent_color(alert.next_phase);
 
         unsafe {
-            let fg = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
-            let muted = self.brushes.alpha_brush(1, FOREGROUND, 0.58 * alpha);
-            let track = self.brushes.alpha_brush(2, FOREGROUND, 0.16 * alpha);
-            let accent = self.brushes.alpha_brush(3, accent_color, alpha);
-            let accent_soft = self.brushes.alpha_brush(4, accent_color, 0.20 * alpha);
+            let fg = &self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+            let muted = &self.brushes.alpha_brush(FOREGROUND, 0.58 * alpha);
+            let track = &self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+            let accent = &self.brushes.alpha_brush(accent_color, alpha);
+            let accent_soft = &self.brushes.alpha_brush(accent_color, 0.20 * alpha);
 
             let top_cy = scale(17, self.dpi) as f32;
             let badge_rect = D2D_RECT_F {
@@ -1301,7 +1301,7 @@ impl Renderer {
             } else {
                 0.15 * alpha
             };
-            let ext_brush = self.brushes.alpha_brush(5, FOREGROUND, ext_alpha);
+            let ext_brush = &self.brushes.alpha_brush(FOREGROUND, ext_alpha);
             self.draw_rounded_box(extend_rect, extend_rect.height as f32 * 0.5, ext_brush);
             self.draw_text("+5m", &self.text_app_bold, rect_to_d2d(extend_rect), fg);
 
@@ -1310,8 +1310,8 @@ impl Renderer {
             } else {
                 accent_color
             };
-            let start_brush = self.brushes.alpha_brush(6, start_color, alpha);
-            let dark_text = self.brushes.alpha_brush(7, BLACK, 0.92 * alpha);
+            let start_brush = &self.brushes.alpha_brush(start_color, alpha);
+            let dark_text = &self.brushes.alpha_brush(BLACK, 0.92 * alpha);
             self.draw_rounded_box(start_rect, start_rect.height as f32 * 0.5, start_brush);
             self.draw_text(
                 alert.action_label(),
@@ -1835,8 +1835,9 @@ impl Renderer {
     }
 
     fn draw_slot_pill(&self, slot: Rect, brush: &ID2D1SolidColorBrush) {
-        let pad_y = scale(4, self.dpi) as f32;
-        let radius = scale(6, self.dpi) as f32;
+        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
+        let pad_y = shape.slot_inset_y as f32;
+        let radius = shape.slot_radius as f32;
         let rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: slot.x as f32,
@@ -1853,9 +1854,10 @@ impl Renderer {
     }
 
     fn draw_slot_focus_ring(&self, slot: Rect, brush: &ID2D1SolidColorBrush) {
-        let pad_y = scale(3, self.dpi) as f32;
-        let radius = scale(7, self.dpi) as f32;
-        let stroke = scale(2, self.dpi).max(2) as f32;
+        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
+        let pad_y = shape.focus_ring_inset_y as f32;
+        let radius = shape.focus_ring_radius as f32;
+        let stroke = shape.focus_ring_width as f32;
         let inset = stroke * 0.5;
         let rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
@@ -2012,7 +2014,7 @@ impl Renderer {
                 .DrawRoundedRectangle(&body, muted, stroke * 0.9, &self.stroke_style);
             self.target.FillRoundedRectangle(&cap, muted);
             if status.battery.charging {
-                let green = self.brushes.scratch(0, CHARGING_GREEN);
+                let green = &self.brushes.color_brush(CHARGING_GREEN);
                 self.target.FillRoundedRectangle(&fill_rect, green);
                 self.draw_charging_bolt(bat_x + bat_w * 0.5, cy, bat_h * 0.42, fg)?;
             } else {
@@ -2184,10 +2186,10 @@ impl Renderer {
         let left_x = n.x as f32 + pad_x;
         let right_x = n.right() as f32 - pad_x;
 
-        let fg_brush = self.brushes.alpha_brush(0, FOREGROUND, 0.96 * alpha);
-        let muted_brush = self.brushes.alpha_brush(1, FOREGROUND, 0.30 * alpha);
-        let green_brush = self.brushes.alpha_brush(2, CHARGING_GREEN, 0.96 * alpha);
-        let amber_brush = self.brushes.alpha_brush(3, AMBER_WARN, 0.96 * alpha);
+        let fg_brush = &self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let muted_brush = &self.brushes.alpha_brush(FOREGROUND, 0.30 * alpha);
+        let green_brush = &self.brushes.alpha_brush(CHARGING_GREEN, 0.96 * alpha);
+        let amber_brush = &self.brushes.alpha_brush(AMBER_WARN, 0.96 * alpha);
 
         match hud.kind {
             NotchHudKind::Volume { percent, muted } => {
