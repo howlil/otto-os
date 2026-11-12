@@ -14,21 +14,23 @@ use otto_core::{
 use otto_platform::{
     AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
     WindowsNotchPort, adjust_volume, apply_backdrop_material, current_process_id, cursor_position,
-    enable_backdrop_blur, foreground_application, is_routing_bar_keys, motion_preference,
-    open_quick_settings, open_spotlight_search, primary_screen, read_system_status,
-    register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys, step_display_brightness,
-    stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
-    window_bounds, window_change_generations,
+    enable_backdrop_blur, foreground_application, is_escape_down, is_routing_bar_keys,
+    motion_preference, open_quick_settings, open_spotlight_search, primary_screen,
+    read_system_status, register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys,
+    step_display_brightness, stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow,
+    unregister_notch_hotkeys, window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowPos, ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED,
-    WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER,
+    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -69,6 +71,7 @@ pub(crate) struct Bar {
     maintain_ticks: u8,
     foreground_gate: ChangeGate,
     focus: BarFocus,
+    seek_drag_hwnd: Option<isize>,
     lyrics: LyricsService,
     lyrics_track: Option<(String, String)>,
     lyrics_generation: u64,
@@ -163,6 +166,7 @@ pub fn start(
         maintain_ticks: 0,
         foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
         focus: BarFocus::default(),
+        seek_drag_hwnd: None,
         lyrics,
         lyrics_track: None,
         lyrics_generation: 0,
@@ -259,7 +263,21 @@ pub fn handle_message(
         }
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);
-            with_bar(runtime, |bar| bar.on_mouse_move(runtime, hwnd, x, y));
+            with_bar(runtime, |bar| {
+                if bar.notch.is_seek_dragging() {
+                    bar.drag_seek(runtime, hwnd, x, y);
+                } else {
+                    bar.on_mouse_move(runtime, hwnd, x, y);
+                }
+            });
+            Some(LRESULT(0))
+        }
+        WM_LBUTTONUP => {
+            with_bar(runtime, |bar| bar.release_seek(runtime, true));
+            Some(LRESULT(0))
+        }
+        WM_CAPTURECHANGED => {
+            with_bar(runtime, |bar| bar.release_seek(runtime, false));
             Some(LRESULT(0))
         }
         WM_MOUSELEAVE => {
@@ -382,6 +400,44 @@ impl Bar {
             self.controls.active_app(),
             self.notch_input(),
         );
+    }
+
+    fn seek_ratio_at(&self, x: i32) -> Option<f32> {
+        let seekbar = self.layout.media_seekbar;
+        (seekbar.width > 0).then(|| ((x - seekbar.x) as f32 / seekbar.width as f32).clamp(0.0, 1.0))
+    }
+
+    fn drag_seek(&mut self, runtime: &RuntimeContext, source_hwnd: isize, raw_x: i32, raw_y: i32) {
+        let (x, _) = self.translate_client_point(source_hwnd, raw_x, raw_y);
+        if let Some(ratio) = self.seek_ratio_at(x)
+            && self.notch.update_seek_drag(ratio)
+        {
+            self.present(runtime);
+        }
+    }
+
+    fn release_seek(&mut self, runtime: &RuntimeContext, commit: bool) {
+        let Some(hwnd) = self.seek_drag_hwnd.take() else {
+            return;
+        };
+        let update = if commit {
+            self.notch.finish_seek_drag(crate::notch::unix_now_ms())
+        } else {
+            self.notch.cancel_seek_drag();
+            crate::notch::NotchUpdate {
+                changed: true,
+                effect: None,
+            }
+        };
+        if hwnd != 0 {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
+        if let Some(NotchEffect::Platform(action)) = update.effect {
+            self.notch_port.execute(action);
+        }
+        self.present(runtime);
     }
 
     fn translate_client_point(&self, source_hwnd: isize, x: i32, y: i32) -> (i32, i32) {
@@ -617,6 +673,9 @@ impl Bar {
         }
         self.sync_full_screen(runtime);
         self.sync_keyboard_focus(runtime);
+        if self.notch.is_seek_dragging() && is_escape_down() {
+            self.release_seek(runtime, false);
+        }
         let latest = read_system_status();
         if let Some(event) = detect_hud_event(self.controls.status(), latest) {
             self.notch.trigger_hud(event);
@@ -936,21 +995,16 @@ impl Bar {
         };
 
         if target == HitTarget::MediaSeekbar {
-            let seekbar = self.layout.media_seekbar;
-            if seekbar.width > 0 {
-                let ratio = ((x - seekbar.x) as f32 / seekbar.width as f32).clamp(0.0, 1.0);
-                let update = self
-                    .notch
-                    .handle_seekbar_click(ratio, crate::notch::unix_now_ms());
-                if let Some(NotchEffect::Platform(action)) = update.effect {
-                    self.notch_port.execute(action);
+            if let Some(ratio) = self.seek_ratio_at(x)
+                && self.notch.begin_seek_drag(ratio)
+            {
+                unsafe {
+                    let _ = SetCapture(HWND(source_hwnd as *mut _));
                 }
-                if update.changed {
-                    self.recompute_layout();
-                    self.present(runtime);
-                }
-                return;
+                self.seek_drag_hwnd = Some(source_hwnd);
+                self.present(runtime);
             }
+            return;
         }
 
         let notch_target = matches!(
@@ -1086,10 +1140,7 @@ impl Bar {
             .hovered
             .or_else(|| crate::menu::active_top_bar_target(runtime));
         let appearance = crate::theme_state::appearance(runtime);
-        let media = self
-            .notch
-            .media()
-            .map(|media| media.at(crate::notch::unix_now_ms()));
+        let media = self.notch.display_media(crate::notch::unix_now_ms());
         let _ = self.renderer.present(
             self.hwnd,
             (0, 0),

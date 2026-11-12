@@ -2,8 +2,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
     HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
-    NotchHudState, NotchLayoutInput, NowPlaying, PomodoroClock, PomodoroState, PomodoroStatus,
-    PomodoroTick, animate_value,
+    NotchHudState, NotchLayoutInput, NowPlaying, PendingSeek, PomodoroClock, PomodoroState,
+    PomodoroStatus, PomodoroTick, SeekReadback, animate_value, reconcile_seek, seek_target_ms,
 };
 
 const HUD_HOLD_MS: u64 = 1_650;
@@ -69,6 +69,8 @@ pub(crate) struct NotchController {
     anim_phase: f32,
     lyrics_expanded: bool,
     lyrics: Option<otto_core::LyricsSheet>,
+    pending_seek: Option<PendingSeek>,
+    seek_drag: Option<f32>,
 }
 
 impl NotchController {
@@ -92,6 +94,8 @@ impl NotchController {
             anim_phase: 0.0,
             lyrics_expanded: false,
             lyrics: None,
+            pending_seek: None,
+            seek_drag: None,
         }
     }
 
@@ -198,7 +202,71 @@ impl NotchController {
         self.panel_trigger.is_open() || alert_active
     }
 
+    pub(crate) fn display_media(&self, now_unix_ms: i64) -> Option<NowPlaying> {
+        let media = self.media.as_ref()?;
+        Some(match self.seek_drag {
+            Some(ratio) => NowPlaying {
+                position_ms: seek_target_ms(ratio, media.duration_ms),
+                position_updated_unix_ms: None,
+                ..media.clone()
+            },
+            None => media.at(now_unix_ms),
+        })
+    }
+
+    pub(crate) fn is_seek_dragging(&self) -> bool {
+        self.seek_drag.is_some()
+    }
+
+    pub(crate) fn begin_seek_drag(&mut self, ratio: f32) -> bool {
+        if !self.media.as_ref().is_some_and(NowPlaying::is_seekable) {
+            return false;
+        }
+        self.seek_drag = Some(ratio.clamp(0.0, 1.0));
+        true
+    }
+
+    pub(crate) fn update_seek_drag(&mut self, ratio: f32) -> bool {
+        let Some(current) = self.seek_drag.as_mut() else {
+            return false;
+        };
+        let next = ratio.clamp(0.0, 1.0);
+        let changed = (*current - next).abs() > f32::EPSILON;
+        *current = next;
+        changed
+    }
+
+    pub(crate) fn finish_seek_drag(&mut self, now_unix_ms: i64) -> NotchUpdate {
+        match self.seek_drag.take() {
+            Some(ratio) => self.handle_seekbar_click(ratio, now_unix_ms),
+            None => NotchUpdate::default(),
+        }
+    }
+
+    pub(crate) fn cancel_seek_drag(&mut self) -> bool {
+        self.seek_drag.take().is_some()
+    }
+
     pub(crate) fn set_media(&mut self, latest_media: Option<NowPlaying>) -> bool {
+        self.set_media_at(latest_media, unix_now_ms())
+    }
+
+    fn set_media_at(&mut self, mut latest_media: Option<NowPlaying>, now_unix_ms: i64) -> bool {
+        if let (Some(pending), Some(latest)) = (self.pending_seek, latest_media.as_mut()) {
+            let same_track = self
+                .media
+                .as_ref()
+                .is_some_and(|current| current.is_same_track(latest));
+            match reconcile_seek(pending, latest, now_unix_ms) {
+                SeekReadback::Hold if same_track => {
+                    latest.position_ms = pending.target_ms;
+                    latest.position_updated_unix_ms = Some(pending.issued_unix_ms);
+                }
+                SeekReadback::Hold | SeekReadback::Confirmed | SeekReadback::Expired => {
+                    self.pending_seek = None;
+                }
+            }
+        }
         if latest_media == self.media {
             return false;
         }
@@ -209,6 +277,8 @@ impl NotchController {
         };
         if track_changed {
             self.lyrics = None;
+            self.pending_seek = None;
+            self.seek_drag = None;
         }
         if latest_media.as_ref().is_some_and(NowPlaying::is_active)
             && !self.pomodoro.is_compact_active()
@@ -312,9 +382,13 @@ impl NotchController {
         let Some(media) = self.media.as_mut().filter(|media| media.is_seekable()) else {
             return NotchUpdate::default();
         };
-        let target_ms = ((ratio * media.duration_ms as f32).round() as u64).min(media.duration_ms);
+        let target_ms = seek_target_ms(ratio, media.duration_ms);
         media.position_ms = target_ms;
         media.position_updated_unix_ms = Some(now_unix_ms);
+        self.pending_seek = Some(PendingSeek {
+            target_ms,
+            issued_unix_ms: now_unix_ms,
+        });
         NotchUpdate {
             changed: true,
             effect: Some(NotchEffect::Platform(NotchAction::Media(
@@ -851,6 +925,84 @@ mod tests {
         );
         notch.media.as_mut().unwrap().playing = false;
         assert_eq!(notch.media_repaint_in(1_000), None);
+    }
+
+    fn seekable_track() -> NowPlaying {
+        NowPlaying {
+            source_app: String::from("Spotify.exe"),
+            title: String::from("Song"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms: 30_000,
+            duration_ms: 200_000,
+            position_updated_unix_ms: Some(0),
+            ..NowPlaying::default()
+        }
+    }
+
+    #[test]
+    fn dragging_previews_the_position_and_seeks_only_on_release() {
+        let mut notch = NotchController::new(Some(seekable_track()), NotchExpandedTab::Media);
+        assert!(notch.begin_seek_drag(0.25));
+        assert!(notch.update_seek_drag(0.5));
+        assert_eq!(
+            notch.display_media(5_000).map(|media| media.position_ms),
+            Some(100_000)
+        );
+        let update = notch.finish_seek_drag(5_000);
+        assert_eq!(
+            update.effect,
+            Some(NotchEffect::Platform(NotchAction::Media(
+                MediaCommand::Seek(100_000)
+            )))
+        );
+        assert!(!notch.is_seek_dragging());
+    }
+
+    #[test]
+    fn a_cancelled_drag_sends_nothing_and_restores_the_live_position() {
+        let mut notch = NotchController::new(Some(seekable_track()), NotchExpandedTab::Media);
+        assert!(notch.begin_seek_drag(0.9));
+        assert!(notch.cancel_seek_drag());
+        assert_eq!(notch.finish_seek_drag(1_000), NotchUpdate::default());
+        assert_eq!(
+            notch.display_media(1_000).map(|media| media.position_ms),
+            Some(31_000)
+        );
+    }
+
+    #[test]
+    fn stale_readback_after_a_seek_is_held_until_confirmed_or_expired() {
+        let mut notch = NotchController::new(Some(seekable_track()), NotchExpandedTab::Media);
+        let _ = notch.handle_seekbar_click(0.5, 10_000);
+        let stale = seekable_track();
+        notch.set_media_at(Some(stale.clone()), 10_400);
+        assert_eq!(
+            notch.display_media(10_400).map(|media| media.position_ms),
+            Some(100_400)
+        );
+        let confirmed = NowPlaying {
+            position_ms: 100_500,
+            position_updated_unix_ms: Some(10_500),
+            ..seekable_track()
+        };
+        notch.set_media_at(Some(confirmed), 10_600);
+        assert!(notch.pending_seek.is_none());
+
+        let _ = notch.handle_seekbar_click(0.9, 20_000);
+        notch.set_media_at(Some(stale), 20_000 + otto_core::SEEK_READBACK_TIMEOUT_MS);
+        assert!(notch.pending_seek.is_none());
+    }
+
+    #[test]
+    fn unseekable_media_cannot_start_a_drag() {
+        let live = NowPlaying {
+            duration_ms: 0,
+            ..seekable_track()
+        };
+        let mut notch = NotchController::new(Some(live), NotchExpandedTab::Media);
+        assert!(!notch.begin_seek_drag(0.5));
+        assert!(!notch.is_seek_dragging());
     }
 
     #[test]

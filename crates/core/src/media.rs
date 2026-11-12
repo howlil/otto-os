@@ -176,6 +176,45 @@ impl NowPlaying {
     }
 }
 
+pub const SEEK_CONFIRM_TOLERANCE_MS: u64 = 1_500;
+pub const SEEK_READBACK_TIMEOUT_MS: i64 = 2_500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSeek {
+    pub target_ms: u64,
+    pub issued_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekReadback {
+    Confirmed,
+    Hold,
+    Expired,
+}
+
+#[must_use]
+pub fn seek_target_ms(ratio: f32, duration_ms: u64) -> u64 {
+    ((ratio.clamp(0.0, 1.0) * duration_ms as f32).round() as u64).min(duration_ms)
+}
+
+#[must_use]
+pub fn reconcile_seek(pending: PendingSeek, latest: &NowPlaying, now_unix_ms: i64) -> SeekReadback {
+    let expected = NowPlaying {
+        position_ms: pending.target_ms,
+        position_updated_unix_ms: Some(pending.issued_unix_ms),
+        ..latest.clone()
+    }
+    .position_at(now_unix_ms);
+    let reported = latest.position_at(now_unix_ms);
+    if reported.abs_diff(expected) <= SEEK_CONFIRM_TOLERANCE_MS {
+        SeekReadback::Confirmed
+    } else if now_unix_ms.saturating_sub(pending.issued_unix_ms) >= SEEK_READBACK_TIMEOUT_MS {
+        SeekReadback::Expired
+    } else {
+        SeekReadback::Hold
+    }
+}
+
 #[must_use]
 pub fn format_duration(ms: u64) -> String {
     let total_seconds = ms / 1_000;
@@ -390,6 +429,36 @@ mod tests {
             ..playing_track(0, 1)
         };
         assert!(spotify.is_same_track(&later));
+    }
+
+    #[test]
+    fn seek_targets_clamp_to_the_track() {
+        assert_eq!(seek_target_ms(0.5, 200_000), 100_000);
+        assert_eq!(seek_target_ms(1.4, 200_000), 200_000);
+        assert_eq!(seek_target_ms(-0.2, 200_000), 0);
+    }
+
+    #[test]
+    fn seek_readback_confirms_holds_and_expires() {
+        let pending = PendingSeek {
+            target_ms: 90_000,
+            issued_unix_ms: 10_000,
+        };
+        let stale = playing_track(30_000, 120_000);
+        assert_eq!(reconcile_seek(pending, &stale, 10_500), SeekReadback::Hold);
+        assert_eq!(
+            reconcile_seek(pending, &stale, 10_000 + SEEK_READBACK_TIMEOUT_MS),
+            SeekReadback::Expired
+        );
+        let moved = NowPlaying {
+            position_ms: 90_200,
+            position_updated_unix_ms: Some(10_300),
+            ..playing_track(0, 120_000)
+        };
+        assert_eq!(
+            reconcile_seek(pending, &moved, 11_000),
+            SeekReadback::Confirmed
+        );
     }
 
     #[test]

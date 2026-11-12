@@ -198,8 +198,17 @@ fn media_worker(receiver: &mpsc::Receiver<MediaTask>, cache: &Mutex<MediaCache>)
                 }
             }
             MediaTask::Command(command) => {
-                if com.is_some() {
-                    send_media_command_sync(command, deadline);
+                if com.is_none() {
+                    continue;
+                }
+                let outcome = send_media_command_sync(command, deadline);
+                if outcome != CommandResult::Accepted {
+                    crate::actions::signal_command_failure();
+                }
+                let readback =
+                    read_now_playing_sync(&mut artwork, Instant::now() + MEDIA_OPERATION_TIMEOUT);
+                if let Ok(mut state) = cache.lock() {
+                    state.store(readback, Instant::now());
                 }
             }
         }
@@ -308,28 +317,47 @@ fn read_now_playing_sync(artwork: &mut ArtworkCache, deadline: Instant) -> Optio
     Some(media)
 }
 
-fn send_media_command_sync(command: MediaCommand, deadline: Instant) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandResult {
+    Accepted,
+    Rejected,
+    NoSession,
+    TimedOut,
+}
+
+fn command_result(session_found: bool, reply: Option<bool>) -> CommandResult {
+    match (session_found, reply) {
+        (false, _) => CommandResult::NoSession,
+        (true, Some(true)) => CommandResult::Accepted,
+        (true, Some(false)) => CommandResult::Rejected,
+        (true, None) => CommandResult::TimedOut,
+    }
+}
+
+fn send_media_command_sync(command: MediaCommand, deadline: Instant) -> CommandResult {
     let Some(session) = current_session(deadline) else {
-        return;
+        return command_result(false, None);
     };
-    let _ = match command {
-        MediaCommand::TogglePlayPause => session.TryTogglePlayPauseAsync(),
-        MediaCommand::Next => session.TrySkipNextAsync(),
-        MediaCommand::Previous => session.TrySkipPreviousAsync(),
+    let reply = match command {
+        MediaCommand::TogglePlayPause => await_until!(session.TryTogglePlayPauseAsync(), deadline),
+        MediaCommand::Next => await_until!(session.TrySkipNextAsync(), deadline),
+        MediaCommand::Previous => await_until!(session.TrySkipPreviousAsync(), deadline),
         MediaCommand::Seek(target_ms) => {
             let nanos_100 = i64::try_from(target_ms)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(10_000);
-            session.TryChangePlaybackPositionAsync(nanos_100)
+            await_until!(session.TryChangePlaybackPositionAsync(nanos_100), deadline)
         }
     };
+    command_result(true, reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ARTWORK_MAX_ATTEMPTS, ARTWORK_RETRY_BASE, ArtworkCache, CacheRead, MEDIA_CACHE_TTL,
-        MEDIA_STALE_AFTER, MediaCache, rate_permille, unix_ms_from_windows_ticks,
+        ARTWORK_MAX_ATTEMPTS, ARTWORK_RETRY_BASE, ArtworkCache, CacheRead, CommandResult,
+        MEDIA_CACHE_TTL, MEDIA_STALE_AFTER, MediaCache, command_result, rate_permille,
+        unix_ms_from_windows_ticks,
     };
     use otto_core::{NowPlaying, TrackKey};
     use std::sync::Arc;
@@ -370,6 +398,14 @@ mod tests {
         }
         assert!(!cache.should_fetch(&key("A"), now + Duration::from_hours(1)));
         assert!(cache.should_fetch(&key("B"), now));
+    }
+
+    #[test]
+    fn command_replies_classify_into_accepted_and_failures() {
+        assert_eq!(command_result(true, Some(true)), CommandResult::Accepted);
+        assert_eq!(command_result(true, Some(false)), CommandResult::Rejected);
+        assert_eq!(command_result(true, None), CommandResult::TimedOut);
+        assert_eq!(command_result(false, Some(true)), CommandResult::NoSession);
     }
 
     #[test]

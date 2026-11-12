@@ -56,7 +56,8 @@ pub use material::{
 };
 pub use media::{
     MediaCapabilities, MediaCommand, NORMAL_PLAYBACK_RATE_PERMILLE, NotchExpandedTab, NowPlaying,
-    TrackKey,
+    PendingSeek, SEEK_CONFIRM_TOLERANCE_MS, SEEK_READBACK_TIMEOUT_MS, SeekReadback, TrackKey,
+    reconcile_seek, seek_target_ms,
 };
 pub use menu::*;
 pub use motion::{
