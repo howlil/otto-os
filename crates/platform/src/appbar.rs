@@ -108,8 +108,12 @@ fn rebase_work_area(
     [
         left,
         top,
-        (right + new_screen.0 - old_screen.0).max(left + 1),
-        (bottom + new_screen.1 - old_screen.1).max(top + 1),
+        right
+            .saturating_add(new_screen.0.saturating_sub(old_screen.0))
+            .max(left.saturating_add(1)),
+        bottom
+            .saturating_add(new_screen.1.saturating_sub(old_screen.1))
+            .max(top.saturating_add(1)),
     ]
 }
 
@@ -251,10 +255,10 @@ impl AppBar {
     }
 
     pub fn hide_system_taskbar(&mut self) {
-        self.set_taskbar_state(self.original_state | ABS_AUTOHIDE as usize);
-        Self::set_tray_visibility(SW_HIDE);
         self.taskbar_hidden = true;
         write_recovery(self.recovery());
+        self.set_taskbar_state(self.original_state | ABS_AUTOHIDE as usize);
+        Self::set_tray_visibility(SW_HIDE);
     }
 
     pub fn maintain(&mut self, screen_width: i32, screen_height: i32, bar_height: i32) {
@@ -352,6 +356,43 @@ fn clear_recovery_file() {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct RestorePlan {
+    work_area: Option<WorkArea>,
+    taskbar_state: Option<usize>,
+}
+
+fn restore_plan(recovery: ShellRecovery, screen: ScreenSize) -> RestorePlan {
+    let work_area = if recovery.work_area_written {
+        recovered_original(recovery, screen).map(|(area, _)| area)
+    } else {
+        None
+    };
+    let taskbar_state = recovery.taskbar_hidden.then_some(recovery.taskbar_state);
+    RestorePlan {
+        work_area,
+        taskbar_state,
+    }
+}
+
+fn apply_restore_plan(plan: &RestorePlan) {
+    if let Some(area) = plan.work_area {
+        AppBar::set_work_area(area_to_rect(area));
+    }
+    if let Some(state) = plan.taskbar_state {
+        AppBar::set_tray_visibility(SW_SHOW);
+        let mut data = APPBARDATA {
+            cbSize: size_of::<APPBARDATA>() as u32,
+            hWnd: HWND::default(),
+            lParam: LPARAM(state as isize),
+            ..APPBARDATA::default()
+        };
+        unsafe {
+            SHAppBarMessage(ABM_SETSTATE, &mut data);
+        }
+    }
+}
+
 #[must_use]
 pub fn restore_shell_from_recovery() -> bool {
     let Some(path) = recovery_file_path() else {
@@ -360,28 +401,13 @@ pub fn restore_shell_from_recovery() -> bool {
     let Ok(content) = std::fs::read_to_string(&path) else {
         return false;
     };
-    let _ = std::fs::remove_file(&path);
     let Some(recovery) = ShellRecovery::parse(&content) else {
+        let _ = std::fs::remove_file(&path);
         return false;
     };
     let primary = primary_screen();
-    if recovery.work_area_written
-        && let Some((area, _)) = recovered_original(recovery, (primary.width, primary.height))
-    {
-        AppBar::set_work_area(area_to_rect(area));
-    }
-    if recovery.taskbar_hidden {
-        AppBar::set_tray_visibility(SW_SHOW);
-        let mut data = APPBARDATA {
-            cbSize: size_of::<APPBARDATA>() as u32,
-            hWnd: HWND::default(),
-            lParam: LPARAM(recovery.taskbar_state as isize),
-            ..APPBARDATA::default()
-        };
-        unsafe {
-            SHAppBarMessage(ABM_SETSTATE, &mut data);
-        }
-    }
+    apply_restore_plan(&restore_plan(recovery, (primary.width, primary.height)));
+    let _ = std::fs::remove_file(&path);
     true
 }
 
@@ -408,7 +434,7 @@ impl Drop for AppBar {
 mod tests {
     use super::{
         ShellNotification, ShellRecovery, choose_original, classify_shell_notification,
-        is_plausible_work_area, rebase_work_area, recovered_original,
+        is_plausible_work_area, rebase_work_area, recovered_original, restore_plan,
     };
 
     const FHD: (i32, i32) = (1920, 1080);
@@ -534,5 +560,48 @@ mod tests {
             choose_original(Some(stale), live_area, 0, (1280, 720)),
             (live_area, 0)
         );
+    }
+
+    #[test]
+    fn rebase_saturates_instead_of_overflowing_on_corrupt_values() {
+        let rebased = rebase_work_area([i32::MAX - 1, 0, i32::MAX, 10], FHD, QHD);
+        assert!(!is_plausible_work_area(rebased, QHD));
+        let collapsed = rebase_work_area([i32::MAX, 0, i32::MAX, 10], QHD, (1, 1));
+        assert_eq!(collapsed[0], i32::MAX);
+        assert!(!is_plausible_work_area(collapsed, (1, 1)));
+    }
+
+    #[test]
+    fn restore_plan_skips_planned_but_unapplied_work_area() {
+        let planned = ShellRecovery {
+            work_area_written: false,
+            ..recovery(Some(FHD))
+        };
+        let plan = restore_plan(planned, FHD);
+        assert_eq!(plan.work_area, None);
+        assert_eq!(plan.taskbar_state, Some(2));
+    }
+
+    #[test]
+    fn restore_plan_rebases_applied_work_area_to_current_screen() {
+        let plan = restore_plan(recovery(Some(FHD)), QHD);
+        assert_eq!(plan.work_area, Some([0, 0, 2560, 1392]));
+        assert_eq!(plan.taskbar_state, Some(2));
+    }
+
+    #[test]
+    fn restore_plan_leaves_taskbar_alone_when_it_was_never_hidden() {
+        let visible = ShellRecovery {
+            taskbar_hidden: false,
+            ..recovery(Some(FHD))
+        };
+        assert_eq!(restore_plan(visible, FHD).taskbar_state, None);
+    }
+
+    #[test]
+    fn restore_plan_drops_implausible_work_area_but_keeps_taskbar() {
+        let plan = restore_plan(recovery(None), (1280, 720));
+        assert_eq!(plan.work_area, None);
+        assert_eq!(plan.taskbar_state, Some(2));
     }
 }
