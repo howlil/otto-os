@@ -6,9 +6,9 @@ use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    BarPointer, BarVisibility, HitTarget, Layout, Metrics, MotionPreference, NotchExpandedTab,
-    NotchHudKind, NotchLayoutInput, NotchPort, NowPlaying, compute_layout_with_notch,
-    detect_hud_event, is_top_bar_menu_target, scale,
+    BarPointer, BarVisibility, ChangeGate, HitTarget, Layout, Metrics, MotionPreference,
+    NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort, NowPlaying,
+    compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target, scale,
 };
 use otto_platform::{
     AppBar, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen, WindowsNotchPort,
@@ -16,7 +16,7 @@ use otto_platform::{
     foreground_application, motion_preference, open_quick_settings, open_spotlight_search,
     primary_screen, read_system_status, register_notch_hotkeys, restore_shell_from_recovery,
     step_display_brightness, suppress_native_osd, toggle_tray_overflow, unregister_notch_hotkeys,
-    window_bounds,
+    window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -40,6 +40,7 @@ const PBT_APMRESUMESUSPEND: usize = 0x0007;
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const MIN_DEADLINE_MS: u128 = 10;
 const STATUS_POLL_MS: u32 = 120;
+const FOREGROUND_FALLBACK_TICKS: u32 = 8;
 const HUD_ANIM_MS: u32 = 8;
 
 #[allow(clippy::struct_excessive_bools)]
@@ -61,6 +62,7 @@ pub(crate) struct Bar {
     tracking_bar_mouse: bool,
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
+    foreground_gate: ChangeGate,
     lyrics: LyricsService,
     lyrics_track: Option<(String, String)>,
     lyrics_generation: u64,
@@ -151,6 +153,7 @@ pub fn start(
         tracking_bar_mouse: false,
         tracking_panel_mouse: false,
         maintain_ticks: 0,
+        foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
         lyrics,
         lyrics_track: None,
         lyrics_generation: 0,
@@ -566,7 +569,10 @@ impl Bar {
                 dirty = true;
             }
         }
-        if let Some(foreground) = foreground_application(self.own_pid) {
+        let foreground_changed = self
+            .foreground_gate
+            .should_refresh(window_change_generations().map(|changes| changes.geometry));
+        if foreground_changed && let Some(foreground) = foreground_application(self.own_pid) {
             let change = self
                 .controls
                 .apply_foreground(foreground.name, foreground.window);

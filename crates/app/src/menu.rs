@@ -2,22 +2,21 @@ use std::time::{Duration, Instant};
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    AppMenuState, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY,
-    CMD_CC_BLUETOOTH, CMD_CC_BRIGHTNESS, CMD_CC_CALENDAR, CMD_CC_DISPLAY, CMD_CC_FOCUS,
-    CMD_CC_LYRICS_ONLINE, CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE,
-    CMD_CC_SOUND, CMD_CC_THEME_AUTO, CMD_CC_THEME_DARK, CMD_CC_THEME_LIGHT, CMD_CC_THEME_TOGGLE,
-    CMD_CC_VOLUME, CMD_CC_WIFI, CMD_WIN_MINIMIZE, Capability, CommandOutcome, ControlCenterAction,
-    ControlCenterPort, EstimatedMenuText, HitTarget, MediaCommand, MenuAnchor, MenuContext,
-    MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect,
-    WindowCommand, WindowInfo, WindowMenuState, build_calendar_rows, build_control_center_rows,
-    build_menu_overflow_rows, build_top_bar_menu_rows, build_window_tiling_menu_rows,
-    compute_popup_menu_layout, overflow_menu_target, scale, shift_month,
+    AppMenuState, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY, CMD_CC_BRIGHTNESS, CMD_CC_VOLUME,
+    CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, Capability, CommandOutcome,
+    ControlCenterEffect, ControlCenterPort, DownloadsEffect, EstimatedMenuText, HitTarget,
+    MenuAnchor, MenuContext, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics,
+    PopupMenuPlacement, Rect, ThemeChange, WindowCommand, WindowInfo, WindowMenuEffect,
+    WindowMenuState, build_calendar_rows, build_control_center_rows, build_menu_overflow_rows,
+    build_top_bar_menu_rows, build_window_tiling_menu_rows, compute_popup_menu_layout,
+    control_center_effect, downloads_effect, overflow_menu_target, scale, shift_month,
+    window_menu_effect,
 };
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
     build_dock_context_menu_rows, current_process_id, cursor_position, execute_top_bar_command,
-    focus_window_hwnd, monitor_work_area_at, poll_menu_events, primary_screen,
-    read_downloads_stack_items, signal_command_failure, window_command_capability,
+    focus_window_hwnd, monitor_work_area_at, open_downloads_folder, open_path, poll_menu_events,
+    primary_screen, read_downloads_stack_items, signal_command_failure, window_command_capability,
 };
 use otto_render::PopupMenuRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -34,8 +33,6 @@ const MENU_POLL_TIMER: usize = 30;
 const MENU_POLL_MS: u32 = 16;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
 const WHEEL_ROWS_PER_NOTCH: i32 = 2;
-const DOWNLOADS_OPEN_FOLDER: usize = 200;
-const DOWNLOADS_ITEM_BASE: usize = 300;
 const DOWNLOADS_VISIBLE_ITEMS: usize = 24;
 
 pub(crate) struct TopBarMenuRequest<'a> {
@@ -251,14 +248,18 @@ pub fn open_downloads_stack_menu(runtime: &RuntimeContext, center_x: i32, bottom
         for (index, item) in items.iter().enumerate() {
             let prefix = if item.is_dir { "📁 " } else { "📄 " };
             rows.push(MenuRow::item(
-                DOWNLOADS_ITEM_BASE + index,
+                CMD_DOWNLOADS_ITEM_BASE + index,
                 format!("{prefix}{}", item.name),
                 "",
             ));
         }
     }
     rows.push(MenuRow::Separator);
-    rows.push(MenuRow::item(DOWNLOADS_OPEN_FOLDER, "Open in Finder", ""));
+    rows.push(MenuRow::item(
+        CMD_DOWNLOADS_OPEN_FOLDER,
+        "Open in Finder",
+        "",
+    ));
 
     let source = MenuSource::DownloadsStack { items };
     with_menu(runtime, |menu| {
@@ -474,20 +475,6 @@ pub fn repaint(runtime: &RuntimeContext) {
     with_menu(runtime, |menu| menu.present(runtime));
 }
 
-fn shell_open(target: &str) {
-    let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
-    let _ = unsafe {
-        windows::Win32::UI::Shell::ShellExecuteW(
-            None,
-            windows::core::w!("open"),
-            windows::core::PCWSTR(wide.as_ptr()),
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR::null(),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
-        )
-    };
-}
-
 fn report(outcome: CommandOutcome) {
     if !matches!(
         outcome,
@@ -503,17 +490,28 @@ fn execute_window_menu_command(
     window: Option<&WindowInfo>,
 ) -> bool {
     let own_pid = current_process_id();
-    if cmd == CMD_WIN_MINIMIZE
-        && let Some(window) = window
-        && window_command_capability(window.identity, WindowCommand::Minimize, own_pid)
+    let minimize_available = window.is_some_and(|window| {
+        window_command_capability(window.identity, WindowCommand::Minimize, own_pid)
             == Some(Capability::Available)
-    {
-        let _ = crate::genie::minimize_window(runtime, window.identity.hwnd);
-        return false;
+    });
+    match window_menu_effect(cmd, minimize_available) {
+        WindowMenuEffect::CycleTheme => {
+            crate::theme_state::cycle_theme_mode(runtime);
+            false
+        }
+        WindowMenuEffect::GenieMinimize => {
+            if let Some(window) = window {
+                let _ = crate::genie::minimize_window(runtime, window.identity.hwnd);
+            }
+            false
+        }
+        WindowMenuEffect::Native(cmd) => {
+            let result =
+                execute_top_bar_command(cmd, window.map(|window| window.identity), own_pid);
+            report(result.outcome);
+            result.quit_requested
+        }
     }
-    let result = execute_top_bar_command(cmd, window.map(|window| window.identity), own_pid);
-    report(result.outcome);
-    result.quit_requested
 }
 
 fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) {
@@ -521,10 +519,6 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
         MenuSource::TopBar {
             bar_hwnd, window, ..
         } => {
-            if cmd == CMD_CC_THEME_TOGGLE {
-                crate::theme_state::cycle_theme_mode(runtime);
-                return;
-            }
             if execute_window_menu_command(runtime, cmd, window.as_ref()) {
                 let _ = unsafe {
                     PostMessageW(
@@ -568,16 +562,11 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
         MenuSource::WindowControls { window } => {
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));
         }
-        MenuSource::DownloadsStack { items } => {
-            if cmd == DOWNLOADS_OPEN_FOLDER {
-                shell_open("shell:Downloads");
-            } else if let Some(item) = cmd
-                .checked_sub(DOWNLOADS_ITEM_BASE)
-                .and_then(|index| items.get(index))
-            {
-                shell_open(&item.path.to_string_lossy());
-            }
-        }
+        MenuSource::DownloadsStack { items } => match downloads_effect(cmd, items.len()) {
+            Some(DownloadsEffect::OpenFolder) => open_downloads_folder(),
+            Some(DownloadsEffect::OpenItem(index)) => open_path(&items[index].path),
+            None => {}
+        },
     }
 }
 
@@ -858,44 +847,20 @@ impl PopupMenu {
     }
 
     fn execute_control_center_command(&self, runtime: &RuntimeContext, cmd: usize) {
-        match cmd {
-            CMD_CC_LYRICS_ONLINE => {
+        match control_center_effect(cmd) {
+            Some(ControlCenterEffect::ToggleOnlineLyrics) => {
                 let enabled = !runtime.online_lyrics_enabled.get();
                 runtime.pending_online_lyrics.set(Some(enabled));
-                return;
             }
-            CMD_CC_THEME_TOGGLE => {
+            Some(ControlCenterEffect::Theme(ThemeChange::Cycle)) => {
                 crate::theme_state::cycle_theme_mode(runtime);
-                return;
             }
-            CMD_CC_THEME_LIGHT => {
-                crate::theme_state::set_theme_mode(runtime, otto_core::ThemeMode::Light);
-                return;
+            Some(ControlCenterEffect::Theme(ThemeChange::Set(mode))) => {
+                crate::theme_state::set_theme_mode(runtime, mode);
             }
-            CMD_CC_THEME_DARK => {
-                crate::theme_state::set_theme_mode(runtime, otto_core::ThemeMode::Dark);
-                return;
-            }
-            CMD_CC_THEME_AUTO => {
-                crate::theme_state::set_theme_mode(runtime, otto_core::ThemeMode::Auto);
-                return;
-            }
-            _ => {}
+            Some(ControlCenterEffect::Action(action)) => self.control_center.execute(action),
+            None => {}
         }
-        let action = match cmd {
-            CMD_CC_MEDIA_TOGGLE => ControlCenterAction::Media(MediaCommand::TogglePlayPause),
-            CMD_CC_MEDIA_NEXT => ControlCenterAction::Media(MediaCommand::Next),
-            CMD_CC_MEDIA_PREVIOUS => ControlCenterAction::Media(MediaCommand::Previous),
-            CMD_CC_CALENDAR => ControlCenterAction::OpenCalendar,
-            CMD_CAL_SETTINGS => ControlCenterAction::OpenCalendarSettings,
-            CMD_CC_WIFI => ControlCenterAction::OpenWifi,
-            CMD_CC_BLUETOOTH => ControlCenterAction::OpenBluetooth,
-            CMD_CC_FOCUS => ControlCenterAction::OpenFocus,
-            CMD_CC_DISPLAY => ControlCenterAction::OpenDisplay,
-            CMD_CC_SOUND => ControlCenterAction::OpenSound,
-            _ => return,
-        };
-        self.control_center.execute(action);
     }
 
     fn on_click(&mut self, x: i32, y: i32) -> Option<(MenuSource, usize)> {

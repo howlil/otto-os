@@ -26,9 +26,10 @@ mod worker;
 pub use actions::{
     HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO, MenuCommandResult, MenuNavEvent, adjust_volume,
     execute_control_center_command, execute_top_bar_command, is_escape_down, load_apple_fonts,
-    open_calendar_notifications, open_quick_settings, open_spotlight_search, open_start_menu,
-    open_task_view, play_pomodoro_chime, poll_menu_events, register_notch_hotkeys,
-    signal_command_failure, toggle_tray_overflow, trim_working_set, unregister_notch_hotkeys,
+    open_calendar_notifications, open_downloads_folder, open_path, open_quick_settings,
+    open_spotlight_search, open_start_menu, open_task_view, play_pomodoro_chime, poll_menu_events,
+    register_notch_hotkeys, signal_command_failure, toggle_tray_overflow, trim_working_set,
+    unregister_notch_hotkeys,
 };
 pub use appbar::{
     APPBAR_CALLBACK_MESSAGE, AppBar, ShellNotification, classify_shell_notification,
@@ -60,8 +61,9 @@ pub use media::{
 pub use motion::motion_preference;
 pub use notch::WindowsNotchPort;
 pub use os_events::{
-    acknowledge_window_sync, install_window_tracking_hook, poll_foreground_change,
-    suppress_native_osd, uninstall_window_tracking_hook,
+    WindowChangeGenerations, acknowledge_window_sync, install_window_event_hooks,
+    install_window_tracking_hook, poll_foreground_change, suppress_native_osd,
+    uninstall_window_event_hooks, uninstall_window_tracking_hook, window_change_generations,
 };
 pub use screen::{
     PrimaryScreen, enable_per_monitor_dpi, monitor_work_area_at, primary_screen, virtual_screen,

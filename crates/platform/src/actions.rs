@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -494,6 +494,19 @@ fn restore_focus(target_hwnd: isize) -> bool {
         thread::sleep(FOCUS_POLL_INTERVAL);
     }
     unsafe { GetForegroundWindow() == hwnd }
+}
+
+pub fn open_downloads_folder() {
+    shell_exec(w!("shell:Downloads"), PCWSTR::null());
+}
+
+pub fn open_path(path: &Path) {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    shell_exec(PCWSTR(wide.as_ptr()), PCWSTR::null());
 }
 
 fn shell_exec(file: PCWSTR, params: PCWSTR) {

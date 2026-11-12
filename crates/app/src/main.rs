@@ -25,16 +25,22 @@ fn main() -> Result<()> {
     otto_platform::enable_per_monitor_dpi();
     otto_platform::load_apple_fonts();
 
+    let _ = otto_platform::install_window_event_hooks();
     let blur = !std::env::args().any(|arg| arg == "--no-blur");
-    host::start(blur)?;
+    if let Err(error) = host::start(blur) {
+        otto_platform::uninstall_window_event_hooks();
+        return Err(error);
+    }
     if let Err(error) = host::apply_cli_overrides() {
         host::stop();
+        otto_platform::uninstall_window_event_hooks();
         return Err(error);
     }
     let _ = otto_platform::install_keyboard_hook();
     host::run_message_loop();
     otto_platform::uninstall_keyboard_hook();
     host::stop();
+    otto_platform::uninstall_window_event_hooks();
     Ok(())
 }
 

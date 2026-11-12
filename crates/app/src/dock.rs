@@ -4,11 +4,10 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    Activation, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN,
-    CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, CommandOutcome, DockInput, DockLayout,
+    ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockInput, DockLayout,
     DockMetrics, MotionMetrics, MotionPreference, Rect, StableOrder, WindowCommand, WindowIdentity,
-    advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout, decide_activation,
-    scale,
+    advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout,
+    dock_activation_effect, dock_command_effect, dock_drop_effect, scale,
 };
 use otto_platform::{
     DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
@@ -17,7 +16,7 @@ use otto_platform::{
     is_escape_down, is_window_minimized, launch_new_instance, motion_preference,
     open_file_with_dock_entry, other_applications_visible, primary_screen, quit_application,
     remove_pinned_app, reorder_pinned_apps, show_application, shutdown_recycle_bin_task,
-    signal_command_failure, toggle_pin_entry,
+    signal_command_failure, toggle_pin_entry, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -37,6 +36,8 @@ const WM_DROPFILES: u32 = 0x0233;
 const DOCK_POLL_TIMER: usize = 10;
 const DOCK_ANIM_TIMER: usize = 11;
 const DOCK_POLL_MS: u32 = 150;
+const DOCK_ENTRIES_FALLBACK_TICKS: u32 = 14;
+const DOCK_COVER_FALLBACK_TICKS: u32 = 7;
 
 struct AnimState {
     mag_strength: f32,
@@ -88,6 +89,9 @@ pub(crate) struct Dock {
     motion_metrics: MotionMetrics,
     anim: AnimState,
     drag: DragState,
+    entries_gate: ChangeGate,
+    cover_gate: ChangeGate,
+    covered: bool,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
@@ -140,6 +144,9 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         motion_metrics,
         anim: AnimState::default(),
         drag: DragState::default(),
+        entries_gate: ChangeGate::new(DOCK_ENTRIES_FALLBACK_TICKS),
+        cover_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
+        covered: false,
     };
     dock.place();
     dock.present(runtime);
@@ -285,17 +292,12 @@ fn show_window(runtime: &RuntimeContext, window: WindowIdentity, target: Option<
 }
 
 fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target: Option<Rect>) {
-    let Some(app) = entry.app.as_ref() else {
-        launch_new_instance(entry);
-        return;
-    };
-    match decide_activation(app) {
-        Activation::Launch => launch_new_instance(entry),
-        Activation::Unhide => report(show_application(app, current_process_id())),
-        Activation::Restore(window) | Activation::Focus(window) => {
-            show_window(runtime, window, target);
-        }
-    }
+    execute_dock_effect(
+        runtime,
+        dock_activation_effect(entry.app.as_ref()),
+        entry,
+        target,
+    );
 }
 
 pub fn execute_dock_menu_command(
@@ -304,38 +306,37 @@ pub fn execute_dock_menu_command(
     entry: &DockEntry,
     target: Option<Rect>,
 ) {
-    if let Some(index) = cmd.checked_sub(CMD_DOCK_WINDOW_BASE) {
-        let window = entry
-            .app
-            .as_ref()
-            .and_then(|app| app.primary_windows().nth(index))
-            .map(|window| window.identity);
-        match window {
-            Some(window) => show_window(runtime, window, target),
-            None => report(CommandOutcome::TargetGone),
-        }
-        return;
+    if let Some(effect) = dock_command_effect(cmd, entry.app.as_ref()) {
+        execute_dock_effect(runtime, effect, entry, target);
     }
+}
+
+fn execute_dock_effect(
+    runtime: &RuntimeContext,
+    effect: DockEffect,
+    entry: &DockEntry,
+    target: Option<Rect>,
+) {
     let own_pid = current_process_id();
-    match cmd {
-        CMD_DOCK_PIN => {
+    match effect {
+        DockEffect::Launch => launch_new_instance(entry),
+        DockEffect::ShowWindow(window) => show_window(runtime, window, target),
+        DockEffect::TogglePin => {
             toggle_pin_entry(entry);
             with_dock(runtime, |dock| dock.refresh_entries(runtime));
         }
-        CMD_DOCK_TOGGLE => activate_entry(runtime, entry, target),
-        CMD_DOCK_NEW_WINDOW => launch_new_instance(entry),
-        CMD_DOCK_EMPTY_TRASH => empty_recycle_bin(),
-        CMD_DOCK_HIDE => {
-            if let Some(app) = entry.app.as_ref() {
-                report(hide_application(app, own_pid));
-            }
+        DockEffect::EmptyTrash => empty_recycle_bin(),
+        DockEffect::Unhide | DockEffect::Hide | DockEffect::Quit => {
+            let Some(app) = entry.app.as_ref() else {
+                return;
+            };
+            report(match effect {
+                DockEffect::Unhide => show_application(app, own_pid),
+                DockEffect::Hide => hide_application(app, own_pid),
+                _ => quit_application(app, own_pid),
+            });
         }
-        CMD_DOCK_QUIT => {
-            if let Some(app) = entry.app.as_ref() {
-                report(quit_application(app, own_pid));
-            }
-        }
-        _ => {}
+        DockEffect::Fail(outcome) => report(outcome),
     }
 }
 
@@ -453,6 +454,7 @@ impl Dock {
 
     fn rebuild(&mut self, runtime: &RuntimeContext) {
         self.screen = primary_screen();
+        self.cover_gate.invalidate();
         self.recompute_layout();
         let all = self.combined_entries();
         if let Ok(mut renderer) = DockRenderer::new(
@@ -467,6 +469,63 @@ impl Dock {
         self.present(runtime);
     }
 
+    fn refresh_entries_if_changed(&mut self, topology: Option<u64>) -> bool {
+        if !self.entries_gate.should_refresh(topology) {
+            return false;
+        }
+        let latest = collect_dock_entries(self.own_pid, &mut self.order);
+        if latest == self.entries {
+            return false;
+        }
+        let mut need_anim = false;
+        for new_e in &latest {
+            if !self.entries.iter().any(|old_e| old_e.key == new_e.key) {
+                self.presence.insert(new_e.key.clone(), 0.08);
+                need_anim = true;
+            }
+            if new_e.running
+                && !matches!(new_e.kind, DockItemKind::Trash { .. })
+                && !self
+                    .entries
+                    .iter()
+                    .any(|old_e| old_e.key == new_e.key && old_e.running)
+            {
+                self.anim.bounce_key = Some(new_e.key.clone());
+                self.anim.bounce_phase = 0.01;
+                need_anim = true;
+            }
+        }
+
+        for old_e in &self.entries {
+            if !matches!(
+                old_e.kind,
+                DockItemKind::Finder
+                    | DockItemKind::Launchpad
+                    | DockItemKind::Downloads
+                    | DockItemKind::Trash { .. }
+            ) && !latest.iter().any(|new_e| new_e.key == old_e.key)
+                && !self.closing_entries.iter().any(|c| c.key == old_e.key)
+            {
+                let mut ghost = old_e.clone();
+                ghost.running = false;
+                ghost.active = false;
+                self.closing_entries.push(ghost);
+                need_anim = true;
+            }
+        }
+        if need_anim {
+            self.ensure_animating();
+        }
+
+        self.closing_entries
+            .retain(|c| !latest.iter().any(|n| n.key == c.key));
+        self.entries = latest;
+        let all = self.combined_entries();
+        sync_icons(&mut self.renderer, &all);
+        self.recompute_layout();
+        true
+    }
+
     fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
         let mut dirty = false;
         let next_motion = motion_preference();
@@ -475,54 +534,8 @@ impl Dock {
             self.ensure_animating();
         }
         self.cancel_drag_on_escape();
-        let latest = collect_dock_entries(self.own_pid, &mut self.order);
-        if latest != self.entries {
-            let mut need_anim = false;
-            for new_e in &latest {
-                if !self.entries.iter().any(|old_e| old_e.key == new_e.key) {
-                    self.presence.insert(new_e.key.clone(), 0.08);
-                    need_anim = true;
-                }
-                if new_e.running
-                    && !matches!(new_e.kind, DockItemKind::Trash { .. })
-                    && !self
-                        .entries
-                        .iter()
-                        .any(|old_e| old_e.key == new_e.key && old_e.running)
-                {
-                    self.anim.bounce_key = Some(new_e.key.clone());
-                    self.anim.bounce_phase = 0.01;
-                    need_anim = true;
-                }
-            }
-
-            for old_e in &self.entries {
-                if !matches!(
-                    old_e.kind,
-                    DockItemKind::Finder
-                        | DockItemKind::Launchpad
-                        | DockItemKind::Downloads
-                        | DockItemKind::Trash { .. }
-                ) && !latest.iter().any(|new_e| new_e.key == old_e.key)
-                    && !self.closing_entries.iter().any(|c| c.key == old_e.key)
-                {
-                    let mut ghost = old_e.clone();
-                    ghost.running = false;
-                    ghost.active = false;
-                    self.closing_entries.push(ghost);
-                    need_anim = true;
-                }
-            }
-            if need_anim {
-                self.ensure_animating();
-            }
-
-            self.closing_entries
-                .retain(|c| !latest.iter().any(|n| n.key == c.key));
-            self.entries = latest;
-            let all = self.combined_entries();
-            sync_icons(&mut self.renderer, &all);
-            self.recompute_layout();
+        let generations = window_change_generations();
+        if self.refresh_entries_if_changed(generations.map(|changes| changes.topology)) {
             dirty = true;
         }
 
@@ -531,8 +544,17 @@ impl Dock {
         let local_x = gx;
         let local_y = gy - win_top;
 
-        let fullscreen_or_max =
-            has_maximized_or_fullscreen_window(self.screen.width, self.screen.height, self.own_pid);
+        if self
+            .cover_gate
+            .should_refresh(generations.map(|changes| changes.geometry))
+        {
+            self.covered = has_maximized_or_fullscreen_window(
+                self.screen.width,
+                self.screen.height,
+                self.own_pid,
+            );
+        }
+        let fullscreen_or_max = self.covered;
 
         let at_bottom_edge = gy >= self.screen.height - 6;
         let in_interactive_zone = self.anim.hide_progress < 0.85
@@ -766,31 +788,25 @@ impl Dock {
         let gap_pad = scale(self.metrics.icon_gap, self.screen.dpi) as f32 * 0.5;
 
         let unpin_distance = scale(45, self.screen.dpi);
-        if y < self.layout.pill.y - unpin_distance
-            && entry.pinned
-            && matches!(entry.kind, DockItemKind::App { .. })
-        {
-            if remove_pinned_app(&entry.key) {
-                self.refresh_entries(runtime);
-            }
-            return;
-        }
-
-        let Some(target_idx) = self.layout.hit_test(x, y, gap_pad) else {
-            return;
-        };
-        if target_idx == start_idx {
-            return;
-        }
-
         let reorderable = |candidate: &DockEntry| {
             candidate.pinned && matches!(candidate.kind, DockItemKind::App { .. })
         };
-        if let Some(target_entry) = all.get(target_idx)
-            && reorderable(&entry)
-            && reorderable(target_entry)
-            && reorder_pinned_apps(&entry.key, &target_entry.key)
-        {
+        let target = self.layout.hit_test(x, y, gap_pad);
+        let target_entry = target.and_then(|index| all.get(index));
+        let effect = dock_drop_effect(DockDropInput {
+            source: start_idx,
+            source_reorderable: reorderable(&entry),
+            beyond_unpin_line: y < self.layout.pill.y - unpin_distance,
+            target,
+            target_reorderable: target_entry.is_some_and(reorderable),
+        });
+        let applied = match effect {
+            DockDropEffect::Unpin => remove_pinned_app(&entry.key),
+            DockDropEffect::Reorder { .. } => target_entry
+                .is_some_and(|target_entry| reorder_pinned_apps(&entry.key, &target_entry.key)),
+            DockDropEffect::Nothing => false,
+        };
+        if applied {
             self.refresh_entries(runtime);
         }
     }
