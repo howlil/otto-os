@@ -1134,6 +1134,14 @@ impl Bar {
     ) {
         self.ensure_anim_timer();
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
+        if self.layout.notch.contains(x, y) {
+            let update = self.notch.dismiss_compact(Instant::now());
+            if update.changed {
+                self.recompute_layout();
+                self.present(runtime);
+                return;
+            }
+        }
         let anchor_x = if self.layout.hit_test(x, y) == Some(HitTarget::Start) {
             self.layout.start_slot.x
         } else {

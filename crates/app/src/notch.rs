@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
-    HitTarget, LyricsStatus, LyricsView, MediaCommand, MotionPreference, NotchAction,
-    NotchExpandedTab, NotchHudKind, NotchHudState, NotchLayoutInput, NowPlaying, PendingSeek,
-    PomodoroClock, PomodoroState, PomodoroStatus, PomodoroTick, SeekReadback, animate_value,
-    reconcile_seek, seek_target_ms,
+    CompactContent, HitTarget, IslandInputs, LyricsStatus, LyricsView, MediaCommand,
+    MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind, NotchHudState, NotchLayoutInput,
+    NowPlaying, PendingSeek, PomodoroClock, PomodoroState, PomodoroStatus, PomodoroTick,
+    SeekReadback, animate_value, island_targets, reconcile_seek, seek_target_ms,
 };
 
 const HUD_HOLD_MS: u64 = 1_650;
@@ -73,6 +73,8 @@ pub(crate) struct NotchController {
     lyrics_status: LyricsStatus,
     pending_seek: Option<PendingSeek>,
     seek_drag: Option<f32>,
+    dismissed: Option<CompactContent>,
+    hover_blocked: bool,
 }
 
 impl NotchController {
@@ -99,6 +101,49 @@ impl NotchController {
             lyrics_status: LyricsStatus::Idle,
             pending_seek: None,
             seek_drag: None,
+            dismissed: None,
+            hover_blocked: false,
+        }
+    }
+
+    fn island_inputs(&self, now: Instant) -> IslandInputs {
+        IslandInputs {
+            alert: self.pomodoro.status == PomodoroStatus::Alert
+                && self.alert_until.is_none_or(|until| now < until),
+            panel_requested: self.panel_trigger.is_open(),
+            hud: self.hud_until.is_some_and(|until| now < until),
+            focus_active: self.pomodoro.is_compact_active(),
+            media: self
+                .media
+                .as_ref()
+                .filter(|media| media.is_active())
+                .map(NowPlaying::track_key),
+            dismissed: self.dismissed.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn island_mode(&self, now: Instant) -> otto_core::IslandMode {
+        otto_core::resolve_island(&self.island_inputs(now))
+    }
+
+    pub(crate) fn dismiss_compact(&mut self, now: Instant) -> NotchUpdate {
+        if matches!(
+            self.panel_trigger,
+            PanelTrigger::Pinned | PanelTrigger::PinnedHovered
+        ) {
+            return NotchUpdate::default();
+        }
+        let Some(content) = self.island_inputs(now).compact_content() else {
+            return NotchUpdate::default();
+        };
+        self.dismissed = Some(content);
+        self.panel_trigger = PanelTrigger::Closed;
+        self.hover_since = None;
+        self.hover_blocked = true;
+        NotchUpdate {
+            changed: true,
+            effect: None,
         }
     }
 
@@ -386,11 +431,15 @@ impl NotchController {
             if self.panel_expansion > 0.55 && self.panel_trigger == PanelTrigger::Pinned {
                 self.panel_trigger = PanelTrigger::PinnedHovered;
             }
-            if self.hover_since.is_none() && self.panel_trigger == PanelTrigger::Closed {
+            if self.hover_since.is_none()
+                && self.panel_trigger == PanelTrigger::Closed
+                && !self.hover_blocked
+            {
                 self.hover_since = Some(Instant::now());
             }
         } else {
             self.hover_since = None;
+            self.hover_blocked = false;
         }
     }
 
@@ -399,6 +448,7 @@ impl NotchController {
             return false;
         }
         self.hover_since = None;
+        self.hover_blocked = false;
         if matches!(
             self.panel_trigger,
             PanelTrigger::Hovered | PanelTrigger::PinnedHovered
@@ -569,18 +619,10 @@ impl NotchController {
         self.step_hover_tracking(now, cursor_inside_notch, panel_visible);
 
         let hud_active = self.hud_until.is_some_and(|until| now < until);
-        let media_active = self.media.as_ref().is_some_and(NowPlaying::is_active);
-        let target_hud = if hud_active { 1.0 } else { 0.0 };
-        let target_compact = if self.pomodoro.is_compact_active() || media_active {
-            1.0
-        } else {
-            0.0
-        };
-        let target_panel = if self.is_panel_target_open(now) {
-            1.0
-        } else {
-            0.0
-        };
+        let targets = island_targets(&self.island_inputs(now));
+        let target_hud = targets.hud;
+        let target_compact = targets.compact;
+        let target_panel = targets.panel;
 
         let next_hud = animate_value(self.hud_expansion, target_hud, 18.0, dt, motion);
         let next_compact = animate_value(self.compact_expansion, target_compact, 16.0, dt, motion);
@@ -683,6 +725,7 @@ impl NotchController {
             }
         } else {
             self.hover_since = None;
+            self.hover_blocked = false;
             if matches!(
                 self.panel_trigger,
                 PanelTrigger::Hovered | PanelTrigger::PinnedHovered
@@ -699,8 +742,8 @@ mod tests {
         ALERT_HOLD_MS, HUD_HOLD_MS, NotchController, NotchEffect, NotchHotkey, NotchUpdate,
     };
     use otto_core::{
-        HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
-        NowPlaying, PomodoroStatus,
+        HitTarget, IslandMode, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab,
+        NotchHudKind, NowPlaying, PomodoroStatus,
     };
     use std::time::{Duration, Instant};
 
@@ -789,6 +832,111 @@ mod tests {
         assert_eq!(notch.pomodoro().status, PomodoroStatus::Idle);
         assert!(!notch.is_panel_target_open(deadline));
         assert_eq!(notch.next_deadline(deadline), None);
+    }
+
+    fn settle(notch: &mut NotchController, mut now: Instant) -> Instant {
+        for _ in 0..400 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, false, true, MotionPreference::Full);
+        }
+        now
+    }
+
+    fn playing(title: &str) -> NowPlaying {
+        NowPlaying {
+            source_app: String::from("Spotify.exe"),
+            title: String::from(title),
+            artist: String::from("Artist"),
+            playing: true,
+            ..NowPlaying::default()
+        }
+    }
+
+    #[test]
+    fn a_volume_burst_while_the_panel_is_open_keeps_the_panel_and_hides_the_hud() {
+        let mut notch = idle_notch();
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        let now = settle(&mut notch, Instant::now());
+        for _ in 0..20 {
+            notch.trigger_hud(NotchHudKind::Volume {
+                percent: 40,
+                muted: false,
+            });
+        }
+        assert_eq!(notch.island_mode(now), IslandMode::Expanded);
+        let _ = settle(&mut notch, now);
+        assert!((notch.panel_expansion() - 1.0).abs() < f32::EPSILON);
+        assert!(notch.hud_expansion.abs() < 0.01);
+    }
+
+    #[test]
+    fn right_click_dismisses_compact_media_until_the_track_changes() {
+        let mut notch = NotchController::new(Some(playing("Song")), NotchExpandedTab::Media);
+        let now = settle(&mut notch, Instant::now());
+        assert!((notch.compact_expansion - 1.0).abs() < f32::EPSILON);
+        assert!(notch.dismiss_compact(now).changed);
+        let now = settle(&mut notch, now);
+        assert!(notch.compact_expansion.abs() < f32::EPSILON);
+        assert_eq!(notch.island_mode(now), IslandMode::Collapsed);
+        assert!(notch.set_media(Some(playing("Next song"))));
+        let now = settle(&mut notch, now);
+        assert!((notch.compact_expansion - 1.0).abs() < f32::EPSILON);
+        assert!(matches!(notch.island_mode(now), IslandMode::Compact(_)));
+    }
+
+    #[test]
+    fn dismissing_needs_compact_content_and_never_closes_a_pinned_panel() {
+        let mut notch = idle_notch();
+        let now = Instant::now();
+        assert_eq!(notch.dismiss_compact(now), NotchUpdate::default());
+        let mut playing_notch =
+            NotchController::new(Some(playing("Song")), NotchExpandedTab::Media);
+        let _ = playing_notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        assert_eq!(playing_notch.dismiss_compact(now), NotchUpdate::default());
+    }
+
+    #[test]
+    fn dismissing_from_a_hover_panel_closes_it_until_the_pointer_leaves() {
+        let mut notch = NotchController::new(Some(playing("Song")), NotchExpandedTab::Media);
+        let mut now = Instant::now();
+        notch.handle_pointer_move(true);
+        for _ in 0..40 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, true, true, MotionPreference::Full);
+        }
+        assert_eq!(notch.island_mode(now), otto_core::IslandMode::Expanded);
+        assert!(notch.dismiss_compact(now).changed);
+        notch.handle_pointer_move(true);
+        for _ in 0..80 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, true, true, MotionPreference::Full);
+        }
+        assert_eq!(notch.island_mode(now), otto_core::IslandMode::Collapsed);
+        notch.handle_pointer_move(false);
+        notch.handle_pointer_move(true);
+        for _ in 0..40 {
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, true, true, MotionPreference::Full);
+        }
+        assert_eq!(notch.island_mode(now), otto_core::IslandMode::Expanded);
+    }
+
+    #[test]
+    fn rapid_notch_toggles_settle_to_the_last_request() {
+        let mut notch = NotchController::new(Some(playing("Song")), NotchExpandedTab::Media);
+        let mut now = Instant::now();
+        for _ in 0..25 {
+            let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+            now += Duration::from_millis(8);
+            let _ = notch.advance(now, false, true, MotionPreference::Full);
+        }
+        let now = settle(&mut notch, now);
+        assert_eq!(notch.island_mode(now), IslandMode::Expanded);
+        assert!((notch.panel_expansion() - 1.0).abs() < f32::EPSILON);
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        let now = settle(&mut notch, now);
+        assert!(notch.panel_expansion().abs() < f32::EPSILON);
+        assert!(matches!(notch.island_mode(now), IslandMode::Compact(_)));
     }
 
     #[test]

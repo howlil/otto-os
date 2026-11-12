@@ -6,6 +6,7 @@ mod change_gate;
 mod dock;
 mod effects;
 mod genie;
+mod island;
 mod layout;
 mod lyrics;
 mod material;
@@ -41,6 +42,9 @@ pub use effects::{
 };
 pub use genie::{
     GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry, genie_canvas, is_blank_frame,
+};
+pub use island::{
+    CompactContent, IslandInputs, IslandMode, IslandTargets, island_targets, resolve_island,
 };
 pub use layout::{
     HitTarget, Layout, Metrics, NotchLayoutInput, Rect, compute_layout, compute_layout_for_app,
