@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e',
@@ -1843,22 +1843,26 @@ function Set-PersonalizeValue([string]$name, $value) {
 }
 
 function Find-DockPill([string]$path, $dock, [int[]]$hint, [int]$tolerance) {
+    return Find-FillBox $path $dock.Left $dock.Top $dock.Width $dock.Height $hint $tolerance 'Dock pill'
+}
+
+function Find-FillBox([string]$path, [int]$left, [int]$top, [int]$width, [int]$height, [int[]]$hint, [int]$tolerance, [string]$label) {
     $bitmap = [System.Drawing.Bitmap]::new($path)
     try {
-        $minX = [int]::MaxValue; $minY = [int]::MaxValue
-        $maxX = -1; $maxY = -1
-        $bottom = [Math]::Min($bitmap.Height - 1, $dock.Top + $dock.Height - 1)
-        $right = [Math]::Min($bitmap.Width - 1, $dock.Left + $dock.Width - 1)
-        for ($y = [Math]::Max(0, $dock.Top); $y -le $bottom; $y += 2) {
-            for ($x = [Math]::Max(0, $dock.Left); $x -le $right; $x += 2) {
+        $bottom = [Math]::Min($bitmap.Height - 1, $top + $height - 1)
+        $right = [Math]::Min($bitmap.Width - 1, $left + $width - 1)
+        $rowCount = @{}
+        $rowMin = @{}
+        $rowMax = @{}
+        for ($y = [Math]::Max(0, $top); $y -le $bottom; $y += 2) {
+            for ($x = [Math]::Max(0, $left); $x -le $right; $x += 2) {
                 $pixel = $bitmap.GetPixel($x, $y)
                 if ([Math]::Abs($pixel.R - $hint[0]) -le $tolerance -and
                     [Math]::Abs($pixel.G - $hint[1]) -le $tolerance -and
                     [Math]::Abs($pixel.B - $hint[2]) -le $tolerance) {
-                    if ($x -lt $minX) { $minX = $x }
-                    if ($x -gt $maxX) { $maxX = $x }
-                    if ($y -lt $minY) { $minY = $y }
-                    if ($y -gt $maxY) { $maxY = $y }
+                    $rowCount[$y] = 1 + [int]$rowCount[$y]
+                    if (-not $rowMin.ContainsKey($y) -or $x -lt $rowMin[$y]) { $rowMin[$y] = $x }
+                    if (-not $rowMax.ContainsKey($y) -or $x -gt $rowMax[$y]) { $rowMax[$y] = $x }
                 }
             }
         }
@@ -1866,21 +1870,40 @@ function Find-DockPill([string]$path, $dock, [int[]]$hint, [int]$tolerance) {
     finally {
         $bitmap.Dispose()
     }
-    if ($maxX -lt 0) {
-        throw "Dock pill not found: no pixel matched the fill hint ($($hint -join ','), tolerance $tolerance)."
+    if ($rowCount.Count -eq 0) {
+        throw "$label not found: no pixel matched the fill hint ($($hint -join ','), tolerance $tolerance)."
     }
+    $peak = ($rowCount.Values | Measure-Object -Maximum).Maximum
+    $solid = @($rowCount.Keys | Where-Object { $rowCount[$_] -ge [Math]::Max(8, [int]($peak * 0.5)) })
+    $minX = ($solid | ForEach-Object { $rowMin[$_] } | Measure-Object -Minimum).Minimum
+    $maxX = ($solid | ForEach-Object { $rowMax[$_] } | Measure-Object -Maximum).Maximum
+    $minY = ($solid | Measure-Object -Minimum).Minimum
+    $maxY = ($solid | Measure-Object -Maximum).Maximum
     return [pscustomobject]@{ X = $minX; Y = $minY; Width = $maxX - $minX + 1; Height = $maxY - $minY + 1 }
 }
 
-function Get-DockSampleRegion($pill, $offset) {
-    $centerX = $pill.X + [int]($pill.Width / 2)
-    $top = $pill.Y + (Convert-ToScaled $offset[1])
+function Get-DockEmptyPoint($pill) {
+    return [pscustomobject]@{
+        X = $pill.X + [int]($pill.Width / 2)
+        Y = $pill.Y + (Convert-ToScaled 3)
+    }
+}
+
+function Get-FillSampleRegion($box, $offset) {
+    $centerX = $box.X + [int]($box.Width / 2)
     return [pscustomobject]@{
         X = $centerX - (Convert-ToScaled 2)
-        Y = $top
+        Y = $box.Y + (Convert-ToScaled $offset[1])
         Width = Convert-ToScaled 4
         Height = Convert-ToScaled 2
     }
+}
+
+function Read-DockPreference([string]$path, [string]$key) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $line = Get-Content -LiteralPath $path | Where-Object { $_ -like "$key=*" } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return $line.Substring($key.Length + 1)
 }
 
 function Run-VisualReferenceFlow {
@@ -1889,7 +1912,10 @@ function Run-VisualReferenceFlow {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
     $original = Get-ItemProperty -Path $key
     $process = $null
+    $preferencePath = Join-Path $env:LOCALAPPDATA 'otto-os\plugins.txt'
+    $preferenceBackup = if (Test-Path -LiteralPath $preferencePath) { [IO.File]::ReadAllBytes($preferencePath) } else { $null }
     try {
+        Set-DockMagnification $preferencePath $false
         $process = Start-Otto 'visual-reference'
         $bar = Get-BarMetrics $process
         $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
@@ -1915,42 +1941,69 @@ function Run-VisualReferenceFlow {
             Set-PersonalizeValue 'AppsUseLightTheme' $mode.Light
             Set-PersonalizeValue 'EnableTransparency' 0
             [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
-            Start-Sleep -Milliseconds 1500
+            Start-Sleep -Milliseconds 2500
             $shot = Save-Screenshot 'visual-reference' $mode.Name
             $modeEntry = $manifest.modes.($mode.Name)
 
             $barColor = Get-RegionColor $shot (Get-EmptyBarRegion $bar)
-            $barObserved = "rgb=$($barColor.R),$($barColor.G),$($barColor.B) spread=$($barColor.Spread)"
+            $notchRegion = [pscustomobject]@{ X = $bar.Left + [int]($bar.Width / 2) - (Convert-ToScaled 2); Y = $bar.Top + (Convert-ToScaled 4); Width = Convert-ToScaled 4; Height = Convert-ToScaled 2 }
+            $notchColor = Get-RegionColor $shot $notchRegion
 
             $pill = Find-DockPill $shot $dock $modeEntry.'dock-fill-hint' $manifest.tolerance
-            $sample = Get-DockSampleRegion $pill $modeEntry.'dock-pill-offset'
-            $dockColor = Get-RegionColor $shot $sample
-            $dockObserved = "rgb=$($dockColor.R),$($dockColor.G),$($dockColor.B) spread=$($dockColor.Spread) pill=$($pill.X),$($pill.Y),$($pill.Width)x$($pill.Height)"
+            $dockRegion = Get-FillSampleRegion $pill $modeEntry.'dock-pill-offset'
+            $dockColor = Get-RegionColor $shot $dockRegion
             $wallpaperRegion = [pscustomobject]@{ X = $dock.Left + (Convert-ToScaled 4); Y = $dock.Top + (Convert-ToScaled 4); Width = Convert-ToScaled 4; Height = Convert-ToScaled 2 }
             $wallpaperColor = Get-RegionColor $shot $wallpaperRegion
 
+            $menuPoint = Get-DockEmptyPoint $pill
+            Show-DockAt ([pscustomobject]@{ X = $menuPoint.X; Y = $menuPoint.Y; Edge = $dock.Bottom - 1 })
+            Start-Sleep -Milliseconds 300
+            [OttoE2ESystem]::RightClick($menuPoint.X, $menuPoint.Y)
+            Wait-VisibleWindow $process 'OttoPopupMenu' "Dock settings menu for $($mode.Name)" 3000
+            Start-Sleep -Milliseconds 500
+            $menuShot = Save-Screenshot 'visual-reference' "$($mode.Name)-menu"
+            $menuBox = Find-FillBox $menuShot $dock.Left ([Math]::Max(0, $dock.Top - (Convert-ToScaled 260))) $dock.Width (Convert-ToScaled 260) $modeEntry.'menu-fill-hint' $manifest.tolerance 'Dock settings menu'
+            $menuRegion = Get-FillSampleRegion $menuBox $modeEntry.'menu-fill-offset'
+            $menuColor = Get-RegionColor $menuShot $menuRegion
+            [OttoE2ENative]::SendKey(0x1B)
+            Wait-HiddenWindow $process 'OttoPopupMenu' "Dock settings menu to close for $($mode.Name)" 3000
+
+            $barObserved = "rgb=$($barColor.R),$($barColor.G),$($barColor.B) spread=$($barColor.Spread)"
+            $notchObserved = "rgb=$($notchColor.R),$($notchColor.G),$($notchColor.B) spread=$($notchColor.Spread)"
+            $dockObserved = "rgb=$($dockColor.R),$($dockColor.G),$($dockColor.B) spread=$($dockColor.Spread) pill=$($pill.X),$($pill.Y),$($pill.Width)x$($pill.Height)"
+            $menuObserved = "rgb=$($menuColor.R),$($menuColor.G),$($menuColor.B) spread=$($menuColor.Spread) box=$($menuBox.X),$($menuBox.Y),$($menuBox.Width)x$($menuBox.Height)"
+
+            $surfaces = [ordered]@{
+                'bar-empty' = @($barColor, $barObserved)
+                'notch-core' = @($notchColor, $notchObserved)
+                'dock-pill' = @($dockColor, $dockObserved)
+                'menu-fill' = @($menuColor, $menuObserved)
+            }
+
             if ($RecordReference) {
-                $modeEntry.'bar-empty' = @($barColor.R, $barColor.G, $barColor.B)
-                $modeEntry.'dock-pill' = @($dockColor.R, $dockColor.G, $dockColor.B)
-                Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=bar-empty $barObserved"
-                Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=dock-pill $dockObserved"
+                foreach ($surface in $surfaces.Keys) {
+                    $color = $surfaces[$surface][0]
+                    $modeEntry.$surface = @($color.R, $color.G, $color.B)
+                    Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=$surface $($surfaces[$surface][1])"
+                }
                 continue
             }
 
-            if ($null -eq $modeEntry.'bar-empty' -or $null -eq $modeEntry.'dock-pill') {
-                throw "$($mode.Name): no reference recorded; run with -RecordReference first."
-            }
-            if (-not (Test-ColorNear $barColor @($modeEntry.'bar-empty') $manifest.tolerance) -or $barColor.Spread -gt $manifest.spreadMax) {
-                throw "$($mode.Name)/bar-empty: colour drifted from the reference ($barObserved, expected $(@($modeEntry.'bar-empty') -join ','))."
-            }
-            if (-not (Test-ColorNear $dockColor @($modeEntry.'dock-pill') $manifest.tolerance) -or $dockColor.Spread -gt $manifest.spreadMax) {
-                throw "$($mode.Name)/dock-pill: colour drifted from the reference ($dockObserved, expected $(@($modeEntry.'dock-pill') -join ','))."
+            foreach ($surface in $surfaces.Keys) {
+                $color = $surfaces[$surface][0]
+                $observed = $surfaces[$surface][1]
+                $expected = $modeEntry.$surface
+                if ($null -eq $expected) {
+                    throw "$($mode.Name)/${surface}: no reference recorded; run with -RecordReference first."
+                }
+                if (-not (Test-ColorNear $color @($expected) $manifest.tolerance) -or $color.Spread -gt $manifest.spreadMax) {
+                    throw "$($mode.Name)/${surface}: colour drifted from the reference ($observed, expected $(@($expected) -join ','))."
+                }
+                Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/$surface $observed"
             }
             if (Test-ColorNear $dockColor @($wallpaperColor.R, $wallpaperColor.G, $wallpaperColor.B) 24) {
                 throw "$($mode.Name)/dock-pill: the sample matches the wallpaper outside the pill ($dockObserved), so the Dock fill was not measured."
             }
-            Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/bar-empty $barObserved"
-            Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/dock-pill $dockObserved"
         }
         if ($RecordReference) {
             $manifest.recordedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -1963,6 +2016,81 @@ function Run-VisualReferenceFlow {
         Set-PersonalizeValue 'AppsUseLightTheme' $original.AppsUseLightTheme
         Set-PersonalizeValue 'EnableTransparency' $original.EnableTransparency
         [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
+        if ($script:ownedProcess) { Stop-Otto $script:ownedProcess }
+        if ($preferenceBackup) {
+            [IO.File]::WriteAllBytes($preferencePath, $preferenceBackup)
+        }
+        elseif (Test-Path -LiteralPath $preferencePath) {
+            Remove-Item -LiteralPath $preferencePath -Force
+        }
+    }
+}
+
+function Set-DockMagnification([string]$path, [bool]$enabled) {
+    $value = if ($enabled) { 'true' } else { 'false' }
+    $lines = if (Test-Path -LiteralPath $path) { @(Get-Content -LiteralPath $path) } else { @() }
+    $found = $false
+    $updated = foreach ($line in $lines) {
+        if ($line -like 'dock_magnification=*') { $found = $true; "dock_magnification=$value" } else { $line }
+    }
+    if (-not $found) { $updated = @($updated) + "dock_magnification=$value" }
+    $directory = Split-Path -Parent $path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    Set-Content -LiteralPath $path -Value $updated -Encoding UTF8
+}
+
+function Run-DockSettingsFlow {
+    $preferencePath = Join-Path $env:LOCALAPPDATA 'otto-os\plugins.txt'
+    $backup = if (Test-Path -LiteralPath $preferencePath) { [IO.File]::ReadAllBytes($preferencePath) } else { $null }
+    $process = $null
+    try {
+        Set-DockMagnification $preferencePath $false
+        $process = Start-Otto 'dock-settings'
+        $bar = Get-BarMetrics $process
+        $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
+        if (-not $dock) { throw 'OttoDockBar is not visible.' }
+        $shot = Save-Screenshot 'dock-settings' '00-before'
+        $light = [int](Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme
+        $hint = if ($light -eq 1) { @(245, 245, 250) } else { @(33, 33, 41) }
+        $manifest = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'tests\visual\reference\manifest.json') | ConvertFrom-Json
+        $pill = Find-DockPill $shot $dock $hint $manifest.tolerance
+        $point = Get-DockEmptyPoint $pill
+
+        $before = Read-DockPreference $preferencePath 'dock_magnification'
+        Show-DockAt ([pscustomobject]@{ X = $point.X; Y = $point.Y; Edge = $dock.Bottom - 1 })
+        Start-Sleep -Milliseconds 300
+        [OttoE2ESystem]::RightClick($point.X, $point.Y)
+        Wait-VisibleWindow $process 'OttoPopupMenu' 'Dock settings menu' 3000
+        Start-Sleep -Milliseconds 400
+        Save-Screenshot 'dock-settings' '01-menu-open' | Out-Null
+        [OttoE2ENative]::SendKey(0x28)
+        Start-Sleep -Milliseconds 150
+        [OttoE2ENative]::SendKey(0x28)
+        Start-Sleep -Milliseconds 150
+        [OttoE2ENative]::SendKey(0x0D)
+        Wait-HiddenWindow $process 'OttoPopupMenu' 'Dock settings menu to close after the choice' 3000
+        Start-Sleep -Milliseconds 800
+        $after = Read-DockPreference $preferencePath 'dock_magnification'
+        if ($null -eq $after -or $after -eq $before) {
+            throw "Choosing Magnification did not change plugins.txt (before=$before after=$after)."
+        }
+        Write-Output "CHECKPOINT_PASS scenario=dock-settings name=01-saved magnification $before -> $after"
+
+        Stop-Otto $process
+        $process = Start-Otto 'dock-settings'
+        $persisted = Read-DockPreference $preferencePath 'dock_magnification'
+        if ($persisted -ne $after) {
+            throw "Dock magnification did not survive a restart (saved=$after reloaded=$persisted)."
+        }
+        Write-Output "CHECKPOINT_PASS scenario=dock-settings name=02-persisted-after-restart magnification=$persisted"
+    }
+    finally {
+        if ($backup) {
+            [IO.File]::WriteAllBytes($preferencePath, $backup)
+        }
+        elseif (Test-Path -LiteralPath $preferencePath) {
+            Remove-Item -LiteralPath $preferencePath -Force
+        }
         if ($script:ownedProcess) { Stop-Otto $script:ownedProcess }
     }
 }
@@ -2070,6 +2198,7 @@ try {
                 'stall' { Run-StallFlow }
                 'appearance' { Run-AppearanceFlow }
                 'visual-reference' { Run-VisualReferenceFlow }
+                'dock-settings' { Run-DockSettingsFlow }
                 'audio' { Run-AudioFlow }
             }
         }

@@ -1,8 +1,8 @@
 ﻿{
-    "version":  2,
+    "version":  3,
     "tolerance":  6,
     "spreadMax":  6,
-    "recordedAt":  "2026-11-12T16:27:02.8310831Z",
+    "recordedAt":  "2026-11-12T16:46:30.1608873Z",
     "recordedDpi":  144,
     "recordedWallpaper":  "C:\\Users\\howlil\\Downloads\\macos-monterey-wwdc-21-stock-5k-3840x2160-5584.jpg",
     "modes":  {
@@ -12,6 +12,11 @@
                                                         28,
                                                         33
                                                     ],
+                                      "notch-core":  [
+                                                         0,
+                                                         0,
+                                                         0
+                                                     ],
                                       "dock-fill-hint":  [
                                                              33,
                                                              33,
@@ -25,6 +30,20 @@
                                                         33,
                                                         33,
                                                         41
+                                                    ],
+                                      "menu-fill-hint":  [
+                                                             36,
+                                                             36,
+                                                             43
+                                                         ],
+                                      "menu-fill-offset":  [
+                                                               0,
+                                                               3
+                                                           ],
+                                      "menu-fill":  [
+                                                        36,
+                                                        36,
+                                                        43
                                                     ]
                                   },
                   "light-opaque":  {
@@ -33,6 +52,11 @@
                                                          240,
                                                          245
                                                      ],
+                                       "notch-core":  [
+                                                          0,
+                                                          0,
+                                                          0
+                                                      ],
                                        "dock-fill-hint":  [
                                                               245,
                                                               245,
@@ -46,6 +70,20 @@
                                                          245,
                                                          245,
                                                          250
+                                                     ],
+                                       "menu-fill-hint":  [
+                                                              247,
+                                                              247,
+                                                              252
+                                                          ],
+                                       "menu-fill-offset":  [
+                                                                0,
+                                                                3
+                                                            ],
+                                       "menu-fill":  [
+                                                         247,
+                                                         247,
+                                                         252
                                                      ]
                                    }
               }

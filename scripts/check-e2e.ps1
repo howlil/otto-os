@@ -64,7 +64,15 @@ if ($manifest) {
         if ($hint.Count -ne 3) {
             $failures.Add("$mode/dock-fill-hint must have three channels")
         }
-        foreach ($surface in 'bar-empty', 'dock-pill') {
+        $menuHint = @($modeEntry.'menu-fill-hint')
+        if ($menuHint.Count -ne 3) {
+            $failures.Add("$mode/menu-fill-hint must have three channels")
+        }
+        $menuOffset = @($modeEntry.'menu-fill-offset')
+        if ($menuOffset.Count -ne 2) {
+            $failures.Add("$mode/menu-fill-offset must have two values")
+        }
+        foreach ($surface in 'bar-empty', 'notch-core', 'dock-pill', 'menu-fill') {
             $value = $modeEntry.$surface
             if ($null -eq $value) { continue }
             $channels = @($value)
