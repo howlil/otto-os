@@ -15,7 +15,7 @@ Last updated: 2026-11-12, branch `otto/m07-dock`.
 | M01 | Safety and resources | RAII render resources, pixel limits (DEC-31), shell recovery | Done | None |
 | M02 | Lifecycle | AppBar registration, recovery, graceful shutdown (DEC-26, DEC-28) | Done | None |
 | M03 | Bar model and window identity | DEC-27 | Done | None |
-| M04 | Bar keyboard and accessibility | DEC-39 (Ctrl+F2 focus mode) | Partial | UI Automation provider, Tab traversal, Dock and panel keyboard focus, pointer-capture audit |
+| M04 | Bar keyboard and accessibility | DEC-39 (Ctrl+F2 focus mode), DEC-50 (Tab, Dock focus, capture audit) | Partial | UI Automation provider (deferred to its own slice), keyboard focus in the notch panel and popups, live keyboard E2E run |
 | M05 | Material and visual reference | DEC-40, DEC-41, DEC-42 | Partial | Versioned visual reference set per surface, mode, scale, and wallpaper |
 | M06 | Interaction model | Not separated in the notes; overlaps M03 and M04 | Undefined | Define the scope, or fold into M04 |
 | M07 | Dock gate | DEC-47 | Done | None |

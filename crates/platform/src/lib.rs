@@ -2,6 +2,7 @@ mod actions;
 mod appbar;
 mod audio;
 mod blur;
+mod capture;
 mod com;
 mod control_center;
 mod dock;
@@ -38,6 +39,7 @@ pub use appbar::{
 };
 pub use audio::{set_system_volume, shutdown_audio_task, step_system_volume, toggle_system_mute};
 pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
+pub use capture::release_capture_if_owned;
 pub use control_center::WindowsControlCenter;
 pub use dock::{
     ActiveWindowTarget, DockEntry, DockItemKind, IconBitmap, OVERFLOW_ENTRY_KEY, PinnedApp,
@@ -57,8 +59,8 @@ pub use idle_wake::{
 };
 pub use instance::InstanceGuard;
 pub use keyboard_hook::{
-    install_keyboard_hook, is_routing_bar_keys, route_bar_keys, stop_routing_bar_keys,
-    uninstall_keyboard_hook,
+    install_keyboard_hook, is_routing_bar_keys, route_bar_keys, routes_keys_to,
+    stop_routing_bar_keys, stop_routing_if_targets, uninstall_keyboard_hook,
 };
 pub use lyrics::{
     LyricsOutcome, LyricsRequest, LyricsResponse, LyricsService, LyricsSource, clean_track_title,

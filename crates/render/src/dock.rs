@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
-use otto_core::{Appearance, AppleIconKind, DockItemLayout, DockLayout, PixelLimits, scale};
+use otto_core::{
+    Appearance, AppleIconKind, DockItemLayout, DockLayout, PixelLimits, ShapeTokens, scale,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
@@ -59,6 +61,7 @@ const fn rgb(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct DockRenderItem<'a> {
     pub key: &'a str,
     pub title: &'a str,
@@ -66,6 +69,7 @@ pub struct DockRenderItem<'a> {
     pub running: bool,
     pub active: bool,
     pub hidden: bool,
+    pub focused: bool,
 }
 
 pub struct DockRenderer {
@@ -236,6 +240,10 @@ impl DockRenderer {
                             dot_brush
                         };
                         self.target.FillEllipse(&ellipse, b);
+                    }
+
+                    if item.focused {
+                        self.draw_focus_ring(&effective_slot);
                     }
                 }
 
@@ -945,6 +953,30 @@ impl DockRenderer {
             }
         }
         Ok(())
+    }
+
+    fn draw_focus_ring(&self, slot: &DockItemLayout) {
+        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
+        let stroke = shape.focus_ring_width as f32;
+        let inset = stroke * 0.5;
+        let rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: slot.x + inset - 2.0,
+                top: slot.y + inset - 2.0,
+                right: slot.x + slot.size - inset + 2.0,
+                bottom: slot.y + slot.size - inset + 2.0,
+            },
+            radiusX: shape.focus_ring_radius as f32,
+            radiusY: shape.focus_ring_radius as f32,
+        };
+        unsafe {
+            self.target.DrawRoundedRectangle(
+                &rect,
+                &self.brushes.text_primary,
+                stroke,
+                &self.stroke_style,
+            );
+        }
     }
 
     fn draw_pill(&self, layout: &DockLayout, palette: &LiquidGlassPalette) {

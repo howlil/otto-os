@@ -4,26 +4,28 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockInput, DockLayout,
-    DockMetrics, DockPreferences, MotionMetrics, MotionPreference, Rect, StableOrder, TickCadence,
-    WindowCommand, WindowIdentity, advance_bounce_phase, animate_value, bounce_offset,
-    compute_dock_layout, dock_activation_effect, dock_capacity, dock_command_effect,
-    dock_drop_effect, scale, split_dock_overflow,
+    BarKey, ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockFocus,
+    DockFocusOutcome, DockInput, DockLayout, DockMetrics, DockPreferences, MotionMetrics,
+    MotionPreference, Rect, StableOrder, TickCadence, WindowCommand, WindowIdentity,
+    advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout,
+    dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, scale,
+    split_dock_overflow,
 };
+use otto_platform::release_capture_if_owned;
 use otto_platform::{
     DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
     cursor_position, empty_recycle_bin, enable_drag_accept_files, execute_window_command,
     extract_dock_icon, extract_dropped_files, has_maximized_or_fullscreen_window, hide_application,
     is_escape_down, is_window_minimized, launch_new_instance, motion_preference,
     open_file_with_dock_entry, other_applications_visible, overflow_dock_entry, primary_screen,
-    quit_application, remove_pinned_app, reorder_pinned_apps, show_application,
-    shutdown_recycle_bin_task, signal_command_failure, toggle_pin_entry, watch_bottom_edge,
-    window_change_generations,
+    quit_application, remove_pinned_app, reorder_pinned_apps, route_bar_keys, routes_keys_to,
+    show_application, shutdown_recycle_bin_task, signal_command_failure, stop_routing_if_targets,
+    toggle_pin_entry, watch_bottom_edge, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos,
@@ -42,6 +44,7 @@ const DOCK_ENTRIES_FALLBACK_TICKS: u32 = 14;
 const DOCK_COVER_FALLBACK_TICKS: u32 = 7;
 const DOCK_IDLE_MS: u32 = 1000;
 const DOCK_REVEAL_BAND: i32 = 6;
+const WM_APP_DOCK_KEY: u32 = 0x8000 + 23;
 const DOCK_IDLE_AFTER_TICKS: u32 = 14;
 
 struct AnimState {
@@ -99,6 +102,7 @@ pub(crate) struct Dock {
     cover_gate: ChangeGate,
     covered: bool,
     cadence: TickCadence,
+    focus: DockFocus,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
@@ -157,6 +161,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         cover_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
         covered: false,
         cadence: TickCadence::new(DOCK_POLL_MS, DOCK_IDLE_MS, DOCK_IDLE_AFTER_TICKS),
+        focus: DockFocus::default(),
     };
     dock.place();
     dock.present(runtime);
@@ -191,11 +196,20 @@ pub fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
-    if matches!(message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP) {
+    if matches!(
+        message,
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY
+    ) {
         wake(runtime);
     }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
+        WM_APP_DOCK_KEY => {
+            if let Some(key) = BarKey::from_code(wparam.0) {
+                with_dock(runtime, |dock| dock.on_dock_key(runtime, key));
+            }
+            Some(LRESULT(0))
+        }
         WM_TIMER if wparam.0 == DOCK_POLL_TIMER => {
             with_dock(runtime, |dock| dock.on_poll_timer(runtime));
             Some(LRESULT(0))
@@ -249,6 +263,19 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
+}
+
+pub fn keyboard_entry_count(runtime: &RuntimeContext) -> usize {
+    runtime
+        .dock
+        .try_borrow()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|dock| dock.combined_entries().len()))
+        .unwrap_or(0)
+}
+
+pub fn enter_keyboard_focus(runtime: &RuntimeContext, from_end: bool) {
+    with_dock(runtime, |dock| dock.enter_keyboard_focus(runtime, from_end));
 }
 
 pub fn wake(runtime: &RuntimeContext) {
@@ -407,9 +434,7 @@ impl Dock {
     fn cancel_drag(&mut self) {
         if self.drag.start_idx.is_some() {
             self.drag = DragState::default();
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            let _ = release_capture_if_owned(self.hwnd);
         }
     }
 
@@ -661,7 +686,9 @@ impl Dock {
             self.screen.height,
         );
         let reveal_needs_polling = fullscreen_or_max && (!hidden || generations.is_none());
+        self.sync_keyboard_focus(runtime);
         let busy = dirty
+            || self.focus.is_active()
             || reveal_needs_polling
             || self.hovering
             || self.anim.timer_running
@@ -867,9 +894,7 @@ impl Dock {
         let Some(start_idx) = drag.start_idx else {
             return;
         };
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        let _ = release_capture_if_owned(self.hwnd);
         if drag.is_dragging {
             self.on_drop(runtime, start_idx, x, y);
         } else {
@@ -933,6 +958,56 @@ impl Dock {
         let Some(idx) = self.layout.hit_test(x, y, gap_pad) else {
             return;
         };
+        self.activate_index(runtime, idx);
+    }
+
+    fn on_dock_key(&mut self, runtime: &RuntimeContext, key: BarKey) {
+        let count = self.combined_entries().len();
+        match self.focus.handle(key, count) {
+            DockFocusOutcome::Moved(_) => self.present(runtime),
+            DockFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
+            DockFocusOutcome::Activate(index) => {
+                self.leave_keyboard_focus(runtime);
+                self.activate_index(runtime, index);
+            }
+            DockFocusOutcome::ReturnToBar => {
+                self.leave_keyboard_focus(runtime);
+                crate::bar::enter_keyboard_focus_from_dock(runtime, key == BarKey::PreviousTab);
+            }
+            DockFocusOutcome::Unchanged => {}
+        }
+    }
+
+    fn enter_keyboard_focus(&mut self, runtime: &RuntimeContext, from_end: bool) {
+        let count = self.combined_entries().len();
+        if self.focus.enter(count, from_end).is_some() && route_bar_keys(self.hwnd, WM_APP_DOCK_KEY)
+        {
+            self.present(runtime);
+        } else {
+            self.focus.exit();
+        }
+    }
+
+    fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        stop_routing_if_targets(self.hwnd);
+        if self.focus.exit() {
+            self.present(runtime);
+        }
+    }
+
+    fn sync_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        if !self.focus.is_active() {
+            return;
+        }
+        if !routes_keys_to(self.hwnd) {
+            self.focus.exit();
+            self.present(runtime);
+        } else if self.focus.revalidate(self.combined_entries().len()) {
+            self.present(runtime);
+        }
+    }
+
+    fn activate_index(&mut self, runtime: &RuntimeContext, idx: usize) {
         let all = self.combined_entries();
         let Some(entry) = all.get(idx).cloned() else {
             return;
@@ -1101,13 +1176,15 @@ impl Dock {
         let all = self.combined_entries();
         let render_items: Vec<DockRenderItem<'_>> = all
             .iter()
-            .map(|e| DockRenderItem {
+            .enumerate()
+            .map(|(index, e)| DockRenderItem {
                 key: &e.key,
                 title: &e.title,
                 apple_icon: e.apple_icon,
                 running: e.running,
                 active: e.active,
                 hidden: e.hidden,
+                focused: self.focus.current() == Some(index),
             })
             .collect();
         let appearance = crate::theme_state::appearance(runtime);

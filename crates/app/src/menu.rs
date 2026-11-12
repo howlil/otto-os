@@ -13,6 +13,7 @@ use otto_core::{
     dock_settings_rows, downloads_effect, overflow_menu_target, scale, shift_month,
     window_menu_effect,
 };
+use otto_platform::release_capture_if_owned;
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
     build_dock_context_menu_rows, current_process_id, cursor_position, execute_top_bar_command,
@@ -21,7 +22,7 @@ use otto_platform::{
 };
 use otto_render::PopupMenuRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SetTimer, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE,
@@ -747,9 +748,7 @@ impl PopupMenu {
 
     fn end_slider_drag(&mut self) {
         if self.dragging_row.take().is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            let _ = release_capture_if_owned(self.hwnd);
         }
     }
 

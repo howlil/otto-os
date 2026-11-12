@@ -41,16 +41,20 @@ pub enum BarKey {
     Last,
     Activate,
     Exit,
+    PreviousTab,
+    NextTab,
 }
 
 impl BarKey {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Previous,
         Self::Next,
         Self::First,
         Self::Last,
         Self::Activate,
         Self::Exit,
+        Self::PreviousTab,
+        Self::NextTab,
     ];
 
     #[must_use]
@@ -96,6 +100,21 @@ impl BarFocus {
         self.current
     }
 
+    pub fn enter_last(&mut self, targets: &[HitTarget]) -> Option<HitTarget> {
+        self.current = targets.last().copied();
+        self.current
+    }
+
+    #[must_use]
+    pub fn dock_handoff(&self, key: BarKey, targets: &[HitTarget]) -> Option<bool> {
+        let current = self.current?;
+        match key {
+            BarKey::NextTab if targets.last() == Some(&current) => Some(false),
+            BarKey::PreviousTab if targets.first() == Some(&current) => Some(true),
+            _ => None,
+        }
+    }
+
     pub fn exit(&mut self) -> bool {
         self.current.take().is_some()
     }
@@ -124,12 +143,14 @@ impl BarFocus {
         }
         let last = targets.len() - 1;
         let index = targets.iter().position(|target| *target == current);
-        let next = match (key, index) {
-            (BarKey::First, _) | (BarKey::Next, None) => 0,
-            (BarKey::Last, _) | (BarKey::Previous, None) => last,
-            (BarKey::Next, Some(index)) => (index + 1) % targets.len(),
-            (BarKey::Previous, Some(index)) => index.checked_sub(1).unwrap_or(last),
-            (BarKey::Activate | BarKey::Exit, _) => return BarFocusOutcome::Unchanged,
+        let next = match key {
+            BarKey::First => 0,
+            BarKey::Last => last,
+            BarKey::Next | BarKey::NextTab => index.map_or(0, |index| (index + 1) % targets.len()),
+            BarKey::Previous | BarKey::PreviousTab => {
+                index.map_or(last, |index| index.checked_sub(1).unwrap_or(last))
+            }
+            BarKey::Activate | BarKey::Exit => return BarFocusOutcome::Unchanged,
         };
         let target = targets[next];
         self.current = Some(target);
@@ -260,17 +281,49 @@ mod tests {
     }
 
     #[test]
+    fn tab_keys_step_like_arrows() {
+        let mut focus = focused();
+        assert_eq!(
+            focus.handle(BarKey::NextTab, &TARGETS),
+            BarFocusOutcome::Moved(HitTarget::AppMenu)
+        );
+        assert_eq!(
+            focus.handle(BarKey::PreviousTab, &TARGETS),
+            BarFocusOutcome::Moved(HitTarget::Start)
+        );
+        assert_eq!(
+            focus.handle(BarKey::PreviousTab, &TARGETS),
+            BarFocusOutcome::Moved(HitTarget::Clock)
+        );
+    }
+
+    #[test]
+    fn tab_past_either_end_hands_over_to_the_dock() {
+        let mut focus = focused();
+        assert_eq!(focus.dock_handoff(BarKey::NextTab, &TARGETS), None);
+        focus.handle(BarKey::Last, &TARGETS);
+        assert_eq!(focus.dock_handoff(BarKey::NextTab, &TARGETS), Some(false));
+        assert_eq!(focus.dock_handoff(BarKey::PreviousTab, &TARGETS), None);
+        focus.handle(BarKey::First, &TARGETS);
+        assert_eq!(
+            focus.dock_handoff(BarKey::PreviousTab, &TARGETS),
+            Some(true)
+        );
+        assert_eq!(focus.dock_handoff(BarKey::Next, &TARGETS), None);
+    }
+
+    #[test]
+    fn enter_last_focuses_the_final_target() {
+        let mut focus = BarFocus::default();
+        assert_eq!(focus.enter_last(&TARGETS), Some(HitTarget::Clock));
+        assert_eq!(focus.enter_last(&[]), None);
+    }
+
+    #[test]
     fn key_codes_round_trip() {
-        for key in [
-            BarKey::Previous,
-            BarKey::Next,
-            BarKey::First,
-            BarKey::Last,
-            BarKey::Activate,
-            BarKey::Exit,
-        ] {
+        for key in BarKey::ALL {
             assert_eq!(BarKey::from_code(key.code()), Some(key));
         }
-        assert_eq!(BarKey::from_code(99), None);
+        assert_eq!(BarKey::from_code(BarKey::ALL.len()), None);
     }
 }

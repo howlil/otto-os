@@ -11,20 +11,21 @@ use otto_core::{
     NotchLayoutInput, NotchPort, NowPlaying, TickCadence, compute_layout_with_notch,
     detect_hud_event, is_top_bar_menu_target, scale,
 };
+use otto_platform::release_capture_if_owned;
 use otto_platform::{
     AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
     WindowsNotchPort, acknowledge_idle_wake, adjust_volume, apply_backdrop_material,
     current_process_id, cursor_position, enable_backdrop_blur, foreground_application,
-    is_escape_down, is_routing_bar_keys, motion_preference, open_quick_settings,
-    open_spotlight_search, primary_screen, read_system_status, register_idle_wake,
-    register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys, step_display_brightness,
-    stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow, unregister_idle_wake,
+    is_escape_down, motion_preference, open_quick_settings, open_spotlight_search, primary_screen,
+    read_system_status, register_idle_wake, register_notch_hotkeys, restore_shell_from_recovery,
+    route_bar_keys, routes_keys_to, step_display_brightness, stop_routing_bar_keys,
+    stop_routing_if_targets, suppress_native_osd, toggle_tray_overflow, unregister_idle_wake,
     unregister_notch_hotkeys, watch_top_edge, window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
@@ -471,11 +472,7 @@ impl Bar {
                 effect: None,
             }
         };
-        if hwnd != 0 {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
-        }
+        let _ = release_capture_if_owned(hwnd);
         if let Some(NotchEffect::Platform(action)) = update.effect {
             self.notch_port.execute(action);
         }
@@ -901,8 +898,27 @@ impl Bar {
         }
     }
 
+    fn enter_from_dock(&mut self, runtime: &RuntimeContext, from_end: bool) {
+        if !self.visibility.is_visible() {
+            stop_routing_if_targets(self.hwnd);
+            return;
+        }
+        let targets = self.layout.keyboard_targets();
+        let entered = if from_end {
+            self.focus.enter_last(&targets)
+        } else {
+            self.focus.enter(&targets)
+        };
+        if entered.is_some() && route_bar_keys(self.hwnd, WM_APP_BAR_KEY) {
+            self.present(runtime);
+        } else {
+            self.focus.exit();
+            stop_routing_if_targets(self.hwnd);
+        }
+    }
+
     fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
-        stop_routing_bar_keys();
+        stop_routing_if_targets(self.hwnd);
         if self.focus.exit() {
             self.present(runtime);
         }
@@ -912,7 +928,7 @@ impl Bar {
         if !self.focus.is_active() {
             return;
         }
-        if !is_routing_bar_keys() || !self.visibility.is_visible() {
+        if !routes_keys_to(self.hwnd) || !self.visibility.is_visible() {
             self.leave_keyboard_focus(runtime);
         } else if self.focus.revalidate(&self.layout.keyboard_targets()) {
             self.present(runtime);
@@ -921,6 +937,14 @@ impl Bar {
 
     fn on_bar_key(&mut self, runtime: &RuntimeContext, key: BarKey) {
         let targets = self.layout.keyboard_targets();
+        if let Some(from_end) = self.focus.dock_handoff(key, &targets)
+            && crate::dock::keyboard_entry_count(runtime) > 0
+        {
+            self.focus.exit();
+            crate::dock::enter_keyboard_focus(runtime, from_end);
+            self.present(runtime);
+            return;
+        }
         match self.focus.handle(key, &targets) {
             BarFocusOutcome::Moved(_) => self.present(runtime),
             BarFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
@@ -1280,4 +1304,8 @@ impl Bar {
             );
         }
     }
+}
+
+pub fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) {
+    with_bar(runtime, |bar| bar.enter_from_dock(runtime, from_end));
 }

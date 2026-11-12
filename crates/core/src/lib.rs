@@ -4,6 +4,7 @@ mod bar_visibility;
 mod calendar;
 mod change_gate;
 mod dock;
+mod dock_focus;
 mod effects;
 mod genie;
 mod island;
@@ -38,6 +39,7 @@ pub use dock::{
     compute_dock_layout, dock_capacity, select_dock_click_window, smooth_damp, split_dock_overflow,
     step_toward,
 };
+pub use dock_focus::{DockFocus, DockFocusOutcome};
 pub use effects::{
     CMD_DOCK_OVERFLOW_BASE, CMD_DOCK_SIZE_LARGE, CMD_DOCK_SIZE_MEDIUM, CMD_DOCK_SIZE_SMALL,
     CMD_DOCK_TOGGLE_HIDING, CMD_DOCK_TOGGLE_MAGNIFICATION, CMD_DOWNLOADS_ITEM_BASE,

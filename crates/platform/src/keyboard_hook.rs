@@ -10,8 +10,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
-    VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+    GetAsyncKeyState, VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW,
@@ -58,7 +58,7 @@ fn volume_key(virtual_key: u32, flags: u32) -> Option<VolumeKey> {
     }
 }
 
-fn bar_key(virtual_key: u32, flags: u32) -> Option<BarKey> {
+fn bar_key(virtual_key: u32, flags: u32, shift_down: bool) -> Option<BarKey> {
     if flags & INJECTED_FLAG != 0 {
         return None;
     }
@@ -72,8 +72,14 @@ fn bar_key(virtual_key: u32, flags: u32) -> Option<BarKey> {
             Some(BarKey::Activate)
         }
         key if key == VK_ESCAPE.0 => Some(BarKey::Exit),
+        key if key == VK_TAB.0 && shift_down => Some(BarKey::PreviousTab),
+        key if key == VK_TAB.0 => Some(BarKey::NextTab),
         _ => None,
     }
+}
+
+fn shift_is_down() -> bool {
+    unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0 }
 }
 
 fn now_ms() -> u64 {
@@ -99,6 +105,19 @@ pub fn route_bar_keys(target_hwnd: isize, message: u32) -> bool {
 pub fn stop_routing_bar_keys() {
     ROUTE_TARGET.store(0, Ordering::Release);
     ROUTE_DEADLINE_MS.store(0, Ordering::Release);
+}
+
+#[must_use]
+pub fn routes_keys_to(target_hwnd: isize) -> bool {
+    target_hwnd != 0
+        && ROUTE_TARGET.load(Ordering::Acquire) == target_hwnd
+        && route_live(ROUTE_DEADLINE_MS.load(Ordering::Acquire), now_ms())
+}
+
+pub fn stop_routing_if_targets(target_hwnd: isize) {
+    if target_hwnd != 0 && ROUTE_TARGET.load(Ordering::Acquire) == target_hwnd {
+        stop_routing_bar_keys();
+    }
 }
 
 #[must_use]
@@ -157,7 +176,7 @@ fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
     if event.vkCode == u32::from(VK_CAPITAL.0) {
         crate::idle_wake::request_idle_wake();
     }
-    if let Some(key) = bar_key(event.vkCode, event.flags.0) {
+    if let Some(key) = bar_key(event.vkCode, event.flags.0, shift_is_down()) {
         return route_bar_key(key, is_key_down(wparam.0));
     }
     let Some(key) = volume_key(event.vkCode, event.flags.0) else {
@@ -278,7 +297,7 @@ mod tests {
 
     #[test]
     fn maps_navigation_keys_to_bar_keys() {
-        let key = |vk: u16| bar_key(u32::from(vk), 0);
+        let key = |vk: u16| bar_key(u32::from(vk), 0, false);
         assert_eq!(key(VK_LEFT.0), Some(BarKey::Previous));
         assert_eq!(key(VK_RIGHT.0), Some(BarKey::Next));
         assert_eq!(key(VK_HOME.0), Some(BarKey::First));
@@ -287,8 +306,20 @@ mod tests {
         assert_eq!(key(VK_SPACE.0), Some(BarKey::Activate));
         assert_eq!(key(VK_DOWN.0), Some(BarKey::Activate));
         assert_eq!(key(VK_ESCAPE.0), Some(BarKey::Exit));
-        assert_eq!(key(VK_TAB.0), None);
-        assert_eq!(bar_key(u32::from(VK_LEFT.0), INJECTED_FLAG), None);
+        assert_eq!(bar_key(u32::from(VK_LEFT.0), INJECTED_FLAG, false), None);
+    }
+
+    #[test]
+    fn tab_moves_forward_and_shift_tab_moves_back() {
+        assert_eq!(
+            bar_key(u32::from(VK_TAB.0), 0, false),
+            Some(BarKey::NextTab)
+        );
+        assert_eq!(
+            bar_key(u32::from(VK_TAB.0), 0, true),
+            Some(BarKey::PreviousTab)
+        );
+        assert_eq!(bar_key(u32::from(VK_TAB.0), INJECTED_FLAG, false), None);
     }
 
     #[test]
