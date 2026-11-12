@@ -313,7 +313,11 @@ impl AppInfo {
                 }
             }
             AppCommand::ShowAll => {
-                if any_presence(WindowPresence::Hidden) {
+                if self
+                    .windows
+                    .iter()
+                    .any(|window| window.presence == WindowPresence::Hidden)
+                {
                     Capability::Available
                 } else {
                     Capability::TemporarilyUnavailable
@@ -324,13 +328,27 @@ impl AppInfo {
                     Capability::Unsupported
                 } else if elevated {
                     Capability::Denied
-                } else if self.primary_windows().any(|window| window.traits.closable) {
-                    Capability::Available
                 } else {
-                    Capability::Unsupported
+                    closing_capability(self.primary_windows())
                 }
             }
         }
+    }
+}
+
+fn closing_capability<'a>(windows: impl Iterator<Item = &'a WindowInfo>) -> Capability {
+    windows
+        .map(|window| window.capability(WindowCommand::Close))
+        .max_by_key(|capability| capability_rank(*capability))
+        .unwrap_or(Capability::Unsupported)
+}
+
+const fn capability_rank(capability: Capability) -> u8 {
+    match capability {
+        Capability::Available => 3,
+        Capability::TemporarilyUnavailable => 2,
+        Capability::Denied => 1,
+        Capability::Unsupported => 0,
     }
 }
 
@@ -402,21 +420,14 @@ pub fn decide_activation(app: &AppInfo) -> Activation {
         .copied()
         .filter(|window| window.presence == WindowPresence::Visible)
         .collect();
-    if let Some(active_index) = primary.iter().position(|window| window.active) {
-        if visible.len() > 1 {
-            let active = primary[active_index].identity;
-            let position = visible
-                .iter()
-                .position(|window| window.identity == active)
-                .unwrap_or(0);
-            return Activation::Focus(visible[(position + 1) % visible.len()].identity);
-        }
-        return Activation::Focus(primary[active_index].identity);
+    if visible.is_empty() {
+        return Activation::Restore(first.identity);
     }
-    match visible.first() {
-        Some(window) => Activation::Focus(window.identity),
-        None => Activation::Restore(first.identity),
-    }
+    let focused = visible
+        .iter()
+        .position(|window| window.active)
+        .map_or(0, |active| (active + 1) % visible.len());
+    Activation::Focus(visible[focused].identity)
 }
 
 #[cfg(test)]
@@ -677,6 +688,67 @@ mod tests {
         let changed = [String::from("d"), String::from("c"), String::from("a")];
         assert_eq!(order.arrange(&changed), vec![2, 1, 0]);
         assert_eq!(order.keys(), ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn quit_is_offered_only_when_some_primary_window_can_take_a_close_request() {
+        let mut hung = window(1, 10, "editor.exe");
+        hung.traits.responding = false;
+        assert_eq!(
+            app(vec![hung.clone()]).capability(AppCommand::Quit, false),
+            Capability::TemporarilyUnavailable
+        );
+        let responsive = window(2, 10, "editor.exe");
+        assert_eq!(
+            app(vec![hung, responsive]).capability(AppCommand::Quit, false),
+            Capability::Available
+        );
+        let mut fixed = window(3, 20, "tool.exe");
+        fixed.traits.closable = false;
+        assert_eq!(
+            app(vec![fixed]).capability(AppCommand::Quit, false),
+            Capability::Unsupported
+        );
+    }
+
+    #[test]
+    fn show_all_reaches_a_hidden_owned_dialog_of_a_visible_application() {
+        let mut dialog = window(5, 10, "editor.exe");
+        dialog.role = WindowRole::OwnedDialog;
+        dialog.presence = WindowPresence::Hidden;
+        let application = app(vec![window(1, 10, "editor.exe"), dialog]);
+        assert_eq!(
+            application.capability(AppCommand::ShowAll, false),
+            Capability::Available
+        );
+    }
+
+    #[test]
+    fn activation_never_targets_a_minimized_window_marked_active() {
+        let mut parked_active = window(1, 10, "editor.exe");
+        parked_active.active = true;
+        parked_active.presence = WindowPresence::Minimized;
+        let first_visible = window(2, 10, "editor.exe");
+        let second_visible = window(3, 10, "editor.exe");
+        let application = app(vec![
+            parked_active.clone(),
+            first_visible.clone(),
+            second_visible,
+        ]);
+        assert_eq!(
+            decide_activation(&application),
+            Activation::Focus(first_visible.identity)
+        );
+        let alone = app(vec![parked_active.clone(), first_visible.clone()]);
+        assert_eq!(
+            decide_activation(&alone),
+            Activation::Focus(first_visible.identity)
+        );
+        let only_parked = app(vec![parked_active.clone()]);
+        assert_eq!(
+            decide_activation(&only_parked),
+            Activation::Restore(parked_active.identity)
+        );
     }
 
     #[test]
