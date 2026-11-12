@@ -15,7 +15,7 @@ Last updated: 2026-11-12, branch `otto/m07-dock`, after commit `34153b8`.
 | Priority | Milestone | Why | Next concrete step |
 |---|---|---|---|
 | P1 | M04 keyboard and accessibility | Tab, Dock focus, and Escape are committed (`a5c3b77`, `ef238a6`). Live `keyboard-dock` passes on a clean desktop. Real key presses through the low-level hook are still untested. | Manual check of Ctrl+F2, End, Tab, Escape by the user; then decide whether a UIA slice starts. |
-| P1 | M05 visual reference | Recorded and verifies (DEC-51, `ef238a6`). The Dock sample is wallpaper-only, so it does not check the Dock theme colour. | Find an opaque Dock sample point, or accept the limitation and move to menus and notch. |
+| P1 | M05 visual reference | Dock sample fixed: it finds the pill from the fill hint and records the opaque Dock colour (33,33,41 dark, 245,245,250 light). Verifies on a clean desktop. | Menus, notch, and high contrast; scale in the manifest; live wallpaper-change check. |
 | P2 | M07.6 Dock preferences | Code is done; the live settings menu has never been checked. | Check the Dock right-click menu in the next quiet desktop session. |
 | P2 | G1 idle CPU | Target 0% not met. Three quiet samples of the same build read 0.31 %, 0.73 %, and 1.04 %, so DEC-52 is not shown to help. | Measure on a desktop with other apps closed, then keep or revert DEC-52. |
 | P2 | M13 MSIX qualification | Not started. Blocks shipping, but has no detailed scope. | Decide whether it is a release blocker; then write the qualification checklist. |
@@ -32,7 +32,7 @@ Last updated: 2026-11-12, branch `otto/m07-dock`, after commit `34153b8`.
 | M02 | Lifecycle | AppBar registration, recovery, graceful shutdown (DEC-26, DEC-28) | Done | None |
 | M03 | Bar model and window identity | DEC-27 | Done | None |
 | M04 | Bar keyboard and accessibility | DEC-39, DEC-50, commits `a5c3b77`, `40824c8`, `ef238a6`; live `keyboard-dock` passes | Partial | Manual hook check; UIA provider (deferred); notch and popup focus |
-| M05 | Material and visual reference | DEC-40 to DEC-42, DEC-51 (recorded, verifies) | Partial | Opaque Dock sample point; menus, notch, high contrast; scale in the manifest |
+| M05 | Material and visual reference | DEC-40 to DEC-42, DEC-51 (Dock sample fixed; recorded and verifies) | Partial | Menus, notch, high contrast; scale; live wallpaper-change check |
 | M06 | Interaction model | Not separated in the notes; overlaps M03 and M04 | Undefined | Define the scope, or fold into M04 |
 | M07 | Dock gate | DEC-47 | Done | None |
 | M07.6 | Dock preferences | DEC-48 | Partial | Live check of the settings menu |

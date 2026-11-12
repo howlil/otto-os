@@ -1842,12 +1842,44 @@ function Set-PersonalizeValue([string]$name, $value) {
     }
 }
 
-function Get-DockPillRegion($dock) {
+function Find-DockPill([string]$path, $dock, [int[]]$hint, [int]$tolerance) {
+    $bitmap = [System.Drawing.Bitmap]::new($path)
+    try {
+        $minX = [int]::MaxValue; $minY = [int]::MaxValue
+        $maxX = -1; $maxY = -1
+        $bottom = [Math]::Min($bitmap.Height - 1, $dock.Top + $dock.Height - 1)
+        $right = [Math]::Min($bitmap.Width - 1, $dock.Left + $dock.Width - 1)
+        for ($y = [Math]::Max(0, $dock.Top); $y -le $bottom; $y += 2) {
+            for ($x = [Math]::Max(0, $dock.Left); $x -le $right; $x += 2) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                if ([Math]::Abs($pixel.R - $hint[0]) -le $tolerance -and
+                    [Math]::Abs($pixel.G - $hint[1]) -le $tolerance -and
+                    [Math]::Abs($pixel.B - $hint[2]) -le $tolerance) {
+                    if ($x -lt $minX) { $minX = $x }
+                    if ($x -gt $maxX) { $maxX = $x }
+                    if ($y -lt $minY) { $minY = $y }
+                    if ($y -gt $maxY) { $maxY = $y }
+                }
+            }
+        }
+    }
+    finally {
+        $bitmap.Dispose()
+    }
+    if ($maxX -lt 0) {
+        throw "Dock pill not found: no pixel matched the fill hint ($($hint -join ','), tolerance $tolerance)."
+    }
+    return [pscustomobject]@{ X = $minX; Y = $minY; Width = $maxX - $minX + 1; Height = $maxY - $minY + 1 }
+}
+
+function Get-DockSampleRegion($pill, $offset) {
+    $centerX = $pill.X + [int]($pill.Width / 2)
+    $top = $pill.Y + (Convert-ToScaled $offset[1])
     return [pscustomobject]@{
-        X = $dock.Left + (Convert-ToScaled 24)
-        Y = $dock.Top + (Convert-ToScaled 8)
-        Width = Convert-ToScaled 12
-        Height = Convert-ToScaled 6
+        X = $centerX - (Convert-ToScaled 2)
+        Y = $top
+        Width = Convert-ToScaled 4
+        Height = Convert-ToScaled 2
     }
 }
 
@@ -1875,10 +1907,6 @@ function Run-VisualReferenceFlow {
         elseif ($manifest.recordedWallpaper -ne $currentWallpaper) {
             throw 'The wallpaper differs from the one the reference was recorded with; record it again or restore the wallpaper.'
         }
-        $regions = [ordered]@{
-            'bar-empty' = Get-EmptyBarRegion $bar
-            'dock-pill' = Get-DockPillRegion $dock
-        }
         $modes = @(
             [pscustomobject]@{ Name = 'dark-opaque'; Light = 0 },
             [pscustomobject]@{ Name = 'light-opaque'; Light = 1 }
@@ -1889,23 +1917,40 @@ function Run-VisualReferenceFlow {
             [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
             Start-Sleep -Milliseconds 1500
             $shot = Save-Screenshot 'visual-reference' $mode.Name
-            foreach ($surface in $regions.Keys) {
-                $color = Get-RegionColor $shot $regions[$surface]
-                $observed = "rgb=$($color.R),$($color.G),$($color.B) spread=$($color.Spread)"
-                if ($RecordReference) {
-                    $manifest.modes.($mode.Name).$surface = @($color.R, $color.G, $color.B)
-                    Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=$surface $observed"
-                    continue
-                }
-                $expected = $manifest.modes.($mode.Name).$surface
-                if ($null -eq $expected) {
-                    throw "$($mode.Name)/${surface}: no reference recorded; run with -RecordReference first."
-                }
-                if (-not (Test-ColorNear $color $expected $manifest.tolerance) -or $color.Spread -gt $manifest.spreadMax) {
-                    throw "$($mode.Name)/${surface}: colour drifted from the reference ($observed, expected $($expected -join ','), tolerance $($manifest.tolerance))."
-                }
-                Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/$surface $observed"
+            $modeEntry = $manifest.modes.($mode.Name)
+
+            $barColor = Get-RegionColor $shot (Get-EmptyBarRegion $bar)
+            $barObserved = "rgb=$($barColor.R),$($barColor.G),$($barColor.B) spread=$($barColor.Spread)"
+
+            $pill = Find-DockPill $shot $dock $modeEntry.'dock-fill-hint' $manifest.tolerance
+            $sample = Get-DockSampleRegion $pill $modeEntry.'dock-pill-offset'
+            $dockColor = Get-RegionColor $shot $sample
+            $dockObserved = "rgb=$($dockColor.R),$($dockColor.G),$($dockColor.B) spread=$($dockColor.Spread) pill=$($pill.X),$($pill.Y),$($pill.Width)x$($pill.Height)"
+            $wallpaperRegion = [pscustomobject]@{ X = $dock.Left + (Convert-ToScaled 4); Y = $dock.Top + (Convert-ToScaled 4); Width = Convert-ToScaled 4; Height = Convert-ToScaled 2 }
+            $wallpaperColor = Get-RegionColor $shot $wallpaperRegion
+
+            if ($RecordReference) {
+                $modeEntry.'bar-empty' = @($barColor.R, $barColor.G, $barColor.B)
+                $modeEntry.'dock-pill' = @($dockColor.R, $dockColor.G, $dockColor.B)
+                Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=bar-empty $barObserved"
+                Write-Output "REFERENCE_RECORDED mode=$($mode.Name) surface=dock-pill $dockObserved"
+                continue
             }
+
+            if ($null -eq $modeEntry.'bar-empty' -or $null -eq $modeEntry.'dock-pill') {
+                throw "$($mode.Name): no reference recorded; run with -RecordReference first."
+            }
+            if (-not (Test-ColorNear $barColor @($modeEntry.'bar-empty') $manifest.tolerance) -or $barColor.Spread -gt $manifest.spreadMax) {
+                throw "$($mode.Name)/bar-empty: colour drifted from the reference ($barObserved, expected $(@($modeEntry.'bar-empty') -join ','))."
+            }
+            if (-not (Test-ColorNear $dockColor @($modeEntry.'dock-pill') $manifest.tolerance) -or $dockColor.Spread -gt $manifest.spreadMax) {
+                throw "$($mode.Name)/dock-pill: colour drifted from the reference ($dockObserved, expected $(@($modeEntry.'dock-pill') -join ','))."
+            }
+            if (Test-ColorNear $dockColor @($wallpaperColor.R, $wallpaperColor.G, $wallpaperColor.B) 24) {
+                throw "$($mode.Name)/dock-pill: the sample matches the wallpaper outside the pill ($dockObserved), so the Dock fill was not measured."
+            }
+            Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/bar-empty $barObserved"
+            Write-Output "CHECKPOINT_PASS scenario=visual-reference name=$($mode.Name)/dock-pill $dockObserved"
         }
         if ($RecordReference) {
             $manifest.recordedAt = (Get-Date).ToUniversalTime().ToString('o')

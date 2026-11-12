@@ -56,6 +56,14 @@ if ($manifest) {
             $failures.Add("manifest has no mode '$mode'")
             continue
         }
+        $offset = @($modeEntry.'dock-pill-offset')
+        if ($offset.Count -ne 2) {
+            $failures.Add("$mode/dock-pill-offset must have two values")
+        }
+        $hint = @($modeEntry.'dock-fill-hint')
+        if ($hint.Count -ne 3) {
+            $failures.Add("$mode/dock-fill-hint must have three channels")
+        }
         foreach ($surface in 'bar-empty', 'dock-pill') {
             $value = $modeEntry.$surface
             if ($null -eq $value) { continue }
