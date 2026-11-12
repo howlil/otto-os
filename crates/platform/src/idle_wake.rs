@@ -46,12 +46,29 @@ fn store_edge_screen(screen_width: i32, screen_height: i32) {
 }
 
 fn edge_watch() -> PointerEdgeWatch {
-    let band = EDGE_BOTTOM_BAND.load(Ordering::Acquire);
+    edge_watch_from(
+        EDGE_SCREEN_WIDTH.load(Ordering::Acquire),
+        EDGE_SCREEN_HEIGHT.load(Ordering::Acquire),
+        EDGE_TOP.load(Ordering::Acquire),
+        EDGE_BOTTOM_BAND.load(Ordering::Acquire),
+    )
+}
+
+const fn edge_watch_from(
+    screen_width: i32,
+    screen_height: i32,
+    top: bool,
+    bottom_band: i32,
+) -> PointerEdgeWatch {
     PointerEdgeWatch {
-        screen_width: EDGE_SCREEN_WIDTH.load(Ordering::Acquire),
-        screen_height: EDGE_SCREEN_HEIGHT.load(Ordering::Acquire),
-        top: EDGE_TOP.load(Ordering::Acquire),
-        bottom_band: (band > 0).then_some(band),
+        screen_width,
+        screen_height,
+        top,
+        bottom_band: if bottom_band > 0 {
+            Some(bottom_band)
+        } else {
+            None
+        },
     }
 }
 
@@ -76,5 +93,32 @@ pub(crate) fn request_idle_wake() {
         unsafe { PostMessageW(Some(HWND(target as *mut _)), message, WPARAM(0), LPARAM(0)) };
     if posted.is_err() {
         WAKE_PENDING.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_watch_from;
+
+    #[test]
+    fn a_zero_band_means_no_bottom_watch() {
+        let edges = edge_watch_from(1920, 1080, false, 0);
+        assert_eq!(edges.bottom_band, None);
+        assert!(!edges.is_watching());
+    }
+
+    #[test]
+    fn a_positive_band_watches_the_bottom_rows() {
+        let edges = edge_watch_from(1920, 1080, false, 6);
+        assert_eq!(edges.bottom_band, Some(6));
+        assert!(edges.touches(960, 1079));
+        assert!(!edges.touches(960, 500));
+    }
+
+    #[test]
+    fn the_top_flag_is_carried_through() {
+        let edges = edge_watch_from(1920, 1080, true, 0);
+        assert!(edges.touches(960, 0));
+        assert!(edges.is_watching());
     }
 }
