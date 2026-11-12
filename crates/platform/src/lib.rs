@@ -2,6 +2,7 @@ mod actions;
 mod appbar;
 mod audio;
 mod blur;
+mod caption;
 mod capture;
 mod com;
 mod control_center;
@@ -40,6 +41,7 @@ pub use appbar::{
 };
 pub use audio::{set_system_volume, shutdown_audio_task, step_system_volume, toggle_system_mute};
 pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
+pub use caption::{native_caption, sample_screen_color};
 pub use capture::release_capture_if_owned;
 pub use control_center::WindowsControlCenter;
 pub use dock::{

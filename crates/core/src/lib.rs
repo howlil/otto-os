@@ -93,8 +93,9 @@ pub use status::{
 pub use theme::{ResolvedTheme, Rgba, ThemeMode};
 pub use tick_cadence::TickCadence;
 pub use window_controls::{
+    CoverStyle, NATIVE_CAPTION_BUTTON_DIP, NATIVE_CORNER_RADIUS_DIP, NativeCaption,
     NativeCaptionStyle, TrafficLightAction, TrafficLightLayout, TrafficLightMetrics,
     WindowControlAction, WindowControlsLayout, WindowControlsMetrics, WindowControlsState,
-    accepts_window_controls, compute_traffic_light_layout, compute_window_controls_layout,
-    native_minimize_button, window_controls_top,
+    accepts_window_controls, compute_cover_layout, compute_traffic_light_layout,
+    compute_window_controls_layout, window_controls_top,
 };

@@ -97,6 +97,7 @@ pub struct ActiveWindowTarget {
     pub maximized: bool,
     pub dpi: u32,
     pub on_primary: bool,
+    pub caption: Option<otto_core::NativeCaption>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +220,7 @@ pub fn active_window_target(own_pid: u32) -> Option<ActiveWindowTarget> {
         maximized,
         dpi: monitor_dpi,
         on_primary: monitor == primary,
+        caption: crate::caption::native_caption_of(target),
     })
 }
 

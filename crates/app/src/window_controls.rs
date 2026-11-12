@@ -3,17 +3,17 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{
-    Appearance, Capability, CommandOutcome, Metrics, MotionMetrics, MotionPreference,
-    WindowCommand, WindowControlAction, WindowControlsLayout, WindowControlsMetrics,
-    WindowControlsState, WindowInfo, accepts_window_controls, animate_value,
-    compute_window_controls_layout, scale, window_controls_top,
+    Appearance, Capability, CommandOutcome, CoverStyle, Metrics, MotionMetrics, MotionPreference,
+    NativeCaption, ResolvedTheme, WindowCommand, WindowControlAction, WindowControlsLayout,
+    WindowControlsMetrics, WindowControlsState, WindowInfo, accepts_window_controls, animate_value,
+    compute_cover_layout, compute_window_controls_layout, scale, window_controls_top,
 };
 use otto_platform::{
     ActiveWindowTarget, acknowledge_native_minimize, acknowledge_window_sync, active_window_target,
     current_process_id, execute_window_command, inspect_window, install_native_minimize_hook,
     install_window_tracking_hook, minimize_window_native, motion_preference,
-    poll_foreground_change, primary_screen, signal_command_failure, uninstall_native_minimize_hook,
-    uninstall_window_tracking_hook,
+    poll_foreground_change, primary_screen, sample_screen_color, signal_command_failure,
+    uninstall_native_minimize_hook, uninstall_window_tracking_hook,
 };
 use otto_render::WindowControlsRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -34,6 +34,22 @@ const WINDOW_CONTROLS_ANIM_TIMER: usize = 20;
 const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
 const GREEN_HOVER_TIMER: usize = 21;
 const GREEN_HOVER_MS: u32 = 600;
+const COVER_SAMPLE_GAP_DIP: i32 = 4;
+const FALLBACK_DARK_FILL: [u8; 3] = [0x20, 0x20, 0x20];
+const FALLBACK_LIGHT_FILL: [u8; 3] = [0xF3, 0xF3, 0xF3];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoverState {
+    caption: NativeCaption,
+    fill: [u8; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Placement {
+    Hidden,
+    Left,
+    Cover(NativeCaption),
+}
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct WindowControls {
@@ -46,7 +62,7 @@ pub(crate) struct WindowControls {
     target: Option<ActiveWindowTarget>,
     window: Option<WindowInfo>,
     state: WindowControlsState,
-    layout_dpi: u32,
+    cover: Option<CoverState>,
     render_origin: (f32, f32),
     settle_ticks: u8,
     green_hover_armed: bool,
@@ -76,7 +92,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         target: None,
         window: None,
         state: WindowControlsState::default(),
-        layout_dpi: screen.dpi,
+        cover: None,
         render_origin: (0.0, 0.0),
         settle_ticks: 0,
         green_hover_armed: false,
@@ -210,7 +226,31 @@ impl WindowControls {
             .then(|| scale(Metrics::default().notch_height, target.dpi))
     }
 
+    fn left_title_bar_visible(&self, target: ActiveWindowTarget) -> bool {
+        let height = scale(self.metrics.height, target.dpi);
+        Self::bar_height_for(target).is_none_or(|bar| target.maximized || target.top + height > bar)
+    }
+
+    fn placement(&self, target: ActiveWindowTarget) -> Placement {
+        match target.caption {
+            Some(caption) => {
+                let under_bar = Self::bar_height_for(target).is_some_and(|bar| caption.top < bar);
+                if under_bar {
+                    Placement::Hidden
+                } else {
+                    Placement::Cover(caption)
+                }
+            }
+            None if self.left_title_bar_visible(target) => Placement::Left,
+            None => Placement::Hidden,
+        }
+    }
+
     fn target_origin(&self, target: ActiveWindowTarget) -> (f32, f32) {
+        if let Some(cover) = self.cover {
+            let rect = cover.caption.cover_rect();
+            return (rect.x as f32, rect.y as f32);
+        }
         let x = (target.left + self.layout.offset_x) as f32;
         let y = window_controls_top(
             target.top,
@@ -221,21 +261,49 @@ impl WindowControls {
         (x, y)
     }
 
-    fn title_bar_visible(&self, target: ActiveWindowTarget) -> bool {
-        Self::bar_height_for(target)
-            .is_none_or(|bar| target.maximized || target.top + self.layout.height > bar)
+    fn use_layout(&mut self, layout: WindowControlsLayout) -> bool {
+        if layout == self.layout {
+            return true;
+        }
+        match WindowControlsRenderer::new(layout.width, layout.height) {
+            Ok(renderer) => {
+                self.renderer = renderer;
+                self.layout = layout;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
-    fn match_target_dpi(&mut self, dpi: u32) {
-        if dpi == self.layout_dpi {
-            return;
+    fn sample_cover_fill(&self, caption: NativeCaption) -> [u8; 3] {
+        let rect = caption.cover_rect();
+        let x = rect.x - scale(COVER_SAMPLE_GAP_DIP, caption.dpi);
+        let y = rect.y + rect.height / 2;
+        sample_screen_color(x, y)
+            .or(self.cover.map(|cover| cover.fill))
+            .unwrap_or(match self.appearance.theme {
+                ResolvedTheme::Dark => FALLBACK_DARK_FILL,
+                ResolvedTheme::Light => FALLBACK_LIGHT_FILL,
+            })
+    }
+
+    fn resample_cover_fill(&mut self) -> bool {
+        let Some(cover) = self.cover else {
+            return false;
+        };
+        let fill = self.sample_cover_fill(cover.caption);
+        if fill == cover.fill {
+            return false;
         }
-        let layout = compute_window_controls_layout(&self.metrics, dpi);
-        if let Ok(renderer) = WindowControlsRenderer::new(layout.width, layout.height) {
-            self.layout = layout;
-            self.renderer = renderer;
-            self.layout_dpi = dpi;
-        }
+        self.cover = Some(CoverState { fill, ..cover });
+        true
+    }
+
+    fn cover_style(&self) -> Option<CoverStyle> {
+        self.cover.map(|cover| CoverStyle {
+            rgb: cover.fill,
+            top_right_radius: cover.caption.corner_radius(),
+        })
     }
 
     fn refresh_window(&mut self, target: ActiveWindowTarget, reinspect: bool) -> bool {
@@ -262,6 +330,7 @@ impl WindowControls {
         }
         self.target = None;
         self.window = None;
+        self.cover = None;
     }
 
     fn render_origin(&self) -> (i32, i32) {
@@ -272,9 +341,6 @@ impl WindowControls {
     }
 
     fn rebuild(&mut self) {
-        let screen = primary_screen();
-        self.layout_dpi = 0;
-        self.match_target_dpi(screen.dpi);
         self.hide();
         self.sync_target();
     }
@@ -291,7 +357,20 @@ impl WindowControls {
             self.hide();
             return;
         };
-        self.match_target_dpi(target.dpi);
+        let placement = self.placement(target);
+        let layout = match placement {
+            Placement::Hidden => None,
+            Placement::Left => Some(compute_window_controls_layout(&self.metrics, target.dpi)),
+            Placement::Cover(caption) => compute_cover_layout(caption, &self.metrics),
+        };
+        let Some(layout) = layout else {
+            self.hide();
+            return;
+        };
+        if !self.use_layout(layout) {
+            self.hide();
+            return;
+        }
         let previous = self.target;
         let window_changed = previous.is_none_or(|current| current.hwnd != target.hwnd);
         let shape_changed = previous.is_none_or(|current| {
@@ -299,38 +378,36 @@ impl WindowControls {
                 || current.right - current.left != target.right - target.left
                 || current.bottom - current.top != target.bottom - target.top
         });
-        if !self.title_bar_visible(target)
-            || !self.refresh_window(target, window_changed || shape_changed)
-        {
+        if !self.refresh_window(target, window_changed || shape_changed) {
             self.hide();
             return;
         }
-        let target_changed = previous != Some(target);
+        let cover = match placement {
+            Placement::Cover(caption) => Some(CoverState {
+                caption,
+                fill: self.sample_cover_fill(caption),
+            }),
+            Placement::Left | Placement::Hidden => None,
+        };
+        let cover_changed = cover != self.cover;
+        self.cover = cover;
+        let target_changed = previous != Some(target) || cover_changed;
         let desired_origin = self.target_origin(target);
         self.target = Some(target);
         let was_invisible = !self.visible;
-        if was_invisible || window_changed {
-            self.cancel_green_hover();
+        if was_invisible || window_changed || self.cover.is_some() {
+            if was_invisible || window_changed {
+                self.cancel_green_hover();
+            }
             self.render_origin = desired_origin;
-            self.visible = true;
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
+            if was_invisible {
+                self.visible = true;
+                unsafe {
+                    let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
+                }
             }
         } else {
-            self.render_origin.0 = animate_value(
-                self.render_origin.0,
-                desired_origin.0,
-                self.motion_metrics.window_controls_follow_rate,
-                dt,
-                self.motion,
-            );
-            self.render_origin.1 = animate_value(
-                self.render_origin.1,
-                desired_origin.1,
-                self.motion_metrics.window_controls_follow_rate,
-                dt,
-                self.motion,
-            );
+            self.follow(desired_origin, dt);
         }
         let origin_changed = self.render_origin != desired_origin;
         if target_changed {
@@ -346,18 +423,11 @@ impl WindowControls {
         }
     }
 
-    fn tick_animation(&mut self) {
-        let now = Instant::now();
-        let dt = now
-            .duration_since(self.last_tick)
-            .as_secs_f32()
-            .clamp(0.001, 0.050);
-        self.last_tick = now;
-        let Some(target) = self.target else {
-            self.stop_anim_timer();
+    fn follow(&mut self, desired_origin: (f32, f32), dt: f32) {
+        if self.cover.is_some() {
+            self.render_origin = desired_origin;
             return;
-        };
-        let desired_origin = self.target_origin(target);
+        }
         self.render_origin.0 = animate_value(
             self.render_origin.0,
             desired_origin.0,
@@ -372,10 +442,26 @@ impl WindowControls {
             dt,
             self.motion,
         );
+    }
+
+    fn tick_animation(&mut self) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.last_tick)
+            .as_secs_f32()
+            .clamp(0.001, 0.050);
+        self.last_tick = now;
+        let Some(target) = self.target else {
+            self.stop_anim_timer();
+            return;
+        };
+        let desired_origin = self.target_origin(target);
+        self.follow(desired_origin, dt);
         let origin_changed = self.render_origin != desired_origin;
         let settling = self.settle_ticks > 0;
         self.settle_ticks = self.settle_ticks.saturating_sub(1);
-        if origin_changed || settling {
+        let fill_changed = settling && self.resample_cover_fill();
+        if origin_changed || fill_changed {
             self.present();
         }
         if !origin_changed && self.settle_ticks == 0 {
@@ -462,7 +548,10 @@ impl WindowControls {
             return;
         };
         let (ox, oy) = self.render_origin();
-        let anchor_x = ox + self.layout.centers_x[2].round() as i32 - self.layout.height / 2;
+        let Some(zoom_center) = self.layout.center_of(WindowControlAction::ToggleMaximize) else {
+            return;
+        };
+        let anchor_x = ox + zoom_center.round() as i32 - self.layout.height / 2;
         crate::menu::open_window_tiling_menu(
             runtime,
             &window,
@@ -534,6 +623,7 @@ impl WindowControls {
             target.maximized,
             self.hovered,
             self.appearance,
+            self.cover_style(),
         );
         unsafe {
             let _ = SetWindowPos(

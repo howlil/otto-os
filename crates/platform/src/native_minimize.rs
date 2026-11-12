@@ -6,22 +6,22 @@ use std::sync::{Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use otto_core::{NativeCaptionStyle, Rect, native_minimize_button};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GWL_STYLE, GetMessageW, GetWindowLongW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, KillTimer, MSG, MSLLHOOKSTRUCT,
-    PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SC_MINIMIZE, SetTimer,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_QUIT, WM_SYSCOMMAND, WM_TIMER, WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GetMessageW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, KillTimer, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW,
+    PostThreadMessageW, SC_MINIMIZE, SetTimer, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_SYSCOMMAND,
+    WM_TIMER,
 };
 use windows::core::BOOL;
 
+use crate::caption::{dwm_rect, native_caption_of};
 use crate::worker::join_within;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -61,14 +61,6 @@ fn locked<T, U>(state: &Mutex<T>, update: impl FnOnce(&mut T) -> U) -> U {
     update(&mut guard)
 }
 
-fn caption_style(style: u32) -> NativeCaptionStyle {
-    NativeCaptionStyle {
-        has_caption: style & WS_CAPTION.0 == WS_CAPTION.0,
-        has_system_menu: style & WS_SYSMENU.0 != 0,
-        can_minimize: style & WS_MINIMIZEBOX.0 != 0,
-    }
-}
-
 fn watchdog_action(pending: Option<Pending>, now_ms: u64) -> WatchdogAction {
     match pending {
         Some(pending) if now_ms >= pending.deadline_ms => {
@@ -76,23 +68,6 @@ fn watchdog_action(pending: Option<Pending>, now_ms: u64) -> WatchdogAction {
         }
         _ => WatchdogAction::Wait,
     }
-}
-
-fn dwm_rect(
-    window: HWND,
-    attribute: windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE,
-) -> Option<RECT> {
-    let mut rect = RECT::default();
-    unsafe {
-        DwmGetWindowAttribute(
-            window,
-            attribute,
-            std::ptr::from_mut(&mut rect).cast(),
-            size_of::<RECT>() as u32,
-        )
-    }
-    .ok()?;
-    Some(rect)
 }
 
 fn is_cloaked(window: HWND) -> bool {
@@ -159,16 +134,8 @@ fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
     if belongs_to_this_process(window) {
         return None;
     }
-    let style = caption_style(unsafe { GetWindowLongW(window, GWL_STYLE) } as u32);
-    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
-    let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)?;
-    let absolute = Rect {
-        x: frame.left + buttons.left,
-        y: frame.top + buttons.top,
-        width: buttons.right - buttons.left,
-        height: buttons.bottom - buttons.top,
-    };
-    native_minimize_button(absolute, style)?
+    native_caption_of(window)?
+        .minimize_button()?
         .contains(x, y)
         .then_some(window.0 as isize)
 }
@@ -325,31 +292,9 @@ pub fn acknowledge_native_minimize(window: isize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_THREAD, Pending, WatchdogAction, acknowledge_native_minimize, caption_style,
+        HOOK_THREAD, Pending, WatchdogAction, acknowledge_native_minimize,
         install_native_minimize_hook, uninstall_native_minimize_hook, watchdog_action,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
-    };
-
-    #[test]
-    fn a_standard_overlapped_window_style_can_be_taken_over() {
-        let style =
-            caption_style(WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0);
-        assert!(style.has_caption && style.has_system_menu && style.can_minimize);
-    }
-
-    #[test]
-    fn a_border_without_the_full_caption_is_not_a_caption() {
-        let style = caption_style(0x0080_0000 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
-        assert!(!style.has_caption);
-    }
-
-    #[test]
-    fn a_window_without_a_minimize_box_cannot_be_taken_over() {
-        let style = caption_style(WS_CAPTION.0 | WS_SYSMENU.0 | WS_MAXIMIZEBOX.0);
-        assert!(!style.can_minimize);
-    }
 
     #[test]
     fn the_watchdog_waits_for_the_deadline_and_then_minimizes_natively() {

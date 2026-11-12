@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings', 'native-minimize')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings', 'native-minimize', 'window-cover')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e',
@@ -1219,6 +1219,12 @@ public static class OttoE2EWindowState
     public static extern bool IsWindowVisible(IntPtr window);
 
     [DllImport("user32.dll")]
+    public static extern bool IsZoomed(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
     public static IntPtr Foreground() { return GetForegroundWindow(); }
@@ -1326,11 +1332,9 @@ public static class OttoE2EDwm {
         [OttoE2EDwm]::DwmGetWindowAttribute($window.Handle, 5, [ref]$buttons, 16) -ne 0) {
         throw 'DWM did not report the probe window caption buttons.'
     }
-    $width = $buttons.Right - $buttons.Left
-    $height = $buttons.Bottom - $buttons.Top
     return [pscustomobject]@{
-        X = $frame.Left + $buttons.Left + [int]($width / 6)
-        Y = $frame.Top + $buttons.Top + [int]($height / 2)
+        X = $frame.Right - (Convert-ToScaled 138) + (Convert-ToScaled 23)
+        Y = $frame.Top + (Convert-ToScaled 16)
     }
 }
 
@@ -1363,6 +1367,89 @@ function Run-NativeMinimizeFlow {
         Wait-Until { [OttoE2EWindowState]::IsIconic($form.Handle) } 'probe window to end minimized' 3000
         Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after the animation' 3000
         Write-Output 'CHECKPOINT_PASS scenario=native-minimize name=02-minimized'
+    }
+    finally {
+        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Otto $process
+}
+
+function Get-CaptionFrameRight($window) {
+    if (-not ('OttoE2EDwm' -as [type])) {
+        Get-NativeMinimizeCenter $window | Out-Null
+    }
+    $frame = New-Object OttoE2EDwm+Bounds
+    if ([OttoE2EDwm]::DwmGetWindowAttribute($window.Handle, 9, [ref]$frame, 16) -ne 0) {
+        throw 'DWM did not report the probe window frame.'
+    }
+    return $frame
+}
+
+function Assert-CoverCircle([string]$path, $cover, [int]$slot, [string]$name, [scriptblock]$isColor) {
+    $cell = $cover.Width / 3.0
+    $x = [int]($cover.Left + $cell * ($slot + 0.5))
+    $y = [int](($cover.Top + $cover.Bottom) / 2)
+    $color = Get-RegionColor $path ([pscustomobject]@{ X = $x - 2; Y = $y - 2; Width = 4; Height = 4 })
+    if (-not (& $isColor $color)) {
+        throw "The $name circle is not drawn at the native button position (rgb=$($color.R),$($color.G),$($color.B) at $x,$y)."
+    }
+}
+
+function Run-WindowCoverFlow {
+    $process = Start-Otto 'window-cover'
+    $probe = Start-ProbeWindow "OttoE2ECover$runId"
+    try {
+        $form = Wait-ProbeForm $probe 'cover probe window to open'
+        [OttoE2ENative]::Click([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
+        Wait-Until { [OttoE2EWindowState]::Foreground() -eq $form.Handle } 'probe window to take focus' 3000
+        Wait-Until { $null -ne (Get-OttoWindow $process.Id 'OttoWindowControls' $true) } 'cover overlay to appear' 5000
+        Start-Sleep -Milliseconds 400
+        $cover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+        $frame = Get-CaptionFrameRight $form
+        $expectedWidth = Convert-ToScaled 138
+        if ([Math]::Abs($cover.Right - $frame.Right) -gt 2) {
+            throw "The cover right edge $($cover.Right) does not match the window frame right edge $($frame.Right)."
+        }
+        if ([Math]::Abs($cover.Width - $expectedWidth) -gt 3) {
+            throw "The cover is $($cover.Width) px wide; the native button strip is $expectedWidth px."
+        }
+        if ($cover.Top -lt $frame.Top -or $cover.Top -gt $frame.Top + (Convert-ToScaled 4)) {
+            throw "The cover top $($cover.Top) is not aligned with the window top $($frame.Top)."
+        }
+        [OttoE2ENative]::MoveCursor($form.Left + 40, $form.Top + 200)
+        Start-Sleep -Milliseconds 300
+        $shot = Save-Screenshot 'window-cover' '01-cover'
+        Assert-CoverCircle $shot $cover 0 'yellow minimize' { param($c) $c.R -gt 200 -and $c.G -gt 150 -and $c.B -lt 110 }
+        Assert-CoverCircle $shot $cover 1 'green zoom' { param($c) $c.G -gt 150 -and $c.R -lt 120 }
+        Assert-CoverCircle $shot $cover 2 'red close' { param($c) $c.R -gt 180 -and $c.G -lt 120 }
+        $midY = [int](($cover.Top + $cover.Bottom) / 2)
+        $titleBar = Get-RegionColor $shot ([pscustomobject]@{ X = $cover.Left - 12; Y = $midY - 2; Width = 4; Height = 4 })
+        $coverFill = Get-RegionColor $shot ([pscustomobject]@{ X = $cover.Left + 2; Y = $midY - 2; Width = 4; Height = 4 })
+        if (-not (Test-ColorNear $coverFill @($titleBar.R, $titleBar.G, $titleBar.B) 14)) {
+            throw "The cover fill rgb=$($coverFill.R),$($coverFill.G),$($coverFill.B) does not match the title bar rgb=$($titleBar.R),$($titleBar.G),$($titleBar.B)."
+        }
+        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=01-covers-native-buttons'
+        $cell = $cover.Width / 3.0
+        $y = [int](($cover.Top + $cover.Bottom) / 2)
+        $zoomX = [int]($cover.Left + $cell * 1.5)
+        [OttoE2ENative]::Click($zoomX, $y)
+        Wait-Until { [OttoE2EWindowState]::IsZoomed($form.Handle) } 'green button to maximize the probe window' 3000
+        Start-Sleep -Milliseconds 500
+        Save-Screenshot 'window-cover' '02-maximized' | Out-Null
+        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=02-zoom-maximizes'
+        [void][OttoE2EWindowState]::ShowWindow($form.Handle, 9)
+        Wait-Until { -not [OttoE2EWindowState]::IsZoomed($form.Handle) } 'probe window to restore' 3000
+        Wait-Until { $null -ne (Get-OttoWindow $process.Id 'OttoWindowControls' $true) } 'cover overlay to return after restore' 5000
+        Start-Sleep -Milliseconds 500
+        $cover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+        $y = [int](($cover.Top + $cover.Bottom) / 2)
+        $closeX = [int]($cover.Left + ($cover.Width / 3.0) * 2.5)
+        [OttoE2ENative]::Click($closeX, $y)
+        Wait-Until { -not [OttoE2EWindowState]::IsWindowVisible($form.Handle) } 'red button to close the probe window' 3000
+        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=03-close-closes'
+        Start-Sleep -Milliseconds 800
+        Assert-NoCrash $process
+        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=04-survives-close'
     }
     finally {
         Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
@@ -1488,7 +1575,7 @@ function Invoke-GenieMinimize($process, $form, [string]$scenario) {
             $candidate = Get-OttoWindow $process.Id 'OttoWindowControls' $true
             $focused = [OttoE2EWindowState]::Foreground() -eq $form.Handle
             if ($focused -and $candidate -and
-                [Math]::Abs($candidate.Left - $form.Left) -le $tolerance -and
+                (([Math]::Abs($candidate.Left - $form.Left) -le $tolerance) -or ([Math]::Abs($candidate.Right - $form.Right) -le $tolerance)) -and
                 [Math]::Abs($candidate.Top - $form.Top) -le $tolerance) {
                 $controls = $candidate
                 break
@@ -1499,15 +1586,18 @@ function Invoke-GenieMinimize($process, $form, [string]$scenario) {
     if (-not $controls) {
         throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
     }
-    [OttoE2ENative]::MoveCursor($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
+    $coverMode = [Math]::Abs($controls.Right - $form.Right) -le $tolerance
+    $pressX = if ($coverMode) { [int]($controls.Left + $controls.Width / 6.0) } else { $controls.Left + (Convert-ToScaled 32) }
+    $pressY = if ($coverMode) { [int](($controls.Top + $controls.Bottom) / 2) } else { $controls.Top + (Convert-ToScaled 14) }
+    [OttoE2ENative]::MoveCursor($pressX, $pressY)
     Start-Sleep -Milliseconds 300
     $settled = Get-OttoWindow $process.Id 'OttoWindowControls' $true
     if (-not $settled -or [OttoE2EWindowState]::Foreground() -ne $form.Handle -or
-        [Math]::Abs($settled.Left - $form.Left) -gt $tolerance -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
+        ([Math]::Abs($settled.Left - $form.Left) -gt $tolerance -and [Math]::Abs($settled.Right - $form.Right) -gt $tolerance) -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
         throw 'Focus or window controls moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
     }
     Save-Screenshot $scenario '00-before-minimize' | Out-Null
-    [OttoE2ENative]::Click($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
+    [OttoE2ENative]::Click($pressX, $pressY)
     $overlaySeen = $false
     $deadline = (Get-Date).AddMilliseconds(600)
     while ((Get-Date) -lt $deadline) {
@@ -2239,7 +2329,7 @@ function Run-AudioFlow {
     Stop-Otto $process
 }
 
-$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'native-minimize', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
+$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'native-minimize', 'window-cover', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
 $fatal = $null
 $scenarioFailures = [System.Collections.Generic.List[string]]::new()
 try {
@@ -2261,6 +2351,7 @@ try {
                 'visual-reference' { Run-VisualReferenceFlow }
                 'dock-settings' { Run-DockSettingsFlow }
                 'native-minimize' { Run-NativeMinimizeFlow }
+                'window-cover' { Run-WindowCoverFlow }
                 'audio' { Run-AudioFlow }
             }
         }

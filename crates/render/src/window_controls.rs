@@ -1,13 +1,16 @@
-use otto_core::{Appearance, Rgba, WindowControlsLayout, WindowControlsState};
+use otto_core::{
+    Appearance, CoverStyle, Rgba, WindowControlAction, WindowControlsLayout, WindowControlsState,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_PIXEL_FORMAT,
+    D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
@@ -16,6 +19,7 @@ use windows_numerics::Vector2;
 use crate::shared_d2d_factory;
 use crate::surface::{DibSurface, draw_on};
 
+const BASE_BUTTON_RADIUS: f32 = 6.0;
 const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
     g: 0.0,
@@ -103,6 +107,7 @@ pub struct WindowControlsRenderer {
     disabled_fill: ID2D1SolidColorBrush,
     disabled_border: ID2D1SolidColorBrush,
     glyph_brush: ID2D1SolidColorBrush,
+    cover_brush: ID2D1SolidColorBrush,
     surface: DibSurface,
 }
 
@@ -142,6 +147,7 @@ impl WindowControlsRenderer {
             let disabled_fill = target.CreateSolidColorBrush(&DISABLED_FILL, None)?;
             let disabled_border = target.CreateSolidColorBrush(&DISABLED_BORDER, None)?;
             let glyph_brush = target.CreateSolidColorBrush(&GLYPH_DARK, None)?;
+            let cover_brush = target.CreateSolidColorBrush(&CLEAR, None)?;
 
             let surface = DibSurface::new(width, height)?;
 
@@ -158,6 +164,7 @@ impl WindowControlsRenderer {
                 disabled_fill,
                 disabled_border,
                 glyph_brush,
+                cover_brush,
                 surface,
             })
         }
@@ -173,9 +180,22 @@ impl WindowControlsRenderer {
         maximized: bool,
         hovered: bool,
         appearance: Appearance,
+        cover: Option<CoverStyle>,
     ) -> Result<()> {
         let high_contrast = self.apply_appearance(&appearance);
-        self.draw(layout, state, maximized, hovered || high_contrast)?;
+        let cover = cover.map(|style| {
+            let color = match appearance.contrast {
+                Some(system) => d2d(system.window),
+                None => D2D1_COLOR_F {
+                    r: f32::from(style.rgb[0]) / 255.0,
+                    g: f32::from(style.rgb[1]) / 255.0,
+                    b: f32::from(style.rgb[2]) / 255.0,
+                    a: 1.0,
+                },
+            };
+            (color, style.top_right_radius)
+        });
+        self.draw(layout, state, maximized, hovered || high_contrast, cover)?;
         self.surface.present(hwnd, origin)
     }
 
@@ -229,6 +249,7 @@ impl WindowControlsRenderer {
         state: WindowControlsState,
         maximized: bool,
         hovered: bool,
+        cover: Option<(D2D1_COLOR_F, f32)>,
     ) -> Result<()> {
         draw_on(
             &self.target,
@@ -237,41 +258,103 @@ impl WindowControlsRenderer {
             || unsafe {
                 let clear = CLEAR;
                 self.target.Clear(Some(&raw const clear));
+                if let Some((color, radius)) = cover {
+                    self.draw_cover(layout, color, radius)?;
+                }
 
-                let [close_x, min_x, max_x] = layout.centers_x;
                 let cy = layout.center_y;
                 let r = layout.radius;
+                let glyph_scale = (r / BASE_BUTTON_RADIUS).max(1.0);
+                let slots = layout.slots.min(layout.centers_x.len());
 
-                let pick = |enabled: bool,
-                            fill: &'_ ID2D1SolidColorBrush,
-                            border: &'_ ID2D1SolidColorBrush| {
-                    if enabled {
-                        (fill.clone(), border.clone())
-                    } else {
-                        (self.disabled_fill.clone(), self.disabled_border.clone())
-                    }
-                };
-                let (fill, border) = pick(state.close, &self.red_fill, &self.red_border);
-                self.draw_circle(&fill, &border, close_x, cy, r);
-                let (fill, border) = pick(state.minimize, &self.yellow_fill, &self.yellow_border);
-                self.draw_circle(&fill, &border, min_x, cy, r);
-                let (fill, border) = pick(state.zoom, &self.green_fill, &self.green_border);
-                self.draw_circle(&fill, &border, max_x, cy, r);
+                for slot in 0..slots {
+                    let action = layout.actions[slot];
+                    let (fill, border) = self.circle_brushes(action, state.allows(action));
+                    self.draw_circle(&fill, &border, layout.centers_x[slot], cy, r);
+                }
 
                 if hovered {
-                    if state.close {
-                        self.draw_close_glyph(&self.glyph_brush, close_x, cy);
-                    }
-                    if state.minimize {
-                        self.draw_minimize_glyph(&self.glyph_brush, min_x, cy);
-                    }
-                    if state.zoom {
-                        self.draw_zoom_glyph(&self.glyph_brush, max_x, cy, maximized)?;
+                    for slot in 0..slots {
+                        let action = layout.actions[slot];
+                        if !state.allows(action) {
+                            continue;
+                        }
+                        let cx = layout.centers_x[slot];
+                        match action {
+                            WindowControlAction::Close => {
+                                self.draw_close_glyph(&self.glyph_brush, cx, cy, glyph_scale);
+                            }
+                            WindowControlAction::Minimize => {
+                                self.draw_minimize_glyph(&self.glyph_brush, cx, cy, glyph_scale);
+                            }
+                            WindowControlAction::ToggleMaximize => {
+                                self.draw_zoom_glyph(
+                                    &self.glyph_brush,
+                                    cx,
+                                    cy,
+                                    maximized,
+                                    glyph_scale,
+                                )?;
+                            }
+                        }
                     }
                 }
                 Ok(())
             },
         )
+    }
+
+    fn circle_brushes(
+        &self,
+        action: WindowControlAction,
+        enabled: bool,
+    ) -> (ID2D1SolidColorBrush, ID2D1SolidColorBrush) {
+        if !enabled {
+            return (self.disabled_fill.clone(), self.disabled_border.clone());
+        }
+        match action {
+            WindowControlAction::Close => (self.red_fill.clone(), self.red_border.clone()),
+            WindowControlAction::Minimize => (self.yellow_fill.clone(), self.yellow_border.clone()),
+            WindowControlAction::ToggleMaximize => {
+                (self.green_fill.clone(), self.green_border.clone())
+            }
+        }
+    }
+
+    unsafe fn draw_cover(
+        &self,
+        layout: &WindowControlsLayout,
+        color: D2D1_COLOR_F,
+        top_right_radius: f32,
+    ) -> Result<()> {
+        unsafe {
+            self.cover_brush.SetColor(&raw const color);
+            let (width, height) = (layout.width as f32, layout.height as f32);
+            let path = self.factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            sink.BeginFigure(Vector2::new(0.0, 0.0), D2D1_FIGURE_BEGIN_FILLED);
+            if top_right_radius > 0.0 {
+                sink.AddLine(Vector2::new(width - top_right_radius, 0.0));
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: Vector2::new(width, top_right_radius),
+                    size: D2D_SIZE_F {
+                        width: top_right_radius,
+                        height: top_right_radius,
+                    },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: D2D1_ARC_SIZE_SMALL,
+                });
+            } else {
+                sink.AddLine(Vector2::new(width, 0.0));
+            }
+            sink.AddLine(Vector2::new(width, height));
+            sink.AddLine(Vector2::new(0.0, height));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&path, &self.cover_brush, None);
+        }
+        Ok(())
     }
 
     unsafe fn draw_circle(
@@ -294,27 +377,33 @@ impl WindowControlsRenderer {
         }
     }
 
-    unsafe fn draw_close_glyph(&self, brush: &ID2D1SolidColorBrush, cx: f32, cy: f32) {
-        let arm = 3.0;
+    unsafe fn draw_close_glyph(&self, brush: &ID2D1SolidColorBrush, cx: f32, cy: f32, scale: f32) {
+        let arm = 3.0 * scale;
         let p0 = Vector2::new(cx - arm, cy - arm);
         let p1 = Vector2::new(cx + arm, cy + arm);
         let p2 = Vector2::new(cx + arm, cy - arm);
         let p3 = Vector2::new(cx - arm, cy + arm);
         unsafe {
             self.target
-                .DrawLine(p0, p1, brush, 1.2, Some(&self.stroke_style));
+                .DrawLine(p0, p1, brush, 1.2 * scale, Some(&self.stroke_style));
             self.target
-                .DrawLine(p2, p3, brush, 1.2, Some(&self.stroke_style));
+                .DrawLine(p2, p3, brush, 1.2 * scale, Some(&self.stroke_style));
         }
     }
 
-    unsafe fn draw_minimize_glyph(&self, brush: &ID2D1SolidColorBrush, cx: f32, cy: f32) {
-        let half = 3.5;
+    unsafe fn draw_minimize_glyph(
+        &self,
+        brush: &ID2D1SolidColorBrush,
+        cx: f32,
+        cy: f32,
+        scale: f32,
+    ) {
+        let half = 3.5 * scale;
         let p0 = Vector2::new(cx - half, cy);
         let p1 = Vector2::new(cx + half, cy);
         unsafe {
             self.target
-                .DrawLine(p0, p1, brush, 1.3, Some(&self.stroke_style));
+                .DrawLine(p0, p1, brush, 1.3 * scale, Some(&self.stroke_style));
         }
     }
 
@@ -324,13 +413,14 @@ impl WindowControlsRenderer {
         cx: f32,
         cy: f32,
         maximized: bool,
+        scale: f32,
     ) -> Result<()> {
         unsafe {
             let path = self.factory.CreatePathGeometry()?;
             let sink = path.Open()?;
             if maximized {
-                let size = 2.6;
-                let gap = 1.0;
+                let size = 2.6 * scale;
+                let gap = 1.0 * scale;
                 let left = cx - size - gap;
                 let right = cx + gap;
                 let top = cy - size * 0.5;
@@ -348,8 +438,8 @@ impl WindowControlsRenderer {
                 sink.AddLine(Vector2::new(right, bottom));
                 sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             } else {
-                let outer = 3.6;
-                let leg = 2.4;
+                let outer = 3.6 * scale;
+                let leg = 2.4 * scale;
 
                 sink.BeginFigure(
                     Vector2::new(cx - outer, cy - outer),

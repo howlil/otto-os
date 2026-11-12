@@ -53,6 +53,9 @@ pub struct WindowControlsLayout {
     pub hit_radius: f32,
     pub center_y: f32,
     pub centers_x: [f32; 3],
+    pub actions: [WindowControlAction; 3],
+    pub slots: usize,
+    pub cell_width: f32,
 }
 
 pub type TrafficLightLayout = WindowControlsLayout;
@@ -60,18 +63,21 @@ pub type TrafficLightLayout = WindowControlsLayout;
 impl WindowControlsLayout {
     #[must_use]
     pub fn hit_test(&self, x: i32, y: i32) -> Option<WindowControlAction> {
+        if self.cell_width > 0.0 {
+            return self.cell_hit_test(x, y);
+        }
         let (fx, fy) = (x as f32, y as f32);
         let hit_r = self.hit_radius;
         let dy = fy - self.center_y;
         if dy.abs() > hit_r {
             return None;
         }
-        let actions = [
-            WindowControlAction::Close,
-            WindowControlAction::Minimize,
-            WindowControlAction::ToggleMaximize,
-        ];
-        for (cx, action) in self.centers_x.into_iter().zip(actions) {
+        for (cx, action) in self
+            .centers_x
+            .into_iter()
+            .zip(self.actions)
+            .take(self.slots)
+        {
             let dx = fx - cx;
             if dx * dx + dy * dy <= hit_r * hit_r {
                 return Some(action);
@@ -79,7 +85,36 @@ impl WindowControlsLayout {
         }
         None
     }
+
+    fn cell_hit_test(&self, x: i32, y: i32) -> Option<WindowControlAction> {
+        if x < 0 || y < 0 || y >= self.height {
+            return None;
+        }
+        let slot = (x as f32 / self.cell_width) as usize;
+        (slot < self.slots).then(|| self.actions[slot])
+    }
+
+    #[must_use]
+    pub fn center_of(&self, action: WindowControlAction) -> Option<f32> {
+        self.actions
+            .into_iter()
+            .zip(self.centers_x)
+            .take(self.slots)
+            .find_map(|(candidate, center)| (candidate == action).then_some(center))
+    }
 }
+
+const LEFT_ACTIONS: [WindowControlAction; 3] = [
+    WindowControlAction::Close,
+    WindowControlAction::Minimize,
+    WindowControlAction::ToggleMaximize,
+];
+
+const COVER_ACTIONS: [WindowControlAction; 3] = [
+    WindowControlAction::Minimize,
+    WindowControlAction::ToggleMaximize,
+    WindowControlAction::Close,
+];
 
 #[must_use]
 pub fn compute_window_controls_layout(
@@ -108,6 +143,9 @@ pub fn compute_window_controls_layout(
         hit_radius,
         center_y,
         centers_x: [close_x, min_x, max_x],
+        actions: LEFT_ACTIONS,
+        slots: 3,
+        cell_width: 0.0,
     }
 }
 
@@ -174,36 +212,130 @@ pub const fn window_controls_top(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoverStyle {
+    pub rgb: [u8; 3],
+    pub top_right_radius: f32,
+}
+
+pub const NATIVE_CAPTION_BUTTON_DIP: i32 = 46;
+pub const NATIVE_CORNER_RADIUS_DIP: i32 = 8;
+
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeCaptionStyle {
     pub has_caption: bool,
     pub has_system_menu: bool,
     pub can_minimize: bool,
+    pub can_maximize: bool,
 }
 
-const NATIVE_CAPTION_BUTTONS: i32 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCaption {
+    pub frame_right: i32,
+    pub top: i32,
+    pub height: i32,
+    pub slots: u8,
+    pub can_minimize: bool,
+    pub rounded_top_right: bool,
+    pub dpi: u32,
+}
+
+impl NativeCaption {
+    #[must_use]
+    pub const fn new(
+        style: NativeCaptionStyle,
+        frame_right: i32,
+        top: i32,
+        height: i32,
+        rounded_top_right: bool,
+        dpi: u32,
+    ) -> Option<Self> {
+        if !style.has_caption || !style.has_system_menu || height <= 0 {
+            return None;
+        }
+        let slots = if style.can_minimize || style.can_maximize {
+            3
+        } else {
+            1
+        };
+        Some(Self {
+            frame_right,
+            top,
+            height,
+            slots,
+            can_minimize: style.can_minimize,
+            rounded_top_right,
+            dpi,
+        })
+    }
+
+    #[must_use]
+    pub fn cover_rect(&self) -> Rect {
+        let width = scale(NATIVE_CAPTION_BUTTON_DIP, self.dpi) * i32::from(self.slots);
+        Rect {
+            x: self.frame_right - width,
+            y: self.top,
+            width,
+            height: self.height,
+        }
+    }
+
+    #[must_use]
+    pub fn minimize_button(&self) -> Option<Rect> {
+        if self.slots != 3 || !self.can_minimize {
+            return None;
+        }
+        let cover = self.cover_rect();
+        Some(Rect {
+            width: scale(NATIVE_CAPTION_BUTTON_DIP, self.dpi),
+            ..cover
+        })
+    }
+
+    #[must_use]
+    pub fn corner_radius(&self) -> f32 {
+        if self.rounded_top_right {
+            scale(NATIVE_CORNER_RADIUS_DIP, self.dpi) as f32
+        } else {
+            0.0
+        }
+    }
+}
 
 #[must_use]
-pub const fn native_minimize_button(
-    caption_buttons: Rect,
-    style: NativeCaptionStyle,
-) -> Option<Rect> {
-    if !style.has_caption
-        || !style.has_system_menu
-        || !style.can_minimize
-        || caption_buttons.is_empty()
-    {
+pub fn compute_cover_layout(
+    caption: NativeCaption,
+    metrics: &WindowControlsMetrics,
+) -> Option<WindowControlsLayout> {
+    let dpi = caption.dpi;
+    let cover = caption.cover_rect();
+    if cover.is_empty() {
         return None;
     }
-    let width = caption_buttons.width / NATIVE_CAPTION_BUTTONS;
-    if width <= 0 {
-        return None;
+    let slots = usize::from(caption.slots);
+    let cell_width = cover.width as f32 / slots as f32;
+    let mut centers_x = [0.0_f32; 3];
+    for (index, center) in centers_x.iter_mut().enumerate().take(slots) {
+        *center = cell_width * (index as f32 + 0.5);
     }
-    Some(Rect {
-        x: caption_buttons.x,
-        y: caption_buttons.y,
-        width,
-        height: caption_buttons.height,
+    let actions = if slots == 1 {
+        [WindowControlAction::Close; 3]
+    } else {
+        COVER_ACTIONS
+    };
+    Some(WindowControlsLayout {
+        width: cover.width,
+        height: cover.height,
+        offset_x: 0,
+        offset_y: 0,
+        radius: scale(metrics.button_radius, dpi) as f32,
+        hit_radius: 0.0,
+        center_y: cover.height as f32 * 0.5,
+        centers_x,
+        actions,
+        slots,
+        cell_width,
     })
 }
 
@@ -340,38 +472,59 @@ mod tests {
         has_caption: true,
         has_system_menu: true,
         can_minimize: true,
+        can_maximize: true,
     };
 
-    const BUTTONS: Rect = Rect {
-        x: 1200,
-        y: 300,
-        width: 220,
-        height: 44,
-    };
-
-    #[test]
-    fn the_native_minimize_button_is_the_left_third_of_the_caption_buttons() {
-        let button = native_minimize_button(BUTTONS, STANDARD_STYLE).unwrap();
-        assert_eq!(button.x, 1200);
-        assert_eq!(button.y, 300);
-        assert_eq!(button.width, 73);
-        assert_eq!(button.height, 44);
-        assert!(button.contains(1200, 300));
-        assert!(button.contains(1272, 343));
-        assert!(!button.contains(1273, 320));
+    fn caption(style: NativeCaptionStyle) -> NativeCaption {
+        NativeCaption::new(style, 1191, 300, 44, true, 144).unwrap()
     }
 
     #[test]
-    fn a_window_without_a_minimize_box_has_no_minimize_button_to_take_over() {
+    fn three_native_buttons_are_right_aligned_to_the_visible_frame() {
+        let caption = caption(STANDARD_STYLE);
+        let cover = caption.cover_rect();
+        assert_eq!(cover.width, 69 * 3);
+        assert_eq!(cover.right(), 1191);
+        assert_eq!(cover.y, 300);
+        assert_eq!(cover.height, 44);
+    }
+
+    #[test]
+    fn a_close_only_window_covers_a_single_button() {
+        let style = NativeCaptionStyle {
+            can_minimize: false,
+            can_maximize: false,
+            ..STANDARD_STYLE
+        };
+        let caption = caption(style);
+        assert_eq!(caption.slots, 1);
+        assert_eq!(caption.cover_rect().width, 69);
+        assert_eq!(caption.minimize_button(), None);
+    }
+
+    #[test]
+    fn a_window_with_only_a_maximize_box_still_shows_three_slots_but_no_minimize() {
         let style = NativeCaptionStyle {
             can_minimize: false,
             ..STANDARD_STYLE
         };
-        assert_eq!(native_minimize_button(BUTTONS, style), None);
+        let caption = caption(style);
+        assert_eq!(caption.slots, 3);
+        assert_eq!(caption.minimize_button(), None);
     }
 
     #[test]
-    fn frameless_or_menuless_windows_are_left_alone() {
+    fn the_native_minimize_button_is_the_leftmost_native_slot() {
+        let caption = caption(STANDARD_STYLE);
+        let button = caption.minimize_button().unwrap();
+        assert_eq!(button.x, 1191 - 69 * 3);
+        assert_eq!(button.width, 69);
+        assert!(button.contains(button.x, 300));
+        assert!(!button.contains(button.right(), 300));
+    }
+
+    #[test]
+    fn windows_without_a_caption_or_system_menu_have_no_native_caption() {
         for style in [
             NativeCaptionStyle {
                 has_caption: false,
@@ -382,18 +535,79 @@ mod tests {
                 ..STANDARD_STYLE
             },
         ] {
-            assert_eq!(native_minimize_button(BUTTONS, style), None);
+            assert_eq!(NativeCaption::new(style, 1191, 300, 44, true, 144), None);
         }
+        assert_eq!(
+            NativeCaption::new(STANDARD_STYLE, 1191, 300, 0, true, 144),
+            None
+        );
     }
 
     #[test]
-    fn empty_or_tiny_caption_bounds_never_produce_a_button() {
-        let empty = Rect::default();
-        assert_eq!(native_minimize_button(empty, STANDARD_STYLE), None);
-        let tiny = Rect {
-            width: 2,
-            ..BUTTONS
+    fn the_corner_radius_follows_rounding_and_dpi() {
+        let rounded = caption(STANDARD_STYLE);
+        assert!((rounded.corner_radius() - 12.0).abs() < 0.001);
+        let square = NativeCaption::new(STANDARD_STYLE, 1191, 300, 44, false, 144).unwrap();
+        assert!(square.corner_radius().abs() < 0.001);
+    }
+
+    #[test]
+    fn the_cover_layout_orders_buttons_like_windows_with_mac_colours() {
+        let layout =
+            compute_cover_layout(caption(STANDARD_STYLE), &WindowControlsMetrics::default())
+                .unwrap();
+        assert_eq!(layout.actions[0], WindowControlAction::Minimize);
+        assert_eq!(layout.actions[1], WindowControlAction::ToggleMaximize);
+        assert_eq!(layout.actions[2], WindowControlAction::Close);
+        assert_eq!(layout.width, 207);
+        assert!((layout.centers_x[0] - 34.5).abs() < 0.01);
+        assert!((layout.centers_x[2] - 172.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_cover_hit_test_uses_the_whole_native_button_cell() {
+        let layout =
+            compute_cover_layout(caption(STANDARD_STYLE), &WindowControlsMetrics::default())
+                .unwrap();
+        assert_eq!(layout.hit_test(0, 0), Some(WindowControlAction::Minimize));
+        assert_eq!(layout.hit_test(68, 43), Some(WindowControlAction::Minimize));
+        assert_eq!(
+            layout.hit_test(69, 10),
+            Some(WindowControlAction::ToggleMaximize)
+        );
+        assert_eq!(layout.hit_test(206, 10), Some(WindowControlAction::Close));
+        assert_eq!(layout.hit_test(207, 10), None);
+        assert_eq!(layout.hit_test(100, 44), None);
+        assert_eq!(layout.hit_test(-1, 10), None);
+    }
+
+    #[test]
+    fn a_single_slot_layout_only_answers_for_close() {
+        let style = NativeCaptionStyle {
+            can_minimize: false,
+            can_maximize: false,
+            ..STANDARD_STYLE
         };
-        assert_eq!(native_minimize_button(tiny, STANDARD_STYLE), None);
+        let layout =
+            compute_cover_layout(caption(style), &WindowControlsMetrics::default()).unwrap();
+        assert_eq!(layout.slots, 1);
+        assert_eq!(layout.hit_test(30, 10), Some(WindowControlAction::Close));
+        assert_eq!(layout.hit_test(70, 10), None);
+        assert_eq!(layout.center_of(WindowControlAction::Close), Some(34.5));
+        assert_eq!(layout.center_of(WindowControlAction::Minimize), None);
+    }
+
+    #[test]
+    fn the_left_layout_keeps_its_circle_hit_test_and_order() {
+        let layout = compute_window_controls_layout(&WindowControlsMetrics::default(), 96);
+        assert_eq!(layout.actions[0], WindowControlAction::Close);
+        assert_eq!(
+            layout.center_of(WindowControlAction::ToggleMaximize),
+            Some(layout.centers_x[2])
+        );
+        assert_eq!(
+            layout.hit_test(layout.centers_x[1] as i32, layout.center_y as i32),
+            Some(WindowControlAction::Minimize)
+        );
     }
 }
