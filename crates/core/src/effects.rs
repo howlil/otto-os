@@ -1,11 +1,14 @@
 use crate::app_model::{Activation, AppInfo, CommandOutcome, WindowIdentity, decide_activation};
+use crate::dock::{
+    DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL, DockPreferences, DockSettingsChange,
+};
 use crate::media::MediaCommand;
 use crate::menu::{
     CMD_CAL_SETTINGS, CMD_CC_BLUETOOTH, CMD_CC_CALENDAR, CMD_CC_DISPLAY, CMD_CC_FOCUS,
     CMD_CC_LYRICS_ONLINE, CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE,
     CMD_CC_SOUND, CMD_CC_THEME_AUTO, CMD_CC_THEME_DARK, CMD_CC_THEME_LIGHT, CMD_CC_THEME_TOGGLE,
     CMD_CC_WIFI, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN,
-    CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, CMD_WIN_MINIMIZE,
+    CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, CMD_WIN_MINIMIZE, MenuRow,
 };
 use crate::ports::ControlCenterAction;
 use crate::theme::ThemeMode;
@@ -13,6 +16,49 @@ use crate::theme::ThemeMode;
 pub const CMD_DOWNLOADS_OPEN_FOLDER: usize = 200;
 pub const CMD_DOWNLOADS_ITEM_BASE: usize = 300;
 pub const CMD_DOCK_OVERFLOW_BASE: usize = 400;
+pub const CMD_DOCK_TOGGLE_HIDING: usize = 500;
+pub const CMD_DOCK_TOGGLE_MAGNIFICATION: usize = 501;
+pub const CMD_DOCK_SIZE_SMALL: usize = 502;
+pub const CMD_DOCK_SIZE_MEDIUM: usize = 503;
+pub const CMD_DOCK_SIZE_LARGE: usize = 504;
+
+#[must_use]
+pub fn dock_settings_effect(cmd: usize) -> Option<DockSettingsChange> {
+    match cmd {
+        CMD_DOCK_TOGGLE_HIDING => Some(DockSettingsChange::ToggleHiding),
+        CMD_DOCK_TOGGLE_MAGNIFICATION => Some(DockSettingsChange::ToggleMagnification),
+        CMD_DOCK_SIZE_SMALL => Some(DockSettingsChange::IconSize(DOCK_ICON_SMALL)),
+        CMD_DOCK_SIZE_MEDIUM => Some(DockSettingsChange::IconSize(DOCK_ICON_MEDIUM)),
+        CMD_DOCK_SIZE_LARGE => Some(DockSettingsChange::IconSize(DOCK_ICON_LARGE)),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn dock_settings_rows(preferences: DockPreferences) -> Vec<MenuRow> {
+    let hiding = if preferences.autohide {
+        "Turn Hiding Off"
+    } else {
+        "Turn Hiding On"
+    };
+    let magnification = if preferences.magnification {
+        "Turn Magnification Off"
+    } else {
+        "Turn Magnification On"
+    };
+    let size = |id: usize, label: &str, value: i32| {
+        MenuRow::check_item(id, label, preferences.icon_size == value, true)
+    };
+    vec![
+        MenuRow::item(CMD_DOCK_TOGGLE_HIDING, hiding, ""),
+        MenuRow::item(CMD_DOCK_TOGGLE_MAGNIFICATION, magnification, ""),
+        MenuRow::Separator,
+        MenuRow::heading("Icon Size"),
+        size(CMD_DOCK_SIZE_SMALL, "Small", DOCK_ICON_SMALL),
+        size(CMD_DOCK_SIZE_MEDIUM, "Medium", DOCK_ICON_MEDIUM),
+        size(CMD_DOCK_SIZE_LARGE, "Large", DOCK_ICON_LARGE),
+    ]
+}
 
 #[must_use]
 pub fn dock_overflow_choice(cmd: usize, hidden_count: usize) -> Option<usize> {
@@ -390,6 +436,34 @@ mod tests {
             window_menu_effect(CMD_CC_THEME_TOGGLE, false),
             WindowMenuEffect::CycleTheme
         );
+    }
+
+    #[test]
+    fn dock_settings_rows_reflect_and_change_the_preferences() {
+        use crate::dock::{DOCK_ICON_LARGE, DockPreferences, DockSettingsChange};
+        use crate::menu::MenuRow;
+        let prefs = DockPreferences::default();
+        let rows = super::dock_settings_rows(prefs);
+        let labels: Vec<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Item { label, checked, .. } => Some(format!("{label}:{checked}")),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&String::from("Turn Hiding On:false")));
+        assert!(labels.contains(&String::from("Turn Magnification Off:false")));
+        assert!(labels.contains(&String::from("Medium:true")));
+        assert!(labels.contains(&String::from("Large:false")));
+        assert_eq!(
+            super::dock_settings_effect(super::CMD_DOCK_SIZE_LARGE),
+            Some(DockSettingsChange::IconSize(DOCK_ICON_LARGE))
+        );
+        assert_eq!(
+            super::dock_settings_effect(super::CMD_DOCK_TOGGLE_HIDING),
+            Some(DockSettingsChange::ToggleHiding)
+        );
+        assert_eq!(super::dock_settings_effect(499), None);
     }
 
     #[test]

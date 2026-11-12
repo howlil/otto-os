@@ -95,9 +95,87 @@ impl Default for DockPreferences {
         Self {
             position: DockPosition::Bottom,
             magnification: true,
-            icon_size: 48,
+            icon_size: DOCK_ICON_MEDIUM,
             autohide: false,
         }
+    }
+}
+
+pub const DOCK_ICON_SMALL: i32 = 40;
+pub const DOCK_ICON_MEDIUM: i32 = 48;
+pub const DOCK_ICON_LARGE: i32 = 64;
+const DOCK_ICON_MIN: i32 = 32;
+const DOCK_ICON_MAX: i32 = 80;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockSettingsChange {
+    ToggleHiding,
+    ToggleMagnification,
+    IconSize(i32),
+}
+
+impl DockPreferences {
+    #[must_use]
+    pub fn apply(self, change: DockSettingsChange) -> Self {
+        match change {
+            DockSettingsChange::ToggleHiding => Self {
+                autohide: !self.autohide,
+                ..self
+            },
+            DockSettingsChange::ToggleMagnification => Self {
+                magnification: !self.magnification,
+                ..self
+            },
+            DockSettingsChange::IconSize(size) => Self {
+                icon_size: size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX),
+                ..self
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn metrics(self) -> DockMetrics {
+        DockMetrics {
+            base_icon_size: self.icon_size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX),
+            max_scale: if self.magnification {
+                DockMetrics::MACOS_SONOMA.max_scale
+            } else {
+                1.0
+            },
+            ..DockMetrics::MACOS_SONOMA
+        }
+    }
+
+    #[must_use]
+    pub fn parse_config(contents: &str) -> Self {
+        let value = |key: &str| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        let flag = |key: &str, fallback: bool| {
+            value(key).map_or(fallback, |text| text.eq_ignore_ascii_case("true"))
+        };
+        let defaults = Self::default();
+        Self {
+            position: DockPosition::Bottom,
+            magnification: flag("dock_magnification=", defaults.magnification),
+            icon_size: value("dock_icon_size=")
+                .and_then(|text| text.parse::<i32>().ok())
+                .map_or(defaults.icon_size, |size| {
+                    size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX)
+                }),
+            autohide: flag("dock_autohide=", defaults.autohide),
+        }
+    }
+
+    #[must_use]
+    pub fn config_lines(self) -> String {
+        format!(
+            "dock_autohide={}\ndock_magnification={}\ndock_icon_size={}\n",
+            self.autohide, self.magnification, self.icon_size
+        )
     }
 }
 
@@ -598,6 +676,66 @@ mod tests {
         assert!(layout.pill.x + layout.pill.width <= 800);
         let last = layout.items.last().unwrap();
         assert!(last.x + last.size <= 800.0);
+    }
+
+    #[test]
+    fn preferences_round_trip_through_the_config_and_clamp_sizes() {
+        let prefs = DockPreferences {
+            autohide: true,
+            magnification: false,
+            icon_size: DOCK_ICON_LARGE,
+            ..DockPreferences::default()
+        };
+        let text = format!("version=1\nenabled=topbar\n{}", prefs.config_lines());
+        assert_eq!(DockPreferences::parse_config(&text), prefs);
+        assert_eq!(
+            DockPreferences::parse_config(""),
+            DockPreferences::default()
+        );
+        let huge = DockPreferences::parse_config("dock_icon_size=500\n");
+        assert_eq!(huge.icon_size, 80);
+        let junk = DockPreferences::parse_config("dock_icon_size=abc\ndock_autohide=yes\n");
+        assert_eq!(junk, DockPreferences::default());
+    }
+
+    #[test]
+    fn settings_changes_toggle_and_resize() {
+        let prefs = DockPreferences::default();
+        assert!(prefs.apply(DockSettingsChange::ToggleHiding).autohide);
+        assert!(
+            !prefs
+                .apply(DockSettingsChange::ToggleMagnification)
+                .magnification
+        );
+        assert_eq!(
+            prefs
+                .apply(DockSettingsChange::IconSize(DOCK_ICON_SMALL))
+                .icon_size,
+            DOCK_ICON_SMALL
+        );
+        assert_eq!(prefs.apply(DockSettingsChange::IconSize(4)).icon_size, 32);
+    }
+
+    #[test]
+    fn preferences_drive_icon_size_and_magnification() {
+        let still = DockPreferences {
+            magnification: false,
+            icon_size: DOCK_ICON_LARGE,
+            ..DockPreferences::default()
+        }
+        .metrics();
+        assert_eq!(still.base_icon_size, DOCK_ICON_LARGE);
+        let base = compute_dock_layout(&still, sample_input(None, 0.0));
+        let target = base.items[2].x + base.items[2].size * 0.5;
+        let hovered = compute_dock_layout(&still, sample_input(Some(target), 1.0));
+        assert!((hovered.items[2].size - base.items[2].size).abs() < 0.01);
+        let small = DockPreferences {
+            icon_size: DOCK_ICON_SMALL,
+            ..DockPreferences::default()
+        }
+        .metrics();
+        let small_layout = compute_dock_layout(&small, sample_input(None, 0.0));
+        assert!(small_layout.items[0].size < base.items[0].size);
     }
 
     #[test]

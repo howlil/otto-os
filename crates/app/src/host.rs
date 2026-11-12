@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Error, PCWSTR, Result, w};
 
 use crate::{bar, dock, genie, menu, window_controls};
-use otto_core::{SystemAppearance, ThemeMode};
+use otto_core::{DockPreferences, SystemAppearance, ThemeMode};
 use otto_platform::{
     replace_file_atomically, restore_hidden_windows, shutdown_audio_task, shutdown_media_task,
 };
@@ -178,6 +178,7 @@ enum ConfigSource {
 struct PluginConfig {
     enabled: Vec<PluginId>,
     online_lyrics: bool,
+    dock: DockPreferences,
     source: ConfigSource,
 }
 
@@ -206,6 +207,7 @@ impl Default for PluginConfig {
                 PluginId::ControlCenter,
             ],
             online_lyrics: false,
+            dock: DockPreferences::default(),
             source: ConfigSource::Defaults,
         }
     }
@@ -246,6 +248,7 @@ impl PluginConfig {
                 .lines()
                 .find_map(|line| line.strip_prefix("online_lyrics="))
                 .is_some_and(|value| value.trim().eq_ignore_ascii_case("true")),
+            dock: DockPreferences::parse_config(contents),
         };
         for name in enabled.split(',') {
             if let Some(plugin) = PluginId::parse(name)
@@ -281,8 +284,9 @@ impl PluginConfig {
         replace_file_atomically(
             &path,
             format!(
-                "version={SUPPORTED_CONFIG_VERSION}\nenabled={enabled}\nonline_lyrics={}\n",
-                self.online_lyrics
+                "version={SUPPORTED_CONFIG_VERSION}\nenabled={enabled}\nonline_lyrics={}\n{}",
+                self.online_lyrics,
+                self.dock.config_lines()
             )
             .as_bytes(),
         )
@@ -370,6 +374,8 @@ pub(crate) struct RuntimeContext {
     pub(crate) system_appearance: Cell<SystemAppearance>,
     pub(crate) online_lyrics_enabled: Cell<bool>,
     pub(crate) pending_online_lyrics: Cell<Option<bool>>,
+    pub(crate) dock_preferences: Cell<DockPreferences>,
+    pub(crate) pending_dock_preferences: Cell<Option<DockPreferences>>,
 }
 
 impl RuntimeContext {
@@ -384,6 +390,8 @@ impl RuntimeContext {
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
             online_lyrics_enabled: Cell::new(online_lyrics_enabled),
             pending_online_lyrics: Cell::new(None),
+            dock_preferences: Cell::new(DockPreferences::default()),
+            pending_dock_preferences: Cell::new(None),
         }
     }
 }
@@ -429,6 +437,7 @@ pub fn start(blur: bool) -> Result<()> {
     host.runtime
         .system_appearance
         .set(otto_platform::read_system_appearance());
+    host.runtime.dock_preferences.set(host.config.dock);
     if let Err(error) = host.initialize() {
         host.shutdown();
         return Err(error);
@@ -510,6 +519,26 @@ pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
             return Err(error);
         }
         host.runtime.online_lyrics_enabled.set(enabled);
+        Ok(())
+    })
+}
+
+pub fn set_dock_preferences(preferences: DockPreferences) -> Result<()> {
+    HOST.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(host) = guard.as_mut() else {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                "Otto host is not running",
+            ));
+        };
+        let previous = host.config.dock;
+        host.config.dock = preferences;
+        if let Err(error) = host.config.save() {
+            host.config.dock = previous;
+            return Err(error);
+        }
+        host.runtime.dock_preferences.set(preferences);
         Ok(())
     })
 }
@@ -934,13 +963,23 @@ fn should_post_quit(hwnd: isize) -> bool {
 fn dispatch_runtime_message(
     action: impl FnOnce(&RuntimeContext) -> Option<LRESULT>,
 ) -> Option<LRESULT> {
-    let (result, pending_online_lyrics) = HOST.with(|cell| {
+    let (result, pending_online_lyrics, pending_dock) = HOST.with(|cell| {
         let guard = cell.try_borrow().ok()?;
         let host = guard.as_ref()?;
         let result = action(&host.runtime);
         let pending = host.runtime.pending_online_lyrics.take();
-        Some((result, pending))
+        let dock = host.runtime.pending_dock_preferences.take();
+        Some((result, pending, dock))
     })?;
+    if let Some(preferences) = pending_dock
+        && set_dock_preferences(preferences).is_ok()
+    {
+        HOST.with(|cell| {
+            if let Some(host) = cell.borrow().as_ref() {
+                dock::apply_preferences(&host.runtime, preferences);
+            }
+        });
+    }
     if let Some(enabled) = pending_online_lyrics
         && set_online_lyrics_enabled(enabled).is_ok()
     {
@@ -1160,6 +1199,28 @@ mod tests {
         assert!(config.is_enabled(PluginId::TopBar));
         assert!(config.is_enabled(PluginId::Dock));
         assert!(!config.is_enabled(PluginId::WindowControls));
+    }
+
+    #[test]
+    fn dock_preferences_load_from_config_and_default_when_absent() {
+        let legacy = PluginConfig::parse(
+            "version=1
+enabled=dock
+online_lyrics=false
+",
+        );
+        assert_eq!(legacy.dock, otto_core::DockPreferences::default());
+        let saved = PluginConfig::parse(
+            "version=1
+enabled=dock
+dock_autohide=true
+dock_magnification=false
+dock_icon_size=64
+",
+        );
+        assert!(saved.dock.autohide);
+        assert!(!saved.dock.magnification);
+        assert_eq!(saved.dock.icon_size, 64);
     }
 
     #[test]

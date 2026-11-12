@@ -4,13 +4,14 @@ use crate::host::RuntimeContext;
 use otto_core::{
     AppMenuState, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY, CMD_CC_BRIGHTNESS, CMD_CC_VOLUME,
     CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, Capability,
-    CommandOutcome, ControlCenterEffect, ControlCenterPort, DownloadsEffect, EstimatedMenuText,
-    HitTarget, MenuAnchor, MenuContext, MenuRow, MenuTextMeasure, PopupMenuLayout,
-    PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowCommand, WindowInfo,
-    WindowMenuEffect, WindowMenuState, build_calendar_rows, build_control_center_rows,
+    CommandOutcome, ControlCenterEffect, ControlCenterPort, DockPreferences, DownloadsEffect,
+    EstimatedMenuText, HitTarget, MenuAnchor, MenuContext, MenuRow, MenuTextMeasure,
+    PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowCommand,
+    WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_rows, build_control_center_rows,
     build_menu_overflow_rows, build_top_bar_menu_rows, build_window_tiling_menu_rows,
-    compute_popup_menu_layout, control_center_effect, dock_overflow_choice, downloads_effect,
-    overflow_menu_target, scale, shift_month, window_menu_effect,
+    compute_popup_menu_layout, control_center_effect, dock_overflow_choice, dock_settings_effect,
+    dock_settings_rows, downloads_effect, overflow_menu_target, scale, shift_month,
+    window_menu_effect,
 };
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
@@ -73,6 +74,7 @@ enum MenuSource {
     DockOverflow {
         entries: Vec<DockEntry>,
     },
+    DockSettings,
 }
 
 pub(crate) struct PopupMenu {
@@ -238,6 +240,22 @@ pub fn open_dock_menu(
             MenuAnchor::AboveDock { center_x, bottom_y },
             rows,
             source,
+        );
+    });
+}
+
+pub fn open_dock_settings_menu(
+    runtime: &RuntimeContext,
+    center_x: i32,
+    bottom_y: i32,
+    preferences: DockPreferences,
+) {
+    with_menu(runtime, |menu| {
+        menu.open(
+            runtime,
+            MenuAnchor::AboveDock { center_x, bottom_y },
+            dock_settings_rows(preferences),
+            MenuSource::DockSettings,
         );
     });
 }
@@ -590,6 +608,12 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
         },
         MenuSource::WindowControls { window } => {
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));
+        }
+        MenuSource::DockSettings => {
+            if let Some(change) = dock_settings_effect(cmd) {
+                let next = runtime.dock_preferences.get().apply(change);
+                runtime.pending_dock_preferences.set(Some(next));
+            }
         }
         MenuSource::DockOverflow { entries } => {
             if let Some(index) = dock_overflow_choice(cmd, entries.len()) {

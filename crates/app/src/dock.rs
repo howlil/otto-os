@@ -5,10 +5,10 @@ use std::time::Instant;
 use crate::host::RuntimeContext;
 use otto_core::{
     ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockInput, DockLayout,
-    DockMetrics, MotionMetrics, MotionPreference, Rect, StableOrder, WindowCommand, WindowIdentity,
-    advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout,
-    dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, scale,
-    split_dock_overflow,
+    DockMetrics, DockPreferences, MotionMetrics, MotionPreference, Rect, StableOrder,
+    WindowCommand, WindowIdentity, advance_bounce_phase, animate_value, bounce_offset,
+    compute_dock_layout, dock_activation_effect, dock_capacity, dock_command_effect,
+    dock_drop_effect, scale, split_dock_overflow,
 };
 use otto_platform::{
     DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
@@ -90,6 +90,7 @@ pub(crate) struct Dock {
     motion_metrics: MotionMetrics,
     anim: AnimState,
     drag: DragState,
+    preferences: DockPreferences,
     entries_gate: ChangeGate,
     cover_gate: ChangeGate,
     covered: bool,
@@ -99,7 +100,8 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     enable_drag_accept_files(hwnd);
     let own_pid = current_process_id();
     let screen = primary_screen();
-    let metrics = DockMetrics::default();
+    let preferences = runtime.dock_preferences.get();
+    let metrics = preferences.metrics();
     let motion = motion_preference();
     let motion_metrics = MotionMetrics::default();
     let mut order = StableOrder::default();
@@ -145,6 +147,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         motion_metrics,
         anim: AnimState::default(),
         drag: DragState::default(),
+        preferences,
         entries_gate: ChangeGate::new(DOCK_ENTRIES_FALLBACK_TICKS),
         cover_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
         covered: false,
@@ -290,6 +293,15 @@ fn show_window(runtime: &RuntimeContext, window: WindowIdentity, target: Option<
         WindowCommand::Focus,
         current_process_id(),
     ));
+}
+
+pub fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences) {
+    with_dock(runtime, |dock| {
+        dock.preferences = preferences;
+        dock.metrics = preferences.metrics();
+        dock.ensure_animating();
+        dock.rebuild(runtime);
+    });
 }
 
 pub fn activate_overflow_entry(runtime: &RuntimeContext, entry: &DockEntry) {
@@ -593,7 +605,7 @@ impl Dock {
                 self.own_pid,
             );
         }
-        let fullscreen_or_max = self.covered;
+        let fullscreen_or_max = self.covered || self.preferences.autohide;
 
         let at_bottom_edge = gy >= self.screen.height - 6;
         let in_interactive_zone = self.anim.hide_progress < 0.85
@@ -922,6 +934,16 @@ impl Dock {
     fn on_right_click(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
         let gap_pad = scale(self.metrics.icon_gap, self.screen.dpi) as f32 * 0.5;
         let Some(idx) = self.layout.hit_test(x, y, gap_pad) else {
+            if self.layout.pill.contains(x, y) {
+                let (origin_x, origin_y) = self.window_origin();
+                let bottom_y = origin_y + self.layout.pill.y - scale(10, self.screen.dpi);
+                crate::menu::open_dock_settings_menu(
+                    runtime,
+                    origin_x + x,
+                    bottom_y,
+                    self.preferences,
+                );
+            }
             return;
         };
         let all = self.combined_entries();
