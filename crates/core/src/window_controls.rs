@@ -19,6 +19,7 @@ pub struct WindowControlsMetrics {
     pub button_radius: i32,
     pub button_spacing: i32,
     pub left_margin: i32,
+    pub hit_slop: i32,
 }
 
 pub type TrafficLightMetrics = WindowControlsMetrics;
@@ -32,6 +33,7 @@ impl WindowControlsMetrics {
         button_radius: 6,
         button_spacing: 20,
         left_margin: 12,
+        hit_slop: 4,
     };
 }
 
@@ -48,6 +50,7 @@ pub struct WindowControlsLayout {
     pub offset_x: i32,
     pub offset_y: i32,
     pub radius: f32,
+    pub hit_radius: f32,
     pub center_y: f32,
     pub centers_x: [f32; 3],
 }
@@ -58,7 +61,7 @@ impl WindowControlsLayout {
     #[must_use]
     pub fn hit_test(&self, x: i32, y: i32) -> Option<WindowControlAction> {
         let (fx, fy) = (x as f32, y as f32);
-        let hit_r = self.radius + 4.0;
+        let hit_r = self.hit_radius;
         let dy = fy - self.center_y;
         if dy.abs() > hit_r {
             return None;
@@ -89,6 +92,7 @@ pub fn compute_window_controls_layout(
     let offset_y = scale(metrics.offset_y, dpi);
     let radius = scale(metrics.button_radius, dpi) as f32;
     let spacing = scale(metrics.button_spacing, dpi) as f32;
+    let hit_radius = radius + scale(metrics.hit_slop, dpi) as f32;
     let left_margin = scale(metrics.left_margin, dpi) as f32;
     let close_x = left_margin;
     let min_x = close_x + spacing;
@@ -101,6 +105,7 @@ pub fn compute_window_controls_layout(
         offset_x,
         offset_y,
         radius,
+        hit_radius,
         center_y,
         centers_x: [close_x, min_x, max_x],
     }
@@ -261,6 +266,17 @@ mod tests {
         assert!(layout.centers_x[0] < layout.centers_x[1]);
         assert!(layout.centers_x[1] < layout.centers_x[2]);
         assert_eq!(layout.hit_test(2, 2), None);
+    }
+
+    #[test]
+    fn hit_slop_scales_with_the_monitor_dpi() {
+        let layout = compute_window_controls_layout(&WindowControlsMetrics::MACOS_SONOMA, 192);
+        let cy = layout.center_y as i32;
+        let just_inside_close = layout.centers_x[0] as i32 + 18;
+        assert_eq!(
+            layout.hit_test(just_inside_close, cy),
+            Some(WindowControlAction::Close)
+        );
     }
 
     #[test]
