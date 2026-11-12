@@ -8,7 +8,7 @@ Rules:
 - Priority is one of: P1 (blocks the next release or is a verified defect), P2 (planned work with a clear scope), P3 (later or unscoped).
 - Evidence points to a DEC in [engineering.md](engineering.md) or a commit. A milestone without evidence cannot be marked Done.
 
-Last updated: 2026-11-12, branch `otto/m07-dock`, after commit `ef238a6`.
+Last updated: 2026-11-12, branch `otto/m07-dock`, after commit `34153b8`.
 
 ## Priority order
 
