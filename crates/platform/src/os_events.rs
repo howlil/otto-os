@@ -8,8 +8,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
     EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, FindWindowW,
-    GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow, OBJID_WINDOW, PostMessageW, SW_HIDE,
-    ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow, OBJID_CURSOR, OBJID_WINDOW, PostMessageW,
+    SW_HIDE, ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 use windows::core::{PCWSTR, w};
 
@@ -209,10 +209,15 @@ unsafe extern "system" fn win_event_proc(
     _event_time: u32,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        if event == EVENT_OBJECT_LOCATIONCHANGE && id_object == OBJID_CURSOR.0 {
+            crate::idle_wake::pointer_moved();
+            return;
+        }
         if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.0.is_null() {
             return;
         }
-        if let Some(change) = classify_window_event(event, is_top_level_or_gone(hwnd)) {
+        let change = classify_window_event(event, is_top_level_or_gone(hwnd));
+        if let Some(change) = change {
             record_window_change(change);
         }
         if event == EVENT_SYSTEM_FOREGROUND {
@@ -224,6 +229,9 @@ unsafe extern "system" fn win_event_proc(
             || (event == EVENT_OBJECT_LOCATIONCHANGE && current_foreground() == hwnd);
         if relevant {
             post_window_sync(hwnd, event);
+        }
+        if relevant || change == Some(WindowChange::Topology) {
+            crate::idle_wake::request_idle_wake();
         }
     }));
 }

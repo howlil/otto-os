@@ -31,8 +31,6 @@ const WINDOW_CONTROLS_ANIM_TIMER: usize = 20;
 const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
 const GREEN_HOVER_TIMER: usize = 21;
 const GREEN_HOVER_MS: u32 = 600;
-const FOREGROUND_CHECK_TIMER: usize = 22;
-const FOREGROUND_CHECK_MS: u32 = 500;
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct WindowControls {
@@ -88,14 +86,6 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         last_tick: Instant::now(),
     };
     install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
-    unsafe {
-        SetTimer(
-            Some(HWND(hwnd as *mut _)),
-            FOREGROUND_CHECK_TIMER,
-            FOREGROUND_CHECK_MS,
-            None,
-        );
-    }
     wc.sync_target();
 
     *runtime.window_controls.borrow_mut() = Some(wc);
@@ -111,7 +101,6 @@ pub fn stop(runtime: &RuntimeContext) {
                 WINDOW_CONTROLS_ANIM_TIMER,
             );
             let _ = KillTimer(Some(HWND(controls.hwnd as *mut _)), GREEN_HOVER_TIMER);
-            let _ = KillTimer(Some(HWND(controls.hwnd as *mut _)), FOREGROUND_CHECK_TIMER);
         }
     }
 }
@@ -137,12 +126,6 @@ pub fn handle_message(
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);
             with_window_controls(runtime, |wc| wc.on_mouse_move(x, y));
-            Some(LRESULT(0))
-        }
-        WM_TIMER if wparam.0 == FOREGROUND_CHECK_TIMER => {
-            if poll_foreground_change() {
-                with_window_controls(runtime, WindowControls::sync_target);
-            }
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == GREEN_HOVER_TIMER => {
@@ -184,6 +167,12 @@ pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
             controls.present();
         }
     });
+}
+
+pub fn poll_foreground(runtime: &RuntimeContext) {
+    if poll_foreground_change() {
+        with_window_controls(runtime, WindowControls::sync_target);
+    }
 }
 
 fn with_window_controls(runtime: &RuntimeContext, action: impl FnOnce(&mut WindowControls)) {

@@ -44,6 +44,11 @@ impl BarVisibility {
     pub const fn is_visible(&self) -> bool {
         !self.full_screen_app || self.revealed
     }
+
+    #[must_use]
+    pub const fn tracks_pointer(&self) -> bool {
+        self.full_screen_app
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +114,18 @@ mod tests {
         };
         assert!(!bar.track_pointer(elsewhere, BAR, false));
         assert!(!bar.is_visible());
+    }
+
+    #[test]
+    fn pointer_tracking_is_needed_only_while_a_full_screen_app_is_active() {
+        let mut bar = BarVisibility::default();
+        assert!(!bar.tracks_pointer());
+        bar.set_full_screen_app(true);
+        assert!(bar.tracks_pointer());
+        bar.track_pointer(at(0), BAR, false);
+        assert!(bar.tracks_pointer());
+        bar.set_full_screen_app(false);
+        assert!(!bar.tracks_pointer());
     }
 
     #[test]

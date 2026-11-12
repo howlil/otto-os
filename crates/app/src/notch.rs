@@ -318,6 +318,12 @@ impl NotchController {
         if latest_media == self.media {
             return false;
         }
+        if let (Some(current), Some(latest)) = (self.media.as_ref(), latest_media.as_ref())
+            && current.presents_like(latest, now_unix_ms)
+        {
+            self.media = latest_media;
+            return false;
+        }
         let track_changed = match (&self.media, &latest_media) {
             (Some(prev), Some(next)) => !prev.is_same_track(next),
             (None, Some(_)) | (Some(_), None) => true,

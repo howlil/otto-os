@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::host::RuntimeContext;
 use otto_core::{
     ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockInput, DockLayout,
-    DockMetrics, DockPreferences, MotionMetrics, MotionPreference, Rect, StableOrder,
+    DockMetrics, DockPreferences, MotionMetrics, MotionPreference, Rect, StableOrder, TickCadence,
     WindowCommand, WindowIdentity, advance_bounce_phase, animate_value, bounce_offset,
     compute_dock_layout, dock_activation_effect, dock_capacity, dock_command_effect,
     dock_drop_effect, scale, split_dock_overflow,
@@ -17,7 +17,8 @@ use otto_platform::{
     is_escape_down, is_window_minimized, launch_new_instance, motion_preference,
     open_file_with_dock_entry, other_applications_visible, overflow_dock_entry, primary_screen,
     quit_application, remove_pinned_app, reorder_pinned_apps, show_application,
-    shutdown_recycle_bin_task, signal_command_failure, toggle_pin_entry, window_change_generations,
+    shutdown_recycle_bin_task, signal_command_failure, toggle_pin_entry, watch_bottom_edge,
+    window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -39,6 +40,9 @@ const DOCK_ANIM_TIMER: usize = 11;
 const DOCK_POLL_MS: u32 = 150;
 const DOCK_ENTRIES_FALLBACK_TICKS: u32 = 14;
 const DOCK_COVER_FALLBACK_TICKS: u32 = 7;
+const DOCK_IDLE_MS: u32 = 1000;
+const DOCK_REVEAL_BAND: i32 = 6;
+const DOCK_IDLE_AFTER_TICKS: u32 = 14;
 
 struct AnimState {
     mag_strength: f32,
@@ -94,6 +98,7 @@ pub(crate) struct Dock {
     entries_gate: ChangeGate,
     cover_gate: ChangeGate,
     covered: bool,
+    cadence: TickCadence,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
@@ -151,6 +156,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         entries_gate: ChangeGate::new(DOCK_ENTRIES_FALLBACK_TICKS),
         cover_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
         covered: false,
+        cadence: TickCadence::new(DOCK_POLL_MS, DOCK_IDLE_MS, DOCK_IDLE_AFTER_TICKS),
     };
     dock.place();
     dock.present(runtime);
@@ -185,6 +191,9 @@ pub fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
+    if matches!(message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP) {
+        wake(runtime);
+    }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_TIMER if wparam.0 == DOCK_POLL_TIMER => {
@@ -240,6 +249,10 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
+}
+
+pub fn wake(runtime: &RuntimeContext) {
+    with_dock(runtime, |dock| dock.wake(runtime));
 }
 
 fn with_dock(runtime: &RuntimeContext, action: impl FnOnce(&mut Dock)) {
@@ -607,7 +620,7 @@ impl Dock {
         }
         let fullscreen_or_max = self.covered || self.preferences.autohide;
 
-        let at_bottom_edge = gy >= self.screen.height - 6;
+        let at_bottom_edge = gy >= self.screen.height - DOCK_REVEAL_BAND;
         let in_interactive_zone = self.anim.hide_progress < 0.85
             && local_x >= self.layout.pill.x - 20
             && local_x <= self.layout.pill.right() + 20
@@ -640,6 +653,39 @@ impl Dock {
 
         if dirty && !self.anim.timer_running {
             self.present(runtime);
+        }
+        let hidden = self.anim.should_hide;
+        watch_bottom_edge(
+            hidden.then_some(DOCK_REVEAL_BAND),
+            self.screen.width,
+            self.screen.height,
+        );
+        let reveal_needs_polling = fullscreen_or_max && (!hidden || generations.is_none());
+        let busy = dirty
+            || reveal_needs_polling
+            || self.hovering
+            || self.anim.timer_running
+            || self.drag.start_idx.is_some();
+        if let Some(interval) = self.cadence.observe(busy) {
+            self.set_poll_interval(interval);
+        }
+    }
+
+    fn wake(&mut self, runtime: &RuntimeContext) {
+        if let Some(interval) = self.cadence.wake() {
+            self.set_poll_interval(interval);
+            self.on_poll_timer(runtime);
+        }
+    }
+
+    fn set_poll_interval(&self, interval: u32) {
+        unsafe {
+            SetTimer(
+                Some(HWND(self.hwnd as *mut _)),
+                DOCK_POLL_TIMER,
+                interval,
+                None,
+            );
         }
     }
 

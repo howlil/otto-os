@@ -1,5 +1,6 @@
 pub const NORMAL_PLAYBACK_RATE_PERMILLE: u32 = 1_000;
 const MAX_PLAYBACK_RATE_PERMILLE: u32 = 16_000;
+pub const POSITION_DRIFT_TOLERANCE_MS: u64 = 750;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -109,6 +110,20 @@ impl NowPlaying {
         let rate = u64::from(self.playback_rate_permille.min(MAX_PLAYBACK_RATE_PERMILLE));
         let advanced = elapsed.saturating_mul(rate) / u64::from(NORMAL_PLAYBACK_RATE_PERMILLE);
         self.clamped_position(self.position_ms.saturating_add(advanced))
+    }
+
+    #[must_use]
+    pub fn presents_like(&self, other: &Self, now_unix_ms: i64) -> bool {
+        self.is_same_track(other)
+            && self.playing == other.playing
+            && self.duration_ms == other.duration_ms
+            && self.playback_rate_permille == other.playback_rate_permille
+            && self.capabilities == other.capabilities
+            && self.thumbnail == other.thumbnail
+            && self
+                .position_at(now_unix_ms)
+                .abs_diff(other.position_at(now_unix_ms))
+                <= POSITION_DRIFT_TOLERANCE_MS
     }
 
     #[must_use]
@@ -298,6 +313,48 @@ mod tests {
         assert!((active.progress_ratio() - 0.25).abs() < f32::EPSILON);
         assert_eq!(active.elapsed_formatted(), "00:30");
         assert_eq!(active.remaining_formatted(), "-01:30");
+    }
+
+    fn playing_at(position_ms: u64, updated_unix_ms: i64) -> NowPlaying {
+        NowPlaying {
+            title: String::from("Song"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms,
+            duration_ms: 200_000,
+            position_updated_unix_ms: Some(updated_unix_ms),
+            ..NowPlaying::default()
+        }
+    }
+
+    #[test]
+    fn a_readback_that_matches_the_extrapolated_position_presents_alike() {
+        let shown = playing_at(10_000, 1_000_000);
+        let readback = playing_at(14_900, 1_005_000);
+        assert!(shown.presents_like(&readback, 1_005_000));
+        assert_ne!(shown, readback);
+    }
+
+    #[test]
+    fn a_seek_beyond_the_drift_tolerance_presents_differently() {
+        let shown = playing_at(10_000, 1_000_000);
+        let sought = playing_at(60_000, 1_005_000);
+        assert!(!shown.presents_like(&sought, 1_005_000));
+    }
+
+    #[test]
+    fn play_state_or_track_changes_present_differently() {
+        let shown = playing_at(10_000, 1_000_000);
+        let paused = NowPlaying {
+            playing: false,
+            ..shown.clone()
+        };
+        let other = NowPlaying {
+            title: String::from("Other"),
+            ..shown.clone()
+        };
+        assert!(!shown.presents_like(&paused, 1_000_000));
+        assert!(!shown.presents_like(&other, 1_000_000));
     }
 
     #[test]

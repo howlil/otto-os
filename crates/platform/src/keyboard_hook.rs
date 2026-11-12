@@ -10,8 +10,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_VOLUME_DOWN,
-    VK_VOLUME_MUTE, VK_VOLUME_UP,
+    VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+    VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW,
@@ -154,6 +154,9 @@ fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
         return false;
     }
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    if event.vkCode == u32::from(VK_CAPITAL.0) {
+        crate::idle_wake::request_idle_wake();
+    }
     if let Some(key) = bar_key(event.vkCode, event.flags.0) {
         return route_bar_key(key, is_key_down(wparam.0));
     }

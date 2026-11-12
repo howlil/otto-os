@@ -14,11 +14,13 @@ mod media;
 mod menu;
 mod motion;
 mod pixels;
+mod pointer_edge;
 mod pomodoro;
 mod ports;
 mod snapshot_cache;
 mod status;
 mod theme;
+mod tick_cadence;
 mod window_controls;
 
 pub use app_model::{
@@ -76,6 +78,7 @@ pub use pixels::{
     BgraLayout, CropRegion, PixelBufferError, PixelLimits, bgra_layout, crop_bgra, resize_bgra,
     scale_dimension, validate_bgra_buffer,
 };
+pub use pointer_edge::PointerEdgeWatch;
 pub use pomodoro::{
     POMODORO_SUSPEND_GAP_MS, PomodoroAlert, PomodoroClock, PomodoroPhase, PomodoroState,
     PomodoroStatus, PomodoroTick,
@@ -86,6 +89,7 @@ pub use status::{
     BatteryStatus, ClockTime, NotchHudKind, NotchHudState, SystemStatus, detect_hud_event,
 };
 pub use theme::{ResolvedTheme, Rgba, ThemeMode};
+pub use tick_cadence::TickCadence;
 pub use window_controls::{
     TrafficLightAction, TrafficLightLayout, TrafficLightMetrics, WindowControlAction,
     WindowControlsLayout, WindowControlsMetrics, WindowControlsState, accepts_window_controls,

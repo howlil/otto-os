@@ -97,6 +97,7 @@ mod listeners {
             if let Some(data) = unsafe { notify.as_ref() } {
                 let (percent, muted) = decode_notification(data);
                 store_state(percent, muted);
+                crate::idle_wake::request_idle_wake();
             }
             Ok(())
         }

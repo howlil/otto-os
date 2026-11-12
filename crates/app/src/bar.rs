@@ -8,17 +8,18 @@ use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
     Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate,
     HitTarget, Layout, LyricsStatus, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind,
-    NotchLayoutInput, NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event,
-    is_top_bar_menu_target, scale,
+    NotchLayoutInput, NotchPort, NowPlaying, TickCadence, compute_layout_with_notch,
+    detect_hud_event, is_top_bar_menu_target, scale,
 };
 use otto_platform::{
     AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
-    WindowsNotchPort, adjust_volume, apply_backdrop_material, current_process_id, cursor_position,
-    enable_backdrop_blur, foreground_application, is_escape_down, is_routing_bar_keys,
-    motion_preference, open_quick_settings, open_spotlight_search, primary_screen,
-    read_system_status, register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys,
-    step_display_brightness, stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow,
-    unregister_notch_hotkeys, window_bounds, window_change_generations,
+    WindowsNotchPort, acknowledge_idle_wake, adjust_volume, apply_backdrop_material,
+    current_process_id, cursor_position, enable_backdrop_blur, foreground_application,
+    is_escape_down, is_routing_bar_keys, motion_preference, open_quick_settings,
+    open_spotlight_search, primary_screen, read_system_status, register_idle_wake,
+    register_notch_hotkeys, restore_shell_from_recovery, route_bar_keys, step_display_brightness,
+    stop_routing_bar_keys, suppress_native_osd, toggle_tray_overflow, unregister_idle_wake,
+    unregister_notch_hotkeys, watch_top_edge, window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -47,6 +48,11 @@ const MIN_DEADLINE_MS: u128 = 10;
 const STATUS_POLL_MS: u32 = 120;
 const FOREGROUND_FALLBACK_TICKS: u32 = 8;
 const WM_APP_BAR_KEY: u32 = 0x8000 + 21;
+const WM_APP_IDLE_WAKE: u32 = 0x8000 + 22;
+const STATUS_IDLE_MS: u32 = 1000;
+const STATUS_IDLE_AFTER_TICKS: u32 = 16;
+const MEDIA_EVERY_TICKS: u8 = 4;
+const MAINTAIN_EVERY_TICKS: u8 = 8;
 const HUD_ANIM_MS: u32 = 8;
 
 #[allow(clippy::struct_excessive_bools)]
@@ -70,6 +76,7 @@ pub(crate) struct Bar {
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
     foreground_gate: ChangeGate,
+    cadence: TickCadence,
     focus: BarFocus,
     seek_drag_hwnd: Option<isize>,
     lyrics: LyricsService,
@@ -165,6 +172,7 @@ pub fn start(
         tracking_panel_mouse: false,
         maintain_ticks: 0,
         foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
+        cadence: TickCadence::new(STATUS_POLL_MS, STATUS_IDLE_MS, STATUS_IDLE_AFTER_TICKS),
         focus: BarFocus::default(),
         seek_drag_hwnd: None,
         lyrics,
@@ -190,12 +198,14 @@ pub fn start(
         );
     }
     bar.ensure_anim_timer();
+    register_idle_wake(hwnd, WM_APP_IDLE_WAKE);
 
     *runtime.bar.borrow_mut() = Some(bar);
     Ok(())
 }
 
 pub fn stop(runtime: &RuntimeContext) {
+    unregister_idle_wake();
     if let Some(mut bar) = runtime.bar.borrow_mut().take() {
         unsafe {
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), STATUS_TIMER);
@@ -215,9 +225,11 @@ pub fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
+    wake_for_message(runtime, message);
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_QUERYENDSESSION => Some(LRESULT(1)),
+        WM_APP_IDLE_WAKE => Some(LRESULT(0)),
         WM_ENDSESSION => {
             if wparam.0 != 0 {
                 let _ = otto_platform::restore_hidden_windows();
@@ -316,6 +328,35 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
+}
+
+const fn wakes_status_tick(message: u32) -> bool {
+    matches!(
+        message,
+        WM_APP_IDLE_WAKE
+            | WM_HOTKEY
+            | WM_APP_BAR_KEY
+            | WM_MOUSEMOVE
+            | WM_LBUTTONDOWN
+            | WM_RBUTTONUP
+            | WM_MOUSEWHEEL
+            | WM_POWERBROADCAST
+            | otto_platform::APPBAR_CALLBACK_MESSAGE
+    )
+}
+
+fn wake_for_message(runtime: &RuntimeContext, message: u32) {
+    if message == WM_APP_IDLE_WAKE {
+        acknowledge_idle_wake();
+    }
+    if wakes_status_tick(message) {
+        wake(runtime);
+    }
+}
+
+pub fn wake(runtime: &RuntimeContext) {
+    with_bar(runtime, |bar| bar.wake(runtime));
+    crate::dock::wake(runtime);
 }
 
 fn with_bar(runtime: &RuntimeContext, action: impl FnOnce(&mut Bar)) {
@@ -618,10 +659,57 @@ impl Bar {
         self.ensure_anim_timer();
     }
 
+    fn wake(&mut self, runtime: &RuntimeContext) {
+        if let Some(interval) = self.cadence.wake() {
+            self.set_status_interval(interval);
+            self.tick(runtime);
+        }
+    }
+
+    fn set_status_interval(&self, interval: u32) {
+        unsafe {
+            SetTimer(
+                Some(HWND(self.hwnd as *mut _)),
+                STATUS_TIMER,
+                interval,
+                None,
+            );
+        }
+    }
+
+    fn periodic_due(&self, every_ticks: u8) -> bool {
+        self.cadence.is_idle() || self.maintain_ticks.is_multiple_of(every_ticks)
+    }
+
+    fn hidden_for_full_screen(&self) -> bool {
+        self.visibility.tracks_pointer() && !self.visibility.is_visible()
+    }
+
+    fn status_busy(&self, runtime: &RuntimeContext, dirty: bool) -> bool {
+        let reveal_needs_polling = self.visibility.tracks_pointer()
+            && (self.visibility.is_visible() || window_change_generations().is_none());
+        dirty || reveal_needs_polling || self.needs_status_polling(runtime)
+    }
+
+    fn needs_status_polling(&self, runtime: &RuntimeContext) -> bool {
+        self.animating
+            || self.settle_ticks > 0
+            || self.panel_visible
+            || self.hovered.is_some()
+            || self.focus.is_active()
+            || self.notch.is_seek_dragging()
+            || self.notch.hud_state().is_some()
+            || self.notch.lyrics_view().status == LyricsStatus::Loading
+            || crate::menu::active_top_bar_target(runtime).is_some()
+            || crate::menu::is_control_center_open(runtime)
+            || crate::menu::is_calendar_open(runtime)
+    }
+
     fn tick(&mut self, runtime: &RuntimeContext) {
         self.maintain_ticks = self.maintain_ticks.wrapping_add(1);
         self.track_reveal(runtime);
-        if self.maintain_ticks.is_multiple_of(8) {
+        crate::window_controls::poll_foreground(runtime);
+        if self.periodic_due(MAINTAIN_EVERY_TICKS) {
             suppress_native_osd();
             self.appbar.maintain(
                 self.screen.width,
@@ -692,7 +780,7 @@ impl Bar {
         if self.controls.apply_status(latest) {
             dirty = true;
         }
-        if self.maintain_ticks.is_multiple_of(4) {
+        if self.periodic_due(MEDIA_EVERY_TICKS) {
             let latest_media = self.notch_port.read_now_playing();
             if self.notch.set_media(latest_media) {
                 self.recompute_layout();
@@ -706,6 +794,15 @@ impl Bar {
             self.present(runtime);
         }
         self.schedule_deadline();
+        watch_top_edge(
+            self.hidden_for_full_screen(),
+            self.screen.width,
+            self.screen.height,
+        );
+        let busy = self.status_busy(runtime, dirty);
+        if let Some(interval) = self.cadence.observe(busy) {
+            self.set_status_interval(interval);
+        }
     }
 
     fn schedule_deadline(&self) {

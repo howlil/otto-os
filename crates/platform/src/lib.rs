@@ -8,6 +8,7 @@ mod dock;
 mod file;
 mod gdi;
 mod hidden_windows;
+mod idle_wake;
 mod instance;
 mod keyboard_hook;
 mod lyrics;
@@ -50,6 +51,10 @@ pub use dock::{
     restore_window_native_quiet, set_window_transitions_enabled, toggle_pin_entry, window_bounds,
 };
 pub use file::{DATA_DIR_OVERRIDE, data_dir, replace_file_atomically};
+pub use idle_wake::{
+    acknowledge_idle_wake, register_idle_wake, unregister_idle_wake, watch_bottom_edge,
+    watch_top_edge,
+};
 pub use instance::InstanceGuard;
 pub use keyboard_hook::{
     install_keyboard_hook, is_routing_bar_keys, route_bar_keys, stop_routing_bar_keys,
