@@ -1,14 +1,146 @@
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub const NORMAL_PLAYBACK_RATE_PERMILLE: u32 = 1_000;
+const MAX_PLAYBACK_RATE_PERMILLE: u32 = 16_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct MediaCapabilities {
+    pub play_pause: bool,
+    pub next: bool,
+    pub previous: bool,
+    pub seek: bool,
+}
+
+impl MediaCapabilities {
+    pub const ALL: Self = Self {
+        play_pause: true,
+        next: true,
+        previous: true,
+        seek: true,
+    };
+
+    #[must_use]
+    pub const fn allows(self, command: MediaCommand) -> bool {
+        match command {
+            MediaCommand::TogglePlayPause => self.play_pause,
+            MediaCommand::Next => self.next,
+            MediaCommand::Previous => self.previous,
+            MediaCommand::Seek(_) => self.seek,
+        }
+    }
+}
+
+impl Default for MediaCapabilities {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrackKey {
+    pub source_app: String,
+    pub title: String,
+    pub artist: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowPlaying {
+    pub source_app: String,
     pub title: String,
     pub artist: String,
     pub playing: bool,
     pub position_ms: u64,
     pub duration_ms: u64,
+    pub position_updated_unix_ms: Option<i64>,
+    pub playback_rate_permille: u32,
+    pub capabilities: MediaCapabilities,
     pub thumbnail: Option<std::sync::Arc<[u8]>>,
 }
 
+impl Default for NowPlaying {
+    fn default() -> Self {
+        Self {
+            source_app: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            playing: false,
+            position_ms: 0,
+            duration_ms: 0,
+            position_updated_unix_ms: None,
+            playback_rate_permille: NORMAL_PLAYBACK_RATE_PERMILLE,
+            capabilities: MediaCapabilities::ALL,
+            thumbnail: None,
+        }
+    }
+}
+
 impl NowPlaying {
+    #[must_use]
+    pub fn track_key(&self) -> TrackKey {
+        TrackKey {
+            source_app: self.source_app.clone(),
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_same_track(&self, other: &Self) -> bool {
+        self.source_app == other.source_app
+            && self.title == other.title
+            && self.artist == other.artist
+    }
+
+    #[must_use]
+    pub const fn has_known_duration(&self) -> bool {
+        self.duration_ms > 0
+    }
+
+    #[must_use]
+    pub const fn is_seekable(&self) -> bool {
+        self.capabilities.seek && self.has_known_duration()
+    }
+
+    #[must_use]
+    pub fn position_at(&self, now_unix_ms: i64) -> u64 {
+        let Some(updated) = self.position_updated_unix_ms.filter(|_| self.playing) else {
+            return self.clamped_position(self.position_ms);
+        };
+        let elapsed = u64::try_from(now_unix_ms.saturating_sub(updated)).unwrap_or(0);
+        let rate = u64::from(self.playback_rate_permille.min(MAX_PLAYBACK_RATE_PERMILLE));
+        let advanced = elapsed.saturating_mul(rate) / u64::from(NORMAL_PLAYBACK_RATE_PERMILLE);
+        self.clamped_position(self.position_ms.saturating_add(advanced))
+    }
+
+    #[must_use]
+    pub fn at(&self, now_unix_ms: i64) -> Self {
+        Self {
+            position_ms: self.position_at(now_unix_ms),
+            ..self.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn next_whole_second_in(&self, now_unix_ms: i64) -> Option<u64> {
+        if !self.playing || self.position_updated_unix_ms.is_none() {
+            return None;
+        }
+        let rate = u64::from(
+            self.playback_rate_permille
+                .clamp(1, MAX_PLAYBACK_RATE_PERMILLE),
+        );
+        let position = self.position_at(now_unix_ms);
+        let media_wait = 1_000 - position % 1_000;
+        Some((media_wait * u64::from(NORMAL_PLAYBACK_RATE_PERMILLE)).div_ceil(rate))
+    }
+
+    const fn clamped_position(&self, position_ms: u64) -> u64 {
+        if self.has_known_duration() && position_ms > self.duration_ms {
+            self.duration_ms
+        } else {
+            position_ms
+        }
+    }
+
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.playing && !self.title.trim().is_empty()
@@ -98,6 +230,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 0,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         assert!(!playing_no_title.is_active());
 
@@ -108,6 +241,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 0,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         assert!(!paused.is_active());
 
@@ -118,6 +252,7 @@ mod tests {
             position_ms: 30_000,
             duration_ms: 120_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         assert!(active.is_active());
         assert_eq!(active.display_artist(), "Artist");
@@ -135,6 +270,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 0,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         assert_eq!(item.display_artist(), "Unknown Artist");
     }
@@ -159,8 +295,114 @@ mod tests {
             position_ms: 200_000,
             duration_ms: 100_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         assert!((over.progress_ratio() - 1.0).abs() < f32::EPSILON);
+    }
+
+    fn playing_track(position_ms: u64, duration_ms: u64) -> NowPlaying {
+        NowPlaying {
+            source_app: String::from("Spotify.exe"),
+            title: String::from("Song"),
+            artist: String::from("Artist"),
+            playing: true,
+            position_ms,
+            duration_ms,
+            position_updated_unix_ms: Some(10_000),
+            ..NowPlaying::default()
+        }
+    }
+
+    #[test]
+    fn position_advances_from_the_last_timeline_update_while_playing() {
+        let track = playing_track(30_000, 120_000);
+        assert_eq!(track.position_at(10_000), 30_000);
+        assert_eq!(track.position_at(12_500), 32_500);
+        assert_eq!(track.position_at(9_000), 30_000);
+        assert_eq!(track.at(15_000).position_ms, 35_000);
+    }
+
+    #[test]
+    fn paused_tracks_and_unknown_update_times_do_not_advance() {
+        let paused = NowPlaying {
+            playing: false,
+            ..playing_track(30_000, 120_000)
+        };
+        assert_eq!(paused.position_at(60_000), 30_000);
+        let unstamped = NowPlaying {
+            position_updated_unix_ms: None,
+            ..playing_track(30_000, 120_000)
+        };
+        assert_eq!(unstamped.position_at(60_000), 30_000);
+        assert_eq!(unstamped.next_whole_second_in(60_000), None);
+    }
+
+    #[test]
+    fn position_follows_the_playback_rate_and_stops_at_the_end() {
+        let fast = NowPlaying {
+            playback_rate_permille: 2_000,
+            ..playing_track(30_000, 120_000)
+        };
+        assert_eq!(fast.position_at(11_000), 32_000);
+        assert_eq!(fast.position_at(1_000_000), 120_000);
+    }
+
+    #[test]
+    fn live_streams_keep_counting_and_are_not_seekable() {
+        let live = playing_track(5_000, 0);
+        assert!(!live.has_known_duration());
+        assert!(!live.is_seekable());
+        assert_eq!(live.position_at(20_000), 15_000);
+        let no_seek = NowPlaying {
+            capabilities: MediaCapabilities {
+                seek: false,
+                ..MediaCapabilities::ALL
+            },
+            ..playing_track(5_000, 60_000)
+        };
+        assert!(!no_seek.is_seekable());
+        assert!(playing_track(5_000, 60_000).is_seekable());
+    }
+
+    #[test]
+    fn repaint_waits_until_the_next_whole_media_second() {
+        let track = playing_track(30_250, 120_000);
+        assert_eq!(track.next_whole_second_in(10_000), Some(750));
+        let double = NowPlaying {
+            playback_rate_permille: 2_000,
+            ..track
+        };
+        assert_eq!(double.next_whole_second_in(10_000), Some(375));
+    }
+
+    #[test]
+    fn track_identity_includes_the_source_application() {
+        let spotify = playing_track(0, 1);
+        let browser = NowPlaying {
+            source_app: String::from("chrome.exe"),
+            ..playing_track(0, 1)
+        };
+        assert!(!spotify.is_same_track(&browser));
+        assert_ne!(spotify.track_key(), browser.track_key());
+        let later = NowPlaying {
+            playing: false,
+            position_ms: 900,
+            ..playing_track(0, 1)
+        };
+        assert!(spotify.is_same_track(&later));
+    }
+
+    #[test]
+    fn capabilities_gate_each_transport_command() {
+        let limited = MediaCapabilities {
+            next: false,
+            seek: false,
+            ..MediaCapabilities::ALL
+        };
+        assert!(limited.allows(MediaCommand::TogglePlayPause));
+        assert!(!limited.allows(MediaCommand::Next));
+        assert!(limited.allows(MediaCommand::Previous));
+        assert!(!limited.allows(MediaCommand::Seek(1)));
     }
 
     #[test]

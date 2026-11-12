@@ -62,6 +62,7 @@ const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 0.0,
     a: 1.0,
 };
+const DISABLED_CONTROL_ALPHA: f32 = 0.35;
 const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 1.0,
     g: 1.0,
@@ -948,7 +949,12 @@ impl Renderer {
             bottom: track_y + track_h,
         };
 
-        let ratio = media.progress_ratio();
+        let ratio = if media.has_known_duration() {
+            media.progress_ratio()
+        } else {
+            0.0
+        };
+        let seekable = media.is_seekable();
         let fill_w = (seekbar_rect.width as f32 * ratio).max(0.0);
         let fill_rect = D2D_RECT_F {
             left: seekbar_rect.x as f32,
@@ -958,7 +964,11 @@ impl Renderer {
         };
 
         unsafe {
-            let track_alpha = if hovered { 0.28 * alpha } else { 0.16 * alpha };
+            let track_alpha = if hovered && seekable {
+                0.28 * alpha
+            } else {
+                0.16 * alpha
+            };
             let track_brush = &self.brushes.alpha_brush(FOREGROUND, track_alpha);
             let fill_color = if hovered {
                 brighten(MUSIC_ACCENT, 0.14)
@@ -986,7 +996,7 @@ impl Renderer {
                 self.draw_rounded_box(fill_box, track_radius, fill_brush);
             }
 
-            if hovered && fill_w > 0.0 {
+            if hovered && seekable && fill_w > 0.0 {
                 let thumb_x = (seekbar_rect.x as f32 + fill_w).min(seekbar_rect.right() as f32);
                 let thumb_y = track_y + track_h * 0.5;
                 let thumb_ellipse = D2D1_ELLIPSE {
@@ -1017,12 +1027,12 @@ impl Renderer {
                 elapsed_rect,
                 muted_brush,
             );
-            self.draw_text(
-                &media.remaining_formatted(),
-                &self.text_trailing,
-                remaining_rect,
-                muted_brush,
-            );
+            let remaining = if media.has_known_duration() {
+                media.remaining_formatted()
+            } else {
+                String::from("LIVE")
+            };
+            self.draw_text(&remaining, &self.text_trailing, remaining_rect, muted_brush);
         }
     }
 
@@ -1039,27 +1049,47 @@ impl Renderer {
         let play_rect = translate_rect(layout.media_play_button, -offset_x);
         let next_rect = translate_rect(layout.media_next_button, -offset_x);
 
-        let prev_alpha = if hovered == Some(HitTarget::MediaPrevious) {
-            0.25 * alpha
-        } else {
-            0.14 * alpha
+        let capabilities = media.capabilities;
+        let disabled_glyph = &self
+            .brushes
+            .alpha_brush(FOREGROUND, DISABLED_CONTROL_ALPHA * alpha);
+        let button_alpha = |target: HitTarget, enabled: bool| {
+            if !enabled {
+                0.06 * alpha
+            } else if hovered == Some(target) {
+                0.25 * alpha
+            } else {
+                0.14 * alpha
+            }
         };
-        let prev_fill = &self.brushes.alpha_brush(FOREGROUND, prev_alpha);
+        let prev_fill = &self.brushes.alpha_brush(
+            FOREGROUND,
+            button_alpha(HitTarget::MediaPrevious, capabilities.previous),
+        );
         self.draw_circle_button(prev_rect, prev_fill);
         self.draw_previous_glyph(
             prev_rect.x as f32 + prev_rect.width as f32 * 0.5,
             prev_rect.y as f32 + prev_rect.height as f32 * 0.5,
             scale(6, self.dpi) as f32,
-            fg,
+            if capabilities.previous {
+                fg
+            } else {
+                disabled_glyph
+            },
         )?;
 
-        let play_hover = hovered == Some(HitTarget::MediaPlayPause);
+        let play_hover = hovered == Some(HitTarget::MediaPlayPause) && capabilities.play_pause;
         let play_color = if play_hover {
             brighten(MUSIC_ACCENT, 0.14)
         } else {
             MUSIC_ACCENT
         };
-        let play_fill = &self.brushes.alpha_brush(play_color, alpha);
+        let play_alpha = if capabilities.play_pause {
+            alpha
+        } else {
+            DISABLED_CONTROL_ALPHA * alpha
+        };
+        let play_fill = &self.brushes.alpha_brush(play_color, play_alpha);
         let dark_icon = &self.brushes.alpha_brush(BLACK, 0.92 * alpha);
         self.draw_circle_button(play_rect, play_fill);
         let play_x = play_rect.x as f32 + play_rect.width as f32 * 0.5;
@@ -1070,18 +1100,20 @@ impl Renderer {
             self.draw_play_glyph(play_x, play_y, scale(7, self.dpi) as f32, dark_icon)?;
         }
 
-        let next_alpha = if hovered == Some(HitTarget::MediaNext) {
-            0.25 * alpha
-        } else {
-            0.14 * alpha
-        };
-        let next_fill = &self.brushes.alpha_brush(FOREGROUND, next_alpha);
+        let next_fill = &self.brushes.alpha_brush(
+            FOREGROUND,
+            button_alpha(HitTarget::MediaNext, capabilities.next),
+        );
         self.draw_circle_button(next_rect, next_fill);
         self.draw_skip_glyph(
             next_rect.x as f32 + next_rect.width as f32 * 0.5,
             next_rect.y as f32 + next_rect.height as f32 * 0.5,
             scale(6, self.dpi) as f32,
-            fg,
+            if capabilities.next {
+                fg
+            } else {
+                disabled_glyph
+            },
         )?;
         Ok(())
     }

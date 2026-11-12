@@ -54,7 +54,10 @@ pub use material::{
     Appearance, ContrastColors, InteractionState, MaterialVariant, SemanticColors, ShapeTokens,
     SystemAppearance,
 };
-pub use media::{MediaCommand, NotchExpandedTab, NowPlaying};
+pub use media::{
+    MediaCapabilities, MediaCommand, NORMAL_PLAYBACK_RATE_PERMILLE, NotchExpandedTab, NowPlaying,
+    TrackKey,
+};
 pub use menu::*;
 pub use motion::{
     MotionMetrics, MotionPreference, advance_bounce_phase, advance_genie_progress, animate_value,

@@ -939,7 +939,9 @@ impl Bar {
             let seekbar = self.layout.media_seekbar;
             if seekbar.width > 0 {
                 let ratio = ((x - seekbar.x) as f32 / seekbar.width as f32).clamp(0.0, 1.0);
-                let update = self.notch.handle_seekbar_click(ratio);
+                let update = self
+                    .notch
+                    .handle_seekbar_click(ratio, crate::notch::unix_now_ms());
                 if let Some(NotchEffect::Platform(action)) = update.effect {
                     self.notch_port.execute(action);
                 }
@@ -1084,6 +1086,10 @@ impl Bar {
             .hovered
             .or_else(|| crate::menu::active_top_bar_target(runtime));
         let appearance = crate::theme_state::appearance(runtime);
+        let media = self
+            .notch
+            .media()
+            .map(|media| media.at(crate::notch::unix_now_ms()));
         let _ = self.renderer.present(
             self.hwnd,
             (0, 0),
@@ -1094,7 +1100,7 @@ impl Bar {
             self.focus.current(),
             self.notch.hud_state(),
             self.notch.pomodoro(),
-            self.notch.media(),
+            media.as_ref(),
             self.notch.anim_phase(),
             appearance,
         );
@@ -1104,7 +1110,7 @@ impl Bar {
                 &self.layout,
                 hovered,
                 self.notch.pomodoro(),
-                self.notch.media(),
+                media.as_ref(),
                 self.notch.anim_phase(),
                 self.notch.lyrics(),
             );

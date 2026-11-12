@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
     HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
@@ -9,6 +9,14 @@ use otto_core::{
 const HUD_HOLD_MS: u64 = 1_650;
 const ALERT_HOLD_MS: u64 = 10_000;
 const HOVER_DEBOUNCE_MS: u64 = 80;
+
+pub(crate) fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum PanelTrigger {
@@ -98,7 +106,26 @@ impl NotchController {
 
     pub(crate) fn sync_clock(&mut self, now: Instant) -> NotchUpdate {
         let (changed, effect) = self.step_pomodoro_clock(now);
-        NotchUpdate { changed, effect }
+        NotchUpdate {
+            changed: changed || self.shows_live_media_progress(),
+            effect,
+        }
+    }
+
+    fn shows_live_media_progress(&self) -> bool {
+        self.panel_expansion > 0.05
+            && self.notch_tab == NotchExpandedTab::Media
+            && self.media.as_ref().is_some_and(|media| media.playing)
+    }
+
+    fn media_repaint_in(&self, now_unix_ms: i64) -> Option<Duration> {
+        if !self.shows_live_media_progress() {
+            return None;
+        }
+        self.media
+            .as_ref()
+            .and_then(|media| media.next_whole_second_in(now_unix_ms))
+            .map(Duration::from_millis)
     }
 
     pub(crate) fn suspend(&mut self, now: Instant) -> NotchUpdate {
@@ -122,7 +149,8 @@ impl NotchController {
         let alert = self
             .alert_until
             .filter(|_| self.pomodoro.status == PomodoroStatus::Alert);
-        [pomodoro, alert, self.hud_until]
+        let media = self.media_repaint_in(unix_now_ms()).map(|wait| now + wait);
+        [pomodoro, alert, self.hud_until, media]
             .into_iter()
             .flatten()
             .min()
@@ -175,7 +203,7 @@ impl NotchController {
             return false;
         }
         let track_changed = match (&self.media, &latest_media) {
-            (Some(prev), Some(next)) => prev.title != next.title || prev.artist != next.artist,
+            (Some(prev), Some(next)) => !prev.is_same_track(next),
             (None, Some(_)) | (Some(_), None) => true,
             (None, None) => false,
         };
@@ -280,12 +308,13 @@ impl NotchController {
         false
     }
 
-    pub(crate) fn handle_seekbar_click(&mut self, ratio: f32) -> NotchUpdate {
-        let Some(media) = self.media.as_mut() else {
+    pub(crate) fn handle_seekbar_click(&mut self, ratio: f32, now_unix_ms: i64) -> NotchUpdate {
+        let Some(media) = self.media.as_mut().filter(|media| media.is_seekable()) else {
             return NotchUpdate::default();
         };
         let target_ms = ((ratio * media.duration_ms as f32).round() as u64).min(media.duration_ms);
         media.position_ms = target_ms;
+        media.position_updated_unix_ms = Some(now_unix_ms);
         NotchUpdate {
             changed: true,
             effect: Some(NotchEffect::Platform(NotchAction::Media(
@@ -348,17 +377,26 @@ impl NotchController {
     }
 
     fn handle_media_click(&mut self, target: HitTarget) -> NotchUpdate {
+        let capabilities = self
+            .media
+            .as_ref()
+            .map_or(otto_core::MediaCapabilities::ALL, |media| {
+                media.capabilities
+            });
         let command = match target {
-            HitTarget::MediaPlayPause => {
-                if let Some(media) = self.media.as_mut() {
-                    media.playing = !media.playing;
-                }
-                MediaCommand::TogglePlayPause
-            }
+            HitTarget::MediaPlayPause => MediaCommand::TogglePlayPause,
             HitTarget::MediaPrevious => MediaCommand::Previous,
             HitTarget::MediaNext => MediaCommand::Next,
             _ => return NotchUpdate::default(),
         };
+        if !capabilities.allows(command) {
+            return NotchUpdate::default();
+        }
+        if command == MediaCommand::TogglePlayPause
+            && let Some(media) = self.media.as_mut()
+        {
+            media.playing = !media.playing;
+        }
         NotchUpdate {
             changed: matches!(target, HitTarget::MediaPlayPause),
             effect: Some(NotchEffect::Platform(NotchAction::Media(command))),
@@ -552,7 +590,9 @@ impl NotchController {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALERT_HOLD_MS, HUD_HOLD_MS, NotchController, NotchEffect, NotchHotkey};
+    use super::{
+        ALERT_HOLD_MS, HUD_HOLD_MS, NotchController, NotchEffect, NotchHotkey, NotchUpdate,
+    };
     use otto_core::{
         HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
         NowPlaying, PomodoroStatus,
@@ -700,6 +740,7 @@ mod tests {
             position_ms: 10_000,
             duration_ms: 60_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
 
@@ -724,19 +765,92 @@ mod tests {
             position_ms: 0,
             duration_ms: 200_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
 
-        let update = notch.handle_seekbar_click(0.5);
+        let update = notch.handle_seekbar_click(0.5, 50_000);
 
         assert!(update.changed);
         assert_eq!(notch.media().map(|item| item.position_ms), Some(100_000));
+        assert_eq!(
+            notch.media().and_then(|item| item.position_updated_unix_ms),
+            Some(50_000)
+        );
         assert_eq!(
             update.effect,
             Some(NotchEffect::Platform(NotchAction::Media(
                 MediaCommand::Seek(100_000)
             )))
         );
+    }
+
+    #[test]
+    fn unsupported_transport_commands_are_ignored() {
+        let media = NowPlaying {
+            title: String::from("Live radio"),
+            playing: true,
+            capabilities: otto_core::MediaCapabilities {
+                next: false,
+                previous: false,
+                seek: false,
+                play_pause: true,
+            },
+            ..NowPlaying::default()
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+        assert_eq!(
+            notch.handle_click(HitTarget::MediaNext),
+            NotchUpdate::default()
+        );
+        assert_eq!(
+            notch.handle_click(HitTarget::MediaPrevious),
+            NotchUpdate::default()
+        );
+        assert_eq!(notch.handle_seekbar_click(0.5, 0), NotchUpdate::default());
+        let toggle = notch.handle_click(HitTarget::MediaPlayPause);
+        assert!(toggle.changed);
+        assert_eq!(notch.media().map(|item| item.playing), Some(false));
+    }
+
+    #[test]
+    fn a_track_from_another_application_counts_as_a_track_change() {
+        let spotify = NowPlaying {
+            source_app: String::from("Spotify.exe"),
+            title: String::from("Song"),
+            artist: String::from("Artist"),
+            playing: true,
+            ..NowPlaying::default()
+        };
+        let mut notch = NotchController::new(Some(spotify.clone()), NotchExpandedTab::Media);
+        notch.set_lyrics(Some(otto_core::parse_lrc("[00:01.00]line")));
+        let browser = NowPlaying {
+            source_app: String::from("chrome.exe"),
+            ..spotify
+        };
+        assert!(notch.set_media(Some(browser)));
+        assert!(notch.lyrics().is_none());
+    }
+
+    #[test]
+    fn playing_media_in_the_open_panel_wakes_once_per_media_second() {
+        let media = NowPlaying {
+            title: String::from("Song"),
+            playing: true,
+            position_ms: 10_400,
+            duration_ms: 100_000,
+            position_updated_unix_ms: Some(1_000),
+            ..NowPlaying::default()
+        };
+        let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
+        assert_eq!(notch.media_repaint_in(1_000), None);
+        notch.panel_expansion = 1.0;
+        assert_eq!(
+            notch.media_repaint_in(1_000),
+            Some(Duration::from_millis(600))
+        );
+        notch.media.as_mut().unwrap().playing = false;
+        assert_eq!(notch.media_repaint_in(1_000), None);
     }
 
     #[test]
@@ -759,6 +873,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 0,
             thumbnail: None,
+            ..NowPlaying::default()
         };
 
         assert!(notch.set_media(Some(media)));
@@ -774,6 +889,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 200_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
         let now = std::time::Instant::now();
@@ -794,6 +910,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 200_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
 
@@ -821,6 +938,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 200_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
         let sheet = otto_core::parse_lrc("[00:01.00]Hello world");
@@ -834,6 +952,7 @@ mod tests {
             position_ms: 50_000,
             duration_ms: 200_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         notch.set_media(Some(same_track_updated_pos));
         assert!(notch.lyrics().is_some());
@@ -845,6 +964,7 @@ mod tests {
             position_ms: 0,
             duration_ms: 180_000,
             thumbnail: None,
+            ..NowPlaying::default()
         };
         notch.set_media(Some(different_track));
         assert!(notch.lyrics().is_none());
