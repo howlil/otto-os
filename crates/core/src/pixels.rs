@@ -34,6 +34,16 @@ pub struct BgraLayout {
     pub byte_len: usize,
 }
 
+impl BgraLayout {
+    #[must_use]
+    pub fn is_consistent(&self) -> bool {
+        self.width != 0
+            && self.height != 0
+            && self.width.checked_mul(BYTES_PER_PIXEL as u32) == Some(self.stride)
+            && (self.stride as usize).checked_mul(self.height as usize) == Some(self.byte_len)
+    }
+}
+
 pub fn bgra_layout(
     width: u32,
     height: u32,
@@ -85,7 +95,11 @@ pub struct CropRegion {
 
 #[must_use]
 pub fn crop_bgra(source: &[u8], source_layout: BgraLayout, region: CropRegion) -> Option<Vec<u8>> {
-    if source.len() < source_layout.byte_len || region.width == 0 || region.height == 0 {
+    if !source_layout.is_consistent()
+        || source.len() < source_layout.byte_len
+        || region.width == 0
+        || region.height == 0
+    {
         return None;
     }
     let right = region.x.checked_add(region.width)?;
@@ -119,7 +133,10 @@ pub fn resize_bgra(
     source_layout: BgraLayout,
     target_layout: BgraLayout,
 ) -> Option<Vec<u8>> {
-    if source.len() < source_layout.byte_len {
+    if !source_layout.is_consistent()
+        || !target_layout.is_consistent()
+        || source.len() < source_layout.byte_len
+    {
         return None;
     }
     if source_layout.width == target_layout.width && source_layout.height == target_layout.height {
@@ -130,6 +147,9 @@ pub fn resize_bgra(
     let y_ratio = f64::from(source_layout.height) / f64::from(target_layout.height);
     let max_x = source_layout.width - 1;
     let max_y = source_layout.height - 1;
+    let source_stride = source_layout.stride as usize;
+    let target_stride = target_layout.stride as usize;
+    let at = |x: u32, y: u32| y as usize * source_stride + x as usize * BYTES_PER_PIXEL;
     for row in 0..target_layout.height {
         let sy = ((f64::from(row) + 0.5) * y_ratio - 0.5).max(0.0);
         let y0 = (sy.floor() as u32).min(max_y);
@@ -140,9 +160,8 @@ pub fn resize_bgra(
             let x0 = (sx.floor() as u32).min(max_x);
             let x1 = (x0 + 1).min(max_x);
             let fx = sx - f64::from(x0);
-            let at = |x: u32, y: u32| (y * source_layout.stride + x * 4) as usize;
-            let out = (row * target_layout.stride + column * 4) as usize;
-            for channel in 0..4 {
+            let out = row as usize * target_stride + column as usize * BYTES_PER_PIXEL;
+            for channel in 0..BYTES_PER_PIXEL {
                 let top = f64::from(source[at(x0, y0) + channel]) * (1.0 - fx)
                     + f64::from(source[at(x1, y0) + channel]) * fx;
                 let bottom = f64::from(source[at(x0, y1) + channel]) * (1.0 - fx)
@@ -310,5 +329,47 @@ mod tests {
             height: 1,
         };
         assert!(crop_bgra(&short, layout, inside).is_none());
+    }
+
+    fn hand_built(width: u32, height: u32, stride: u32, byte_len: usize) -> BgraLayout {
+        BgraLayout {
+            width,
+            height,
+            stride,
+            byte_len,
+        }
+    }
+
+    #[test]
+    fn only_layouts_whose_stride_and_byte_length_follow_from_their_size_are_consistent() {
+        assert!(bgra_layout(3, 2, SMALL).unwrap().is_consistent());
+        assert!(!hand_built(4, 4, 4, 16).is_consistent());
+        assert!(!hand_built(4, 4, 16, 63).is_consistent());
+        assert!(!hand_built(0, 4, 0, 0).is_consistent());
+        assert!(!hand_built(4, 0, 16, 0).is_consistent());
+    }
+
+    #[test]
+    fn crop_refuses_a_hand_built_layout_whose_stride_contradicts_its_width() {
+        let lying = hand_built(4, 4, 4, 16);
+        let source = vec![0u8; 16];
+        let whole = CropRegion {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        assert!(crop_bgra(&source, lying, whole).is_none());
+    }
+
+    #[test]
+    fn resize_refuses_hand_built_layouts_that_contradict_their_size() {
+        let target = bgra_layout(2, 2, ANY).unwrap();
+        let lying_source = hand_built(4, 4, 4, 16);
+        assert!(resize_bgra(&[0; 16], lying_source, target).is_none());
+
+        let source = bgra_layout(2, 2, ANY).unwrap();
+        let lying_target = hand_built(4, 4, 4, 16);
+        assert!(resize_bgra(&[0; 16], source, lying_target).is_none());
     }
 }
