@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings', 'native-minimize')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e',
@@ -1309,6 +1309,67 @@ function Run-GenieFlow {
     Stop-Otto $process
 }
 
+function Get-NativeMinimizeCenter($window) {
+    if (-not ('OttoE2EDwm' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class OttoE2EDwm {
+    [StructLayout(LayoutKind.Sequential)] public struct Bounds { public int Left, Top, Right, Bottom; }
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Bounds bounds, int size);
+}
+"@
+    }
+    $frame = New-Object OttoE2EDwm+Bounds
+    $buttons = New-Object OttoE2EDwm+Bounds
+    if ([OttoE2EDwm]::DwmGetWindowAttribute($window.Handle, 9, [ref]$frame, 16) -ne 0 -or
+        [OttoE2EDwm]::DwmGetWindowAttribute($window.Handle, 5, [ref]$buttons, 16) -ne 0) {
+        throw 'DWM did not report the probe window caption buttons.'
+    }
+    $width = $buttons.Right - $buttons.Left
+    $height = $buttons.Bottom - $buttons.Top
+    return [pscustomobject]@{
+        X = $frame.Left + $buttons.Left + [int]($width / 6)
+        Y = $frame.Top + $buttons.Top + [int]($height / 2)
+    }
+}
+
+function Run-NativeMinimizeFlow {
+    $process = Start-Otto 'native-minimize'
+    $probe = Start-ProbeWindow "OttoE2ENative$runId"
+    try {
+        $form = Wait-ProbeForm $probe 'native minimize probe window to open'
+        $center = @([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
+        [OttoE2ENative]::Click($center[0], $center[1])
+        Wait-Until { [OttoE2EWindowState]::Foreground() -eq $form.Handle } 'probe window to take focus' 3000
+        $button = Get-NativeMinimizeCenter $form
+        [OttoE2ENative]::MoveCursor($button.X, $button.Y)
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot 'native-minimize' '00-before-minimize' | Out-Null
+        [OttoE2ENative]::Click($button.X, $button.Y)
+        $overlaySeen = $false
+        $deadline = (Get-Date).AddMilliseconds(800)
+        while ((Get-Date) -lt $deadline) {
+            if (Get-OttoWindow $process.Id 'OttoGenie' $true) {
+                $overlaySeen = $true
+                break
+            }
+            Start-Sleep -Milliseconds 10
+        }
+        if (-not $overlaySeen) {
+            throw "The Genie overlay never appeared after the native minimize button was pressed at $($button.X),$($button.Y) (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)))."
+        }
+        Write-Output 'CHECKPOINT_PASS scenario=native-minimize name=01-genie-from-native-button'
+        Wait-Until { [OttoE2EWindowState]::IsIconic($form.Handle) } 'probe window to end minimized' 3000
+        Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after the animation' 3000
+        Write-Output 'CHECKPOINT_PASS scenario=native-minimize name=02-minimized'
+    }
+    finally {
+        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Otto $process
+}
+
 function Start-FullScreenWindow([string]$title) {
     $formScript = Join-Path $artifactRoot 'fullscreen-probe.ps1'
     @"
@@ -2178,7 +2239,7 @@ function Run-AudioFlow {
     Stop-Otto $process
 }
 
-$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
+$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'native-minimize', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
 $fatal = $null
 $scenarioFailures = [System.Collections.Generic.List[string]]::new()
 try {
@@ -2199,6 +2260,7 @@ try {
                 'appearance' { Run-AppearanceFlow }
                 'visual-reference' { Run-VisualReferenceFlow }
                 'dock-settings' { Run-DockSettingsFlow }
+                'native-minimize' { Run-NativeMinimizeFlow }
                 'audio' { Run-AudioFlow }
             }
         }

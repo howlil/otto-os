@@ -1,5 +1,5 @@
 use crate::app_model::{WindowCommand, WindowInfo, WindowPresence};
-use crate::layout::scale;
+use crate::layout::{Rect, scale};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowControlAction {
@@ -174,6 +174,39 @@ pub const fn window_controls_top(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCaptionStyle {
+    pub has_caption: bool,
+    pub has_system_menu: bool,
+    pub can_minimize: bool,
+}
+
+const NATIVE_CAPTION_BUTTONS: i32 = 3;
+
+#[must_use]
+pub const fn native_minimize_button(
+    caption_buttons: Rect,
+    style: NativeCaptionStyle,
+) -> Option<Rect> {
+    if !style.has_caption
+        || !style.has_system_menu
+        || !style.can_minimize
+        || caption_buttons.is_empty()
+    {
+        return None;
+    }
+    let width = caption_buttons.width / NATIVE_CAPTION_BUTTONS;
+    if width <= 0 {
+        return None;
+    }
+    Some(Rect {
+        x: caption_buttons.x,
+        y: caption_buttons.y,
+        width,
+        height: caption_buttons.height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +334,66 @@ mod tests {
         let high = compute_window_controls_layout(&metrics, 192);
         assert_eq!(high.width, standard.width * 2);
         assert!((high.radius - standard.radius * 2.0).abs() <= 1.0);
+    }
+
+    const STANDARD_STYLE: NativeCaptionStyle = NativeCaptionStyle {
+        has_caption: true,
+        has_system_menu: true,
+        can_minimize: true,
+    };
+
+    const BUTTONS: Rect = Rect {
+        x: 1200,
+        y: 300,
+        width: 220,
+        height: 44,
+    };
+
+    #[test]
+    fn the_native_minimize_button_is_the_left_third_of_the_caption_buttons() {
+        let button = native_minimize_button(BUTTONS, STANDARD_STYLE).unwrap();
+        assert_eq!(button.x, 1200);
+        assert_eq!(button.y, 300);
+        assert_eq!(button.width, 73);
+        assert_eq!(button.height, 44);
+        assert!(button.contains(1200, 300));
+        assert!(button.contains(1272, 343));
+        assert!(!button.contains(1273, 320));
+    }
+
+    #[test]
+    fn a_window_without_a_minimize_box_has_no_minimize_button_to_take_over() {
+        let style = NativeCaptionStyle {
+            can_minimize: false,
+            ..STANDARD_STYLE
+        };
+        assert_eq!(native_minimize_button(BUTTONS, style), None);
+    }
+
+    #[test]
+    fn frameless_or_menuless_windows_are_left_alone() {
+        for style in [
+            NativeCaptionStyle {
+                has_caption: false,
+                ..STANDARD_STYLE
+            },
+            NativeCaptionStyle {
+                has_system_menu: false,
+                ..STANDARD_STYLE
+            },
+        ] {
+            assert_eq!(native_minimize_button(BUTTONS, style), None);
+        }
+    }
+
+    #[test]
+    fn empty_or_tiny_caption_bounds_never_produce_a_button() {
+        let empty = Rect::default();
+        assert_eq!(native_minimize_button(empty, STANDARD_STYLE), None);
+        let tiny = Rect {
+            width: 2,
+            ..BUTTONS
+        };
+        assert_eq!(native_minimize_button(tiny, STANDARD_STYLE), None);
     }
 }

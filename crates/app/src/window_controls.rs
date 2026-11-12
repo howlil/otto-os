@@ -9,9 +9,11 @@ use otto_core::{
     compute_window_controls_layout, scale, window_controls_top,
 };
 use otto_platform::{
-    ActiveWindowTarget, acknowledge_window_sync, active_window_target, current_process_id,
-    execute_window_command, inspect_window, install_window_tracking_hook, motion_preference,
-    poll_foreground_change, primary_screen, signal_command_failure, uninstall_window_tracking_hook,
+    ActiveWindowTarget, acknowledge_native_minimize, acknowledge_window_sync, active_window_target,
+    current_process_id, execute_window_command, inspect_window, install_native_minimize_hook,
+    install_window_tracking_hook, minimize_window_native, motion_preference,
+    poll_foreground_change, primary_screen, signal_command_failure, uninstall_native_minimize_hook,
+    uninstall_window_tracking_hook,
 };
 use otto_render::WindowControlsRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -27,6 +29,7 @@ use windows::core::Result;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_WINDOW_SYNC: u32 = 0x8000 + 20;
+const WM_APP_NATIVE_MINIMIZE: u32 = 0x8000 + 24;
 const WINDOW_CONTROLS_ANIM_TIMER: usize = 20;
 const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
 const GREEN_HOVER_TIMER: usize = 21;
@@ -86,6 +89,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         last_tick: Instant::now(),
     };
     install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
+    let _ = install_native_minimize_hook(hwnd, WM_APP_NATIVE_MINIMIZE);
     wc.sync_target();
 
     *runtime.window_controls.borrow_mut() = Some(wc);
@@ -93,6 +97,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
 }
 
 pub fn stop(runtime: &RuntimeContext) {
+    uninstall_native_minimize_hook();
     uninstall_window_tracking_hook();
     if let Some(controls) = runtime.window_controls.borrow_mut().take() {
         unsafe {
@@ -117,6 +122,10 @@ pub fn handle_message(
         WM_APP_WINDOW_SYNC => {
             acknowledge_window_sync();
             with_window_controls(runtime, WindowControls::sync_target);
+            Some(LRESULT(0))
+        }
+        WM_APP_NATIVE_MINIMIZE => {
+            minimize_from_native_button(runtime, wparam.0 as isize);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == WINDOW_CONTROLS_ANIM_TIMER => {
@@ -167,6 +176,17 @@ pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
             controls.present();
         }
     });
+}
+
+fn minimize_from_native_button(runtime: &RuntimeContext, window: isize) {
+    acknowledge_native_minimize(window);
+    let can_minimize = inspect_window(window, current_process_id())
+        .is_some_and(|live| live.capability(WindowCommand::Minimize) == Capability::Available);
+    if can_minimize {
+        let _ = crate::genie::minimize_window(runtime, window);
+    } else {
+        minimize_window_native(window);
+    }
 }
 
 pub fn poll_foreground(runtime: &RuntimeContext) {

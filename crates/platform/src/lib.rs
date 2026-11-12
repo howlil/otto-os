@@ -15,6 +15,7 @@ mod keyboard_hook;
 mod lyrics;
 mod media;
 mod motion;
+mod native_minimize;
 mod notch;
 mod os_events;
 mod screen;
@@ -69,6 +70,9 @@ pub use media::{
     MediaCommand, NowPlaying, read_now_playing, send_media_command, shutdown_media_task,
 };
 pub use motion::motion_preference;
+pub use native_minimize::{
+    acknowledge_native_minimize, install_native_minimize_hook, uninstall_native_minimize_hook,
+};
 pub use notch::WindowsNotchPort;
 pub use os_events::{
     WindowChangeGenerations, acknowledge_window_sync, install_window_event_hooks,
