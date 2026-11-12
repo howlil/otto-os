@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie')]
+    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'stall', 'appearance', 'audio')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e'
@@ -328,6 +328,190 @@ public static class OttoE2EShell
 
 [OttoE2ENative]::EnablePerMonitorDpi()
 Add-Type -AssemblyName System.Drawing
+
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class OttoE2ESystem
+{
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("kernel32.dll")] private static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+    [DllImport("kernel32.dll")] private static extern uint SuspendThread(IntPtr thread);
+    [DllImport("kernel32.dll")] private static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, StringBuilder lParam);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+    private delegate bool EnumProc(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumProc proc, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int max);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+
+    private const uint ThreadSuspendResume = 0x0002;
+    private const uint KeyUp = 0x0002;
+
+    public static IntPtr SuspendWindowThread(IntPtr window)
+    {
+        uint processId;
+        uint threadId = GetWindowThreadProcessId(window, out processId);
+        IntPtr thread = OpenThread(ThreadSuspendResume, false, threadId);
+        if (thread != IntPtr.Zero && SuspendThread(thread) == uint.MaxValue)
+        {
+            CloseHandle(thread);
+            return IntPtr.Zero;
+        }
+        return thread;
+    }
+
+    public static void ResumeAndClose(IntPtr thread)
+    {
+        if (thread == IntPtr.Zero) return;
+        ResumeThread(thread);
+        CloseHandle(thread);
+    }
+
+    public static void BroadcastSettingChange(string area)
+    {
+        UIntPtr result;
+        SendMessageTimeout(new IntPtr(0xffff), 0x001A, UIntPtr.Zero, area, 0x0002, 3000, out result);
+    }
+
+    public static void Focus(IntPtr window)
+    {
+        SetForegroundWindow(window);
+    }
+
+    public static void Chord(byte modifier, byte key)
+    {
+        keybd_event(modifier, 0, 0, UIntPtr.Zero);
+        keybd_event(key, 0, 0, UIntPtr.Zero);
+        keybd_event(key, 0, KeyUp, UIntPtr.Zero);
+        keybd_event(modifier, 0, KeyUp, UIntPtr.Zero);
+    }
+
+    public static void RightClick(int x, int y)
+    {
+        SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(40);
+        mouse_event(0x0008, 0, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(40);
+        mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);
+    }
+
+    public static void HoldKey(byte key, int milliseconds)
+    {
+        keybd_event(key, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(milliseconds);
+        keybd_event(key, 0, KeyUp, UIntPtr.Zero);
+    }
+
+    public static void Type(string text)
+    {
+        foreach (char ch in text.ToUpperInvariant())
+        {
+            keybd_event((byte)ch, 0, 0, UIntPtr.Zero);
+            keybd_event((byte)ch, 0, KeyUp, UIntPtr.Zero);
+        }
+    }
+
+    public static IntPtr FindChildByClassPrefix(IntPtr parent, string prefix)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumChildWindows(parent, (window, _) =>
+        {
+            var name = new StringBuilder(256);
+            GetClassName(window, name, name.Capacity);
+            if (name.ToString().StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { found = window; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    public static string WindowText(IntPtr window)
+    {
+        var text = new StringBuilder(512);
+        SendMessage(window, 0x000D, new IntPtr(text.Capacity), text);
+        return text.ToString();
+    }
+}
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class OttoE2EDeviceEnumerator { }
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOttoE2EDeviceEnumerator
+{
+    int EnumAudioEndpoints(int dataFlow, int stateMask, out IOttoE2EDeviceCollection devices);
+    int GetDefaultAudioEndpoint(int dataFlow, int role, out IOttoE2EDevice device);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOttoE2EDeviceCollection
+{
+    int GetCount(out uint count);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOttoE2EDevice
+{
+    int Activate(ref Guid iid, int context, IntPtr parameters, [MarshalAs(UnmanagedType.IUnknown)] out object endpoint);
+}
+
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOttoE2EEndpointVolume
+{
+    int RegisterControlChangeNotify(IntPtr notify);
+    int UnregisterControlChangeNotify(IntPtr notify);
+    int GetChannelCount(out uint count);
+    int SetMasterVolumeLevel(float decibels, ref Guid context);
+    int SetMasterVolumeLevelScalar(float level, ref Guid context);
+    int GetMasterVolumeLevel(out float decibels);
+    int GetMasterVolumeLevelScalar(out float level);
+}
+
+public static class OttoE2EAudio
+{
+    private static IOttoE2EEndpointVolume Endpoint()
+    {
+        var enumerator = (IOttoE2EDeviceEnumerator)new OttoE2EDeviceEnumerator();
+        IOttoE2EDevice device;
+        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(0, 0, out device));
+        Guid iid = typeof(IOttoE2EEndpointVolume).GUID;
+        object endpoint;
+        Marshal.ThrowExceptionForHR(device.Activate(ref iid, 1, IntPtr.Zero, out endpoint));
+        return (IOttoE2EEndpointVolume)endpoint;
+    }
+
+    public static uint ActiveRenderDevices()
+    {
+        var enumerator = (IOttoE2EDeviceEnumerator)new OttoE2EDeviceEnumerator();
+        IOttoE2EDeviceCollection devices;
+        Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(0, 1, out devices));
+        uint count;
+        Marshal.ThrowExceptionForHR(devices.GetCount(out count));
+        return count;
+    }
+
+    public static float Volume()
+    {
+        float level;
+        Marshal.ThrowExceptionForHR(Endpoint().GetMasterVolumeLevelScalar(out level));
+        return level;
+    }
+
+    public static void SetVolume(float level)
+    {
+        Guid context = Guid.Empty;
+        Marshal.ThrowExceptionForHR(Endpoint().SetMasterVolumeLevelScalar(level, ref context));
+    }
+}
+'@
 
 function Convert-ToScaled([int]$points) {
     return [int][Math]::Floor(($points * $script:coordinateDpi + 48) / 96)
@@ -1038,57 +1222,9 @@ function Run-GenieFlow {
             $null -ne $script:genieForm
         } 'probe window to open' 10000
         $form = $script:genieForm
-        $center = @([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
-        $tolerance = Convert-ToScaled 48
-        $controls = $null
-        for ($attempt = 0; $attempt -lt 3 -and -not $controls; $attempt++) {
-            [OttoE2ENative]::Click($center[0], $center[1])
-            $deadline = (Get-Date).AddMilliseconds(1500)
-            while ((Get-Date) -lt $deadline) {
-                $candidate = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-                $focused = [OttoE2EWindowState]::Foreground() -eq $form.Handle
-                if ($focused -and $candidate -and
-                    [Math]::Abs($candidate.Left - $form.Left) -le $tolerance -and
-                    [Math]::Abs($candidate.Top - $form.Top) -le $tolerance) {
-                    $controls = $candidate
-                    break
-                }
-                Start-Sleep -Milliseconds 30
-            }
-        }
-        if (-not $controls) {
-            throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
-        }
-        [OttoE2ENative]::MoveCursor($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
-        Start-Sleep -Milliseconds 300
-        $settled = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-        if (-not $settled -or [OttoE2EWindowState]::Foreground() -ne $form.Handle -or
-            [Math]::Abs($settled.Left - $form.Left) -gt $tolerance -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
-            throw 'Focus or window controls moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
-        }
-        Save-Screenshot 'genie' '00-before-minimize' | Out-Null
-        [OttoE2ENative]::Click($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
-        $overlaySeen = $false
-        $deadline = (Get-Date).AddMilliseconds(600)
-        while ((Get-Date) -lt $deadline) {
-            if (Get-OttoWindow $process.Id 'OttoGenie' $true) {
-                $overlaySeen = $true
-                break
-            }
-            Start-Sleep -Milliseconds 10
-        }
-        if (-not $overlaySeen) {
-            Start-Sleep -Milliseconds 800
-            throw "The Genie overlay never appeared after the minimize button was pressed. (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) controls=$($controls.Left),$($controls.Top) probe=$($form.Left),$($form.Top))"
-        }
-        $dockIcon = $null
-        $frames = 0
-        $deadline = (Get-Date).AddMilliseconds(3000)
-        while ((Get-Date) -lt $deadline) {
-            $overlay = Get-OttoWindow $process.Id 'OttoGenie' $true
-            if ($overlay) { $dockIcon = $overlay; $frames++ } elseif ($dockIcon) { break }
-            Start-Sleep -Milliseconds 10
-        }
+        $minimized = Invoke-GenieMinimize $process $form 'genie'
+        $dockIcon = $minimized.Icon
+        $frames = $minimized.Frames
         if ($frames -lt 3) {
             throw "The Genie minimize overlay was observed in only $frames polls; the animation did not run."
         }
@@ -1183,7 +1319,462 @@ function Run-FullScreenFlow {
     Stop-Otto $process
 }
 
-$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie') } else { @($Scenario) }
+function Get-RegionDiff([string]$beforePath, [string]$afterPath, $region) {
+    $before = [System.Drawing.Bitmap]::new($beforePath)
+    $after = [System.Drawing.Bitmap]::new($afterPath)
+    try {
+        $changed = 0
+        $right = [Math]::Min($before.Width, $region.X + $region.Width)
+        $bottom = [Math]::Min($before.Height, $region.Y + $region.Height)
+        for ($y = [Math]::Max(0, $region.Y); $y -lt $bottom; $y++) {
+            for ($x = [Math]::Max(0, $region.X); $x -lt $right; $x++) {
+                $a = $before.GetPixel($x, $y)
+                $b = $after.GetPixel($x, $y)
+                if ([Math]::Abs($a.R - $b.R) -gt 40 -or [Math]::Abs($a.G - $b.G) -gt 40 -or [Math]::Abs($a.B - $b.B) -gt 40) {
+                    $changed++
+                }
+            }
+        }
+        return $changed
+    }
+    finally {
+        $before.Dispose()
+        $after.Dispose()
+    }
+}
+
+function Get-RegionColor([string]$path, $region) {
+    $bitmap = [System.Drawing.Bitmap]::new($path)
+    try {
+        $count = 0
+        $r = 0.0; $g = 0.0; $b = 0.0
+        $minLuma = 255.0; $maxLuma = 0.0
+        for ($y = $region.Y; $y -lt ($region.Y + $region.Height); $y += 2) {
+            for ($x = $region.X; $x -lt ($region.X + $region.Width); $x += 2) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                $r += $pixel.R; $g += $pixel.G; $b += $pixel.B
+                $luma = 0.2126 * $pixel.R + 0.7152 * $pixel.G + 0.0722 * $pixel.B
+                $minLuma = [Math]::Min($minLuma, $luma)
+                $maxLuma = [Math]::Max($maxLuma, $luma)
+                $count++
+            }
+        }
+        return [pscustomobject]@{
+            R = [int]($r / $count)
+            G = [int]($g / $count)
+            B = [int]($b / $count)
+            Spread = [int]($maxLuma - $minLuma)
+        }
+    }
+    finally {
+        $bitmap.Dispose()
+    }
+}
+
+function Test-ColorNear($color, [int[]]$expected, [int]$tolerance) {
+    return [Math]::Abs($color.R - $expected[0]) -le $tolerance -and
+        [Math]::Abs($color.G - $expected[1]) -le $tolerance -and
+        [Math]::Abs($color.B - $expected[2]) -le $tolerance
+}
+
+function Get-EmptyBarRegion($bar) {
+    return [pscustomobject]@{
+        X = $bar.Left + [int]($bar.Width * 0.30)
+        Y = $bar.Top + (Convert-ToScaled 6)
+        Width = [int]($bar.Width * 0.08)
+        Height = Convert-ToScaled 20
+    }
+}
+
+function Invoke-GenieMinimize($process, $form, [string]$scenario) {
+    $center = @([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
+    $tolerance = Convert-ToScaled 48
+    $controls = $null
+    for ($attempt = 0; $attempt -lt 3 -and -not $controls; $attempt++) {
+        [OttoE2ENative]::Click($center[0], $center[1])
+        $deadline = (Get-Date).AddMilliseconds(1500)
+        while ((Get-Date) -lt $deadline) {
+            $candidate = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+            $focused = [OttoE2EWindowState]::Foreground() -eq $form.Handle
+            if ($focused -and $candidate -and
+                [Math]::Abs($candidate.Left - $form.Left) -le $tolerance -and
+                [Math]::Abs($candidate.Top - $form.Top) -le $tolerance) {
+                $controls = $candidate
+                break
+            }
+            Start-Sleep -Milliseconds 30
+        }
+    }
+    if (-not $controls) {
+        throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
+    }
+    [OttoE2ENative]::MoveCursor($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
+    Start-Sleep -Milliseconds 300
+    $settled = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+    if (-not $settled -or [OttoE2EWindowState]::Foreground() -ne $form.Handle -or
+        [Math]::Abs($settled.Left - $form.Left) -gt $tolerance -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
+        throw 'Focus or window controls moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
+    }
+    Save-Screenshot $scenario '00-before-minimize' | Out-Null
+    [OttoE2ENative]::Click($controls.Left + (Convert-ToScaled 32), $controls.Top + (Convert-ToScaled 14))
+    $overlaySeen = $false
+    $deadline = (Get-Date).AddMilliseconds(600)
+    while ((Get-Date) -lt $deadline) {
+        if (Get-OttoWindow $process.Id 'OttoGenie' $true) {
+            $overlaySeen = $true
+            break
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    if (-not $overlaySeen) {
+        Start-Sleep -Milliseconds 800
+        throw "The Genie overlay never appeared after the minimize button was pressed. (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) controls=$($controls.Left),$($controls.Top) probe=$($form.Left),$($form.Top))"
+    }
+    $dockIcon = $null
+    $frames = 0
+    $deadline = (Get-Date).AddMilliseconds(3000)
+    while ((Get-Date) -lt $deadline) {
+        $overlay = Get-OttoWindow $process.Id 'OttoGenie' $true
+        if ($overlay) { $dockIcon = $overlay; $frames++ } elseif ($dockIcon) { break }
+        Start-Sleep -Milliseconds 10
+    }
+    return [pscustomobject]@{ Icon = $dockIcon; Frames = $frames }
+}
+
+function Get-DockIconPoint($process, $icon) {
+    $dockWindow = Get-OttoWindow $process.Id 'OttoDockBar' $true
+    if (-not $dockWindow -or -not $icon) {
+        throw 'The Dock window or the probe icon position is unknown.'
+    }
+    return [pscustomobject]@{
+        X = [int](($icon.Left + $icon.Right) / 2)
+        Y = $dockWindow.Bottom - (Convert-ToScaled 6) - (Convert-ToScaled 12) - (Convert-ToScaled 24)
+        Edge = $dockWindow.Bottom - 1
+    }
+}
+
+function Restore-FromDock($process, $form, $point, [string]$description) {
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        Show-DockAt $point
+        [OttoE2ENative]::Click($point.X, $point.Y)
+        $deadline = (Get-Date).AddMilliseconds(2000)
+        while ((Get-Date) -lt $deadline) {
+            if (-not [OttoE2EWindowState]::IsIconic($form.Handle) -and [OttoE2EWindowState]::IsWindowVisible($form.Handle)) {
+                return
+            }
+            Start-Sleep -Milliseconds 30
+        }
+    }
+    $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
+    throw "Timeout waiting for $description (clicked=$($point.X),$($point.Y) dock=$($dock.Left),$($dock.Top),$($dock.Right),$($dock.Bottom) iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) visible=$([OttoE2EWindowState]::IsWindowVisible($form.Handle)))."
+}
+
+function Show-DockAt($point) {
+    [OttoE2ENative]::MoveCursor($point.X, $point.Edge)
+    Start-Sleep -Milliseconds 700
+    [OttoE2ENative]::MoveCursor($point.X, $point.Y)
+    Start-Sleep -Milliseconds 400
+}
+
+function Wait-ProbeForm($probe, [string]$description) {
+    Wait-Until {
+        $script:probeForm = @(Get-OttoWindows $probe.Id | Where-Object { $_.Visible -and $_.ClassName -like 'WindowsForms*' }) | Select-Object -First 1
+        $null -ne $script:probeForm
+    } $description 20000 {
+        $probe.Refresh()
+        $windows = @(Get-OttoWindows $probe.Id | ForEach-Object { "$($_.ClassName)/$($_.Visible)" }) -join ';'
+        "pid=$($probe.Id) exited=$($probe.HasExited) windows=$windows"
+    }
+    return $script:probeForm
+}
+
+function Invoke-DockMenuCommand($process, $form, $point, [byte]$letter, [string]$checkpoint) {
+    [OttoE2ESystem]::Focus($form.Handle)
+    Start-Sleep -Milliseconds 200
+    Show-DockAt $point
+    [OttoE2ESystem]::RightClick($point.X, $point.Y)
+    Wait-VisibleWindow $process 'OttoPopupMenu' "Dock context menu for $checkpoint" 3000
+    Record-Checkpoint $process $checkpoint "Dock context menu is open before choosing '$([char]$letter)'." 'OttoPopupMenu'
+    [OttoE2ESystem]::HoldKey($letter, 80)
+    Start-Sleep -Milliseconds 150
+    [OttoE2ESystem]::HoldKey(0x0D, 80)
+    Wait-HiddenWindow $process 'OttoPopupMenu' "Dock context menu to close after $checkpoint" 3000
+}
+
+function Run-DockFlow {
+    $process = Start-Otto 'dock'
+    $pinnedPath = Join-Path $env:LOCALAPPDATA 'otto-os\pinned.txt'
+    $pinnedBackup = if (Test-Path -LiteralPath $pinnedPath) { [IO.File]::ReadAllBytes($pinnedPath) } else { $null }
+    $probe = Start-ProbeWindow "OttoE2EDock$runId"
+    $pinProbe = $null
+    try {
+        $form = Wait-ProbeForm $probe 'dock probe window to open'
+        $minimized = Invoke-GenieMinimize $process $form 'dock'
+        Wait-Until { [OttoE2EWindowState]::IsIconic($form.Handle) } 'dock probe to minimize' 3000
+        Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after minimize' 3000
+        Start-Sleep -Milliseconds 600
+        $point = Get-DockIconPoint $process $minimized.Icon
+
+        Restore-FromDock $process $form $point 'Dock click to restore the window (ShowWindow effect)'
+        Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after restore' 3000
+        Record-Checkpoint $process '01-restored-from-dock' 'Clicking the Dock icon restored the minimized window.'
+
+        Invoke-DockMenuCommand $process $form $point ([byte][char]'H') '02-menu-before-hide'
+        Wait-Until { -not [OttoE2EWindowState]::IsWindowVisible($form.Handle) } 'Hide from the Dock menu to hide the application' 3000
+        Record-Checkpoint $process '03-hidden' 'Hide removed the application window from screen.'
+
+        Restore-FromDock $process $form $point 'Dock click to unhide the application (Unhide effect)'
+        Record-Checkpoint $process '04-unhidden' 'Clicking the Dock icon showed the hidden application again.'
+        $ledger = Join-Path $env:LOCALAPPDATA 'otto-os\hidden_windows.txt'
+        if (Test-Path -LiteralPath $ledger) {
+            throw 'The hidden-window ledger still lists a window after unhide.'
+        }
+
+        Invoke-DockMenuCommand $process $form $point ([byte][char]'Q') '05-menu-before-quit'
+        Wait-Until { $probe.HasExited } 'Quit from the Dock menu to end the application (Quit effect)' 5000
+        Write-Output 'CHECKPOINT_PASS scenario=dock name=06-quit probe_exited=true'
+
+        $pinProbe = Start-ProbeWindow "OttoE2EPin$runId"
+        $pinForm = Wait-ProbeForm $pinProbe 'pin probe window to open'
+        $pinMinimized = Invoke-GenieMinimize $process $pinForm 'dock'
+        Wait-Until { [OttoE2EWindowState]::IsIconic($pinForm.Handle) } 'pin probe to minimize' 3000
+        Wait-HiddenWindow $process 'OttoGenie' 'Genie overlay to hide after the pin probe minimized' 3000
+        Start-Sleep -Milliseconds 600
+        $pinPoint = Get-DockIconPoint $process $pinMinimized.Icon
+        $before = if (Test-Path -LiteralPath $pinnedPath) { Get-Content -LiteralPath $pinnedPath -Raw } else { '' }
+        Invoke-DockMenuCommand $process $pinForm $pinPoint ([byte][char]'K') '07-menu-before-keep'
+        Wait-Until {
+            $now = if (Test-Path -LiteralPath $pinnedPath) { Get-Content -LiteralPath $pinnedPath -Raw } else { '' }
+            $now -ne $before
+        } 'Keep in Dock to update the pinned list (TogglePin effect)' 3000
+        Write-Output 'CHECKPOINT_PASS scenario=dock name=08-pinned-list-updated'
+    }
+    finally {
+        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+        if ($pinProbe) { Stop-Process -Id $pinProbe.Id -Force -ErrorAction SilentlyContinue }
+        if ($null -ne $pinnedBackup) {
+            [IO.File]::WriteAllBytes($pinnedPath, $pinnedBackup)
+        }
+        elseif (Test-Path -LiteralPath $pinnedPath) {
+            Remove-Item -LiteralPath $pinnedPath -Force
+        }
+    }
+    Stop-Otto $process
+}
+
+function Run-KeyboardFlow {
+    $process = Start-Otto 'keyboard'
+    $bar = Get-BarMetrics $process
+    $region = [pscustomobject]@{
+        X = $bar.Left
+        Y = $bar.Top
+        Width = Convert-ToScaled 56
+        Height = $bar.Height
+    }
+    Start-Sleep -Milliseconds 600
+    $baseline = Save-Screenshot 'keyboard' '00-baseline'
+    [OttoE2ESystem]::Chord(0x11, 0x71)
+    Start-Sleep -Milliseconds 400
+    $focused = Save-Screenshot 'keyboard' '01-focus-ring'
+    $ring = Get-RegionDiff $baseline $focused $region
+    if ($ring -lt 40) {
+        throw "Ctrl+F2 did not draw a focus ring on the first bar slot (changed pixels: $ring)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard name=01-focus-ring changed=$ring"
+
+    Start-Sleep -Milliseconds 16500
+    $expired = Save-Screenshot 'keyboard' '02-idle-expired'
+    $left = Get-RegionDiff $baseline $expired $region
+    if ($left -gt 10) {
+        throw "Focus mode did not expire after 15 s without navigation keys (changed pixels: $left)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard name=02-idle-expired changed=$left"
+
+    [OttoE2ESystem]::Chord(0x11, 0x71)
+    Start-Sleep -Milliseconds 400
+    $again = Save-Screenshot 'keyboard' '03-focus-again'
+    if ((Get-RegionDiff $baseline $again $region) -lt 40) {
+        throw 'Ctrl+F2 did not re-enter focus mode after it expired.'
+    }
+    $empty = Get-EmptyBarRegion $bar
+    [OttoE2ENative]::Click($empty.X + [int]($empty.Width / 2), $bar.Top + [int]($bar.Height / 2))
+    Start-Sleep -Milliseconds 400
+    $clicked = Save-Screenshot 'keyboard' '04-cleared-by-click'
+    $residue = Get-RegionDiff $baseline $clicked $region
+    if ($residue -gt 10) {
+        throw "A mouse click on the bar did not clear the focus ring (changed pixels: $residue)."
+    }
+    Write-Output "CHECKPOINT_PASS scenario=keyboard name=04-cleared-by-click changed=$residue"
+    Stop-Otto $process
+}
+
+function Start-TypingProbe([string]$title) {
+    $formScript = Join-Path $artifactRoot 'typing-probe.ps1'
+    @"
+Add-Type -Namespace OttoProbe -Name Console -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr window, int command);'
+[void][OttoProbe.Console]::ShowWindow([OttoProbe.Console]::GetConsoleWindow(), 0)
+Add-Type -AssemblyName System.Windows.Forms
+`$form = New-Object Windows.Forms.Form
+`$form.Text = '$title'
+`$form.StartPosition = 'Manual'
+`$form.Bounds = New-Object Drawing.Rectangle 240, 220, 520, 200
+`$form.TopMost = `$true
+`$box = New-Object Windows.Forms.TextBox
+`$box.Dock = 'Fill'
+`$box.Multiline = `$true
+`$form.Controls.Add(`$box)
+[Windows.Forms.Application]::Run(`$form)
+"@ | Set-Content -LiteralPath $formScript -Encoding utf8
+    Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $formScript) -PassThru -WindowStyle Hidden
+}
+
+function Run-StallFlow {
+    $process = Start-Otto 'stall'
+    $probe = Start-TypingProbe "OttoE2EStall$runId"
+    $thread = [IntPtr]::Zero
+    try {
+        $form = Wait-ProbeForm $probe 'typing probe window to open'
+        $box = [IntPtr]::Zero
+        Wait-Until {
+            $script:typingBox = [OttoE2ESystem]::FindChildByClassPrefix($form.Handle, 'WindowsForms10.EDIT')
+            $script:typingBox -ne [IntPtr]::Zero
+        } 'typing probe text box' 5000
+        $box = $script:typingBox
+        Wait-Until {
+            [OttoE2ENative]::Click([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
+            Start-Sleep -Milliseconds 150
+            if ([OttoE2EWindowState]::Foreground() -ne $form.Handle) {
+                [OttoE2ESystem]::Focus($form.Handle)
+                Start-Sleep -Milliseconds 150
+            }
+            [OttoE2EWindowState]::Foreground() -eq $form.Handle
+        } 'typing probe to take focus' 4000 {
+            "foreground=$([OttoE2EWindowState]::Foreground()) form=$($form.Handle) bounds=$($form.Left),$($form.Top),$($form.Right),$($form.Bottom)"
+        }
+        $bar = Get-OttoWindow $process.Id 'OttoNotchBar' $true
+        $thread = [OttoE2ESystem]::SuspendWindowThread($bar.Handle)
+        if ($thread -eq [IntPtr]::Zero) {
+            throw 'Could not suspend the Otto UI thread.'
+        }
+        Start-Sleep -Milliseconds 300
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        [OttoE2ESystem]::Type('ottostall')
+        Wait-Until { [OttoE2ESystem]::WindowText($box) -eq 'ottostall' } 'typed text to reach another application while the Otto UI thread is stalled' 1500 {
+            "text='$([OttoE2ESystem]::WindowText($box))'"
+        }
+        $latency = $timer.ElapsedMilliseconds
+        Start-Sleep -Milliseconds 1200
+        [OttoE2ESystem]::ResumeAndClose($thread)
+        $thread = [IntPtr]::Zero
+        if ($latency -gt 500) {
+            throw "Typing reached the other application only after $latency ms while the Otto UI thread was stalled."
+        }
+        Write-Output "CHECKPOINT_PASS scenario=stall name=01-typing-during-ui-stall latency_ms=$latency"
+        Start-Sleep -Milliseconds 500
+        Assert-ProcessAlive $process 'UI thread resume'
+        Record-Checkpoint $process '02-resumed' 'Otto keeps running after its UI thread resumes.' 'OttoNotchBar'
+    }
+    finally {
+        [OttoE2ESystem]::ResumeAndClose($thread)
+        Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Otto $process
+}
+
+function Set-PersonalizeValue([string]$name, $value) {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    if ($null -eq $value) {
+        Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue
+    }
+    else {
+        Set-ItemProperty -Path $key -Name $name -Value ([int]$value) -Type DWord
+    }
+}
+
+function Run-AppearanceFlow {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    $original = Get-ItemProperty -Path $key
+    $originalLight = $original.AppsUseLightTheme
+    $originalTransparency = $original.EnableTransparency
+    Write-Output "APPEARANCE_ORIGINAL AppsUseLightTheme=$originalLight EnableTransparency=$originalTransparency"
+    $process = $null
+    try {
+        $process = Start-Otto 'appearance'
+        $bar = Get-BarMetrics $process
+        $region = Get-EmptyBarRegion $bar
+        $states = @(
+            [pscustomobject]@{ Name = '01-dark-opaque'; Light = 0; Transparency = 0; Expected = @(28, 28, 33) },
+            [pscustomobject]@{ Name = '02-light-opaque'; Light = 1; Transparency = 0; Expected = @(240, 240, 245) },
+            [pscustomobject]@{ Name = '03-dark-glass'; Light = 0; Transparency = 1; Expected = $null }
+        )
+        foreach ($state in $states) {
+            Set-PersonalizeValue 'AppsUseLightTheme' $state.Light
+            Set-PersonalizeValue 'EnableTransparency' $state.Transparency
+            [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
+            Start-Sleep -Milliseconds 1500
+            $shot = Save-Screenshot 'appearance' $state.Name
+            $color = Get-RegionColor $shot $region
+            $observed = "rgb=$($color.R),$($color.G),$($color.B) spread=$($color.Spread)"
+            if ($state.Expected) {
+                if (-not (Test-ColorNear $color $state.Expected 4) -or $color.Spread -gt 6) {
+                    throw "$($state.Name): the bar did not switch to the opaque surface ($observed, expected $($state.Expected -join ','))."
+                }
+            }
+            elseif ((Test-ColorNear $color @(28, 28, 33) 4) -or (Test-ColorNear $color @(240, 240, 245) 4)) {
+                throw "$($state.Name): the bar stayed opaque after transparency was turned back on ($observed)."
+            }
+            Write-Output "CHECKPOINT_PASS scenario=appearance name=$($state.Name) $observed"
+        }
+    }
+    finally {
+        Set-PersonalizeValue 'AppsUseLightTheme' $originalLight
+        Set-PersonalizeValue 'EnableTransparency' $originalTransparency
+        [OttoE2ESystem]::BroadcastSettingChange('ImmersiveColorSet')
+        $restored = Get-ItemProperty -Path $key
+        Write-Output "APPEARANCE_RESTORED AppsUseLightTheme=$($restored.AppsUseLightTheme) EnableTransparency=$($restored.EnableTransparency)"
+    }
+    Stop-Otto $process
+}
+
+function Run-AudioFlow {
+    $devices = [OttoE2EAudio]::ActiveRenderDevices()
+    $original = [OttoE2EAudio]::Volume()
+    Write-Output "AUDIO_ORIGINAL volume=$([Math]::Round($original, 3)) active_render_devices=$devices"
+    $process = Start-Otto 'audio'
+    try {
+        $bar = Get-BarMetrics $process
+        $region = [pscustomobject]@{
+            X = $bar.Left + [int]($bar.Width / 2) - (Convert-ToScaled 300)
+            Y = $bar.Top
+            Width = Convert-ToScaled 600
+            Height = $bar.Height
+        }
+        Start-Sleep -Milliseconds 2500
+        $baseline = Save-Screenshot 'audio' '00-baseline'
+        $target = if ($original -gt 0.5) { $original - 0.12 } else { $original + 0.12 }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        [OttoE2EAudio]::SetVolume([float]$target)
+        $shown = $false
+        $changed = 0
+        while ($timer.ElapsedMilliseconds -lt 2000 -and -not $shown) {
+            $shot = Save-Screenshot 'audio' '01-hud'
+            $changed = Get-RegionDiff $baseline $shot $region
+            $shown = $changed -ge 150
+        }
+        $latency = $timer.ElapsedMilliseconds
+        if (-not $shown) {
+            throw "An external volume change did not raise the Otto HUD within 2 s (changed pixels: $changed)."
+        }
+        Write-Output "CHECKPOINT_PASS scenario=audio name=01-external-volume-hud latency_ms=$latency changed=$changed"
+    }
+    finally {
+        [OttoE2EAudio]::SetVolume([float]$original)
+        Write-Output "AUDIO_RESTORED volume=$([Math]::Round([OttoE2EAudio]::Volume(), 3))"
+    }
+    Stop-Otto $process
+}
+
+$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'dock', 'keyboard', 'stall') } else { @($Scenario) }
 $fatal = $null
 $scenarioFailures = [System.Collections.Generic.List[string]]::new()
 try {
@@ -1197,6 +1788,11 @@ try {
                 'recovery' { Run-RecoveryFlow }
                 'fullscreen' { Run-FullScreenFlow }
                 'genie' { Run-GenieFlow }
+                'dock' { Run-DockFlow }
+                'keyboard' { Run-KeyboardFlow }
+                'stall' { Run-StallFlow }
+                'appearance' { Run-AppearanceFlow }
+                'audio' { Run-AudioFlow }
             }
         }
         catch {
