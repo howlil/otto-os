@@ -16,7 +16,7 @@ pub use theme::{BrushPalette, LiquidGlassPalette};
 pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
 
 use otto_core::{
-    Appearance, HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudKind, NotchHudState,
+    Appearance, HitTarget, Layout, LyricsView, NotchExpandedTab, NotchHudKind, NotchHudState,
     NowPlaying, PomodoroPhase, PomodoroState, PomodoroStatus, Rect, ShapeTokens, SystemStatus,
     scale,
 };
@@ -403,7 +403,7 @@ impl Renderer {
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
-        lyrics: Option<&LyricsSheet>,
+        lyrics: LyricsView<'_>,
     ) -> Result<()> {
         self.draw_panel(layout, hovered, pomodoro, media, anim_phase, lyrics)?;
         self.panel_surface.present_sized(
@@ -692,7 +692,7 @@ impl Renderer {
         hovered: Option<HitTarget>,
         media: &NowPlaying,
         anim_phase: f32,
-        lyrics: Option<&LyricsSheet>,
+        lyrics: LyricsView<'_>,
     ) -> Result<()> {
         let art_rect = translate_rect(layout.media_cover_art, -offset_x);
         let seekbar_rect = translate_rect(layout.media_seekbar, -offset_x);
@@ -780,7 +780,7 @@ impl Renderer {
             bottom: art_rect.bottom() as f32,
         };
 
-        if let Some(active_lyric) = lyrics.and_then(|l| l.active_line(media.position_ms)) {
+        if let Some(active_lyric) = lyrics.sheet.and_then(|l| l.active_line(media.position_ms)) {
             let lyric_brush = &self.brushes.alpha_brush(MUSIC_ACCENT, 0.95 * alpha);
             self.draw_text(active_lyric, &self.text_caption, artist_rect, lyric_brush);
         } else {
@@ -848,7 +848,7 @@ impl Renderer {
         drawer_rect: Rect,
         alpha: f32,
         media: &NowPlaying,
-        lyrics: Option<&LyricsSheet>,
+        lyrics: LyricsView<'_>,
         anim_phase: f32,
     ) {
         let radius = scale(12, self.dpi) as f32;
@@ -871,7 +871,7 @@ impl Renderer {
                 .DrawRoundedRectangle(&rounded, border_brush, 1.0, None);
         }
 
-        if let Some(sheet) = lyrics.filter(|s| !s.is_empty()) {
+        if let Some(sheet) = lyrics.sheet.filter(|s| !s.is_empty()) {
             let (rel_active, lines) = sheet.visible_window(media.position_ms, 3);
             let line_count = lines.len().max(1);
             let line_h =
@@ -920,13 +920,17 @@ impl Renderer {
                     empty_brush,
                 );
             } else {
-                let pulse = 0.35 + 0.30 * (anim_phase * TAU).sin().abs();
-                let pulse_brush = &self.brushes.alpha_brush(FOREGROUND, pulse * alpha);
+                let level = if lyrics.status.is_pending() {
+                    0.35 + 0.30 * (anim_phase * TAU).sin().abs()
+                } else {
+                    0.45
+                };
+                let status_brush = &self.brushes.alpha_brush(FOREGROUND, level * alpha);
                 self.draw_text(
-                    "Memuat lirik...",
+                    lyrics.status.placeholder(),
                     &self.text_caption,
                     empty_rect,
-                    pulse_brush,
+                    status_brush,
                 );
             }
         }

@@ -1,7 +1,7 @@
 use super::surface::draw_on;
 use super::{CLEAR, LiquidGlassPalette, Renderer};
 use otto_core::{
-    Appearance, HitTarget, Layout, LyricsSheet, NotchExpandedTab, NotchHudState, NowPlaying,
+    Appearance, HitTarget, Layout, LyricsView, NotchExpandedTab, NotchHudState, NowPlaying,
     PomodoroState, PomodoroStatus, Rect, SystemStatus,
 };
 use windows::core::Result;
@@ -108,7 +108,7 @@ impl Renderer {
         pomodoro: PomodoroState,
         media: Option<&NowPlaying>,
         anim_phase: f32,
-        lyrics: Option<&LyricsSheet>,
+        lyrics: LyricsView<'_>,
     ) -> Result<()> {
         let draw_size = (layout.panel_window.width, layout.panel_window.height);
         let offset_x = layout.panel_window.x;

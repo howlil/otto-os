@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
-    HitTarget, MediaCommand, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
-    NotchHudState, NotchLayoutInput, NowPlaying, PendingSeek, PomodoroClock, PomodoroState,
-    PomodoroStatus, PomodoroTick, SeekReadback, animate_value, reconcile_seek, seek_target_ms,
+    HitTarget, LyricsStatus, LyricsView, MediaCommand, MotionPreference, NotchAction,
+    NotchExpandedTab, NotchHudKind, NotchHudState, NotchLayoutInput, NowPlaying, PendingSeek,
+    PomodoroClock, PomodoroState, PomodoroStatus, PomodoroTick, SeekReadback, animate_value,
+    reconcile_seek, seek_target_ms,
 };
 
 const HUD_HOLD_MS: u64 = 1_650;
@@ -69,6 +70,7 @@ pub(crate) struct NotchController {
     anim_phase: f32,
     lyrics_expanded: bool,
     lyrics: Option<otto_core::LyricsSheet>,
+    lyrics_status: LyricsStatus,
     pending_seek: Option<PendingSeek>,
     seek_drag: Option<f32>,
 }
@@ -94,6 +96,7 @@ impl NotchController {
             anim_phase: 0.0,
             lyrics_expanded: false,
             lyrics: None,
+            lyrics_status: LyricsStatus::Idle,
             pending_seek: None,
             seek_drag: None,
         }
@@ -277,6 +280,7 @@ impl NotchController {
         };
         if track_changed {
             self.lyrics = None;
+            self.lyrics_status = LyricsStatus::Idle;
             self.pending_seek = None;
             self.seek_drag = None;
         }
@@ -290,12 +294,39 @@ impl NotchController {
         true
     }
 
-    pub(crate) fn lyrics(&self) -> Option<&otto_core::LyricsSheet> {
-        self.lyrics.as_ref()
+    pub(crate) fn lyrics_view(&self) -> LyricsView<'_> {
+        LyricsView {
+            sheet: self.lyrics.as_ref(),
+            status: self.lyrics_status,
+        }
+    }
+
+    pub(crate) fn begin_lyrics_request(&mut self) {
+        self.lyrics = None;
+        self.lyrics_status = LyricsStatus::Loading;
+    }
+
+    pub(crate) fn finish_lyrics(
+        &mut self,
+        sheet: Option<otto_core::LyricsSheet>,
+        status: LyricsStatus,
+    ) {
+        self.lyrics_status = match (&sheet, status) {
+            (Some(found), LyricsStatus::Ready) if found.is_empty() => LyricsStatus::NotFound {
+                searched_online: true,
+            },
+            _ => status,
+        };
+        self.lyrics = sheet.filter(|found| !found.is_empty());
     }
 
     #[allow(dead_code)]
     pub(crate) fn set_lyrics(&mut self, lyrics: Option<otto_core::LyricsSheet>) {
+        self.lyrics_status = if lyrics.is_some() {
+            LyricsStatus::Ready
+        } else {
+            LyricsStatus::Idle
+        };
         self.lyrics = lyrics;
     }
 
@@ -903,7 +934,7 @@ mod tests {
             ..spotify
         };
         assert!(notch.set_media(Some(browser)));
-        assert!(notch.lyrics().is_none());
+        assert!(notch.lyrics_view().sheet.is_none());
     }
 
     #[test]
@@ -1006,6 +1037,39 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_status_tracks_requests_results_and_track_changes() {
+        let track = NowPlaying {
+            title: String::from("Song"),
+            artist: String::from("Artist"),
+            playing: true,
+            ..NowPlaying::default()
+        };
+        let mut notch = NotchController::new(Some(track.clone()), NotchExpandedTab::Media);
+        assert_eq!(notch.lyrics_view().status, otto_core::LyricsStatus::Idle);
+        notch.begin_lyrics_request();
+        assert_eq!(notch.lyrics_view().status, otto_core::LyricsStatus::Loading);
+        notch.finish_lyrics(None, otto_core::LyricsStatus::Failed);
+        assert_eq!(notch.lyrics_view().status, otto_core::LyricsStatus::Failed);
+        notch.finish_lyrics(
+            Some(otto_core::LyricsSheet::default()),
+            otto_core::LyricsStatus::Ready,
+        );
+        assert_eq!(
+            notch.lyrics_view().status,
+            otto_core::LyricsStatus::NotFound {
+                searched_online: true
+            }
+        );
+        assert!(notch.lyrics_view().sheet.is_none());
+        let next = NowPlaying {
+            title: String::from("Next"),
+            ..track
+        };
+        assert!(notch.set_media(Some(next)));
+        assert_eq!(notch.lyrics_view().status, otto_core::LyricsStatus::Idle);
+    }
+
+    #[test]
     fn hotkeys_toggle_the_notch_without_platform_access() {
         let mut notch = NotchController::new(None, NotchExpandedTab::Pomodoro);
 
@@ -1095,7 +1159,7 @@ mod tests {
         let mut notch = NotchController::new(Some(media), NotchExpandedTab::Media);
         let sheet = otto_core::parse_lrc("[00:01.00]Hello world");
         notch.set_lyrics(Some(sheet));
-        assert!(notch.lyrics().is_some());
+        assert!(notch.lyrics_view().sheet.is_some());
 
         let same_track_updated_pos = NowPlaying {
             title: String::from("Track 1"),
@@ -1107,7 +1171,7 @@ mod tests {
             ..NowPlaying::default()
         };
         notch.set_media(Some(same_track_updated_pos));
-        assert!(notch.lyrics().is_some());
+        assert!(notch.lyrics_view().sheet.is_some());
 
         let different_track = NowPlaying {
             title: String::from("Track 2"),
@@ -1119,6 +1183,6 @@ mod tests {
             ..NowPlaying::default()
         };
         notch.set_media(Some(different_track));
-        assert!(notch.lyrics().is_none());
+        assert!(notch.lyrics_view().sheet.is_none());
     }
 }

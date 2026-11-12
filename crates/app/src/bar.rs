@@ -7,9 +7,9 @@ use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
     Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate,
-    HitTarget, Layout, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind, NotchLayoutInput,
-    NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event, is_top_bar_menu_target,
-    scale,
+    HitTarget, Layout, LyricsStatus, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind,
+    NotchLayoutInput, NotchPort, NowPlaying, compute_layout_with_notch, detect_hud_event,
+    is_top_bar_menu_target, scale,
 };
 use otto_platform::{
     AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
@@ -385,6 +385,7 @@ impl Bar {
         self.lyrics_generation = generation;
         if accepted {
             self.lyrics_track = Some(track);
+            self.notch.begin_lyrics_request();
         }
     }
 
@@ -648,10 +649,17 @@ impl Bar {
                 && media.title == response.title
                 && media.artist == response.artist
             {
-                self.notch.set_lyrics(match response.outcome {
-                    LyricsOutcome::Found { sheet, .. } => Some(sheet),
-                    LyricsOutcome::NotFound | LyricsOutcome::Failed => None,
-                });
+                let (sheet, status) = match response.outcome {
+                    LyricsOutcome::Found { sheet, .. } => (Some(sheet), LyricsStatus::Ready),
+                    LyricsOutcome::NotFound => (
+                        None,
+                        LyricsStatus::NotFound {
+                            searched_online: self.online_lyrics_enabled,
+                        },
+                    ),
+                    LyricsOutcome::Failed => (None, LyricsStatus::Failed),
+                };
+                self.notch.finish_lyrics(sheet, status);
                 dirty = true;
             }
         }
@@ -1163,7 +1171,7 @@ impl Bar {
                 self.notch.pomodoro(),
                 media.as_ref(),
                 self.notch.anim_phase(),
-                self.notch.lyrics(),
+                self.notch.lyrics_view(),
             );
         }
     }

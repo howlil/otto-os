@@ -4,6 +4,46 @@ pub struct LyricLine {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LyricsStatus {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    NotFound {
+        searched_online: bool,
+    },
+    Failed,
+}
+
+impl LyricsStatus {
+    #[must_use]
+    pub const fn placeholder(self) -> &'static str {
+        match self {
+            Self::Idle | Self::Loading => "Memuat lirik...",
+            Self::Ready
+            | Self::NotFound {
+                searched_online: true,
+            } => "Lirik tidak ditemukan",
+            Self::NotFound {
+                searched_online: false,
+            } => "Lirik tersimpan tidak ada \u{b7} aktifkan lirik online",
+            Self::Failed => "Lirik gagal dimuat",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::Idle | Self::Loading)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LyricsView<'a> {
+    pub sheet: Option<&'a LyricsSheet>,
+    pub status: LyricsStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LyricsSheet {
     pub lines: Vec<LyricLine>,
@@ -163,6 +203,33 @@ pub fn parse_lrc(content: &str) -> LyricsSheet {
 
 #[cfg(test)]
 mod tests {
+    use super::LyricsStatus;
+
+    #[test]
+    fn lyrics_status_explains_why_no_lines_are_shown() {
+        assert!(LyricsStatus::Loading.is_pending());
+        assert!(!LyricsStatus::Failed.is_pending());
+        assert_eq!(LyricsStatus::Failed.placeholder(), "Lirik gagal dimuat");
+        assert_eq!(
+            LyricsStatus::NotFound {
+                searched_online: true
+            }
+            .placeholder(),
+            "Lirik tidak ditemukan"
+        );
+        assert!(
+            LyricsStatus::NotFound {
+                searched_online: false
+            }
+            .placeholder()
+            .contains("online")
+        );
+        assert_ne!(
+            LyricsStatus::Loading.placeholder(),
+            LyricsStatus::Failed.placeholder()
+        );
+    }
+
     use super::*;
 
     #[test]
