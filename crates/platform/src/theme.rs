@@ -5,6 +5,7 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
     COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
 };
+use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
@@ -72,6 +73,31 @@ pub fn is_transparency_enabled() -> bool {
     }
 }
 
+const BATTERY_SAVER_ON: u8 = 1;
+
+const fn battery_saver_from_flag(flag: u8) -> bool {
+    flag & BATTERY_SAVER_ON != 0
+}
+
+const AC_LINE_OFFLINE: u8 = 0;
+
+const fn on_battery_from_line(line_status: u8) -> bool {
+    line_status == AC_LINE_OFFLINE
+}
+
+#[must_use]
+pub fn is_running_on_battery() -> bool {
+    let mut power = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut power) }.is_ok() && on_battery_from_line(power.ACLineStatus)
+}
+
+#[must_use]
+pub fn is_battery_saver_active() -> bool {
+    let mut power = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut power) }.is_ok()
+        && battery_saver_from_flag(power.SystemStatusFlag)
+}
+
 #[must_use]
 pub fn is_high_contrast_active() -> bool {
     let mut hc = HIGHCONTRASTW {
@@ -115,7 +141,38 @@ pub fn system_contrast_colors() -> Option<ContrastColors> {
 pub fn read_system_appearance() -> SystemAppearance {
     SystemAppearance {
         dark: is_system_in_dark_mode(),
-        transparency: is_transparency_enabled(),
+        transparency: is_transparency_enabled() && !is_battery_saver_active(),
         contrast: system_contrast_colors(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        battery_saver_from_flag, is_battery_saver_active, on_battery_from_line,
+        read_system_appearance,
+    };
+
+    #[test]
+    fn only_an_offline_ac_line_counts_as_battery_power() {
+        assert!(on_battery_from_line(0));
+        assert!(!on_battery_from_line(1));
+        assert!(!on_battery_from_line(255));
+    }
+
+    #[test]
+    fn battery_saver_is_the_lowest_status_flag_bit() {
+        assert!(battery_saver_from_flag(1));
+        assert!(battery_saver_from_flag(0b11));
+        assert!(!battery_saver_from_flag(0));
+        assert!(!battery_saver_from_flag(0b10));
+    }
+
+    #[test]
+    fn battery_saver_turns_transparency_off_in_the_system_appearance() {
+        let appearance = read_system_appearance();
+        if is_battery_saver_active() {
+            assert!(!appearance.transparency);
+        }
     }
 }

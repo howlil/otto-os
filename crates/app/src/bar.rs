@@ -1,6 +1,7 @@
 use std::mem::size_of;
 use std::time::Instant;
 
+use crate::backdrop_feed::BackdropFeed;
 use crate::bar_controls::{BarControlAction, BarControlsController};
 use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
@@ -11,6 +12,8 @@ use otto_core::{
     NotchLayoutInput, NotchPort, NowPlaying, TickCadence, compute_layout_with_notch,
     detect_hud_event, is_top_bar_menu_target, scale,
 };
+use otto_core::{CaptureRegion, Rect, capture_interval_ms, capture_wanted};
+use otto_platform::is_running_on_battery;
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
     AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
@@ -50,6 +53,7 @@ const STATUS_POLL_MS: u32 = 120;
 const FOREGROUND_FALLBACK_TICKS: u32 = 8;
 const WM_APP_BAR_KEY: u32 = 0x8000 + 21;
 const WM_APP_IDLE_WAKE: u32 = 0x8000 + 22;
+const WM_APP_BAR_BACKDROP: u32 = 0x8000 + 24;
 const STATUS_IDLE_MS: u32 = 1000;
 const STATUS_IDLE_AFTER_TICKS: u32 = 16;
 const MEDIA_EVERY_TICKS: u8 = 4;
@@ -90,6 +94,7 @@ pub(crate) struct Bar {
     motion: MotionPreference,
     visibility: BarVisibility,
     shell_full_screen: bool,
+    backdrop: Option<BackdropFeed>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -186,9 +191,14 @@ pub fn start(
         motion: motion_preference(),
         visibility: BarVisibility::default(),
         shell_full_screen: false,
+        backdrop: runtime
+            .glass_enabled
+            .get()
+            .then(|| BackdropFeed::start(hwnd, WM_APP_BAR_BACKDROP, vec![hwnd, panel_hwnd])),
     };
     bar.place();
     bar.present(runtime);
+    bar.sync_backdrop(runtime, true);
 
     unsafe {
         SetTimer(
@@ -219,6 +229,7 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
@@ -231,6 +242,10 @@ pub fn handle_message(
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_QUERYENDSESSION => Some(LRESULT(1)),
         WM_APP_IDLE_WAKE => Some(LRESULT(0)),
+        WM_APP_BAR_BACKDROP => {
+            with_bar(runtime, |bar| bar.on_backdrop(runtime));
+            Some(LRESULT(0))
+        }
         WM_ENDSESSION => {
             if wparam.0 != 0 {
                 let _ = otto_platform::restore_hidden_windows();
@@ -239,7 +254,14 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == STATUS_TIMER => {
-            with_bar(runtime, |bar| bar.tick(runtime));
+            let mut appearance_due = false;
+            with_bar(runtime, |bar| {
+                bar.tick(runtime);
+                appearance_due = bar.periodic_due(MAINTAIN_EVERY_TICKS);
+            });
+            if appearance_due {
+                crate::theme_state::refresh_system_appearance(runtime);
+            }
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == HUD_ANIM_TIMER => {
@@ -262,6 +284,7 @@ pub fn handle_message(
         }
         WM_POWERBROADCAST => {
             with_bar(runtime, |bar| bar.on_power_event(runtime, wparam.0));
+            crate::theme_state::refresh_system_appearance(runtime);
             Some(LRESULT(1))
         }
         WM_HOTKEY => {
@@ -394,6 +417,7 @@ pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
             };
             let _ = apply_backdrop_material(bar.hwnd, material);
         }
+        bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
 }
@@ -644,6 +668,9 @@ impl Bar {
             self.tint,
         ) {
             self.renderer = renderer;
+            if let Some(feed) = self.backdrop.as_mut() {
+                feed.reset();
+            }
         }
         self.appbar.rebase(self.screen.width, self.screen.height);
         self.appbar.reserve_top(
@@ -653,7 +680,49 @@ impl Bar {
         );
         self.place();
         self.present(runtime);
+        self.sync_backdrop(runtime, true);
         self.ensure_anim_timer();
+    }
+
+    fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
+        let appearance = crate::theme_state::appearance(runtime);
+        let wanted = capture_wanted(&appearance, self.backdrop.is_some());
+        let visible = self.visibility.is_visible();
+        let Some(feed) = self.backdrop.as_mut() else {
+            return;
+        };
+        if !wanted {
+            if feed.is_active() {
+                feed.reset();
+                self.renderer.clear_bar_backdrop();
+                self.present(runtime);
+            }
+            return;
+        }
+        if !visible {
+            return;
+        }
+        let bar_rect = Rect {
+            x: 0,
+            y: 0,
+            width: self.layout.bar.width,
+            height: self.layout.bar.height,
+        };
+        let Some(region) =
+            CaptureRegion::clipped_to_screen(bar_rect, self.screen.width, self.screen.height)
+        else {
+            return;
+        };
+        let interval = capture_interval_ms(is_running_on_battery());
+        feed.request(region, interval, force);
+    }
+
+    fn on_backdrop(&mut self, runtime: &RuntimeContext) {
+        let Some(update) = self.backdrop.as_mut().and_then(BackdropFeed::poll) else {
+            return;
+        };
+        self.renderer.set_bar_backdrop(update.pixels, update.origin);
+        self.present(runtime);
     }
 
     fn wake(&mut self, runtime: &RuntimeContext) {
@@ -765,6 +834,7 @@ impl Bar {
             }
         }
         self.sync_full_screen(runtime);
+        self.sync_backdrop(runtime, foreground_changed);
         self.sync_keyboard_focus(runtime);
         if self.notch.is_seek_dragging() && is_escape_down() {
             self.release_seek(runtime, false);

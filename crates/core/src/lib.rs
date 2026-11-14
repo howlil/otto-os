@@ -2,11 +2,13 @@ mod app_model;
 mod bar_focus;
 mod bar_visibility;
 mod calendar;
+mod capture_plan;
 mod change_gate;
 mod dock;
 mod dock_focus;
 mod effects;
 mod genie;
+mod glass;
 mod island;
 mod layout;
 mod lyrics;
@@ -32,6 +34,7 @@ pub use app_model::{
 pub use bar_focus::{BarFocus, BarFocusOutcome, BarKey};
 pub use bar_visibility::{BarPointer, BarVisibility};
 pub use calendar::{days_in_month, month_cells, month_title, shift_month, weekday_of};
+pub use capture_plan::{CaptureGate, CaptureRegion, capture_interval_ms, capture_wanted};
 pub use change_gate::ChangeGate;
 pub use dock::{
     AppleIconKind, DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL, DockInput, DockItemLayout,
@@ -50,6 +53,10 @@ pub use effects::{
 };
 pub use genie::{
     GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry, genie_canvas, is_blank_frame,
+};
+pub use glass::{
+    GlassBackdrop, GlassBitmap, GlassParams, GlassShape, Rgb, RgbBuffer, compose_glass,
+    glass_color, soften_backdrop,
 };
 pub use island::{
     CompactContent, IslandInputs, IslandMode, IslandTargets, island_targets, resolve_island,

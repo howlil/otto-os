@@ -12,6 +12,11 @@ impl PixelLimits {
         max_bytes: 4 * 1024 * 1024,
     };
 
+    pub const BACKDROP: Self = Self {
+        max_dimension: 8_192,
+        max_bytes: 16 * 1024 * 1024,
+    };
+
     pub const WINDOW_SNAPSHOT: Self = Self {
         max_dimension: 8_192,
         max_bytes: 40 * 1024 * 1024,

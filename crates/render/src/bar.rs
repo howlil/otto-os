@@ -1,8 +1,8 @@
 use super::surface::draw_on;
 use super::{CLEAR, LiquidGlassPalette, Renderer};
 use otto_core::{
-    Appearance, HitTarget, Layout, LyricsView, NotchExpandedTab, NotchHudState, NowPlaying,
-    PomodoroState, PomodoroStatus, Rect, SystemStatus,
+    Appearance, GlassShape, HitTarget, Layout, LyricsView, NotchExpandedTab, NotchHudState,
+    NowPlaying, PomodoroState, PomodoroStatus, Rect, SystemStatus,
 };
 use windows::core::Result;
 
@@ -24,8 +24,25 @@ impl Renderer {
         let palette = LiquidGlassPalette::for_appearance(&appearance);
         let surface = &self.bar_surface;
         draw_on(&self.target, surface, surface.size(), || unsafe {
-            let clear = palette.bar_background;
-            self.target.Clear(Some(&raw const clear));
+            let transparent = CLEAR;
+            self.target.Clear(Some(&raw const transparent));
+            let (bar_width, bar_height) = surface.size();
+            let bar_shape = GlassShape::from_rect(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: bar_width,
+                    height: bar_height,
+                },
+                0.0,
+            );
+            let glass_drawn =
+                self.glass
+                    .draw(&self.target, &appearance, self.dpi, bar_shape, false)?;
+            if !glass_drawn {
+                let clear = palette.bar_background;
+                self.target.Clear(Some(&raw const clear));
+            }
             self.brushes.update_theme(&palette);
 
             let bar_notch = Rect {

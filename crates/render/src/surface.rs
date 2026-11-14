@@ -102,6 +102,22 @@ impl DibSurface {
         self.size
     }
 
+    #[cfg(test)]
+    #[allow(clippy::used_underscore_binding)]
+    pub(crate) fn read_pixels(&self) -> Vec<u8> {
+        use windows::Win32::Graphics::Gdi::{BITMAP, GetObjectW};
+        let mut bitmap = BITMAP::default();
+        unsafe {
+            GetObjectW(
+                HGDIOBJ(self._dib.0.0),
+                size_of::<BITMAP>() as i32,
+                Some((&raw mut bitmap).cast()),
+            );
+            let length = (self.size.0 * self.size.1 * 4) as usize;
+            std::slice::from_raw_parts(bitmap.bmBits.cast::<u8>(), length).to_vec()
+        }
+    }
+
     pub(crate) fn bind(&self, target: &ID2D1DCRenderTarget, size: (i32, i32)) -> Result<()> {
         let (width, height) = self.clamp(size);
         unsafe {

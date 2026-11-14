@@ -372,6 +372,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) genie: RefCell<Option<genie::Genie>>,
     pub(crate) theme_mode: Cell<ThemeMode>,
     pub(crate) system_appearance: Cell<SystemAppearance>,
+    pub(crate) glass_enabled: Cell<bool>,
     pub(crate) online_lyrics_enabled: Cell<bool>,
     pub(crate) pending_online_lyrics: Cell<Option<bool>>,
     pub(crate) dock_preferences: Cell<DockPreferences>,
@@ -388,6 +389,7 @@ impl RuntimeContext {
             genie: RefCell::new(None),
             theme_mode: Cell::new(ThemeMode::Auto),
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
+            glass_enabled: Cell::new(false),
             online_lyrics_enabled: Cell::new(online_lyrics_enabled),
             pending_online_lyrics: Cell::new(None),
             dock_preferences: Cell::new(DockPreferences::default()),
@@ -434,6 +436,7 @@ pub fn start(blur: bool) -> Result<()> {
         shutting_down: false,
         runtime: RuntimeContext::new(online_lyrics_enabled),
     };
+    host.runtime.glass_enabled.set(blur);
     host.runtime
         .system_appearance
         .set(otto_platform::read_system_appearance());

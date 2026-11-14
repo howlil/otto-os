@@ -1,6 +1,7 @@
 mod actions;
 mod appbar;
 mod audio;
+mod backdrop;
 mod blur;
 mod caption;
 mod capture;
@@ -40,6 +41,9 @@ pub use appbar::{
     restore_shell_from_recovery,
 };
 pub use audio::{set_system_volume, shutdown_audio_task, step_system_volume, toggle_system_mute};
+pub use backdrop::{
+    BackdropFrame, BackdropRequest, BackdropWorker, exclude_from_capture, include_in_capture,
+};
 pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
 pub use caption::{native_caption, sample_screen_color};
 pub use capture::release_capture_if_owned;
@@ -86,8 +90,9 @@ pub use screen::{
 };
 pub use status::{read_system_status, set_display_brightness, step_display_brightness};
 pub use theme::{
-    is_high_contrast_active, is_system_in_dark_mode, is_transparency_enabled,
-    read_system_appearance, system_contrast_colors,
+    is_battery_saver_active, is_high_contrast_active, is_running_on_battery,
+    is_system_in_dark_mode, is_transparency_enabled, read_system_appearance,
+    system_contrast_colors,
 };
 pub use trash::{empty_recycle_bin, is_recycle_bin_full, shutdown_recycle_bin_task};
 pub use window_model::{

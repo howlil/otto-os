@@ -24,6 +24,8 @@ Every transition is time-based, reversible from its current value, and safe to s
 
 Notch media controls (Now Playing tab) hit at 24 px minimum; the visual track may be smaller and is centered in its hit rect. Controls in the expanded notch keep at least 4 px between hit rects and never cross the notch curve. Dimmed or unsupported controls must name the reason.
 
+Liquid glass (bar and Dock, Dark and Light): the surface shows a blurred, saturation-boosted copy of what is behind it, tinted toward the theme, with a brighter rim on the upper-left edge, a faint sheen on the upper half, a soft inner shadow on the lower-right, and a one-pixel dark outline. Near the edge the surface bends toward sharp backdrop content (the lens band, 20 pt) while the interior stays soft so icons and text read on it. The bar is a rectangle and uses no lens. Dark and Light share one pipeline and differ only in `GlassParams`; primary text must keep 4.5:1 over the brightest and darkest possible backdrop. Battery Saver, disabled transparency, and high contrast replace glass with the solid `dock_fill` and `bar_background` colours. The notch stays obsidian in both themes.
+
 ## State
 
 Platform observation owns the truth about external windows. App state owns local animation progress. Core owns interpolation and resolved geometry.

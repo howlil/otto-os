@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use otto_core::{
-    Appearance, AppleIconKind, DockItemLayout, DockLayout, PixelLimits, ShapeTokens, scale,
+    Appearance, AppleIconKind, DockItemLayout, DockLayout, GlassShape, PixelLimits, RgbBuffer,
+    ShapeTokens, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
@@ -25,6 +26,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 use windows_numerics::Vector2;
 
+use crate::glass::GlassPainter;
 use crate::surface::{DibSurface, draw_on, upload_bgra_bitmap};
 use crate::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
@@ -82,6 +84,7 @@ pub struct DockRenderer {
     font_px: f32,
     icons: HashMap<String, ID2D1Bitmap>,
     brushes: BrushPalette,
+    glass: GlassPainter,
 }
 
 impl DockRenderer {
@@ -131,8 +134,22 @@ impl DockRenderer {
                 font_px,
                 icons: HashMap::new(),
                 brushes,
+                glass: GlassPainter::default(),
             })
         }
+    }
+
+    pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
+        self.glass.set_backdrop(capture, origin);
+    }
+
+    pub fn clear_backdrop(&self) {
+        self.glass.clear_backdrop();
+    }
+
+    #[must_use]
+    pub fn has_backdrop(&self) -> bool {
+        self.glass.has_backdrop()
     }
 
     #[must_use]
@@ -180,7 +197,13 @@ impl DockRenderer {
                 self.brushes.update_theme(&palette);
 
                 if layout.pill.width > 0 && layout.pill.height > 0 {
-                    self.draw_pill(layout, &palette);
+                    let pill_shape = GlassShape::from_rect(layout.pill, layout.pill_radius);
+                    let glass_drawn =
+                        self.glass
+                            .draw(&self.target, &appearance, self.dpi, pill_shape, true)?;
+                    if !glass_drawn {
+                        self.draw_pill(layout, &palette);
+                    }
                 }
 
                 if let Some(div_x) = layout.divider_x {

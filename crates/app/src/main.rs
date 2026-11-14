@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod backdrop_feed;
 mod bar;
 mod bar_controls;
 mod dock;

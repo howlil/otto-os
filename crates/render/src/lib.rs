@@ -1,6 +1,7 @@
 mod bar;
 mod dock;
 mod genie;
+mod glass;
 mod menu;
 mod surface;
 mod theme;
@@ -171,6 +172,7 @@ pub struct Renderer {
     cached_bar_notch: RefCell<Option<CachedNotchGeometry>>,
     cached_panel_notch: RefCell<Option<CachedNotchGeometry>>,
     cached_cover_art: RefCell<Option<CachedCoverArt>>,
+    glass: glass::GlassPainter,
 }
 
 thread_local! {
@@ -367,6 +369,7 @@ impl Renderer {
                 cached_bar_notch,
                 cached_panel_notch,
                 cached_cover_art: RefCell::new(None),
+                glass: glass::GlassPainter::default(),
             })
         }
     }
@@ -392,6 +395,19 @@ impl Renderer {
             appearance,
         )?;
         self.bar_surface.present(hwnd, origin)
+    }
+
+    pub fn set_bar_backdrop(&self, capture: otto_core::RgbBuffer, origin: (i32, i32)) {
+        self.glass.set_backdrop(capture, origin);
+    }
+
+    pub fn clear_bar_backdrop(&self) {
+        self.glass.clear_backdrop();
+    }
+
+    #[must_use]
+    pub fn has_bar_backdrop(&self) -> bool {
+        self.glass.has_backdrop()
     }
 
     #[allow(clippy::too_many_arguments)]

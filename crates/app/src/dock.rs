@@ -2,25 +2,26 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::time::Instant;
 
+use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
 use otto_core::{
-    BarKey, ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect, DockFocus,
-    DockFocusOutcome, DockInput, DockLayout, DockMetrics, DockPreferences, MotionMetrics,
-    MotionPreference, Rect, StableOrder, TickCadence, WindowCommand, WindowIdentity,
-    advance_bounce_phase, animate_value, bounce_offset, compute_dock_layout,
-    dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, scale,
-    split_dock_overflow,
+    BarKey, CaptureRegion, ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect,
+    DockFocus, DockFocusOutcome, DockInput, DockLayout, DockMetrics, DockPreferences,
+    MotionMetrics, MotionPreference, Rect, StableOrder, TickCadence, WindowCommand, WindowIdentity,
+    advance_bounce_phase, animate_value, bounce_offset, capture_interval_ms, capture_wanted,
+    compute_dock_layout, dock_activation_effect, dock_capacity, dock_command_effect,
+    dock_drop_effect, scale, split_dock_overflow,
 };
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
     DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
     cursor_position, empty_recycle_bin, enable_drag_accept_files, execute_window_command,
     extract_dock_icon, extract_dropped_files, has_maximized_or_fullscreen_window, hide_application,
-    is_escape_down, is_window_minimized, launch_new_instance, motion_preference,
-    open_file_with_dock_entry, other_applications_visible, overflow_dock_entry, primary_screen,
-    quit_application, remove_pinned_app, reorder_pinned_apps, route_bar_keys, routes_keys_to,
-    show_application, shutdown_recycle_bin_task, signal_command_failure, stop_routing_if_targets,
-    toggle_pin_entry, watch_bottom_edge, window_change_generations,
+    is_escape_down, is_running_on_battery, is_window_minimized, launch_new_instance,
+    motion_preference, open_file_with_dock_entry, other_applications_visible, overflow_dock_entry,
+    primary_screen, quit_application, remove_pinned_app, reorder_pinned_apps, route_bar_keys,
+    routes_keys_to, show_application, shutdown_recycle_bin_task, signal_command_failure,
+    stop_routing_if_targets, toggle_pin_entry, watch_bottom_edge, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -45,6 +46,8 @@ const DOCK_COVER_FALLBACK_TICKS: u32 = 7;
 const DOCK_IDLE_MS: u32 = 1000;
 const DOCK_REVEAL_BAND: i32 = 6;
 const WM_APP_DOCK_KEY: u32 = 0x8000 + 23;
+const WM_APP_DOCK_BACKDROP: u32 = 0x8000 + 25;
+const DOCK_HIDDEN_PROGRESS: f32 = 0.99;
 const DOCK_IDLE_AFTER_TICKS: u32 = 14;
 
 struct AnimState {
@@ -103,6 +106,8 @@ pub(crate) struct Dock {
     covered: bool,
     cadence: TickCadence,
     focus: DockFocus,
+    backdrop: Option<BackdropFeed>,
+    backdrop_gate: ChangeGate,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
@@ -138,7 +143,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let mut renderer = DockRenderer::new(layout.window_width, layout.window_height, screen.dpi)?;
     sync_icons(&mut renderer, &entries);
 
-    let dock = Dock {
+    let mut dock = Dock {
         hwnd,
         own_pid,
         renderer,
@@ -162,9 +167,15 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         covered: false,
         cadence: TickCadence::new(DOCK_POLL_MS, DOCK_IDLE_MS, DOCK_IDLE_AFTER_TICKS),
         focus: DockFocus::default(),
+        backdrop: runtime
+            .glass_enabled
+            .get()
+            .then(|| BackdropFeed::start(hwnd, WM_APP_DOCK_BACKDROP, vec![hwnd])),
+        backdrop_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
     };
     dock.place();
     dock.present(runtime);
+    dock.sync_backdrop(runtime, true);
 
     unsafe {
         SetTimer(
@@ -208,6 +219,10 @@ pub fn handle_message(
             if let Some(key) = BarKey::from_code(wparam.0) {
                 with_dock(runtime, |dock| dock.on_dock_key(runtime, key));
             }
+            Some(LRESULT(0))
+        }
+        WM_APP_DOCK_BACKDROP => {
+            with_dock(runtime, |dock| dock.on_backdrop(runtime));
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == DOCK_POLL_TIMER => {
@@ -291,7 +306,10 @@ fn with_dock(runtime: &RuntimeContext, action: impl FnOnce(&mut Dock)) {
 }
 
 pub fn repaint(runtime: &RuntimeContext) {
-    with_dock(runtime, |dock| dock.present(runtime));
+    with_dock(runtime, |dock| {
+        dock.sync_backdrop(runtime, true);
+        dock.present(runtime);
+    });
 }
 
 #[must_use]
@@ -553,8 +571,54 @@ impl Dock {
         ) {
             sync_icons(&mut renderer, &all);
             self.renderer = renderer;
+            if let Some(feed) = self.backdrop.as_mut() {
+                feed.reset();
+            }
         }
         self.place();
+        self.present(runtime);
+        self.sync_backdrop(runtime, true);
+    }
+
+    fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
+        let appearance = crate::theme_state::appearance(runtime);
+        let wanted = capture_wanted(&appearance, self.backdrop.is_some());
+        let hidden = self.anim.hide_progress >= DOCK_HIDDEN_PROGRESS;
+        let (origin_x, origin_y) = self.window_origin();
+        let window = Rect {
+            x: origin_x,
+            y: origin_y,
+            width: self.layout.window_width,
+            height: self.layout.window_height,
+        };
+        let region =
+            CaptureRegion::clipped_to_screen(window, self.screen.width, self.screen.height);
+        let Some(feed) = self.backdrop.as_mut() else {
+            return;
+        };
+        if !wanted {
+            if feed.is_active() {
+                feed.reset();
+                self.renderer.clear_backdrop();
+                self.present(runtime);
+            }
+            return;
+        }
+        if hidden {
+            return;
+        }
+        if let Some(region) = region {
+            feed.request(region, capture_interval_ms(is_running_on_battery()), force);
+        }
+    }
+
+    fn on_backdrop(&mut self, runtime: &RuntimeContext) {
+        let (origin_x, origin_y) = self.window_origin();
+        let Some(update) = self.backdrop.as_mut().and_then(BackdropFeed::poll) else {
+            return;
+        };
+        let local = (update.origin.0 - origin_x, update.origin.1 - origin_y);
+        self.renderer.set_backdrop(update.pixels, local);
         self.present(runtime);
     }
 
@@ -687,6 +751,10 @@ impl Dock {
         );
         let reveal_needs_polling = fullscreen_or_max && (!hidden || generations.is_none());
         self.sync_keyboard_focus(runtime);
+        let geometry_changed = self
+            .backdrop_gate
+            .should_refresh(generations.map(|changes| changes.geometry));
+        self.sync_backdrop(runtime, geometry_changed);
         let busy = dirty
             || self.focus.is_active()
             || reveal_needs_polling
