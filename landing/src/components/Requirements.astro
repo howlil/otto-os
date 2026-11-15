@@ -1,0 +1,36 @@
+---
+import { Check, Lock, RotateCcw, Terminal } from "lucide-astro";
+
+const requirements = [
+  {
+    icon: Terminal,
+    text: "Windows 11 22H2 atau lebih baru (build 22621+, 64-bit x64). Windows 10 tidak didukung dan diblokir aman saat start.",
+  },
+  {
+    icon: Lock,
+    text: "Berjalan lokal di ruang pengguna tanpa telemetri, analitik, atau unggahan riwayat clipboard.",
+  },
+  {
+    icon: RotateCcw,
+    text: "Taskbar dan area kerja bawaan bisa dipulihkan kapan saja dengan perintah --restore-shell.",
+  },
+  {
+    icon: Check,
+    text: "Lirik tersinkron daring bersifat opsional dan hanya aktif bila dinyalakan dari Control Center.",
+  },
+];
+---
+
+<div id="persyaratan" class="scroll-mt-24 text-left">
+  <h2 class="text-xl font-medium tracking-[-0.02em] text-ink sm:text-2xl">Persyaratan & keamanan</h2>
+  <ul class="mt-4 divide-y divide-line rounded-xl border border-line bg-surface">
+    {requirements.map((item) => (
+      <li class="flex items-start gap-3 px-4 py-3.5 text-sm leading-relaxed text-ink-soft">
+        <span class="mt-0.5 flex size-5 shrink-0 items-center justify-center text-muted">
+          <item.icon size={16} strokeWidth={1.5} aria-hidden="true" />
+        </span>
+        <span>{item.text}</span>
+      </li>
+    ))}
+  </ul>
+</div>

@@ -6,6 +6,7 @@ members = ["crates/core", "crates/platform", "crates/render", "crates/app"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/howlil/otto-os"
 publish = false
 
 [workspace.dependencies]

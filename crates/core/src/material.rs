@@ -1,4 +1,4 @@
-use crate::layout::scale;
+use crate::layout::{Rect, scale};
 use crate::theme::{ResolvedTheme, Rgba, ThemeMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,13 +334,35 @@ impl ShapeTokens {
             focus_ring_width: scale(self.focus_ring_width, dpi).max(self.focus_ring_width),
         }
     }
+
+    #[must_use]
+    pub fn bar_slot_pill_rect(self, slot: Rect, dpi: u32) -> Rect {
+        let scaled = self.scaled(dpi);
+        centered_bar_rect(slot, scaled.slot_inset_y, scale(24, dpi))
+    }
+
+    #[must_use]
+    pub fn bar_slot_focus_rect(self, slot: Rect, dpi: u32) -> Rect {
+        let scaled = self.scaled(dpi);
+        centered_bar_rect(slot, scaled.focus_ring_inset_y, scale(26, dpi))
+    }
+}
+
+fn centered_bar_rect(slot: Rect, min_inset_y: i32, max_height: i32) -> Rect {
+    let height = (slot.height - min_inset_y * 2).clamp(0, max_height);
+    Rect {
+        x: slot.x,
+        y: slot.y + (slot.height - height) / 2,
+        width: slot.width,
+        height,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, ContrastColors, InteractionState, MaterialVariant, SemanticColors, ShapeTokens,
-        SystemAppearance,
+        Appearance, ContrastColors, InteractionState, MaterialVariant, Rect, SemanticColors,
+        ShapeTokens, SystemAppearance,
     };
     use crate::theme::{ResolvedTheme, Rgba, ThemeMode};
 
@@ -551,5 +573,75 @@ mod tests {
         assert_eq!(doubled.slot_radius, base.slot_radius * 2);
         assert_eq!(doubled.focus_ring_width, base.focus_ring_width * 2);
         assert!(base.scaled(72).focus_ring_width >= base.focus_ring_width);
+    }
+
+    #[test]
+    fn bar_slot_pill_and_focus_ring_stay_compact_inside_40pt_bar() {
+        let tokens = ShapeTokens::GOLDEN_GATE;
+        let classic_slot = Rect {
+            x: 10,
+            y: 0,
+            width: 60,
+            height: 32,
+        };
+        assert_eq!(
+            tokens.bar_slot_pill_rect(classic_slot, 96),
+            Rect {
+                x: 10,
+                y: 4,
+                width: 60,
+                height: 24,
+            }
+        );
+        assert_eq!(
+            tokens.bar_slot_focus_rect(classic_slot, 96),
+            Rect {
+                x: 10,
+                y: 3,
+                width: 60,
+                height: 26,
+            }
+        );
+
+        let island_slot = Rect {
+            x: 10,
+            y: 0,
+            width: 60,
+            height: 40,
+        };
+        assert_eq!(
+            tokens.bar_slot_pill_rect(island_slot, 96),
+            Rect {
+                x: 10,
+                y: 8,
+                width: 60,
+                height: 24,
+            }
+        );
+        assert_eq!(
+            tokens.bar_slot_focus_rect(island_slot, 96),
+            Rect {
+                x: 10,
+                y: 7,
+                width: 60,
+                height: 26,
+            }
+        );
+
+        let scaled_island_slot = Rect {
+            x: 15,
+            y: 0,
+            width: 90,
+            height: 60,
+        };
+        assert_eq!(
+            tokens.bar_slot_pill_rect(scaled_island_slot, 144),
+            Rect {
+                x: 15,
+                y: 12,
+                width: 90,
+                height: 36,
+            }
+        );
     }
 }

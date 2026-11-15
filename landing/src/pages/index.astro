@@ -1,0 +1,38 @@
+---
+import Base from "../layouts/Base.astro";
+import Nav from "../components/Nav.astro";
+import Hero from "../sections/Hero.astro";
+import HowItWorks from "../components/HowItWorks.astro";
+import Benefits from "../components/Benefits.tsx";
+import Requirements from "../components/Requirements.astro";
+import Status from "../components/Status.astro";
+import Faq from "../components/Faq.astro";
+import Footer from "../components/Footer.astro";
+---
+
+<Base
+  title="Otto OS — Bar atas, Dock, dan Dynamic Island untuk Windows 11"
+  description="Shell desktop berbahasa Rust untuk Windows 11 22H2+ dengan bar atas, Dock, kontrol jendela Genie, dan Dynamic Island. Daftar beta."
+>
+  <Nav />
+  <main id="main-content" class="flex-1">
+    <Hero />
+    <div class="mx-auto flex max-w-5xl flex-col items-center gap-16 px-4 pb-20 sm:gap-20 sm:pb-24">
+      <HowItWorks />
+      <section id="manfaat" class="w-full scroll-mt-24 py-2">
+        <Benefits />
+      </section>
+      <section class="grid w-full gap-8 lg:grid-cols-2 lg:gap-10">
+        <Requirements />
+        <Status />
+      </section>
+      <section id="faq" class="w-full max-w-2xl scroll-mt-24">
+        <h2 class="mb-6 text-left text-2xl font-medium tracking-[-0.02em] text-ink sm:text-center sm:text-3xl">
+          Pertanyaan umum
+        </h2>
+        <Faq />
+      </section>
+    </div>
+  </main>
+  <Footer />
+</Base>

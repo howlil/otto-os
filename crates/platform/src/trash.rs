@@ -35,7 +35,21 @@ static TRASH_CACHE: Mutex<TrashCache> = Mutex::new(TrashCache {
     checked_at: None,
 });
 static TRASH_QUERY_PENDING: AtomicBool = AtomicBool::new(false);
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static TRASH_QUERY_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static TRASH_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+struct TrashQueryGuard;
+
+impl Drop for TrashQueryGuard {
+    fn drop(&mut self) {
+        TRASH_QUERY_PENDING.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn resume_recycle_bin_task() {
+    SHUTTING_DOWN.store(false, Ordering::Release);
+}
 
 #[must_use]
 pub fn recycle_path(path: &str) -> bool {
@@ -66,32 +80,69 @@ fn query_recycle_bin_full() -> bool {
     queried && (info.i64NumItems > 0 || info.i64Size > 0)
 }
 
-fn store_cache(full: bool) {
+fn store_cache(full: bool) -> bool {
     if let Ok(mut guard) = TRASH_CACHE.lock() {
+        let changed = guard.value != Some(full);
         *guard = TrashCache {
             value: Some(full),
             checked_at: Some(Instant::now()),
         };
+        return changed;
     }
+    false
 }
 
 fn spawn_refresh() {
-    if TRASH_QUERY_PENDING.swap(true, Ordering::AcqRel) {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
         return;
+    }
+    if TRASH_QUERY_PENDING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let query_guard = TrashQueryGuard;
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return;
+    }
+    let Ok(mut task_slot) = TRASH_QUERY_TASK.lock() else {
+        return;
+    };
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(prev) = task_slot.take() {
+        if prev.is_finished() {
+            let _ = prev.join();
+        } else {
+            *task_slot = Some(prev);
+            return;
+        }
     }
     let spawned = thread::Builder::new()
         .name(String::from("otto-trash-query"))
-        .spawn(|| {
-            store_cache(query_recycle_bin_full());
-            TRASH_QUERY_PENDING.store(false, Ordering::Release);
+        .spawn(move || {
+            let _query_guard = query_guard;
+            let _com = ComGuard::single_threaded();
+            if SHUTTING_DOWN.load(Ordering::Acquire) {
+                return;
+            }
+            let full = query_recycle_bin_full();
+            if !SHUTTING_DOWN.load(Ordering::Acquire) && store_cache(full) {
+                crate::idle_wake::request_idle_wake();
+            }
         });
-    if spawned.is_err() {
-        TRASH_QUERY_PENDING.store(false, Ordering::Release);
+    if let Ok(handle) = spawned {
+        *task_slot = Some(handle);
     }
 }
 
 #[must_use]
 pub fn is_recycle_bin_full() -> bool {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return false;
+    }
     let cache = TRASH_CACHE.lock().map_or(
         TrashCache {
             value: None,
@@ -99,22 +150,23 @@ pub fn is_recycle_bin_full() -> bool {
         },
         |guard| *guard,
     );
-    let Some(full) = cache.value else {
-        let full = query_recycle_bin_full();
-        store_cache(full);
-        return full;
-    };
     if !cache.is_fresh() {
         spawn_refresh();
     }
-    full
+    cache.value.unwrap_or(false)
 }
 
 pub fn empty_recycle_bin() {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return;
+    }
     invalidate_cache();
     let Ok(mut task) = TRASH_TASK.lock() else {
         return;
     };
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return;
+    }
     if let Some(handle) = task.take() {
         if !handle.is_finished() {
             *task = Some(handle);
@@ -122,18 +174,35 @@ pub fn empty_recycle_bin() {
         }
         let _ = handle.join();
     }
-    *task = Some(thread::spawn(|| {
-        let _com = ComGuard::single_threaded();
-        unsafe {
-            let _ = SHEmptyRecycleBinW(None, PCWSTR::null(), 0);
-        }
-        invalidate_cache();
-    }));
+    if let Ok(handle) = thread::Builder::new()
+        .name(String::from("otto-trash-empty"))
+        .spawn(|| {
+            let _com = ComGuard::single_threaded();
+            if SHUTTING_DOWN.load(Ordering::Acquire) {
+                return;
+            }
+            unsafe {
+                let _ = SHEmptyRecycleBinW(None, PCWSTR::null(), 0);
+            }
+            if !SHUTTING_DOWN.load(Ordering::Acquire) {
+                invalidate_cache();
+            }
+        })
+    {
+        *task = Some(handle);
+    }
 }
 
 pub fn shutdown_recycle_bin_task() {
-    let handle = TRASH_TASK.lock().ok().and_then(|mut task| task.take());
-    if let Some(handle) = handle {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+    if let Some(handle) = TRASH_QUERY_TASK
+        .lock()
+        .ok()
+        .and_then(|mut task| task.take())
+    {
+        let _ = join_within(handle, SHUTDOWN_TIMEOUT);
+    }
+    if let Some(handle) = TRASH_TASK.lock().ok().and_then(|mut task| task.take()) {
         let _ = join_within(handle, SHUTDOWN_TIMEOUT);
     }
 }
@@ -141,5 +210,50 @@ pub fn shutdown_recycle_bin_task() {
 fn invalidate_cache() {
     if let Ok(mut guard) = TRASH_CACHE.lock() {
         guard.checked_at = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, PoisonError};
+
+    use super::{
+        SHUTTING_DOWN, TRASH_QUERY_PENDING, TRASH_QUERY_TASK, TrashQueryGuard, is_recycle_bin_full,
+        resume_recycle_bin_task, shutdown_recycle_bin_task,
+    };
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ResumeTrashGuard;
+
+    impl Drop for ResumeTrashGuard {
+        fn drop(&mut self) {
+            shutdown_recycle_bin_task();
+            resume_recycle_bin_task();
+        }
+    }
+
+    #[test]
+    fn trash_query_guard_resets_pending_flag_on_unwind() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        TRASH_QUERY_PENDING.store(true, Ordering::Release);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = TrashQueryGuard;
+            panic!("simulated panic during recycle bin query");
+        }));
+        assert!(outcome.is_err());
+        assert!(!TRASH_QUERY_PENDING.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn shutdown_prevents_trash_query_spawn_until_resumed() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let _resume = ResumeTrashGuard;
+        shutdown_recycle_bin_task();
+        assert!(SHUTTING_DOWN.load(Ordering::Acquire));
+        assert!(!is_recycle_bin_full());
+        assert!(TRASH_QUERY_TASK.lock().unwrap().is_none());
     }
 }

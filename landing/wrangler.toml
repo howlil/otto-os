@@ -1,0 +1,8 @@
+name = "otto-os-landing"
+compatibility_date = "2026-10-13"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "otto-waitlist"
+database_id = "7e3b5955-2ec5-4c96-9ed8-6e4da58eed5f"

@@ -1,33 +1,36 @@
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EnumWindows, GetMessageW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, KillTimer, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW,
-    PostThreadMessageW, SC_MINIMIZE, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_SYSCOMMAND,
-    WM_TIMER,
+    CallNextHookEx, DispatchMessageW, EnumWindows, GA_ROOT, GWL_STYLE, GetAncestor, GetMessageW,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, KillTimer,
+    MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SC_MINIMIZE,
+    SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SYSCOMMAND, WM_TIMER, WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU,
+    WindowFromPoint,
 };
 use windows::core::BOOL;
 
-use crate::caption::{dwm_rect, native_caption_of};
-use crate::worker::join_within;
+use otto_core::scale;
+
+use crate::caption::{covering_caption_of, dwm_rect};
+use crate::worker::{HookStartup, HookThread, install_hook_thread, uninstall_hook_thread};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const ACK_DEADLINE_MS: u64 = 400;
 const WATCHDOG_TICK_MS: u32 = 100;
+const WM_APP_ARM_WATCHDOG: u32 = WM_APP + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Pending {
@@ -39,11 +42,6 @@ struct Pending {
 enum WatchdogAction {
     Wait,
     MinimizeNatively(isize),
-}
-
-struct HookThread {
-    thread_id: u32,
-    handle: JoinHandle<()>,
 }
 
 static HOOK_THREAD: Mutex<Option<HookThread>> = Mutex::new(None);
@@ -90,29 +88,85 @@ struct HitSearch {
     found: isize,
 }
 
+const CAPTION_BAND_MAX_DIP: i32 = 96;
+const WINDOW_RECT_PREFILTER_MARGIN_PX: i32 = 16;
+
+const fn rect_contains(rect: RECT, x: i32, y: i32, margin: i32) -> bool {
+    x >= rect.left - margin
+        && x < rect.right + margin
+        && y >= rect.top - margin
+        && y < rect.bottom + margin
+}
+
+const fn has_minimize_caption_style(style: u32) -> bool {
+    style & WS_CAPTION.0 == WS_CAPTION.0
+        && style & WS_SYSMENU.0 != 0
+        && style & WS_MINIMIZEBOX.0 != 0
+}
+
+fn is_within_top_caption_band(x: i32, y: i32, frame: RECT, dpi: u32) -> bool {
+    rect_contains(frame, x, y, 0) && y < frame.top + scale(CAPTION_BAND_MAX_DIP, dpi.max(96))
+}
+
 unsafe extern "system" fn visit_window(window: HWND, lparam: LPARAM) -> BOOL {
     let search = unsafe { &mut *(lparam.0 as *mut HitSearch) };
-    if !unsafe { IsWindowVisible(window) }.as_bool()
-        || unsafe { IsIconic(window) }.as_bool()
-        || is_cloaked(window)
+    if !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
+        return BOOL(1);
+    }
+    let mut bounds = RECT::default();
+    if unsafe { GetWindowRect(window, &raw mut bounds) }.is_ok()
+        && !rect_contains(bounds, search.x, search.y, WINDOW_RECT_PREFILTER_MARGIN_PX)
     {
         return BOOL(1);
     }
     let Some(frame) = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS) else {
         return BOOL(1);
     };
-    let inside = search.x >= frame.left
-        && search.x < frame.right
-        && search.y >= frame.top
-        && search.y < frame.bottom;
-    if inside {
+    if rect_contains(frame, search.x, search.y, 0) && !is_cloaked(window) {
         search.found = window.0 as isize;
         return BOOL(0);
     }
     BOOL(1)
 }
 
+enum FastHit {
+    Window(HWND),
+    OwnProcess,
+    Fallback,
+}
+
+fn fast_top_level_window_at(x: i32, y: i32) -> FastHit {
+    let hit = unsafe { WindowFromPoint(POINT { x, y }) };
+    if hit.is_invalid() {
+        return FastHit::Fallback;
+    }
+    let ancestor = unsafe { GetAncestor(hit, GA_ROOT) };
+    let root = if ancestor.is_invalid() { hit } else { ancestor };
+    if belongs_to_this_process(root) {
+        return FastHit::OwnProcess;
+    }
+    if !unsafe { IsWindowVisible(root) }.as_bool()
+        || unsafe { IsIconic(root) }.as_bool()
+        || is_cloaked(root)
+    {
+        return FastHit::Fallback;
+    }
+    let Some(frame) = dwm_rect(root, DWMWA_EXTENDED_FRAME_BOUNDS) else {
+        return FastHit::Fallback;
+    };
+    if rect_contains(frame, x, y, 0) {
+        FastHit::Window(root)
+    } else {
+        FastHit::Fallback
+    }
+}
+
 fn top_level_window_at(x: i32, y: i32) -> Option<HWND> {
+    match fast_top_level_window_at(x, y) {
+        FastHit::Window(window) => return Some(window),
+        FastHit::OwnProcess => return None,
+        FastHit::Fallback => {}
+    }
     let mut search = HitSearch { x, y, found: 0 };
     let _ = unsafe {
         EnumWindows(
@@ -134,10 +188,22 @@ fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
     if belongs_to_this_process(window) {
         return None;
     }
-    native_caption_of(window)?
+    let style = unsafe { GetWindowLongW(window, GWL_STYLE) } as u32;
+    if !has_minimize_caption_style(style) {
+        return None;
+    }
+    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+    let dpi = unsafe { GetDpiForWindow(window) };
+    if !is_within_top_caption_band(x, y, frame, dpi) {
+        return None;
+    }
+    let hit = covering_caption_of(window)?
         .minimize_button()?
-        .contains(x, y)
-        .then_some(window.0 as isize)
+        .contains(x, y);
+    if !hit || crate::window_model::is_window_uipi_blocked(window) {
+        return None;
+    }
+    Some(window.0 as isize)
 }
 
 fn request_minimize(x: i32, y: i32) -> bool {
@@ -167,6 +233,14 @@ fn request_minimize(x: i32, y: i32) -> bool {
             deadline_ms,
         });
     });
+    let _ = unsafe {
+        PostThreadMessageW(
+            GetCurrentThreadId(),
+            WM_APP_ARM_WATCHDOG,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
     SWALLOW_BUTTON_UP.store(true, Ordering::Release);
     true
 }
@@ -216,27 +290,48 @@ fn run_watchdog() {
     }
 }
 
-fn hook_thread_main(ready: &SyncSender<Option<u32>>) {
+fn should_keep_watchdog_timer(pending: Option<Pending>) -> bool {
+    pending.is_some()
+}
+
+fn hook_thread_main(startup: &HookStartup) {
     let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0) };
     let Ok(hook) = hook else {
-        let _ = ready.send(None);
+        let _ = startup.publish(None);
         return;
     };
     let mut message = MSG::default();
     unsafe {
         let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
-        let timer = SetTimer(None, 0, WATCHDOG_TICK_MS, None);
-        let _ = ready.send(Some(GetCurrentThreadId()));
+        let mut watchdog_timer: usize = 0;
+        if !startup.publish(Some(GetCurrentThreadId())) {
+            let _ = UnhookWindowsHookEx(hook);
+            return;
+        }
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+            if message.message == WM_APP_ARM_WATCHDOG {
+                if watchdog_timer == 0
+                    && locked(&PENDING, |pending| should_keep_watchdog_timer(*pending))
+                {
+                    watchdog_timer = SetTimer(None, 0, WATCHDOG_TICK_MS, None);
+                }
+                continue;
+            }
             if message.message == WM_TIMER {
                 run_watchdog();
+                if watchdog_timer != 0
+                    && !locked(&PENDING, |pending| should_keep_watchdog_timer(*pending))
+                {
+                    let _ = KillTimer(None, watchdog_timer);
+                    watchdog_timer = 0;
+                }
                 continue;
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        if timer != 0 {
-            let _ = KillTimer(None, timer);
+        if watchdog_timer != 0 {
+            let _ = KillTimer(None, watchdog_timer);
         }
         let _ = UnhookWindowsHookEx(hook);
     }
@@ -245,26 +340,13 @@ fn hook_thread_main(ready: &SyncSender<Option<u32>>) {
 pub fn install_native_minimize_hook(target_hwnd: isize, message: u32) -> bool {
     MESSAGE.store(message, Ordering::Release);
     TARGET.store(target_hwnd, Ordering::Release);
-    let Ok(mut guard) = HOOK_THREAD.lock() else {
-        return false;
-    };
-    if guard.is_some() {
-        return true;
-    }
-    let (ready_sender, ready_receiver) = sync_channel(1);
-    let Ok(handle) = thread::Builder::new()
-        .name(String::from("otto-native-minimize-hook"))
-        .spawn(move || hook_thread_main(&ready_sender))
-    else {
-        return false;
-    };
-    match ready_receiver.recv_timeout(READY_TIMEOUT) {
-        Ok(Some(thread_id)) => {
-            *guard = Some(HookThread { thread_id, handle });
-            true
-        }
-        _ => false,
-    }
+    install_hook_thread(
+        &HOOK_THREAD,
+        "otto-native-minimize-hook",
+        READY_TIMEOUT,
+        SHUTDOWN_TIMEOUT,
+        |startup: Arc<HookStartup>| hook_thread_main(&startup),
+    )
 }
 
 pub fn uninstall_native_minimize_hook() {
@@ -272,13 +354,7 @@ pub fn uninstall_native_minimize_hook() {
     MESSAGE.store(0, Ordering::Release);
     SWALLOW_BUTTON_UP.store(false, Ordering::Release);
     locked(&PENDING, |pending| *pending = None);
-    let Some(thread) = HOOK_THREAD.lock().ok().and_then(|mut guard| guard.take()) else {
-        return;
-    };
-    unsafe {
-        let _ = PostThreadMessageW(thread.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-    }
-    let _ = join_within(thread.handle, SHUTDOWN_TIMEOUT);
+    uninstall_hook_thread(&HOOK_THREAD, SHUTDOWN_TIMEOUT);
 }
 
 pub fn acknowledge_native_minimize(window: isize) {
@@ -292,8 +368,10 @@ pub fn acknowledge_native_minimize(window: isize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_THREAD, Pending, WatchdogAction, acknowledge_native_minimize,
-        install_native_minimize_hook, uninstall_native_minimize_hook, watchdog_action,
+        HOOK_THREAD, Pending, RECT, WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU, WatchdogAction,
+        acknowledge_native_minimize, has_minimize_caption_style, install_native_minimize_hook,
+        is_within_top_caption_band, should_keep_watchdog_timer, uninstall_native_minimize_hook,
+        watchdog_action,
     };
 
     #[test]
@@ -326,10 +404,39 @@ mod tests {
     }
 
     #[test]
+    fn the_watchdog_timer_only_runs_while_a_minimize_is_pending() {
+        assert!(!should_keep_watchdog_timer(None));
+        assert!(should_keep_watchdog_timer(Some(Pending {
+            window: 77,
+            deadline_ms: 1_000,
+        })));
+    }
+
+    #[test]
     fn the_hook_thread_is_released_after_uninstall() {
         assert!(install_native_minimize_hook(1, 0x8000 + 24));
         assert!(HOOK_THREAD.lock().is_ok_and(|guard| guard.is_some()));
         uninstall_native_minimize_hook();
         assert!(HOOK_THREAD.lock().is_ok_and(|guard| guard.is_none()));
+    }
+
+    #[test]
+    fn caption_band_and_style_prefilter_rejects_client_area_and_tool_windows() {
+        let style_ok = WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0;
+        assert!(has_minimize_caption_style(style_ok));
+        assert!(!has_minimize_caption_style(WS_CAPTION.0 | WS_SYSMENU.0));
+        assert!(!has_minimize_caption_style(WS_SYSMENU.0 | WS_MINIMIZEBOX.0));
+
+        let frame = RECT {
+            left: 100,
+            top: 40,
+            right: 900,
+            bottom: 700,
+        };
+        assert!(is_within_top_caption_band(800, 60, frame, 96));
+        assert!(!is_within_top_caption_band(800, 300, frame, 96));
+        assert!(!is_within_top_caption_band(50, 60, frame, 96));
+        assert!(is_within_top_caption_band(800, 160, frame, 144));
+        assert!(!is_within_top_caption_band(800, 200, frame, 144));
     }
 }

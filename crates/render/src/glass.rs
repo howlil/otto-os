@@ -1,8 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use otto_core::{
     Appearance, GlassBackdrop, GlassBitmap, GlassParams, GlassShape, PixelLimits, ResolvedTheme,
-    RgbBuffer, compose_glass, soften_backdrop,
+    RgbBuffer, compose_glass_lit, light_direction_for_pointer, soften_backdrop,
 };
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
@@ -12,10 +12,13 @@ use windows::core::Result;
 
 use crate::surface::upload_bgra_bitmap;
 
-const BASE_SOFT_FACTOR: usize = 4;
+const BASE_SOFT_FACTOR: usize = 2;
 const MIN_SOFT_FACTOR: usize = 2;
-const BLUR_RADIUS: usize = 3;
+const BASE_BLUR_PT: usize = 9;
+const MIN_BLUR_RADIUS: usize = 3;
 const BASE_DPI: usize = 96;
+
+const LIGHT_QUANT_STEPS: f32 = 24.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SoftKey {
@@ -29,11 +32,44 @@ struct ComposeKey {
     soft: SoftKey,
     shape: GlassShape,
     lens: bool,
+    light: (i16, i16),
 }
+
+fn quantize_light(light: (f32, f32)) -> (i16, i16) {
+    (
+        (light.0 * LIGHT_QUANT_STEPS).round() as i16,
+        (light.1 * LIGHT_QUANT_STEPS).round() as i16,
+    )
+}
+
+use crate::glass_gpu::{GpuGlassComposer, SoftCacheKey};
 
 struct Capture {
     sharp: RgbBuffer,
     origin: (f32, f32),
+}
+
+#[derive(Default)]
+enum GpuBackend {
+    #[default]
+    Uninitialized,
+    Ready(GpuGlassComposer),
+    Unavailable,
+}
+
+impl GpuBackend {
+    fn get_mut(&mut self) -> Option<&mut GpuGlassComposer> {
+        if matches!(self, Self::Uninitialized) {
+            *self = match GpuGlassComposer::new() {
+                Some(gpu) => Self::Ready(gpu),
+                None => Self::Unavailable,
+            };
+        }
+        match self {
+            Self::Ready(gpu) => Some(gpu),
+            Self::Uninitialized | Self::Unavailable => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -43,6 +79,7 @@ pub(crate) struct GlassComposer {
     soft: Option<(SoftKey, RgbBuffer)>,
     composed: Option<(ComposeKey, GlassBitmap)>,
     revision: u64,
+    gpu: GpuBackend,
 }
 
 impl GlassComposer {
@@ -66,12 +103,30 @@ impl GlassComposer {
         self.capture.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn compose(
         &mut self,
         appearance: &Appearance,
         dpi: u32,
         shape: GlassShape,
         lens: bool,
+    ) -> Option<(u64, &GlassBitmap)> {
+        self.compose_lit(
+            appearance,
+            dpi,
+            shape,
+            lens,
+            light_direction_for_pointer(&shape, None),
+        )
+    }
+
+    pub(crate) fn compose_lit(
+        &mut self,
+        appearance: &Appearance,
+        dpi: u32,
+        shape: GlassShape,
+        lens: bool,
+        light_dir: (f32, f32),
     ) -> Option<(u64, &GlassBitmap)> {
         if !appearance.uses_backdrop() {
             return None;
@@ -86,6 +141,7 @@ impl GlassComposer {
             soft: soft_key,
             shape,
             lens,
+            light: quantize_light(light_dir),
         };
         let reusable = self
             .composed
@@ -95,10 +151,11 @@ impl GlassComposer {
             let base = GlassParams::for_theme(appearance.theme).scaled(dpi);
             let params = if lens { base } else { base.without_lens() };
             let factor = soft_factor(dpi);
+            let radius = blur_radius(dpi);
             if self.soft.as_ref().is_none_or(|(held, _)| *held != soft_key) {
                 self.soft = Some((
                     soft_key,
-                    soften_backdrop(&capture.sharp, &params, factor, BLUR_RADIUS),
+                    soften_backdrop(&capture.sharp, &params, factor, radius),
                 ));
             }
             let soft = &self.soft.as_ref()?.1;
@@ -109,7 +166,23 @@ impl GlassComposer {
                 origin: capture.origin,
             };
             self.revision += 1;
-            self.composed = Some((key, compose_glass(&params, &shape, &backdrop)));
+            let gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
+                gpu.compose(
+                    self.generation,
+                    SoftCacheKey {
+                        generation: self.generation,
+                        dpi,
+                        theme: appearance.theme,
+                    },
+                    &params,
+                    &shape,
+                    &backdrop,
+                    light_dir,
+                )
+            });
+            let bitmap = gpu_bitmap
+                .unwrap_or_else(|| compose_glass_lit(&params, &shape, &backdrop, light_dir));
+            self.composed = Some((key, bitmap));
         }
         self.composed
             .as_ref()
@@ -121,20 +194,35 @@ fn soft_factor(dpi: u32) -> usize {
     (BASE_SOFT_FACTOR * dpi as usize / BASE_DPI).max(MIN_SOFT_FACTOR)
 }
 
+fn blur_radius(dpi: u32) -> usize {
+    let factor = soft_factor(dpi);
+    let target_px = (BASE_BLUR_PT * dpi as usize).div_ceil(BASE_DPI);
+    (target_px / factor).max(MIN_BLUR_RADIUS)
+}
+
 #[derive(Default)]
 pub(crate) struct GlassPainter {
     composer: RefCell<GlassComposer>,
     uploaded: RefCell<Option<(u64, ID2D1Bitmap)>>,
+    pointer: Cell<Option<(f32, f32)>>,
 }
 
 impl GlassPainter {
     pub(crate) fn set_backdrop(&self, sharp: RgbBuffer, origin: (i32, i32)) {
         self.composer.borrow_mut().set_backdrop(sharp, origin);
-        self.uploaded.borrow_mut().take();
+        self.invalidate_gpu();
+    }
+
+    pub(crate) fn set_pointer(&self, pointer: Option<(f32, f32)>) {
+        self.pointer.set(pointer);
     }
 
     pub(crate) fn clear_backdrop(&self) {
         self.composer.borrow_mut().clear();
+        self.invalidate_gpu();
+    }
+
+    pub(crate) fn invalidate_gpu(&self) {
         self.uploaded.borrow_mut().take();
     }
 
@@ -150,8 +238,11 @@ impl GlassPainter {
         shape: GlassShape,
         lens: bool,
     ) -> Result<bool> {
+        let light_dir = light_direction_for_pointer(&shape, self.pointer.get());
         let mut composer = self.composer.borrow_mut();
-        let Some((revision, bitmap)) = composer.compose(appearance, dpi, shape, lens) else {
+        let Some((revision, bitmap)) =
+            composer.compose_lit(appearance, dpi, shape, lens, light_dir)
+        else {
             return Ok(false);
         };
         let mut uploaded = self.uploaded.borrow_mut();
@@ -191,7 +282,7 @@ impl GlassPainter {
 mod tests {
     use otto_core::{Appearance, ContrastColors, GlassShape, Rect, ResolvedTheme, RgbBuffer};
 
-    use super::{GlassComposer, GlassPainter, soft_factor};
+    use super::{GlassComposer, GlassPainter, blur_radius, soft_factor};
 
     fn capture() -> RgbBuffer {
         let mut buffer = RgbBuffer::filled(320, 120, [0.0; 3]);
@@ -349,9 +440,14 @@ mod tests {
 
     #[test]
     fn the_soft_factor_grows_with_dpi_and_never_collapses() {
-        assert_eq!(soft_factor(96), 4);
-        assert_eq!(soft_factor(192), 8);
+        assert_eq!(soft_factor(96), 2);
+        assert_eq!(soft_factor(144), 3);
+        assert_eq!(soft_factor(192), 4);
         assert_eq!(soft_factor(24), 2);
+        assert_eq!(blur_radius(96), 4);
+        assert_eq!(blur_radius(144), 4);
+        assert_eq!(blur_radius(192), 4);
+        assert_eq!(blur_radius(24), 3);
     }
 
     mod native {

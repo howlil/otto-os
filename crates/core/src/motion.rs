@@ -28,11 +28,40 @@ pub struct MotionMetrics {
     pub traffic_follow_rate: f32,
     pub genie_minimize_duration_seconds: f32,
     pub genie_restore_duration_seconds: f32,
+    pub genie_slow_motion_scale: f32,
     pub bounce_duration_seconds: f32,
+    pub notch_tab_morph_rate: f32,
+    pub notch_lyrics_morph_rate: f32,
+    pub hud_expand_rate: f32,
+    pub hud_meter_rate: f32,
+    pub hud_content_start: f32,
+    pub hud_content_end: f32,
+    pub hud_hold_ms: u64,
+    pub pomodoro_peek_ms: u64,
+    pub media_pause_hold_ms: u64,
+    pub media_live_drift_seconds: f32,
+    pub pomodoro_glow_frame_ms: u64,
+    pub pomodoro_glow_breathe_seconds: f32,
+    pub pomodoro_last_minute_pulse_seconds: f32,
+    pub pomodoro_tone_rate: f32,
     pub animation_tick_ms: u32,
 }
 
 impl MotionMetrics {
+    #[must_use]
+    pub fn genie_duration_seconds(self, slow_motion: bool, is_restore: bool) -> f32 {
+        let base = if is_restore {
+            self.genie_restore_duration_seconds
+        } else {
+            self.genie_minimize_duration_seconds
+        };
+        if slow_motion {
+            base * self.genie_slow_motion_scale.max(1.0)
+        } else {
+            base
+        }
+    }
+
     pub const MACOS_LIKE: Self = Self {
         dock_magnify_rate: 22.0,
         dock_hide_rate: 16.0,
@@ -42,7 +71,22 @@ impl MotionMetrics {
         traffic_follow_rate: 38.0,
         genie_minimize_duration_seconds: 0.42,
         genie_restore_duration_seconds: 0.36,
+        genie_slow_motion_scale: 4.0,
         bounce_duration_seconds: 0.44,
+        notch_tab_morph_rate: 22.0,
+        notch_lyrics_morph_rate: 18.0,
+        hud_expand_rate: 18.0,
+        hud_meter_rate: 22.0,
+        hud_content_start: 0.30,
+        hud_content_end: 0.80,
+        hud_hold_ms: 1_650,
+        pomodoro_peek_ms: 2_500,
+        media_pause_hold_ms: 8_000,
+        media_live_drift_seconds: 3.0,
+        pomodoro_glow_frame_ms: 80,
+        pomodoro_glow_breathe_seconds: 4.0,
+        pomodoro_last_minute_pulse_seconds: 1.0,
+        pomodoro_tone_rate: 14.0,
         animation_tick_ms: 16,
     };
 }

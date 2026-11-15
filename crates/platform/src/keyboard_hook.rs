@@ -1,7 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use otto_core::BarKey;
@@ -9,18 +8,19 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_VOLUME_DOWN,
-    VK_VOLUME_MUTE, VK_VOLUME_UP,
+    GetAsyncKeyState, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_KANA,
+    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RETURN, VK_RIGHT, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+    VK_VOLUME_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW,
-    PostMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+    PostMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
 use crate::audio::{is_available, step_system_volume, toggle_system_mute};
-use crate::worker::join_within;
+use crate::worker::{HookStartup, HookThread, install_hook_thread, uninstall_hook_thread};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -33,10 +33,15 @@ const KEY_SLOTS: usize = 256;
 static HOOK_THREAD: Mutex<Option<HookThread>> = Mutex::new(None);
 static ROUTE: Mutex<Route> = Mutex::new(Route::IDLE);
 static SWALLOWED_KEY_DOWNS: Mutex<SwallowedKeys> = Mutex::new(SwallowedKeys::EMPTY);
+static VOLUME_HUD_HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
 
-struct HookThread {
-    thread_id: u32,
-    handle: JoinHandle<()>,
+pub fn set_volume_hud_hook_enabled(enabled: bool) {
+    VOLUME_HUD_HOOK_ENABLED.store(enabled, Ordering::Release);
+}
+
+#[must_use]
+pub fn is_volume_hud_hook_enabled() -> bool {
+    VOLUME_HUD_HOOK_ENABLED.load(Ordering::Acquire)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,13 +136,13 @@ fn bar_key(virtual_key: u32, flags: u32, modifiers: Modifiers) -> Option<BarKey>
     }
     let key = u16::try_from(virtual_key).ok()?;
     match key {
+        key if key == VK_UP.0 => Some(BarKey::Up),
+        key if key == VK_DOWN.0 => Some(BarKey::Down),
         key if key == VK_LEFT.0 => Some(BarKey::Previous),
         key if key == VK_RIGHT.0 => Some(BarKey::Next),
         key if key == VK_HOME.0 => Some(BarKey::First),
         key if key == VK_END.0 => Some(BarKey::Last),
-        key if key == VK_RETURN.0 || key == VK_SPACE.0 || key == VK_DOWN.0 => {
-            Some(BarKey::Activate)
-        }
+        key if key == VK_RETURN.0 || key == VK_SPACE.0 => Some(BarKey::Activate),
         key if key == VK_ESCAPE.0 => Some(BarKey::Exit),
         key if key == VK_TAB.0 && modifiers.shift => Some(BarKey::PreviousTab),
         key if key == VK_TAB.0 => Some(BarKey::NextTab),
@@ -262,11 +267,50 @@ fn apply_volume_key(key: VolumeKey) -> bool {
 fn swallow_key_down(virtual_key: u32, flags: u32) -> bool {
     let routed = bar_key(virtual_key, flags, current_modifiers()).is_some_and(post_bar_key);
     record_key_down(virtual_key, routed);
-    routed || volume_key(virtual_key, flags).is_some_and(apply_volume_key)
+    routed
+        || (is_volume_hud_hook_enabled()
+            && volume_key(virtual_key, flags).is_some_and(apply_volume_key))
 }
 
 fn swallow_key_up(virtual_key: u32, flags: u32) -> bool {
-    take_key_down(virtual_key) || (volume_key(virtual_key, flags).is_some() && is_available())
+    take_key_down(virtual_key)
+        || (is_volume_hud_hook_enabled()
+            && volume_key(virtual_key, flags).is_some()
+            && is_available())
+}
+
+#[derive(Clone, Copy, Default)]
+struct WakeModifiers {
+    win: bool,
+    shift: bool,
+    alt_or_ctrl: bool,
+}
+
+fn should_wake_status_with(virtual_key: u32, mods: WakeModifiers) -> bool {
+    let Ok(vk) = u16::try_from(virtual_key) else {
+        return false;
+    };
+    match vk {
+        x if x == VK_CAPITAL.0 || x == VK_NUMLOCK.0 || x == VK_KANA.0 => true,
+        x if x == VK_SPACE.0 => mods.win,
+        x if x == VK_SHIFT.0 || x == VK_LSHIFT.0 || x == VK_RSHIFT.0 => mods.alt_or_ctrl,
+        x if x == VK_MENU.0 || x == VK_LMENU.0 || x == VK_RMENU.0 => mods.shift,
+        _ => false,
+    }
+}
+
+fn should_wake_status(virtual_key: u32) -> bool {
+    should_wake_status_with(
+        virtual_key,
+        WakeModifiers {
+            win: key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0),
+            shift: key_is_down(VK_SHIFT.0) || key_is_down(VK_LSHIFT.0) || key_is_down(VK_RSHIFT.0),
+            alt_or_ctrl: key_is_down(VK_MENU.0)
+                || key_is_down(VK_LMENU.0)
+                || key_is_down(VK_RMENU.0)
+                || key_is_down(VK_CONTROL.0),
+        },
+    )
 }
 
 fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
@@ -274,7 +318,7 @@ fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
         return false;
     }
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-    if event.vkCode == u32::from(VK_CAPITAL.0) {
+    if should_wake_status(event.vkCode) {
         crate::idle_wake::request_idle_wake();
     }
     if is_key_down(wparam.0) {
@@ -296,16 +340,19 @@ unsafe extern "system" fn low_level_keyboard_proc(
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-fn hook_thread_main(ready: &SyncSender<Option<u32>>) {
+fn hook_thread_main(startup: &HookStartup) {
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0) };
     let Ok(hook) = hook else {
-        let _ = ready.send(None);
+        let _ = startup.publish(None);
         return;
     };
     let mut message = MSG::default();
     unsafe {
         let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
-        let _ = ready.send(Some(GetCurrentThreadId()));
+        if !startup.publish(Some(GetCurrentThreadId())) {
+            let _ = UnhookWindowsHookEx(hook);
+            return;
+        }
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -314,51 +361,33 @@ fn hook_thread_main(ready: &SyncSender<Option<u32>>) {
     }
 }
 
+#[must_use]
 pub fn install_keyboard_hook() -> bool {
-    let Ok(mut guard) = HOOK_THREAD.lock() else {
-        return false;
-    };
-    if guard.is_some() {
-        return true;
-    }
-    let (ready_sender, ready_receiver) = sync_channel(1);
-    let Ok(handle) = thread::Builder::new()
-        .name(String::from("otto-keyboard-hook"))
-        .spawn(move || hook_thread_main(&ready_sender))
-    else {
-        return false;
-    };
-    match ready_receiver.recv_timeout(READY_TIMEOUT) {
-        Ok(Some(thread_id)) => {
-            *guard = Some(HookThread { thread_id, handle });
-            true
-        }
-        _ => false,
-    }
+    install_hook_thread(
+        &HOOK_THREAD,
+        "otto-keyboard-hook",
+        READY_TIMEOUT,
+        SHUTDOWN_TIMEOUT,
+        |startup: Arc<HookStartup>| hook_thread_main(&startup),
+    )
 }
 
 pub fn uninstall_keyboard_hook() {
     stop_routing_bar_keys();
-    let Some(thread) = HOOK_THREAD.lock().ok().and_then(|mut guard| guard.take()) else {
-        return;
-    };
-    unsafe {
-        let _ = PostThreadMessageW(thread.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-    }
-    let _ = join_within(thread.handle, SHUTDOWN_TIMEOUT);
+    uninstall_hook_thread(&HOOK_THREAD, SHUTDOWN_TIMEOUT);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_THREAD, INJECTED_FLAG, Modifiers, Route, SwallowedKeys, VolumeKey, bar_key,
-        install_keyboard_hook, is_key_down, is_routing_bar_keys, route_bar_keys, route_live,
-        uninstall_keyboard_hook, volume_key,
+        HOOK_THREAD, INJECTED_FLAG, Modifiers, Route, SwallowedKeys, VolumeKey, WakeModifiers,
+        bar_key, install_keyboard_hook, is_key_down, is_routing_bar_keys, route_bar_keys,
+        route_live, should_wake_status_with, uninstall_keyboard_hook, volume_key,
     };
     use otto_core::BarKey;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_A, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
-        VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+        VK_A, VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NUMLOCK, VK_RETURN,
+        VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN};
 
@@ -413,7 +442,8 @@ mod tests {
         assert_eq!(key(VK_END.0), Some(BarKey::Last));
         assert_eq!(key(VK_RETURN.0), Some(BarKey::Activate));
         assert_eq!(key(VK_SPACE.0), Some(BarKey::Activate));
-        assert_eq!(key(VK_DOWN.0), Some(BarKey::Activate));
+        assert_eq!(key(VK_UP.0), Some(BarKey::Up));
+        assert_eq!(key(VK_DOWN.0), Some(BarKey::Down));
         assert_eq!(key(VK_ESCAPE.0), Some(BarKey::Exit));
         assert_eq!(bar_key(u32::from(VK_LEFT.0), INJECTED_FLAG, PLAIN), None);
     }
@@ -510,5 +540,34 @@ mod tests {
         uninstall_keyboard_hook();
         assert!(HOOK_THREAD.lock().unwrap().is_none());
         assert!(!is_routing_bar_keys());
+    }
+
+    #[test]
+    fn status_wake_matches_lock_keys_and_layout_chords() {
+        let none = WakeModifiers::default();
+        assert!(should_wake_status_with(u32::from(VK_CAPITAL.0), none));
+        assert!(should_wake_status_with(u32::from(VK_NUMLOCK.0), none));
+        assert!(!should_wake_status_with(u32::from(VK_SPACE.0), none));
+        assert!(should_wake_status_with(
+            u32::from(VK_SPACE.0),
+            WakeModifiers { win: true, ..none }
+        ));
+        assert!(should_wake_status_with(
+            u32::from(VK_SHIFT.0),
+            WakeModifiers {
+                alt_or_ctrl: true,
+                ..none
+            }
+        ));
+    }
+
+    #[test]
+    fn volume_hud_hook_flag_toggles_cleanly() {
+        let initial = super::is_volume_hud_hook_enabled();
+        super::set_volume_hud_hook_enabled(false);
+        assert!(!super::is_volume_hud_hook_enabled());
+        super::set_volume_hud_hook_enabled(true);
+        assert!(super::is_volume_hud_hook_enabled());
+        super::set_volume_hud_hook_enabled(initial);
     }
 }

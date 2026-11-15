@@ -54,9 +54,9 @@ The full system contract is documented in [`.agents/engineering.md`](.agents/eng
 
 ## Requirements
 
-- Windows, because the application uses Win32, Direct2D, DirectWrite, GDI, shell APIs, and Windows media/audio interfaces.
-- Rust with edition 2024 support.
-- A working Windows desktop session for runtime behavior and native acceptance testing.
+- Windows 11 22H2 or newer (build 22621+, x64), because the application uses Win32, Direct2D, DirectWrite, GDI, shell APIs, DWM backdrops (`DWMWA_SYSTEMBACKDROP_TYPE`), and Windows media/audio/display interfaces.
+- Rust with edition 2024 support and Windows 10/11 SDK (`rc.exe` for application resources).
+- An unlocked interactive Windows desktop session for runtime behavior, desktop pixel tests, and native acceptance testing.
 
 ## Build and verify
 
@@ -66,7 +66,7 @@ From the repository root:
 cargo fmt --all -- --check
 cargo test --workspace
 cargo check --workspace
-cargo clippy --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Run the application locally with:
@@ -75,17 +75,31 @@ Run the application locally with:
 cargo run -p otto-os
 ```
 
-To disable the optional backdrop blur during development:
+Supported CLI flags:
+
+- `--no-blur`: disable the optional backdrop blur during development.
+- `--quit`: cleanly close an active Otto OS instance and restore shell state before upgrades or uninstall.
+- `--restore-shell`: restore any saved taskbar and work-area recovery state.
+
+Global keyboard shortcuts (when hotkeys are enabled):
+
+- `Ctrl+Alt+N`: toggle expanded Notch panel.
+- `Ctrl+Alt+P`: toggle Pomodoro focus timer.
+- `Ctrl+F2`: focus the top bar for keyboard navigation.
+
+### Build the per-user installer (v1.0 Public Beta)
+
+Build a per-user Windows `.exe` installer (Inno Setup 6, no UAC elevation required; invokes `--quit` cleanly on upgrade/uninstall):
 
 ```powershell
-cargo run -p otto-os -- --no-blur
+.\packaging\installer\build.ps1
 ```
 
-### Build an MSIX package
+WinGet manifest templates (`howlil.OttoOS`) live under `packaging/winget/` and automated CI/Release workflows live under `.github/workflows/`.
 
-The repository includes a reproducible Windows SDK packaging lane. The Store identity, publisher, version, certificate, and final brand assets are supplied at build time rather than committed to source control.
+### Build an MSIX package (v1.1 Microsoft Store lane)
 
-Place the final PNG artwork in `packaging/msix/Assets`, then run PowerShell from the repository root:
+The repository includes a reproducible Windows SDK packaging lane. Store identity, publisher, version, certificate, and Store PNG brand assets under `packaging/msix/Assets` are deferred to v1.1 and supplied at build time rather than committed to source control:
 
 ```powershell
 .\packaging\msix\build.ps1 `
@@ -115,28 +129,39 @@ The native E2E runner launches an isolated Otto process for each scenario, drive
 .\tests\e2e\windows-e2e.ps1 -Scenario all
 ```
 
-The scenarios are `success` for the primary notch and Control Center journey, `false` for outside-click and single-instance rejection, `edge` for empty media and rapid hotkeys, and `worst` for teardown while the panel and popup are active. A non-zero exit is a release-gate failure. Inspect the named screenshots and report entries to distinguish runtime failure, visual signal failure, input-delivery warning, and environment contamination.
+`-Scenario all` runs `success`, `false`, `edge`, `worst`, `fullscreen`, `genie`, `native-minimize`, `window-cover`, `dock`, `keyboard`, `keyboard-dock`, and `stall`; standalone scenarios include `recovery`, `appearance`, `audio`, `visual-reference`, and `dock-settings`. A non-zero exit is a release-gate failure. Inspect the named screenshots and report entries to distinguish runtime failure, visual signal failure, input-delivery warning, and environment contamination.
 
-## Runtime configuration
+## Runtime configuration and diagnostics
 
-Optional plugin configuration is stored at:
+Optional plugin state and user preferences are stored atomically at:
 
 ```text
 %LOCALAPPDATA%\otto-os\plugins.txt
 ```
 
-The file uses a small versioned format:
+The file uses a versioned key/value format:
 
 ```text
 version=1
 enabled=top_bar,dock,window_controls,genie,control_center
+online_lyrics=false
+dock_autohide=false
+dock_magnification=true
+dock_icon_size=48
+theme_mode=auto
+capture_visible=false
+hotkeys_enabled=true
+classic_logo=false
+onboarding_seen=false
 ```
 
-The popup menu and top bar remain required host surfaces. Optional plugins can be disabled without removing the required host path. The Control Center is accessed from the two-toggle icon between Search and Clock in the top bar.
+Rolling local diagnostic logs (zero telemetry, excluding clipboard contents) are written to `%LOCALAPPDATA%\otto-os\logs\`.
+
+The popup menu and top bar remain required host surfaces. Optional plugins can be disabled without removing the required host path. Control Center is accessed from the two-toggle icon between Search and Clock in the top bar.
 
 ## Project status
 
-Otto OS is under active development. The workspace has executable core models, native platform adapters, rendering modules, runtime orchestration, and unit coverage. A production release requires the native Windows acceptance pass described in the engineering contract.
+Otto OS is preparing for v1.0 Public Beta. Core models, native adapters, rendering, runtime orchestration, per-user installer packaging, WinGet templates, and unit suites are in place; interactive desktop E2E validation, Store MSIX assets (`v1.1`), and remaining idle CPU reductions remain tracked in [`.agents/engineering.md`](.agents/engineering.md).
 
 ## Contributing
 
@@ -146,4 +171,4 @@ Before submitting a change, run the verification commands above and review the r
 
 ## License
 
-MIT. See the package metadata in [`Cargo.toml`](Cargo.toml).
+MIT. See [`LICENSE`](LICENSE) and the package metadata in [`Cargo.toml`](Cargo.toml).

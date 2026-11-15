@@ -178,6 +178,66 @@ pub fn resize_bgra(
     Some(target)
 }
 
+#[must_use]
+pub fn downsample_bgra_half(source: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let layout = bgra_layout(width, height, PixelLimits::WINDOW_SNAPSHOT).ok()?;
+    if source.len() < layout.byte_len {
+        return None;
+    }
+    if width <= 2 && height <= 2 {
+        return Some((width, height, source[..layout.byte_len].to_vec()));
+    }
+    let out_width = (width / 2).max(1);
+    let out_height = (height / 2).max(1);
+    let src_stride = layout.stride as usize;
+    let out_stride = out_width as usize * BYTES_PER_PIXEL;
+    let mut output = vec![0u8; out_stride * out_height as usize];
+    for row in 0..out_height {
+        let sy0 = (row * 2) as usize;
+        let sy1 = (sy0 + 1).min(height as usize - 1);
+        let row0 = sy0 * src_stride;
+        let row1 = sy1 * src_stride;
+        let dst_row = row as usize * out_stride;
+        for col in 0..out_width {
+            let sx0 = (col * 2) as usize * BYTES_PER_PIXEL;
+            let sx1 = (col * 2 + 1).min(width - 1) as usize * BYTES_PER_PIXEL;
+            let dst = dst_row + col as usize * BYTES_PER_PIXEL;
+            for ch in 0..BYTES_PER_PIXEL {
+                let sum = u32::from(source[row0 + sx0 + ch])
+                    + u32::from(source[row0 + sx1 + ch])
+                    + u32::from(source[row1 + sx0 + ch])
+                    + u32::from(source[row1 + sx1 + ch]);
+                output[dst + ch] = ((sum + 2) >> 2) as u8;
+            }
+        }
+    }
+    Some((out_width, out_height, output))
+}
+
+#[must_use]
+pub fn downsample_bgra_to_fit(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    max_dimension: u32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let layout = bgra_layout(width, height, PixelLimits::WINDOW_SNAPSHOT).ok()?;
+    if source.len() < layout.byte_len || max_dimension == 0 {
+        return None;
+    }
+    if width.max(height) <= max_dimension {
+        return Some((width, height, source[..layout.byte_len].to_vec()));
+    }
+    let (mut cur_w, mut cur_h, mut cur_buf) = downsample_bgra_half(source, width, height)?;
+    while cur_w.max(cur_h) > max_dimension && (cur_w > 2 || cur_h > 2) {
+        let (next_w, next_h, next_buf) = downsample_bgra_half(&cur_buf, cur_w, cur_h)?;
+        cur_w = next_w;
+        cur_h = next_h;
+        cur_buf = next_buf;
+    }
+    Some((cur_w, cur_h, cur_buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +436,32 @@ mod tests {
         let source = bgra_layout(2, 2, ANY).unwrap();
         let lying_target = hand_built(4, 4, 4, 16);
         assert!(resize_bgra(&[0; 16], source, lying_target).is_none());
+    }
+
+    #[test]
+    fn downsample_half_averages_2x2_blocks_and_shrinks_by_four_bytes() {
+        let pixels = vec![
+            10, 20, 30, 255, 30, 40, 50, 255, 0, 0, 0, 255, 0, 0, 0, 255, 50, 60, 70, 255, 70, 80,
+            90, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 40, 80, 120, 255, 40,
+            80, 120, 255, 0, 0, 0, 255, 0, 0, 0, 255, 40, 80, 120, 255, 40, 80, 120, 255,
+        ];
+        let (w, h, out) = downsample_bgra_half(&pixels, 4, 4).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out.len(), 16);
+        assert_eq!(&out[0..4], &[40, 50, 60, 255]);
+        assert_eq!(&out[12..16], &[40, 80, 120, 255]);
+    }
+
+    #[test]
+    fn downsample_to_fit_caps_large_buffers_and_keeps_small_ones() {
+        let small = vec![120u8; 4 * 4 * 4];
+        let (sw, sh, sout) = downsample_bgra_to_fit(&small, 4, 4, 8).unwrap();
+        assert_eq!((sw, sh), (4, 4));
+        assert_eq!(sout.len(), small.len());
+
+        let large = vec![200u8; 16 * 8 * 4];
+        let (lw, lh, lout) = downsample_bgra_to_fit(&large, 16, 8, 4).unwrap();
+        assert_eq!((lw, lh), (4, 2));
+        assert_eq!(lout.len(), 4 * 2 * 4);
     }
 }

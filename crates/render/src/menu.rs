@@ -1,24 +1,21 @@
 use otto_core::{
-    Appearance, EstimatedMenuText, MenuRow, MenuTextMeasure, PopupMenuLayout, PopupMenuRowLayout,
-    month_cells, month_title, scale,
+    Appearance, EstimatedMenuText, GlassShape, MenuRow, MenuTextMeasure, PopupMenuLayout,
+    PopupMenuRowLayout, Rect, RgbBuffer, month_cells, month_title, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
-    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
+    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget,
+    ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_METRICS, IDWriteTextFormat,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, IDWriteTextFormat,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 use windows_numerics::Vector2;
 
@@ -34,7 +31,8 @@ impl MenuTextMeasure for PopupMenuRenderer {
     }
 }
 
-use crate::surface::{DibSurface, draw_on};
+use crate::glass::GlassPainter;
+use crate::surface::{DibSurface, create_dc_render_target, draw_on, draw_with_recovery};
 use crate::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
@@ -43,10 +41,6 @@ const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     g: 0.0,
     b: 0.0,
     a: 0.0,
-};
-const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
-    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
 };
 
 pub struct PopupMenuRenderer {
@@ -57,8 +51,11 @@ pub struct PopupMenuRenderer {
     label_format: IDWriteTextFormat,
     shortcut_format: IDWriteTextFormat,
     cell_format: IDWriteTextFormat,
+    notif_meta_format: IDWriteTextFormat,
+    notif_body_format: IDWriteTextFormat,
     surface: DibSurface,
     dpi: u32,
+    glass: GlassPainter,
 }
 
 impl PopupMenuRenderer {
@@ -67,15 +64,7 @@ impl PopupMenuRenderer {
         let max_h = scale(520, dpi);
         unsafe {
             let factory = shared_d2d_factory()?;
-            let properties = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: PIXEL_FORMAT,
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let target = factory.CreateDCRenderTarget(&properties)?;
+            let target = create_dc_render_target(&factory)?;
             let brushes = BrushPalette::new(&target)?;
 
             let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
@@ -111,6 +100,18 @@ impl PopupMenuRenderer {
                 DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
+            let notif_meta_format = create_text_format(
+                &dwrite,
+                scale(11, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let notif_body_format = create_text_format(
+                &dwrite,
+                scale(12, dpi) as f32,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
 
             let surface = DibSurface::new(max_w, max_h)?;
 
@@ -122,14 +123,43 @@ impl PopupMenuRenderer {
                 label_format,
                 shortcut_format,
                 cell_format,
+                notif_meta_format,
+                notif_body_format,
                 surface,
                 dpi,
+                glass: GlassPainter::default(),
             })
         }
     }
 
+    pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
+        self.glass.set_backdrop(capture, origin);
+    }
+
+    pub fn set_pointer(&self, pointer: Option<(f32, f32)>) {
+        self.glass.set_pointer(pointer);
+    }
+
+    pub fn clear_backdrop(&self) {
+        self.glass.clear_backdrop();
+    }
+
+    #[must_use]
+    pub fn has_backdrop(&self) -> bool {
+        self.glass.has_backdrop()
+    }
+
+    pub(crate) fn recreate_target(&mut self) -> Result<()> {
+        let target = create_dc_render_target(&self.factory)?;
+        let brushes = BrushPalette::new(&target)?;
+        self.target = target;
+        self.brushes = brushes;
+        self.glass.invalidate_gpu();
+        Ok(())
+    }
+
     pub fn present(
-        &self,
+        &mut self,
         hwnd: isize,
         layout: &PopupMenuLayout,
         rows: &[MenuRow],
@@ -139,9 +169,27 @@ impl PopupMenuRenderer {
         let (max_width, max_height) = self.surface.size();
         let width = layout.window.width.clamp(1, max_width);
         let height = layout.window.height.clamp(1, max_height);
-        self.draw(width, height, layout, rows, hovered_row, appearance)?;
+        draw_with_recovery(
+            self,
+            |renderer| renderer.draw(width, height, layout, rows, hovered_row, appearance),
+            Self::recreate_target,
+        )?;
         self.surface
             .present_sized(hwnd, (layout.window.x, layout.window.y), (width, height))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_preview(
+        &self,
+        layout: &PopupMenuLayout,
+        rows: &[MenuRow],
+        hovered_row: Option<usize>,
+        appearance: Appearance,
+    ) -> Result<()> {
+        let (max_width, max_height) = self.surface.size();
+        let width = layout.window.width.clamp(1, max_width);
+        let height = layout.window.height.clamp(1, max_height);
+        self.draw(width, height, layout, rows, hovered_row, appearance)
     }
 
     fn draw(
@@ -159,7 +207,7 @@ impl PopupMenuRenderer {
             self.target.Clear(Some(&raw const clear));
             self.brushes.update_theme(&palette);
 
-            self.draw_shell(width as f32, height as f32, layout.corner_radius, &palette);
+            self.draw_shell(width, height, layout.corner_radius, &appearance, &palette)?;
 
             let viewport = D2D_RECT_F {
                 left: layout.viewport.x as f32,
@@ -251,6 +299,24 @@ impl PopupMenuRenderer {
                 }
                 MenuRow::Calendar { year, month, today } => {
                     self.draw_calendar(row_layout, *year, *month, *today, palette);
+                }
+                MenuRow::Notification {
+                    app_name,
+                    title,
+                    body,
+                    timestamp_label,
+                    ..
+                } => {
+                    self.draw_notification(
+                        layout,
+                        row_layout,
+                        app_name,
+                        title,
+                        body,
+                        timestamp_label,
+                        hovered_row == Some(row_layout.index),
+                        palette,
+                    );
                 }
                 MenuRow::Slider { label, value, .. } => {
                     self.draw_slider(layout, row_layout, label, *value, palette);
@@ -501,7 +567,32 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn draw_shell(&self, width: f32, height: f32, radius: f32, palette: &LiquidGlassPalette) {
+    fn draw_shell(
+        &self,
+        width: i32,
+        height: i32,
+        radius: f32,
+        appearance: &Appearance,
+        palette: &LiquidGlassPalette,
+    ) -> Result<()> {
+        let shell_shape = GlassShape::from_rect(
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            radius,
+        );
+        if self
+            .glass
+            .draw(&self.target, appearance, self.dpi, shell_shape, true)?
+        {
+            return Ok(());
+        }
+
+        let width = width as f32;
+        let height = height as f32;
         let outer = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: 0.5,
@@ -532,6 +623,7 @@ impl PopupMenuRenderer {
             self.target
                 .DrawRoundedRectangle(&inner, inner_border, 1.0, None);
         }
+        Ok(())
     }
 
     fn draw_checkmark(
@@ -559,5 +651,165 @@ impl PopupMenuRenderer {
                 .DrawGeometry(&path, brush, stroke, &self.stroke_style);
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_notification(
+        &self,
+        layout: &PopupMenuLayout,
+        row: &PopupMenuRowLayout,
+        app_name: &str,
+        title: &str,
+        body: &str,
+        timestamp_label: &str,
+        hovered: bool,
+        palette: &LiquidGlassPalette,
+    ) {
+        let gap_y = scale(2, self.dpi) as f32;
+        let card_rect = D2D_RECT_F {
+            left: row.rect.x as f32,
+            top: row.rect.y as f32 + gap_y,
+            right: row.rect.right() as f32,
+            bottom: (row.rect.bottom() as f32 - gap_y).max(row.rect.y as f32 + gap_y + 1.0),
+        };
+        let radius = layout.row_corner_radius + 2.0;
+        let card = D2D1_ROUNDED_RECT {
+            rect: card_rect,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let fill = if hovered {
+            self.brushes.color_brush(palette.menu_hover_fill)
+        } else {
+            self.brushes.card_fill.clone()
+        };
+        let (primary_fg, secondary_fg) = if hovered {
+            (&self.brushes.on_accent, &self.brushes.on_accent)
+        } else {
+            (&self.brushes.text_primary, &self.brushes.text_muted)
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&card, &fill);
+            self.target
+                .DrawRoundedRectangle(&card, &self.brushes.specular_rim, 1.0, None);
+        }
+        self.draw_notification_contents(
+            card_rect,
+            app_name,
+            title,
+            body,
+            timestamp_label,
+            primary_fg,
+            secondary_fg,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_notification_contents(
+        &self,
+        card_rect: D2D_RECT_F,
+        app_name: &str,
+        title: &str,
+        body: &str,
+        timestamp_label: &str,
+        primary_fg: &ID2D1SolidColorBrush,
+        secondary_fg: &ID2D1SolidColorBrush,
+    ) {
+        let pad_x = scale(10, self.dpi) as f32;
+        let pad_y = scale(4, self.dpi) as f32;
+        let inner_left = card_rect.left + pad_x;
+        let inner_right = (card_rect.right - pad_x).max(inner_left + 1.0);
+        let close_col = scale(14, self.dpi) as f32;
+        let ts_col = if timestamp_label.is_empty() {
+            0.0
+        } else {
+            scale(36, self.dpi) as f32
+        };
+        let meta_h = scale(14, self.dpi) as f32;
+        let meta_top = card_rect.top + pad_y;
+        let meta_rect = D2D_RECT_F {
+            left: inner_left,
+            top: meta_top,
+            right: (inner_right - close_col - ts_col).max(inner_left + 1.0),
+            bottom: meta_top + meta_h,
+        };
+        let ts_rect = D2D_RECT_F {
+            left: (inner_right - close_col - ts_col).max(inner_left),
+            top: meta_top,
+            right: (inner_right - close_col).max(inner_left + 1.0),
+            bottom: meta_top + meta_h,
+        };
+        let close_cx = inner_right - close_col * 0.35;
+        let close_cy = meta_top + meta_h * 0.5;
+        let close_r = scale(3, self.dpi) as f32;
+        let line2_top = meta_top + meta_h;
+        let line2_h = if title.is_empty() || body.is_empty() {
+            (card_rect.bottom - pad_y - line2_top).max(scale(14, self.dpi) as f32)
+        } else {
+            scale(15, self.dpi) as f32
+        };
+        let title_rect = D2D_RECT_F {
+            left: inner_left,
+            top: line2_top,
+            right: inner_right,
+            bottom: line2_top + line2_h,
+        };
+        let body_rect = D2D_RECT_F {
+            left: inner_left,
+            top: line2_top + line2_h,
+            right: inner_right,
+            bottom: (card_rect.bottom - pad_y * 0.5).max(line2_top + line2_h + 1.0),
+        };
+        let primary_text = if title.is_empty() { body } else { title };
+        self.draw_clipped_text(&self.notif_meta_format, app_name, &meta_rect, secondary_fg);
+        self.draw_clipped_text(
+            &self.shortcut_format,
+            timestamp_label,
+            &ts_rect,
+            secondary_fg,
+        );
+        self.draw_clipped_text(&self.label_format, primary_text, &title_rect, primary_fg);
+        if !title.is_empty() {
+            self.draw_clipped_text(&self.notif_body_format, body, &body_rect, secondary_fg);
+        }
+        unsafe {
+            self.target.DrawLine(
+                Vector2::new(close_cx - close_r, close_cy - close_r),
+                Vector2::new(close_cx + close_r, close_cy + close_r),
+                secondary_fg,
+                1.25,
+                &self.stroke_style,
+            );
+            self.target.DrawLine(
+                Vector2::new(close_cx - close_r, close_cy + close_r),
+                Vector2::new(close_cx + close_r, close_cy - close_r),
+                secondary_fg,
+                1.25,
+                &self.stroke_style,
+            );
+        }
+    }
+
+    fn draw_clipped_text(
+        &self,
+        format: &IDWriteTextFormat,
+        text: &str,
+        rect: &D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            self.target.DrawText(
+                &wide,
+                format,
+                rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
     }
 }

@@ -1,0 +1,201 @@
+---
+import {
+  BatteryCharging,
+  FileText,
+  Folder,
+  Globe,
+  HardDrive,
+  Music,
+  Terminal,
+  Trash2,
+  Volume2,
+  Wifi,
+} from "lucide-astro";
+
+const menus = ["File", "Edit", "View", "Window", "Help"];
+
+const dockApps = [
+  { label: "Explorer", icon: Folder, tone: "bg-sky-600 text-white", active: true },
+  { label: "Terminal", icon: Terminal, tone: "bg-zinc-900 text-white", active: true },
+  { label: "Catatan", icon: FileText, tone: "bg-blue-600 text-white", active: false },
+  { label: "Musik", icon: Music, tone: "bg-rose-600 text-white", active: true },
+  { label: "Browser", icon: Globe, tone: "bg-emerald-600 text-white", active: false },
+];
+
+const workspaceFiles = [
+  { name: "otto-os-setup-x64.exe", meta: "14,2 MB · Rilis lokal" },
+  { name: "catatan-beta.txt", meta: "Diubah 13:45" },
+];
+---
+
+<figure
+  class="mx-auto w-full max-w-5xl"
+  aria-label="Pratinjau desktop Otto OS pada Windows 11 dengan bar atas, Dynamic Island hitam untuk Pomodoro dan Pocket, jendela Explorer dengan kontrol kanan atas, serta Dock aplikasi Windows."
+>
+  <div class="relative mx-auto min-h-[360px] w-full overflow-hidden rounded-2xl border border-ink/12 bg-[#cbe6f8] shadow-[0_20px_50px_-24px_rgb(15_17_21/0.28)] sm:aspect-[16/10]">
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 1200 750"
+      preserveAspectRatio="xMidYMid slice"
+      class="absolute inset-0 h-full w-full"
+    >
+      <defs>
+        <linearGradient id="win-sky" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#8ec7f0" />
+          <stop offset="52%" stop-color="#cde9fb" />
+          <stop offset="100%" stop-color="#eef7fe" />
+        </linearGradient>
+        <linearGradient id="win-fold-1" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4d9be0" stop-opacity="0.34" />
+          <stop offset="100%" stop-color="#ffffff" stop-opacity="0.06" />
+        </linearGradient>
+        <linearGradient id="win-fold-2" x1="1" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2c7cc9" stop-opacity="0.22" />
+          <stop offset="100%" stop-color="#a9d8f5" stop-opacity="0.08" />
+        </linearGradient>
+      </defs>
+      <rect width="1200" height="750" fill="url(#win-sky)" />
+      <path d="M0 750 C 260 540, 480 410, 780 420 C 980 426, 1100 320, 1200 220 L 1200 750 Z" fill="url(#win-fold-1)" />
+      <path d="M0 440 C 310 380, 560 580, 920 520 C 1070 495, 1140 560, 1200 620 L 1200 750 L 0 750 Z" fill="url(#win-fold-2)" />
+    </svg>
+
+    <div
+      class="absolute inset-x-0 top-0 z-10 flex h-8 items-center justify-between border-b border-white/15 bg-shell/90 px-3 text-xs text-shell-ink backdrop-blur-md sm:px-4"
+      aria-hidden="true"
+    >
+      <div class="flex items-center gap-3">
+        <span class="inline-flex items-center gap-1.5 font-medium">
+          <svg width="12" height="12" viewBox="0 0 128 128" fill="currentColor" aria-hidden="true">
+            <path d="M40 12C46 12 50 16 50 22V78C50 87 54 91 61 91V111C41 111 30 100 30 80V22C30 16 34 12 40 12Z" />
+            <path transform="translate(128 0) scale(-1 1)" d="M40 12C46 12 50 16 50 22V78C50 87 54 91 61 91V111C41 111 30 100 30 80V22C30 16 34 12 40 12Z" />
+            <path d="M20 34H108C114 34 118 38 118 44S114 54 108 54H20C14 54 10 50 10 44S14 34 20 34Z" />
+          </svg>
+          <span>Explorer</span>
+        </span>
+        <span class="hidden gap-3 text-shell-muted sm:flex">
+          {menus.map((menu) => <span>{menu}</span>)}
+        </span>
+      </div>
+
+      <div class="flex items-center gap-2.5 text-shell-muted">
+        <Wifi size={13} strokeWidth={1.75} class="hidden sm:block" />
+        <Volume2 size={13} strokeWidth={1.75} class="hidden sm:block" />
+        <BatteryCharging size={14} strokeWidth={1.75} class="hidden min-[380px]:block" />
+        <span class="tabular-nums text-shell-ink">14:02</span>
+      </div>
+    </div>
+
+    <div
+      class="absolute top-0 left-1/2 z-20 flex h-8 -translate-x-1/2 items-center gap-2 rounded-b-xl bg-black px-3 text-xs text-shell-ink shadow-md"
+      aria-hidden="true"
+    >
+      <span class="size-2 rounded-full bg-accent"></span>
+      <span class="tabular-nums font-medium" data-pomodoro>24:12</span>
+      <span class="text-white/40">·</span>
+      <span class="flex h-3 items-end gap-[2px] text-white/85">
+        <span class="eq-bar" style="animation-delay: -0.2s; animation-duration: 820ms"></span>
+        <span class="eq-bar" style="animation-delay: -0.6s; animation-duration: 980ms"></span>
+        <span class="eq-bar" style="animation-delay: -0.4s; animation-duration: 740ms"></span>
+        <span class="eq-bar" style="animation-delay: -0.8s; animation-duration: 900ms"></span>
+      </span>
+    </div>
+
+    <div
+      class="absolute inset-x-4 top-12 bottom-16 flex flex-col gap-3 sm:inset-x-6 sm:top-14 sm:bottom-20 sm:grid sm:grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)] sm:items-start sm:gap-5"
+      aria-hidden="true"
+    >
+      <div class="flex flex-col overflow-hidden rounded-xl border border-ink/12 bg-surface/95 text-left shadow-[0_12px_32px_-12px_rgb(15_17_21/0.22)]">
+        <div class="flex h-9 items-center justify-between border-b border-line bg-surface-subtle px-3">
+          <span class="text-xs font-medium text-ink">Dokumen — Proyek Otto</span>
+          <div class="flex items-center gap-1.5">
+            <span class="size-2.5 rounded-full bg-window-minimize"></span>
+            <span class="size-2.5 rounded-full bg-window-zoom"></span>
+            <span class="size-2.5 rounded-full bg-window-close"></span>
+          </div>
+        </div>
+        <div class="grid gap-2 p-3 sm:p-4">
+          {workspaceFiles.map((file) => (
+            <div class="flex items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2.5">
+              <HardDrive size={16} strokeWidth={1.5} class="shrink-0 text-muted" />
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-xs font-medium text-ink sm:text-sm">{file.name}</p>
+                <p class="truncate text-xs text-muted">{file.meta}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div class="hidden flex-col gap-3 rounded-2xl border border-white/15 bg-black p-4 text-left text-shell-ink shadow-[0_16px_36px_-14px_rgb(0_0_0/0.5)] sm:flex">
+        <div class="flex items-center justify-between text-xs text-shell-muted">
+          <div class="flex items-center gap-1.5">
+            <span class="rounded-md bg-white/12 px-2 py-0.5 font-medium text-shell-ink">Musik</span>
+            <span>Fokus</span>
+            <span>Pocket</span>
+            <span>Clip</span>
+          </div>
+          <span class="text-shell-muted">Spotify</span>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <div class="grid size-10 shrink-0 place-items-center rounded-lg bg-white/12 text-shell-ink">
+            <Music size={16} strokeWidth={1.5} />
+          </div>
+          <div class="min-w-0 flex-1">
+            <p class="truncate text-sm font-medium text-shell-ink">Lo-fi untuk fokus</p>
+            <p class="truncate text-xs text-shell-muted">Kafe Sore · 02:14 / 03:40</p>
+          </div>
+        </div>
+
+        <div class="h-1 w-full overflow-hidden rounded-full bg-white/15">
+          <div class="h-full w-[62%] rounded-full bg-accent"></div>
+        </div>
+
+        <div class="flex items-center justify-between border-t border-white/10 pt-2.5 text-xs">
+          <span class="text-shell-muted">Pocket · 2 berkas siap tempel</span>
+          <span class="text-shell-ink">Clip · 12 item di RAM</span>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="absolute bottom-2.5 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-white/25 bg-shell/85 px-3 py-2 shadow-lg backdrop-blur-md sm:bottom-3 sm:gap-2.5"
+      aria-hidden="true"
+    >
+      {dockApps.map((item) => (
+        <div class="relative flex flex-col items-center">
+          <span class={`dock-item grid size-8 place-items-center rounded-lg ${item.tone} sm:size-9`}>
+            <item.icon size={16} strokeWidth={1.75} />
+          </span>
+          {item.active ? (
+            <span class="mt-1 size-1 rounded-full bg-white/85"></span>
+          ) : (
+            <span class="mt-1 size-1"></span>
+          )}
+        </div>
+      ))}
+      <span class="mx-0.5 hidden h-6 w-px bg-white/20 sm:block"></span>
+      <div class="relative hidden flex-col items-center sm:flex">
+        <span class="dock-item grid size-9 place-items-center rounded-lg bg-zinc-600 text-white">
+          <Trash2 size={16} strokeWidth={1.75} />
+        </span>
+        <span class="mt-1 size-1"></span>
+      </div>
+    </div>
+  </div>
+</figure>
+
+<script>
+  const timer = document.querySelector<HTMLElement>("[data-pomodoro]");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (timer && !reducedMotion) {
+    const workSeconds = 25 * 60;
+    let remaining = 24 * 60 + 12;
+    const format = (seconds: number) =>
+      `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    window.setInterval(() => {
+      remaining = remaining > 0 ? remaining - 1 : workSeconds;
+      timer.textContent = format(remaining);
+    }, 1000);
+  }
+</script>

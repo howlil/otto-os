@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Windows Installer & Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event.inputs.tag }}') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          $version = $tag.TrimStart('v')
+          $numericVersion = ($version -replace '-.*$', '')
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "numeric_version=$numericVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify formatting, clippy, and core/render/app tests
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
+
+      - name: Build release binary
+        run: cargo build --release -p otto-os
+
+      - name: Decode code-signing certificate (if configured)
+        id: cert
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          if ($env:CERT_B64) {
+            $pfxPath = Join-Path $env:RUNNER_TEMP 'signing-cert.pfx'
+            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:CERT_B64))
+            "pfx_path=$pfxPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Sign release executable (if certificate present)
+        if: steps.cert.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $kitsBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signTool = Get-ChildItem -Path $kitsBin -Filter 'signtool.exe' -Recurse |
+            Where-Object { $_.FullName -like '*\x64\*' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          & $signTool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f '${{ steps.cert.outputs.pfx_path }}' /p $env:CERT_PASSWORD 'target\release\otto-os.exe'
+
+      - name: Install Inno Setup 6
+        run: choco install innosetup -y
+
+      - name: Build per-user Windows installer
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $args = @{
+            Version = '${{ steps.meta.outputs.version }}'
+            ExecutablePath = 'target\release\otto-os.exe'
+            OutputDir = 'artifacts\release'
+            SkipBuild = $true
+          }
+          if ('${{ steps.cert.outputs.enabled }}' -eq 'true') {
+            $args['CertificatePath'] = '${{ steps.cert.outputs.pfx_path }}'
+            $args['CertificatePassword'] = ConvertTo-SecureString -String $env:CERT_PASSWORD -AsPlainText -Force
+          }
+          .\packaging\installer\build.ps1 @args
+
+      - name: Stage portable zip, WinGet manifests, and checksums
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $version = '${{ steps.meta.outputs.version }}'
+          $numericVersion = '${{ steps.meta.outputs.numeric_version }}'
+          $outDir = (Resolve-Path 'artifacts\release').Path
+
+          $portableDir = Join-Path $env:RUNNER_TEMP 'otto-os-portable'
+          $null = New-Item -ItemType Directory -Path $portableDir -Force
+          Copy-Item -LiteralPath 'target\release\otto-os.exe' -Destination (Join-Path $portableDir 'otto-os.exe')
+          Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $portableDir 'LICENSE')
+          Copy-Item -LiteralPath 'README.md' -Destination (Join-Path $portableDir 'README.md')
+          $zipPath = Join-Path $outDir "otto-os-$version-windows-x64.zip"
+          Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $zipPath -Force
+
+          $installerPath = Join-Path $outDir "otto-os-setup-$numericVersion-x64.exe"
+          $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToUpperInvariant()
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/otto-os-setup-$numericVersion-x64.exe"
+
+          $wingetDir = Join-Path $outDir 'winget'
+          $null = New-Item -ItemType Directory -Path $wingetDir -Force
+          foreach ($manifest in Get-ChildItem -Path 'packaging\winget' -Filter '*.yaml') {
+            $content = Get-Content -LiteralPath $manifest.FullName -Raw
+            $content = $content -replace '(?m)^PackageVersion:\s*.*$', "PackageVersion: $numericVersion"
+            $content = $content -replace '(?m)^(\s*InstallerUrl:\s*).*$', "`${1}$installerUrl"
+            $content = $content -replace '(?m)^(\s*InstallerSha256:\s*).*$', "`${1}$installerHash"
+            Set-Content -LiteralPath (Join-Path $wingetDir $manifest.Name) -Value $content -NoNewline
+          }
+
+          $checksumLines = Get-ChildItem -Path $outDir -File | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$h  $($_.Name)"
+          }
+          Set-Content -LiteralPath (Join-Path $outDir 'SHA256SUMS.txt') -Value ($checksumLines -join "`n")
+
+      - name: Clean up temporary certificate
+        if: always() && steps.cert.outputs.enabled == 'true'
+        shell: pwsh
+        run: Remove-Item -LiteralPath '${{ steps.cert.outputs.pfx_path }}' -Force -ErrorAction SilentlyContinue
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') || startsWith(steps.meta.outputs.tag, 'v0.') }}
+          generate_release_notes: true
+          files: |
+            artifacts/release/*.exe
+            artifacts/release/*.zip
+            artifacts/release/SHA256SUMS.txt
+            artifacts/release/winget/*.yaml

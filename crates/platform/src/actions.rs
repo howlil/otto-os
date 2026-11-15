@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -20,7 +21,7 @@ use otto_core::{
     WindowMenuState,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::AddFontResourceW;
+use windows::Win32::Graphics::Gdi::{AddFontResourceW, RemoveFontResourceW};
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
 use windows::Win32::System::Power::SetSuspendState;
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
@@ -28,8 +29,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput,
     UnregisterHotKey, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_F1, VK_F2, VK_LBUTTON, VK_LCONTROL,
-    VK_LSHIFT, VK_LWIN, VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN, VK_TAB, VK_UP,
-    VK_VOLUME_DOWN, VK_VOLUME_UP,
+    VK_LEFT, VK_LSHIFT, VK_LWIN, VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_UP,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -52,6 +53,25 @@ const FOCUS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub const HOTKEY_TOGGLE_NOTCH: i32 = 1;
 pub const HOTKEY_TOGGLE_POMODORO: i32 = 2;
 pub const HOTKEY_FOCUS_BAR: i32 = 3;
+pub const HOTKEY_CONTROL_CENTER: i32 = 4;
+
+fn notch_hotkey_bindings() -> [(
+    i32,
+    windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS,
+    u32,
+); 4] {
+    let safe_chord = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
+    [
+        (HOTKEY_TOGGLE_NOTCH, safe_chord, u32::from(b'N')),
+        (HOTKEY_TOGGLE_POMODORO, safe_chord, u32::from(b'P')),
+        (
+            HOTKEY_FOCUS_BAR,
+            MOD_CONTROL | MOD_NOREPEAT,
+            u32::from(VK_F2.0),
+        ),
+        (HOTKEY_CONTROL_CENTER, safe_chord, u32::from(b'C')),
+    ]
+}
 
 const fn vk_char(ch: u8) -> VIRTUAL_KEY {
     VIRTUAL_KEY(ch as u16)
@@ -61,6 +81,10 @@ const fn vk_char(ch: u8) -> VIRTUAL_KEY {
 pub enum MenuNavEvent {
     Up,
     Down,
+    Left,
+    Right,
+    Tab,
+    BackTab,
     Enter,
     Escape,
     Char(char),
@@ -78,6 +102,11 @@ pub fn is_escape_down() -> bool {
 }
 
 #[must_use]
+pub fn is_shift_down() -> bool {
+    is_key_down(i32::from(VK_SHIFT.0))
+}
+
+#[must_use]
 pub fn poll_menu_events() -> (bool, Option<MenuNavEvent>) {
     let mouse_down = is_key_down(i32::from(VK_LBUTTON.0)) || is_key_down(i32::from(VK_RBUTTON.0));
     if is_escape_down() {
@@ -87,6 +116,16 @@ pub fn poll_menu_events() -> (bool, Option<MenuNavEvent>) {
         (u32::from(VK_UP.0), Some(MenuNavEvent::Up))
     } else if is_key_down(i32::from(VK_DOWN.0)) {
         (u32::from(VK_DOWN.0), Some(MenuNavEvent::Down))
+    } else if is_key_down(i32::from(VK_LEFT.0)) {
+        (u32::from(VK_LEFT.0), Some(MenuNavEvent::Left))
+    } else if is_key_down(i32::from(VK_RIGHT.0)) {
+        (u32::from(VK_RIGHT.0), Some(MenuNavEvent::Right))
+    } else if is_key_down(i32::from(VK_TAB.0)) {
+        if is_shift_down() {
+            (u32::from(VK_TAB.0) | 0x1000, Some(MenuNavEvent::BackTab))
+        } else {
+            (u32::from(VK_TAB.0), Some(MenuNavEvent::Tab))
+        }
     } else if is_key_down(i32::from(VK_RETURN.0)) {
         (u32::from(VK_RETURN.0), Some(MenuNavEvent::Enter))
     } else {
@@ -120,35 +159,22 @@ pub fn trim_working_set() {
 
 pub fn register_notch_hotkeys(hwnd: isize) {
     let handle = HWND(hwnd as *mut c_void);
-    let modifiers = MOD_ALT | MOD_NOREPEAT;
-    unsafe {
-        let _ = RegisterHotKey(
-            Some(handle),
-            HOTKEY_TOGGLE_NOTCH,
-            modifiers,
-            u32::from(b'N'),
-        );
-        let _ = RegisterHotKey(
-            Some(handle),
-            HOTKEY_TOGGLE_POMODORO,
-            modifiers,
-            u32::from(b'P'),
-        );
-        let _ = RegisterHotKey(
-            Some(handle),
-            HOTKEY_FOCUS_BAR,
-            MOD_CONTROL | MOD_NOREPEAT,
-            u32::from(VK_F2.0),
-        );
+    for (id, modifiers, vk) in notch_hotkey_bindings() {
+        if let Err(error) = unsafe { RegisterHotKey(Some(handle), id, modifiers, vk) } {
+            crate::diagnostics::log_error(
+                "hotkeys",
+                &format!("failed to register hotkey id {id} ({modifiers:?}, vk={vk:#x}): {error}"),
+            );
+        }
     }
 }
 
 pub fn unregister_notch_hotkeys(hwnd: isize) {
     let handle = HWND(hwnd as *mut c_void);
     unsafe {
-        let _ = UnregisterHotKey(Some(handle), HOTKEY_TOGGLE_NOTCH);
-        let _ = UnregisterHotKey(Some(handle), HOTKEY_TOGGLE_POMODORO);
-        let _ = UnregisterHotKey(Some(handle), HOTKEY_FOCUS_BAR);
+        for (id, _, _) in notch_hotkey_bindings() {
+            let _ = UnregisterHotKey(Some(handle), id);
+        }
     }
 }
 
@@ -162,11 +188,37 @@ pub fn play_pomodoro_chime() {
     }
 }
 
+static LOADED_APPLE_FONTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn font_path_wide_z(path: &Path) -> Vec<u16> {
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn broadcast_font_change() {
+    unsafe {
+        let _ = SendNotifyMessageW(HWND_BROADCAST, WM_FONTCHANGE, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn record_loaded_font(registry: &mut Vec<PathBuf>, path: PathBuf) -> bool {
+    if registry.contains(&path) {
+        return false;
+    }
+    registry.push(path);
+    true
+}
+
 pub fn load_apple_fonts() {
     let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
         return;
     };
     let font_dir = PathBuf::from(local_app_data).join("Microsoft\\Windows\\Fonts");
+    let Ok(mut loaded_registry) = LOADED_APPLE_FONTS.lock() else {
+        return;
+    };
     let mut loaded = false;
     for file in [
         "SF-Pro-Text-Regular.otf",
@@ -174,23 +226,44 @@ pub fn load_apple_fonts() {
         "SF-Pro-Text-Semibold.otf",
     ] {
         let path = font_dir.join(file);
-        if path.exists() {
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            unsafe {
-                if AddFontResourceW(PCWSTR(wide.as_ptr())) > 0 {
-                    loaded = true;
-                }
+        if loaded_registry.contains(&path) || !path.exists() {
+            continue;
+        }
+        let wide = font_path_wide_z(&path);
+        unsafe {
+            if AddFontResourceW(PCWSTR(wide.as_ptr())) > 0
+                && record_loaded_font(&mut loaded_registry, path)
+            {
+                loaded = true;
             }
         }
     }
+    drop(loaded_registry);
     if loaded {
+        broadcast_font_change();
+    }
+}
+
+pub fn remove_apple_fonts() {
+    let Ok(mut loaded_registry) = LOADED_APPLE_FONTS.lock() else {
+        return;
+    };
+    if loaded_registry.is_empty() {
+        return;
+    }
+    let paths = std::mem::take(&mut *loaded_registry);
+    drop(loaded_registry);
+    let mut removed = false;
+    for path in paths {
+        let wide = font_path_wide_z(&path);
         unsafe {
-            let _ = SendNotifyMessageW(HWND_BROADCAST, WM_FONTCHANGE, WPARAM(0), LPARAM(0));
+            if RemoveFontResourceW(PCWSTR(wide.as_ptr())).as_bool() {
+                removed = true;
+            }
         }
+    }
+    if removed {
+        broadcast_font_change();
     }
 }
 
@@ -519,9 +592,26 @@ pub fn open_path(path: &Path) {
 }
 
 fn shell_exec(file: PCWSTR, params: PCWSTR) {
-    unsafe {
-        let _ = ShellExecuteW(None, w!("open"), file, params, PCWSTR::null(), SW_SHOW);
-    }
+    let _ = shell_exec_ok(file, params);
+}
+
+pub(crate) fn shell_exec_ok(file: PCWSTR, params: PCWSTR) -> bool {
+    let instance =
+        unsafe { ShellExecuteW(None, w!("open"), file, params, PCWSTR::null(), SW_SHOW) };
+    instance.0 as isize > 32
+}
+
+pub(crate) fn open_external_url(url: &str) -> bool {
+    let wide = windows::core::HSTRING::from(url);
+    shell_exec_ok(PCWSTR(wide.as_ptr()), PCWSTR::null())
+}
+
+pub(crate) fn open_night_light_settings() {
+    shell_exec(w!("ms-settings:nightlight"), PCWSTR::null());
+}
+
+pub(crate) fn open_power_settings() {
+    shell_exec(w!("ms-settings:powersleep"), PCWSTR::null());
 }
 
 pub(crate) fn send_key_chord(keys: &[VIRTUAL_KEY]) {
@@ -554,7 +644,10 @@ const fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_top_bar_command, shortcut_for, window_command_for};
+    use super::{
+        HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
+        execute_top_bar_command, notch_hotkey_bindings, shortcut_for, window_command_for,
+    };
     use otto_core::{
         APPLICATION_MENUS, AppMenuState, CMD_APP_HIDE, CMD_APP_QUIT, CMD_EDIT_PASTE,
         CMD_FILE_NEW_FOLDER, CMD_FILE_NEW_TAB, CMD_SHOW_DESKTOP, CMD_TASK_VIEW,
@@ -645,5 +738,31 @@ mod tests {
         }
         let untargeted = execute_top_bar_command(CMD_EDIT_PASTE, None, own);
         assert_eq!(untargeted.outcome, CommandOutcome::Unsupported);
+    }
+
+    #[test]
+    fn notch_hotkeys_have_unique_ids_and_include_control_center() {
+        let bindings = notch_hotkey_bindings();
+        let ids: Vec<i32> = bindings.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                HOTKEY_TOGGLE_NOTCH,
+                HOTKEY_TOGGLE_POMODORO,
+                HOTKEY_FOCUS_BAR,
+                HOTKEY_CONTROL_CENTER,
+            ]
+        );
+        assert_eq!(bindings[3].2, u32::from(b'C'));
+    }
+
+    #[test]
+    fn loaded_font_registry_deduplicates_paths_and_remove_drains_cleanly() {
+        let mut tracked = Vec::new();
+        let font = std::path::PathBuf::from("C:\\Fonts\\SF-Pro-Text-Regular.otf");
+        assert!(super::record_loaded_font(&mut tracked, font.clone()));
+        assert!(!super::record_loaded_font(&mut tracked, font));
+        assert_eq!(tracked.len(), 1);
+        super::remove_apple_fonts();
     }
 }

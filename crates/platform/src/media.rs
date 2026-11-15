@@ -1,20 +1,24 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use otto_core::{MediaCapabilities, NORMAL_PLAYBACK_RATE_PERMILLE, TrackKey};
 pub use otto_core::{MediaCommand, NowPlaying};
+use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Storage::Streams::{IInputStream, IRandomAccessStreamReference};
-use windows::core::Interface;
+use windows::core::{IUnknown, Interface};
 
 use crate::com::ComGuard;
 use crate::winrt_io::{await_until, read_stream_bounded};
 
 pub const MEDIA_CACHE_TTL: Duration = Duration::from_millis(250);
+pub const MEDIA_PLAYING_EVENT_TTL: Duration = Duration::from_secs(2);
+pub const MEDIA_IDLE_EVENT_TTL: Duration = Duration::from_secs(10);
 pub const MEDIA_STALE_AFTER: Duration = Duration::from_secs(3);
 pub const MEDIA_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
 pub const MEDIA_QUEUE_DEPTH: usize = 8;
@@ -24,6 +28,12 @@ const ARTWORK_RETRY_BASE: Duration = Duration::from_secs(1);
 const ARTWORK_MAX_ATTEMPTS: u32 = 4;
 const WINDOWS_TO_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 const TICKS_PER_MILLISECOND: i64 = 10_000;
+const RPC_E_DISCONNECTED_HR: i32 = -2_147_417_848;
+const RPC_S_SERVER_UNAVAILABLE_HR: i32 = -2_147_023_174;
+
+static MEDIA_DIRTY: AtomicBool = AtomicBool::new(false);
+static MEDIA_EVENTS_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MEDIA_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 enum MediaTask {
     Refresh,
@@ -44,9 +54,21 @@ struct CacheRead {
 }
 
 impl MediaCache {
+    #[cfg(test)]
     fn read(&mut self, now: Instant) -> CacheRead {
+        self.read_at(now, false, false)
+    }
+
+    fn read_at(&mut self, now: Instant, events_active: bool, dirty: bool) -> CacheRead {
         let age = |moment: Option<Instant>| moment.map(|at| now.saturating_duration_since(at));
-        let fresh = age(self.refreshed_at).is_some_and(|elapsed| elapsed < MEDIA_CACHE_TTL);
+        let ttl = if dirty || !events_active {
+            MEDIA_CACHE_TTL
+        } else if self.snapshot.as_ref().is_some_and(|media| media.playing) {
+            MEDIA_PLAYING_EVENT_TTL
+        } else {
+            MEDIA_IDLE_EVENT_TTL
+        };
+        let fresh = !dirty && age(self.refreshed_at).is_some_and(|elapsed| elapsed < ttl);
         let stalled = age(self.requested_at).is_some_and(|elapsed| elapsed >= MEDIA_STALE_AFTER);
         if stalled {
             self.snapshot = None;
@@ -133,9 +155,23 @@ struct MediaRuntime {
 
 static MEDIA_RUNTIME: OnceLock<Mutex<Option<MediaRuntime>>> = OnceLock::new();
 
+fn is_shutting_down() -> bool {
+    MEDIA_SHUTTING_DOWN.load(Ordering::Acquire)
+}
+
+pub fn resume_media_task() {
+    MEDIA_SHUTTING_DOWN.store(false, Ordering::Release);
+}
+
 fn runtime() -> Option<(mpsc::SyncSender<MediaTask>, Arc<Mutex<MediaCache>>)> {
+    if is_shutting_down() {
+        return None;
+    }
     let runtime = MEDIA_RUNTIME.get_or_init(|| Mutex::new(None));
     let mut guard = runtime.lock().ok()?;
+    if is_shutting_down() {
+        return None;
+    }
     if guard.is_none() {
         let (sender, receiver) = mpsc::sync_channel(MEDIA_QUEUE_DEPTH);
         let cache = Arc::new(Mutex::new(MediaCache::default()));
@@ -157,7 +193,12 @@ fn runtime() -> Option<(mpsc::SyncSender<MediaTask>, Arc<Mutex<MediaCache>>)> {
 #[must_use]
 pub fn read_now_playing() -> Option<NowPlaying> {
     let (sender, cache) = runtime()?;
-    let read = cache.lock().ok()?.read(Instant::now());
+    let events_active = MEDIA_EVENTS_ACTIVE.load(Ordering::Acquire);
+    let dirty = MEDIA_DIRTY.load(Ordering::Acquire);
+    let read = cache
+        .lock()
+        .ok()?
+        .read_at(Instant::now(), events_active, dirty);
     if read.request_refresh
         && sender.try_send(MediaTask::Refresh).is_err()
         && let Ok(mut state) = cache.lock()
@@ -169,77 +210,266 @@ pub fn read_now_playing() -> Option<NowPlaying> {
 
 #[must_use]
 pub fn send_media_command(command: MediaCommand) -> bool {
-    runtime().is_some_and(|(sender, _)| sender.try_send(MediaTask::Command(command)).is_ok())
+    let sent =
+        runtime().is_some_and(|(sender, _)| sender.try_send(MediaTask::Command(command)).is_ok());
+    if sent {
+        MEDIA_DIRTY.store(true, Ordering::Release);
+    }
+    sent
 }
 
 pub fn shutdown_media_task() {
+    MEDIA_SHUTTING_DOWN.store(true, Ordering::Release);
     let Some(runtime) = MEDIA_RUNTIME
         .get()
         .and_then(|cell| cell.lock().ok().and_then(|mut guard| guard.take()))
     else {
         return;
     };
+    MEDIA_EVENTS_ACTIVE.store(false, Ordering::Release);
+    MEDIA_DIRTY.store(false, Ordering::Release);
     drop(runtime.sender);
     let _ = crate::worker::join_within(runtime.handle, MEDIA_SHUTDOWN_TIMEOUT);
+}
+
+fn signal_media_changed() {
+    MEDIA_DIRTY.store(true, Ordering::Release);
+    crate::idle_wake::request_idle_wake();
+}
+
+fn session_identity(session: &GlobalSystemMediaTransportControlsSession) -> usize {
+    session
+        .cast::<IUnknown>()
+        .ok()
+        .map_or(0, |unknown| unknown.as_raw() as usize)
+}
+
+fn is_disconnected_hr(code: i32) -> bool {
+    code == RPC_E_DISCONNECTED_HR || code == RPC_S_SERVER_UNAVAILABLE_HR
+}
+
+struct SessionSubscription {
+    session: GlobalSystemMediaTransportControlsSession,
+    identity: usize,
+    media_props_token: Option<i64>,
+    playback_info_token: Option<i64>,
+    timeline_props_token: Option<i64>,
+}
+
+impl SessionSubscription {
+    fn subscribe(session: GlobalSystemMediaTransportControlsSession, identity: usize) -> Self {
+        let media_props_token = session
+            .MediaPropertiesChanged(&TypedEventHandler::new(|_, _| {
+                signal_media_changed();
+                Ok(())
+            }))
+            .ok();
+        let playback_info_token = session
+            .PlaybackInfoChanged(&TypedEventHandler::new(|_, _| {
+                signal_media_changed();
+                Ok(())
+            }))
+            .ok();
+        let timeline_props_token = session
+            .TimelinePropertiesChanged(&TypedEventHandler::new(|_, _| {
+                signal_media_changed();
+                Ok(())
+            }))
+            .ok();
+        Self {
+            session,
+            identity,
+            media_props_token,
+            playback_info_token,
+            timeline_props_token,
+        }
+    }
+
+    fn is_fully_subscribed(&self) -> bool {
+        self.media_props_token.is_some()
+            && self.playback_info_token.is_some()
+            && self.timeline_props_token.is_some()
+    }
+}
+
+impl Drop for SessionSubscription {
+    fn drop(&mut self) {
+        if let Some(token) = self.timeline_props_token.take() {
+            let _ = self.session.RemoveTimelinePropertiesChanged(token);
+        }
+        if let Some(token) = self.playback_info_token.take() {
+            let _ = self.session.RemovePlaybackInfoChanged(token);
+        }
+        if let Some(token) = self.media_props_token.take() {
+            let _ = self.session.RemoveMediaPropertiesChanged(token);
+        }
+    }
+}
+
+#[derive(Default)]
+struct SmtcState {
+    manager: Option<GlobalSystemMediaTransportControlsSessionManager>,
+    manager_token: Option<i64>,
+    session_sub: Option<SessionSubscription>,
+}
+
+impl SmtcState {
+    fn clear_manager(&mut self) {
+        self.session_sub = None;
+        if let (Some(manager), Some(token)) = (self.manager.as_ref(), self.manager_token.take()) {
+            let _ = manager.RemoveCurrentSessionChanged(token);
+        }
+        self.manager = None;
+        MEDIA_EVENTS_ACTIVE.store(false, Ordering::Release);
+    }
+
+    fn current_session(
+        &mut self,
+        deadline: Instant,
+    ) -> Option<GlobalSystemMediaTransportControlsSession> {
+        if self.manager.is_none() {
+            let manager = await_until!(
+                GlobalSystemMediaTransportControlsSessionManager::RequestAsync(),
+                deadline
+            )?;
+            let token = manager
+                .CurrentSessionChanged(&TypedEventHandler::new(|_, _| {
+                    signal_media_changed();
+                    Ok(())
+                }))
+                .ok();
+            self.manager_token = token;
+            self.manager = Some(manager);
+        }
+        let manager = self.manager.as_ref()?;
+        match manager.GetCurrentSession() {
+            Ok(session) => {
+                let identity = session_identity(&session);
+                if self
+                    .session_sub
+                    .as_ref()
+                    .is_none_or(|sub| identity == 0 || sub.identity != identity)
+                {
+                    self.session_sub =
+                        Some(SessionSubscription::subscribe(session.clone(), identity));
+                }
+                let active = self.manager_token.is_some()
+                    && self
+                        .session_sub
+                        .as_ref()
+                        .is_some_and(SessionSubscription::is_fully_subscribed);
+                MEDIA_EVENTS_ACTIVE.store(active, Ordering::Release);
+                Some(session)
+            }
+            Err(error) => {
+                if is_disconnected_hr(error.code().0) {
+                    self.clear_manager();
+                } else {
+                    self.session_sub = None;
+                    MEDIA_EVENTS_ACTIVE.store(self.manager_token.is_some(), Ordering::Release);
+                }
+                None
+            }
+        }
+    }
+}
+
+impl Drop for SmtcState {
+    fn drop(&mut self) {
+        self.clear_manager();
+    }
+}
+
+fn media_snapshot_changed(previous: Option<&NowPlaying>, next: Option<&NowPlaying>) -> bool {
+    previous != next
 }
 
 fn media_worker(receiver: &mpsc::Receiver<MediaTask>, cache: &Mutex<MediaCache>) {
     let com = ComGuard::multithreaded();
     let mut artwork = ArtworkCache::default();
+    let mut smtc = SmtcState::default();
+    let mut last_snapshot: Option<NowPlaying> = None;
     for task in receiver {
+        if is_shutting_down() {
+            break;
+        }
         let deadline = Instant::now() + MEDIA_OPERATION_TIMEOUT;
         match task {
             MediaTask::Refresh => {
+                MEDIA_DIRTY.store(false, Ordering::Release);
                 let snapshot = com
                     .as_ref()
-                    .and_then(|_| read_now_playing_sync(&mut artwork, deadline));
+                    .and_then(|_| read_now_playing_sync(&mut smtc, &mut artwork, deadline));
+                if is_shutting_down() {
+                    break;
+                }
+                let changed = media_snapshot_changed(last_snapshot.as_ref(), snapshot.as_ref());
+                last_snapshot.clone_from(&snapshot);
                 if let Ok(mut state) = cache.lock() {
                     state.store(snapshot, Instant::now());
+                }
+                if changed && !is_shutting_down() {
+                    crate::idle_wake::request_idle_wake();
                 }
             }
             MediaTask::Command(command) => {
                 if com.is_none() {
                     continue;
                 }
-                let outcome = send_media_command_sync(command, deadline);
-                if outcome != CommandResult::Accepted {
+                MEDIA_DIRTY.store(false, Ordering::Release);
+                let outcome = send_media_command_sync(&mut smtc, command, deadline);
+                if outcome != CommandResult::Accepted && !is_shutting_down() {
                     crate::actions::signal_command_failure();
                 }
-                let readback =
-                    read_now_playing_sync(&mut artwork, Instant::now() + MEDIA_OPERATION_TIMEOUT);
+                if is_shutting_down() {
+                    break;
+                }
+                let readback = read_now_playing_sync(
+                    &mut smtc,
+                    &mut artwork,
+                    Instant::now() + MEDIA_OPERATION_TIMEOUT,
+                );
+                if is_shutting_down() {
+                    break;
+                }
+                let changed = media_snapshot_changed(last_snapshot.as_ref(), readback.as_ref());
+                last_snapshot.clone_from(&readback);
                 if let Ok(mut state) = cache.lock() {
                     state.store(readback, Instant::now());
+                }
+                if changed && !is_shutting_down() {
+                    crate::idle_wake::request_idle_wake();
                 }
             }
         }
     }
-}
-
-fn current_session(deadline: Instant) -> Option<GlobalSystemMediaTransportControlsSession> {
-    await_until!(
-        GlobalSystemMediaTransportControlsSessionManager::RequestAsync(),
-        deadline
-    )?
-    .GetCurrentSession()
-    .ok()
+    drop(smtc);
+    drop(com);
 }
 
 fn read_thumbnail_bytes(
     stream_ref: &IRandomAccessStreamReference,
     deadline: Instant,
 ) -> Option<Arc<[u8]>> {
+    if is_shutting_down() {
+        return None;
+    }
     let stream = await_until!(stream_ref.OpenReadAsync(), deadline)?;
     let size = stream.Size().ok()?;
     if size == 0 || size > MAX_THUMBNAIL_BYTES as u64 {
         return None;
     }
     let input = stream.cast::<IInputStream>().ok()?;
-    let bytes = read_stream_bounded(&input, MAX_THUMBNAIL_BYTES, deadline, &|| false)?;
+    let bytes = read_stream_bounded(&input, MAX_THUMBNAIL_BYTES, deadline, &is_shutting_down)?;
     (!bytes.is_empty()).then(|| Arc::from(bytes.into_boxed_slice()))
 }
 
-fn read_now_playing_sync(artwork: &mut ArtworkCache, deadline: Instant) -> Option<NowPlaying> {
-    let session = current_session(deadline)?;
+fn read_now_playing_sync(
+    smtc: &mut SmtcState,
+    artwork: &mut ArtworkCache,
+    deadline: Instant,
+) -> Option<NowPlaying> {
+    let session = smtc.current_session(deadline)?;
     let props = await_until!(session.TryGetMediaPropertiesAsync(), deadline)?;
     let title = props.Title().ok()?.to_string();
     if title.trim().is_empty() {
@@ -304,7 +534,7 @@ fn read_now_playing_sync(artwork: &mut ArtworkCache, deadline: Instant) -> Optio
     };
     let key = media.track_key();
     let now = Instant::now();
-    media.thumbnail = if artwork.should_fetch(&key, now) {
+    media.thumbnail = if !is_shutting_down() && artwork.should_fetch(&key, now) {
         let fetched = props
             .Thumbnail()
             .ok()
@@ -334,8 +564,12 @@ fn command_result(session_found: bool, reply: Option<bool>) -> CommandResult {
     }
 }
 
-fn send_media_command_sync(command: MediaCommand, deadline: Instant) -> CommandResult {
-    let Some(session) = current_session(deadline) else {
+fn send_media_command_sync(
+    smtc: &mut SmtcState,
+    command: MediaCommand,
+    deadline: Instant,
+) -> CommandResult {
+    let Some(session) = smtc.current_session(deadline) else {
         return command_result(false, None);
     };
     let reply = match command {
@@ -356,8 +590,8 @@ fn send_media_command_sync(command: MediaCommand, deadline: Instant) -> CommandR
 mod tests {
     use super::{
         ARTWORK_MAX_ATTEMPTS, ARTWORK_RETRY_BASE, ArtworkCache, CacheRead, CommandResult,
-        MEDIA_CACHE_TTL, MEDIA_STALE_AFTER, MediaCache, command_result, rate_permille,
-        unix_ms_from_windows_ticks,
+        MEDIA_CACHE_TTL, MEDIA_IDLE_EVENT_TTL, MEDIA_PLAYING_EVENT_TTL, MEDIA_STALE_AFTER,
+        MediaCache, command_result, rate_permille, unix_ms_from_windows_ticks,
     };
     use otto_core::{NowPlaying, TrackKey};
     use std::sync::Arc;
@@ -482,5 +716,102 @@ mod tests {
         assert!(cache.read(start).request_refresh);
         cache.abandon_request();
         assert!(cache.read(start).request_refresh);
+    }
+
+    #[test]
+    fn event_subscribed_cache_extends_ttl_and_honors_dirty_notifications() {
+        let mut cache = MediaCache::default();
+        let start = Instant::now();
+        cache.store(None, start);
+        assert!(
+            !cache
+                .read_at(start + MEDIA_CACHE_TTL * 2, true, false)
+                .request_refresh
+        );
+        assert!(
+            cache
+                .read_at(start + MEDIA_IDLE_EVENT_TTL, true, false)
+                .request_refresh
+        );
+
+        let playing = NowPlaying {
+            playing: true,
+            ..track()
+        };
+        let play_start = start + MEDIA_IDLE_EVENT_TTL + Duration::from_secs(1);
+        cache.store(Some(playing), play_start);
+        assert!(
+            !cache
+                .read_at(play_start + MEDIA_CACHE_TTL * 2, true, false)
+                .request_refresh
+        );
+        assert!(
+            cache
+                .read_at(play_start + MEDIA_PLAYING_EVENT_TTL, true, false)
+                .request_refresh
+        );
+        let refreshed = play_start + MEDIA_PLAYING_EVENT_TTL + Duration::from_millis(20);
+        cache.store(
+            Some(NowPlaying {
+                playing: true,
+                ..track()
+            }),
+            refreshed,
+        );
+        assert!(
+            !cache
+                .read_at(refreshed + Duration::from_millis(10), true, false)
+                .request_refresh
+        );
+        assert!(
+            cache
+                .read_at(refreshed + Duration::from_millis(10), true, true)
+                .request_refresh
+        );
+    }
+
+    #[test]
+    fn snapshot_change_detection_ignores_identical_states_and_flags_updates() {
+        let playing = NowPlaying {
+            playing: true,
+            ..track()
+        };
+        let paused = NowPlaying {
+            playing: false,
+            ..track()
+        };
+        assert!(!super::media_snapshot_changed(None, None));
+        assert!(super::media_snapshot_changed(None, Some(&playing)));
+        assert!(!super::media_snapshot_changed(
+            Some(&playing),
+            Some(&playing)
+        ));
+        assert!(super::media_snapshot_changed(Some(&playing), Some(&paused)));
+        assert!(super::media_snapshot_changed(Some(&paused), None));
+    }
+
+    #[test]
+    fn shutdown_blocks_media_respawn_and_marks_stream_cancelled() {
+        struct ResumeMediaGuard;
+        impl Drop for ResumeMediaGuard {
+            fn drop(&mut self) {
+                super::shutdown_media_task();
+                super::resume_media_task();
+            }
+        }
+
+        let _guard = ResumeMediaGuard;
+        super::shutdown_media_task();
+        assert!(super::is_shutting_down());
+        assert!(super::read_now_playing().is_none());
+        assert!(!super::send_media_command(
+            super::MediaCommand::TogglePlayPause
+        ));
+        assert!(
+            super::MEDIA_RUNTIME
+                .get()
+                .and_then(|cell| cell.lock().ok())
+                .is_none_or(|guard| guard.is_none())
+        );
     }
 }

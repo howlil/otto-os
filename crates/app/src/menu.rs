@@ -1,33 +1,35 @@
 use std::time::{Duration, Instant};
 
+use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
 use otto_core::{
-    AppMenuState, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY, CMD_CC_BRIGHTNESS, CMD_CC_VOLUME,
-    CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, Capability,
-    CommandOutcome, ControlCenterEffect, ControlCenterPort, DockPreferences, DownloadsEffect,
-    EstimatedMenuText, HitTarget, MenuAnchor, MenuContext, MenuRow, MenuTextMeasure,
-    PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowCommand,
-    WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_rows, build_control_center_rows,
+    AppMenuState, BACKDROP_PADDING_PT, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY,
+    CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER,
+    CMD_NOTIF_CLEAR_ALL, CMD_NOTIF_REQUEST_ACCESS, Capability, CaptureRegion, CommandOutcome,
+    ControlCenterEffect, ControlCenterPort, DOWNLOADS_STACK_MAX_ITEMS, DockPreferences,
+    DownloadsEffect, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
+    EstimatedMenuText, HitTarget, MAX_VISIBLE_NOTIFICATIONS, MenuAnchor, MenuContext, MenuRow,
+    MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange,
+    WindowCommand, WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_notification_rows,
     build_menu_overflow_rows, build_top_bar_menu_rows, build_window_tiling_menu_rows,
+    capture_interval_for, capture_wanted, compute_downloads_stack_layout,
     compute_popup_menu_layout, control_center_effect, dock_overflow_choice, dock_settings_effect,
-    dock_settings_rows, downloads_effect, overflow_menu_target, scale, shift_month,
-    window_menu_effect,
+    dock_settings_rows, downloads_effect, downloads_stack_hit_test, next_downloads_stack_focus,
+    notification_dismiss_index, overflow_menu_target, scale, shift_month, window_menu_effect,
 };
-use otto_platform::release_capture_if_owned;
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
     build_dock_context_menu_rows, current_process_id, cursor_position, execute_top_bar_command,
-    focus_window_hwnd, monitor_work_area_at, open_downloads_folder, open_path, poll_menu_events,
-    primary_screen, read_downloads_stack_items, signal_command_failure, window_command_capability,
+    focus_window_hwnd, is_running_on_battery, monitor_work_area_at, open_downloads_folder,
+    open_path, poll_menu_events, primary_screen, read_downloads_stack_items,
+    read_downloads_stack_thumbnails, signal_command_failure, window_command_capability,
 };
-use otto_render::PopupMenuRenderer;
+use otto_render::{DownloadsStackRenderer, PopupMenuRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SetTimer, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONUP, WM_TIMER,
+    SetTimer, SetWindowPos, ShowWindow, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -35,7 +37,7 @@ const MENU_POLL_TIMER: usize = 30;
 const MENU_POLL_MS: u32 = 16;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
 const WHEEL_ROWS_PER_NOTCH: i32 = 2;
-const DOWNLOADS_VISIBLE_ITEMS: usize = 24;
+const WM_APP_MENU_BACKDROP: u32 = 0x8000 + 28;
 
 pub(crate) struct TopBarMenuRequest<'a> {
     pub bar_hwnd: isize,
@@ -62,12 +64,12 @@ enum MenuSource {
     WindowControls {
         window: WindowInfo,
     },
-    ControlCenter,
     Calendar {
         year: u16,
         month: u8,
         anchor_right: i32,
         anchor_y: i32,
+        notification_ids: Vec<u32>,
     },
     DownloadsStack {
         items: Vec<StackItem>,
@@ -78,9 +80,18 @@ enum MenuSource {
     DockSettings,
 }
 
+struct DownloadsStackView {
+    items: Vec<StackItem>,
+    entries: Vec<DownloadsStackEntry>,
+    layout: DownloadsStackLayout,
+    active_hit: DownloadsStackHit,
+}
+
 pub(crate) struct PopupMenu {
     hwnd: isize,
     renderer: Option<PopupMenuRenderer>,
+    stack_renderer: Option<DownloadsStackRenderer>,
+    stack_view: Option<DownloadsStackView>,
     control_center: Box<dyn ControlCenterPort>,
     screen: PrimaryScreen,
     metrics: PopupMenuMetrics,
@@ -91,10 +102,11 @@ pub(crate) struct PopupMenu {
     hovered_row: Option<usize>,
     source: Option<MenuSource>,
     visible: bool,
-    dragging_row: Option<usize>,
     opened_at: Instant,
     was_mouse_down: bool,
     last_cursor: (i32, i32),
+    last_specular_cursor: (i32, i32),
+    backdrop: Option<BackdropFeed>,
 }
 
 fn anchor_point(anchor: MenuAnchor) -> (i32, i32) {
@@ -135,6 +147,8 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let menu = PopupMenu {
         hwnd,
         renderer: None,
+        stack_renderer: None,
+        stack_view: None,
         control_center: Box::new(WindowsControlCenter),
         screen,
         layout: resolve_layout(&metrics, screen.dpi, anchor, 0, &[], None),
@@ -145,17 +159,20 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         hovered_row: None,
         source: None,
         visible: false,
-        dragging_row: None,
         opened_at: Instant::now(),
         was_mouse_down: false,
         last_cursor: (0, 0),
+        last_specular_cursor: (0, 0),
+        backdrop: None,
     };
     *runtime.menu.borrow_mut() = Some(menu);
     Ok(())
 }
 
 pub fn stop(runtime: &RuntimeContext) {
-    if let Some(mut menu) = runtime.menu.borrow_mut().take() {
+    if let Ok(mut guard) = runtime.menu.try_borrow_mut()
+        && let Some(mut menu) = guard.take()
+    {
         menu.hide();
     }
 }
@@ -176,6 +193,26 @@ pub fn active_top_bar_target(runtime: &RuntimeContext) -> Option<HitTarget> {
 
 pub fn close(runtime: &RuntimeContext) {
     with_menu(runtime, PopupMenu::hide);
+}
+
+pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_menu(runtime, |menu| {
+        if !enabled {
+            menu.backdrop = None;
+            if let Some(renderer) = menu.renderer.as_ref() {
+                renderer.clear_backdrop();
+            }
+        }
+        menu.sync_backdrop(runtime, true);
+        menu.present(runtime);
+    });
+}
+
+pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+    with_menu(runtime, |menu| {
+        menu.sync_backdrop(runtime, true);
+        menu.present(runtime);
+    });
 }
 
 fn top_bar_context<'a>(request: &TopBarMenuRequest<'a>, own_pid: u32) -> MenuContext<'a> {
@@ -288,63 +325,9 @@ pub fn open_dock_overflow_menu(
 }
 
 pub fn open_downloads_stack_menu(runtime: &RuntimeContext, center_x: i32, bottom_y: i32) {
-    let items = read_downloads_stack_items(DOWNLOADS_VISIBLE_ITEMS);
-    let mut rows = vec![MenuRow::heading("Downloads"), MenuRow::Separator];
-    if items.is_empty() {
-        rows.push(MenuRow::heading("No Recent Downloads"));
-    } else {
-        for (index, item) in items.iter().enumerate() {
-            let prefix = if item.is_dir { "📁 " } else { "📄 " };
-            rows.push(MenuRow::item(
-                CMD_DOWNLOADS_ITEM_BASE + index,
-                format!("{prefix}{}", item.name),
-                "",
-            ));
-        }
-    }
-    rows.push(MenuRow::Separator);
-    rows.push(MenuRow::item(
-        CMD_DOWNLOADS_OPEN_FOLDER,
-        "Open in Finder",
-        "",
-    ));
-
-    let source = MenuSource::DownloadsStack { items };
+    let items = read_downloads_stack_items(DOWNLOADS_STACK_MAX_ITEMS);
     with_menu(runtime, |menu| {
-        menu.open(
-            runtime,
-            MenuAnchor::AboveDock { center_x, bottom_y },
-            rows,
-            source,
-        );
-    });
-}
-
-pub fn open_control_center(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
-    with_menu(runtime, |menu| {
-        let status = menu.control_center.read_system_status();
-        let volume = if status.muted { 0 } else { status.volume };
-        let media = menu.control_center.read_now_playing();
-        let theme_mode = crate::theme_state::theme_mode(runtime);
-        let rows = build_control_center_rows(
-            volume,
-            status.brightness,
-            media
-                .as_ref()
-                .map(|m| (m.title.as_str(), m.artist.as_str(), m.playing)),
-            theme_mode,
-            runtime.online_lyrics_enabled.get(),
-        );
-        let width = scale(menu.metrics.min_width, menu.screen.dpi);
-        menu.open(
-            runtime,
-            MenuAnchor::BelowPoint {
-                x: anchor_right - width,
-                y: anchor_y,
-            },
-            rows,
-            MenuSource::ControlCenter,
-        );
+        menu.open_downloads_stack(runtime, center_x, bottom_y, items);
     });
 }
 
@@ -369,8 +352,28 @@ fn open_calendar_month(
     with_menu(runtime, |menu| {
         let clock = menu.control_center.read_system_status().clock;
         let today = (clock.year == year && clock.month == month).then_some(clock.day);
-        let rows = build_calendar_rows(year, month, today);
-        let width = scale(menu.metrics.min_width, menu.screen.dpi);
+        let notifications = menu.control_center.read_notifications();
+        let notification_ids: Vec<u32> = notifications
+            .items
+            .iter()
+            .take(MAX_VISIBLE_NOTIFICATIONS)
+            .map(|item| item.id)
+            .collect();
+        let rows = build_calendar_notification_rows(year, month, today, &notifications);
+        let probe = MenuAnchor::BelowPoint {
+            x: anchor_right - 1,
+            y: anchor_y,
+        };
+        let width = resolve_layout(
+            &menu.metrics,
+            menu.screen.dpi,
+            probe,
+            0,
+            &rows,
+            menu.renderer.as_ref(),
+        )
+        .window
+        .width;
         menu.open(
             runtime,
             MenuAnchor::BelowPoint {
@@ -383,6 +386,7 @@ fn open_calendar_month(
                 month,
                 anchor_right,
                 anchor_y,
+                notification_ids,
             },
         );
     });
@@ -393,15 +397,6 @@ pub fn is_calendar_open(runtime: &RuntimeContext) -> bool {
     runtime.menu.try_borrow().ok().is_some_and(|guard| {
         guard.as_ref().is_some_and(|menu| {
             menu.visible && matches!(menu.source, Some(MenuSource::Calendar { .. }))
-        })
-    })
-}
-
-#[must_use]
-pub fn is_control_center_open(runtime: &RuntimeContext) -> bool {
-    runtime.menu.try_borrow().ok().is_some_and(|guard| {
-        guard.as_ref().is_some_and(|menu| {
-            menu.visible && matches!(menu.source, Some(MenuSource::ControlCenter))
         })
     })
 }
@@ -456,15 +451,6 @@ pub fn handle_message(
             with_menu(runtime, |menu| menu.on_wheel(runtime, delta));
             Some(LRESULT(0))
         }
-        WM_LBUTTONUP => {
-            with_menu(runtime, PopupMenu::end_slider_drag);
-            Some(LRESULT(0))
-        }
-        WM_CAPTURECHANGED => {
-            with_menu(runtime, |menu| menu.dragging_row = None);
-            Some(LRESULT(0))
-        }
-        WM_LBUTTONDOWN if slider_pressed(runtime, lparam) => Some(LRESULT(0)),
         WM_LBUTTONDOWN | WM_RBUTTONUP => {
             let (x, y) = unpack_point(lparam);
             let mut selected = None;
@@ -480,6 +466,10 @@ pub fn handle_message(
             with_menu(runtime, PopupMenu::rebuild);
             Some(LRESULT(0))
         }
+        WM_APP_MENU_BACKDROP => {
+            with_menu(runtime, |menu| menu.on_backdrop(runtime));
+            Some(LRESULT(0))
+        }
         WM_CLOSE => {
             with_menu(runtime, PopupMenu::hide);
             Some(LRESULT(0))
@@ -492,23 +482,6 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     (x, y)
-}
-
-fn slider_pressed(runtime: &RuntimeContext, lparam: LPARAM) -> bool {
-    let (x, y) = unpack_point(lparam);
-    let mut handled = false;
-    with_menu(runtime, |menu| {
-        handled = menu.begin_slider_drag(runtime, x, y);
-    });
-    handled
-}
-
-fn apply_slider(port: &dyn ControlCenterPort, id: usize, value: u8) -> Option<u8> {
-    match id {
-        CMD_CC_VOLUME => port.set_volume(value).map(|(volume, _)| volume),
-        CMD_CC_BRIGHTNESS => Some(port.set_brightness(value)),
-        _ => None,
-    }
 }
 
 fn with_menu(runtime: &RuntimeContext, action: impl FnOnce(&mut PopupMenu)) {
@@ -553,6 +526,14 @@ fn execute_window_menu_command(
             }
             false
         }
+        WindowMenuEffect::OpenOttoSettings => {
+            crate::bar::open_otto_settings(runtime);
+            false
+        }
+        WindowMenuEffect::OpenLogs => {
+            let _ = otto_platform::open_logs_folder();
+            false
+        }
         WindowMenuEffect::Native(cmd) => {
             let result =
                 execute_top_bar_command(cmd, window.map(|window| window.identity), own_pid);
@@ -586,16 +567,12 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
         MenuSource::Dock { entry, target_rect } => {
             crate::dock::execute_dock_menu_command(runtime, cmd, &entry, target_rect);
         }
-        MenuSource::ControlCenter => {
-            with_menu(runtime, |menu| {
-                menu.execute_control_center_command(runtime, cmd);
-            });
-        }
         MenuSource::Calendar {
             year,
             month,
             anchor_right,
             anchor_y,
+            notification_ids,
         } => match cmd {
             CMD_CAL_PREVIOUS | CMD_CAL_NEXT => {
                 let delta = if cmd == CMD_CAL_NEXT { 1 } else { -1 };
@@ -603,9 +580,31 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
                 open_calendar_month(runtime, next_year, next_month, anchor_right, anchor_y);
             }
             CMD_CAL_TODAY => open_calendar(runtime, anchor_right, anchor_y),
-            _ => with_menu(runtime, |menu| {
-                menu.execute_control_center_command(runtime, cmd);
-            }),
+            CMD_NOTIF_CLEAR_ALL => {
+                with_menu(runtime, |menu| {
+                    let _ = menu.control_center.clear_notifications();
+                });
+                open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+            }
+            CMD_NOTIF_REQUEST_ACCESS => {
+                with_menu(runtime, |menu| {
+                    let _ = menu.control_center.request_notification_access();
+                });
+                open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+            }
+            _ => {
+                if let Some(index) = notification_dismiss_index(cmd, notification_ids.len()) {
+                    let id = notification_ids[index];
+                    with_menu(runtime, |menu| {
+                        let _ = menu.control_center.dismiss_notification(id);
+                    });
+                    open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+                } else {
+                    with_menu(runtime, |menu| {
+                        menu.execute_control_center_command(runtime, cmd);
+                    });
+                }
+            }
         },
         MenuSource::WindowControls { window } => {
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));
@@ -641,14 +640,16 @@ impl PopupMenu {
             self.hide();
             return;
         }
+        crate::control_center::close(runtime);
         self.screen = primary_screen();
+        self.stack_view = None;
+        self.stack_renderer = None;
         let _ = self.ensure_renderer();
         self.rows = rows;
         self.anchor = anchor;
         self.scroll_offset = 0;
         self.relayout();
         self.hovered_row = None;
-        self.dragging_row = None;
         self.source = Some(source);
         self.opened_at = Instant::now();
         self.was_mouse_down = true;
@@ -656,6 +657,66 @@ impl PopupMenu {
         self.visible = true;
 
         self.place();
+        self.sync_backdrop(runtime, true);
+        self.present(runtime);
+        unsafe {
+            SetTimer(
+                Some(HWND(self.hwnd as *mut _)),
+                MENU_POLL_TIMER,
+                MENU_POLL_MS,
+                None,
+            );
+        }
+    }
+
+    fn open_downloads_stack(
+        &mut self,
+        runtime: &RuntimeContext,
+        center_x: i32,
+        bottom_y: i32,
+        items: Vec<StackItem>,
+    ) {
+        crate::control_center::close(runtime);
+        self.screen = primary_screen();
+        self.rows.clear();
+        self.hovered_row = None;
+        self.source = None;
+        self.renderer = None;
+
+        let entries: Vec<DownloadsStackEntry> = items
+            .iter()
+            .map(|item| DownloadsStackEntry {
+                name: item.name.clone(),
+                is_dir: item.is_dir,
+            })
+            .collect();
+        let bounds = monitor_work_area_at(center_x, bottom_y);
+        let layout =
+            compute_downloads_stack_layout(center_x, bottom_y, bounds, self.screen.dpi, &entries);
+        let thumb_px = scale(46, self.screen.dpi) as u32;
+        let thumbs = read_downloads_stack_thumbnails(&items, thumb_px);
+        if self.stack_renderer.is_none()
+            && let Ok(renderer) = DownloadsStackRenderer::new(self.screen.dpi)
+        {
+            self.stack_renderer = Some(renderer);
+        }
+        if let Some(renderer) = self.stack_renderer.as_mut() {
+            let _ = renderer.set_thumbnails(&thumbs);
+        }
+        self.layout.window = layout.window;
+        self.stack_view = Some(DownloadsStackView {
+            items,
+            entries,
+            layout,
+            active_hit: DownloadsStackHit::None,
+        });
+        self.opened_at = Instant::now();
+        self.was_mouse_down = true;
+        self.last_cursor = cursor_position();
+        self.visible = true;
+
+        self.place();
+        self.sync_backdrop(runtime, true);
         self.present(runtime);
         unsafe {
             SetTimer(
@@ -746,21 +807,17 @@ impl PopupMenu {
         }
     }
 
-    fn end_slider_drag(&mut self) {
-        if self.dragging_row.take().is_some() {
-            let _ = release_capture_if_owned(self.hwnd);
-        }
-    }
-
     fn hide(&mut self) {
         if !self.visible {
             return;
         }
-        self.end_slider_drag();
         let restore_hwnd = self.target_hwnd();
         self.visible = false;
         self.hovered_row = None;
         self.source = None;
+        self.stack_view = None;
+        self.stack_renderer = None;
+        self.backdrop = None;
         self.renderer = None;
         unsafe {
             let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), MENU_POLL_TIMER);
@@ -776,6 +833,7 @@ impl PopupMenu {
         self.hide();
         self.screen = primary_screen();
         self.renderer = None;
+        self.stack_renderer = None;
     }
 
     fn take_selection(&mut self, row: usize) -> Option<(MenuSource, usize)> {
@@ -785,15 +843,116 @@ impl PopupMenu {
         Some((source, cmd))
     }
 
+    fn take_stack_selection(&mut self, hit: DownloadsStackHit) -> Option<(MenuSource, usize)> {
+        let cmd = match hit {
+            DownloadsStackHit::OpenFolder => CMD_DOWNLOADS_OPEN_FOLDER,
+            DownloadsStackHit::Item(index) => CMD_DOWNLOADS_ITEM_BASE + index,
+            DownloadsStackHit::None => return None,
+        };
+        let stack = self.stack_view.take()?;
+        self.hide();
+        Some((MenuSource::DownloadsStack { items: stack.items }, cmd))
+    }
+
+    fn on_stack_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<(MenuSource, usize)> {
+        let cursor = cursor_position();
+        let (gx, gy) = cursor;
+        let (inside, pointed_hit, changed) = {
+            let stack = self.stack_view.as_mut()?;
+            let inside = stack.layout.window.contains(gx, gy);
+            let mut changed = false;
+            if cursor != self.last_cursor {
+                self.last_cursor = cursor;
+                let hit = if inside {
+                    downloads_stack_hit_test(
+                        &stack.layout,
+                        gx - stack.layout.window.x,
+                        gy - stack.layout.window.y,
+                    )
+                } else {
+                    DownloadsStackHit::None
+                };
+                if hit != stack.active_hit {
+                    stack.active_hit = hit;
+                    changed = true;
+                }
+            }
+            (inside, stack.active_hit, changed)
+        };
+        if changed {
+            self.present(runtime);
+        }
+
+        let (mouse_down, nav_event) = poll_menu_events();
+        match nav_event {
+            Some(MenuNavEvent::Escape) => {
+                self.hide();
+                return None;
+            }
+            Some(MenuNavEvent::Enter) => {
+                if let Some(selection) = self.take_stack_selection(pointed_hit) {
+                    return Some(selection);
+                }
+            }
+            Some(event) => {
+                let updated = self.stack_view.as_mut().and_then(|stack| {
+                    let (dx, dy) = match event {
+                        MenuNavEvent::Left | MenuNavEvent::BackTab => (-1, 0),
+                        MenuNavEvent::Right | MenuNavEvent::Tab => (1, 0),
+                        MenuNavEvent::Up => (0, -1),
+                        MenuNavEvent::Down => (0, 1),
+                        _ => return None,
+                    };
+                    let next = next_downloads_stack_focus(
+                        stack.active_hit,
+                        stack.entries.len(),
+                        stack.layout.columns,
+                        dx,
+                        dy,
+                    );
+                    (next != stack.active_hit).then(|| {
+                        stack.active_hit = next;
+                    })
+                });
+                if updated.is_some() {
+                    self.present(runtime);
+                }
+            }
+            None => {}
+        }
+
+        if mouse_down
+            && !self.was_mouse_down
+            && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
+            && !inside
+        {
+            self.hide();
+            return None;
+        }
+        self.was_mouse_down = mouse_down;
+        None
+    }
+
     fn on_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<(MenuSource, usize)> {
         if !self.visible {
             return None;
         }
+        if self.stack_view.is_some() {
+            return self.on_stack_poll_timer(runtime);
+        }
+        self.sync_backdrop(runtime, false);
         let cursor = cursor_position();
         let (gx, gy) = cursor;
         let inside = self.layout.window.contains(gx, gy);
-        if cursor != self.last_cursor && self.dragging_row.is_none() {
+        if cursor != self.last_cursor {
             self.last_cursor = cursor;
+            if let Some(renderer) = self.renderer.as_ref() {
+                let pointer = inside.then_some((
+                    (gx - self.layout.window.x) as f32,
+                    (gy - self.layout.window.y) as f32,
+                ));
+                renderer.set_pointer(pointer);
+            }
             let pointed = inside
                 .then(|| {
                     self.layout
@@ -812,14 +971,15 @@ impl PopupMenu {
                 self.hide();
                 return None;
             }
-            Some(MenuNavEvent::Up) => {
+            Some(MenuNavEvent::Up | MenuNavEvent::BackTab) => {
                 let row = self.layout.prev_interactive_row(self.hovered_row);
                 self.select_row(runtime, row);
             }
-            Some(MenuNavEvent::Down) => {
+            Some(MenuNavEvent::Down | MenuNavEvent::Tab) => {
                 let row = self.layout.next_interactive_row(self.hovered_row);
                 self.select_row(runtime, row);
             }
+            Some(MenuNavEvent::Left | MenuNavEvent::Right) | None => {}
             Some(MenuNavEvent::Char(ch)) => {
                 if let Some(row) = self
                     .layout
@@ -835,12 +995,10 @@ impl PopupMenu {
                     return Some(selection);
                 }
             }
-            None => {}
         }
 
         if mouse_down
             && !self.was_mouse_down
-            && self.dragging_row.is_none()
             && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
             && !inside
         {
@@ -855,52 +1013,25 @@ impl PopupMenu {
         if !self.visible {
             return;
         }
-        if let Some(row) = self.dragging_row {
-            self.update_slider(runtime, row, x);
+        if let Some(stack) = self.stack_view.as_mut() {
+            let next = downloads_stack_hit_test(&stack.layout, x, y);
+            if next != stack.active_hit {
+                stack.active_hit = next;
+                self.present(runtime);
+            }
             return;
+        }
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.set_pointer(Some((x as f32, y as f32)));
         }
         let next = self.layout.hit_test(x, y);
-        if next != self.hovered_row {
+        let specular_moved =
+            (x - self.last_specular_cursor.0).abs() + (y - self.last_specular_cursor.1).abs() >= 18;
+        if next != self.hovered_row || specular_moved {
             self.hovered_row = next;
+            self.last_specular_cursor = (x, y);
             self.present(runtime);
         }
-    }
-
-    fn begin_slider_drag(&mut self, runtime: &RuntimeContext, x: i32, y: i32) -> bool {
-        if !self.visible {
-            return false;
-        }
-        let Some(row) = self.layout.hit_test(x, y) else {
-            return false;
-        };
-        if self.layout.slider_value_at(row, x).is_none() {
-            return false;
-        }
-        self.dragging_row = Some(row);
-        unsafe {
-            let _ = SetCapture(HWND(self.hwnd as *mut _));
-        }
-        self.update_slider(runtime, row, x);
-        true
-    }
-
-    fn update_slider(&mut self, runtime: &RuntimeContext, row: usize, x: i32) {
-        let Some(requested) = self.layout.slider_value_at(row, x) else {
-            return;
-        };
-        let Some(MenuRow::Slider {
-            id, value: current, ..
-        }) = self.rows.get_mut(row)
-        else {
-            return;
-        };
-        if *current == requested {
-            return;
-        }
-        if let Some(applied) = apply_slider(self.control_center.as_ref(), *id, requested) {
-            *current = applied.min(100);
-        }
-        self.present(runtime);
     }
 
     fn execute_control_center_command(&self, runtime: &RuntimeContext, cmd: usize) {
@@ -924,28 +1055,103 @@ impl PopupMenu {
         if !self.visible {
             return None;
         }
-        let row = self.layout.hit_test(x, y)?;
-        if self.layout.slider_value_at(row, x).is_some() {
-            return None;
+        if let Some(stack) = self.stack_view.as_ref() {
+            let hit = downloads_stack_hit_test(&stack.layout, x, y);
+            return self.take_stack_selection(hit);
         }
+        let row = self.layout.hit_test(x, y)?;
         self.take_selection(row)
+    }
+
+    fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
+        let appearance = crate::theme_state::appearance(runtime);
+        let wanted = self.visible
+            && self.hwnd != 0
+            && !runtime.capture_visible.get()
+            && capture_wanted(&appearance, runtime.glass_enabled.get());
+        if !wanted {
+            if let Some(feed) = self.backdrop.as_mut()
+                && feed.is_active()
+            {
+                feed.reset();
+            }
+            if let Some(renderer) = self.renderer.as_ref() {
+                renderer.clear_backdrop();
+            }
+            return;
+        }
+        if self.backdrop.is_none() {
+            self.backdrop = Some(BackdropFeed::start(
+                self.hwnd,
+                WM_APP_MENU_BACKDROP,
+                vec![self.hwnd],
+            ));
+        }
+        let Some(feed) = self.backdrop.as_mut() else {
+            return;
+        };
+        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let Some(region) = CaptureRegion::padded_to_screen(
+            self.layout.window,
+            pad,
+            self.screen.width,
+            self.screen.height,
+        ) else {
+            return;
+        };
+        let interval = capture_interval_for(is_running_on_battery(), self.visible);
+        feed.request(region, interval, force);
+    }
+
+    fn on_backdrop(&mut self, runtime: &RuntimeContext) {
+        let Some(update) = self.backdrop.as_mut().and_then(BackdropFeed::poll) else {
+            return;
+        };
+        let local = (
+            update.origin.0 - self.layout.window.x,
+            update.origin.1 - self.layout.window.y,
+        );
+        if self.ensure_renderer()
+            && let Some(renderer) = self.renderer.as_ref()
+        {
+            renderer.set_backdrop(update.pixels, local);
+        }
+        self.present(runtime);
     }
 
     fn present(&mut self, runtime: &RuntimeContext) {
         if !self.visible {
             return;
         }
+        let appearance = crate::theme_state::appearance(runtime);
+        if let (Some(stack), Some(renderer)) =
+            (self.stack_view.as_ref(), self.stack_renderer.as_mut())
+        {
+            crate::host::log_present_error(
+                "downloads_stack",
+                renderer.present(
+                    self.hwnd,
+                    &stack.layout,
+                    &stack.entries,
+                    stack.active_hit,
+                    appearance,
+                ),
+            );
+            return;
+        }
         let _ = self.ensure_renderer();
-        let Some(renderer) = self.renderer.as_ref() else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        let appearance = crate::theme_state::appearance(runtime);
-        let _ = renderer.present(
-            self.hwnd,
-            &self.layout,
-            &self.rows,
-            self.hovered_row,
-            appearance,
+        crate::host::log_present_error(
+            "menu",
+            renderer.present(
+                self.hwnd,
+                &self.layout,
+                &self.rows,
+                self.hovered_row,
+                appearance,
+            ),
         );
     }
 }

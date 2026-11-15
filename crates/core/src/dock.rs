@@ -83,11 +83,15 @@ pub enum DockPosition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DockPreferences {
     pub position: DockPosition,
     pub magnification: bool,
     pub icon_size: i32,
     pub autohide: bool,
+    pub hide_taskbar: bool,
+    pub show_downloads: bool,
+    pub show_trash: bool,
 }
 
 impl Default for DockPreferences {
@@ -97,6 +101,9 @@ impl Default for DockPreferences {
             magnification: true,
             icon_size: DOCK_ICON_MEDIUM,
             autohide: false,
+            hide_taskbar: true,
+            show_downloads: true,
+            show_trash: true,
         }
     }
 }
@@ -111,6 +118,9 @@ const DOCK_ICON_MAX: i32 = 80;
 pub enum DockSettingsChange {
     ToggleHiding,
     ToggleMagnification,
+    ToggleHideTaskbar,
+    ToggleShowDownloads,
+    ToggleShowTrash,
     IconSize(i32),
 }
 
@@ -124,6 +134,18 @@ impl DockPreferences {
             },
             DockSettingsChange::ToggleMagnification => Self {
                 magnification: !self.magnification,
+                ..self
+            },
+            DockSettingsChange::ToggleHideTaskbar => Self {
+                hide_taskbar: !self.hide_taskbar,
+                ..self
+            },
+            DockSettingsChange::ToggleShowDownloads => Self {
+                show_downloads: !self.show_downloads,
+                ..self
+            },
+            DockSettingsChange::ToggleShowTrash => Self {
+                show_trash: !self.show_trash,
                 ..self
             },
             DockSettingsChange::IconSize(size) => Self {
@@ -158,14 +180,22 @@ impl DockPreferences {
                     size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX)
                 }),
             autohide: config_flag(contents, "dock_autohide", defaults.autohide),
+            hide_taskbar: config_flag(contents, "dock_hide_taskbar", defaults.hide_taskbar),
+            show_downloads: config_flag(contents, "dock_show_downloads", defaults.show_downloads),
+            show_trash: config_flag(contents, "dock_show_trash", defaults.show_trash),
         }
     }
 
     #[must_use]
     pub fn config_lines(self) -> String {
         format!(
-            "dock_autohide={}\ndock_magnification={}\ndock_icon_size={}\n",
-            self.autohide, self.magnification, self.icon_size
+            "dock_autohide={}\ndock_magnification={}\ndock_icon_size={}\ndock_hide_taskbar={}\ndock_show_downloads={}\ndock_show_trash={}\n",
+            self.autohide,
+            self.magnification,
+            self.icon_size,
+            self.hide_taskbar,
+            self.show_downloads,
+            self.show_trash
         )
     }
 }
@@ -556,6 +586,67 @@ fn evaluate_scales(
     (scales, hovered_index)
 }
 
+#[must_use]
+pub fn parse_title_badge_count(title: &str) -> Option<u32> {
+    let trimmed = title.trim();
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        if let Some(rest) = trimmed.strip_prefix(open)
+            && let Some((inner, _)) = rest.split_once(close)
+            && let Ok(count) = inner.trim().parse::<u32>()
+            && (1..=999).contains(&count)
+        {
+            return Some(count);
+        }
+    }
+    None
+}
+
+#[must_use]
+pub fn parse_title_progress(title: &str) -> Option<f32> {
+    let trimmed = title.trim();
+    let candidate = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.split_once(')').map(|(inner, _)| inner))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('[')
+                .and_then(|s| s.split_once(']').map(|(inner, _)| inner))
+        })
+        .or_else(|| trimmed.split_whitespace().next())?;
+    let pct_str = candidate.trim().strip_suffix('%')?;
+    let pct: f32 = pct_str.trim().parse().ok()?;
+    if (0.0..=100.0).contains(&pct) {
+        Some((pct / 100.0).clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+#[must_use]
+pub fn dock_entry_badge(window_titles: &[String], notification_count: Option<u32>) -> Option<u32> {
+    let title_count = window_titles
+        .iter()
+        .filter_map(|title| parse_title_badge_count(title))
+        .max();
+    let best = notification_count
+        .unwrap_or(0)
+        .max(title_count.unwrap_or(0));
+    (best > 0).then_some(best)
+}
+
+#[must_use]
+pub fn dock_entry_progress(
+    window_titles: &[String],
+    override_progress: Option<f32>,
+) -> Option<f32> {
+    if let Some(progress) = override_progress {
+        return Some(progress.clamp(0.0, 1.0));
+    }
+    window_titles
+        .iter()
+        .find_map(|title| parse_title_progress(title))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,12 +968,26 @@ mod tests {
     #[test]
     fn settings_changes_toggle_and_resize() {
         let prefs = DockPreferences::default();
+        assert!(prefs.hide_taskbar);
+        assert!(prefs.show_downloads);
+        assert!(prefs.show_trash);
         assert!(prefs.apply(DockSettingsChange::ToggleHiding).autohide);
         assert!(
             !prefs
                 .apply(DockSettingsChange::ToggleMagnification)
                 .magnification
         );
+        assert!(
+            !prefs
+                .apply(DockSettingsChange::ToggleHideTaskbar)
+                .hide_taskbar
+        );
+        assert!(
+            !prefs
+                .apply(DockSettingsChange::ToggleShowDownloads)
+                .show_downloads
+        );
+        assert!(!prefs.apply(DockSettingsChange::ToggleShowTrash).show_trash);
         assert_eq!(
             prefs
                 .apply(DockSettingsChange::IconSize(DOCK_ICON_SMALL))
@@ -890,6 +995,20 @@ mod tests {
             DOCK_ICON_SMALL
         );
         assert_eq!(prefs.apply(DockSettingsChange::IconSize(4)).icon_size, 32);
+
+        let custom = DockPreferences {
+            autohide: true,
+            magnification: false,
+            icon_size: DOCK_ICON_LARGE,
+            hide_taskbar: false,
+            show_downloads: false,
+            show_trash: false,
+            ..DockPreferences::default()
+        };
+        assert_eq!(
+            DockPreferences::parse_config(&custom.config_lines()),
+            custom
+        );
     }
 
     #[test]
@@ -922,5 +1041,52 @@ mod tests {
         let layout = compute_dock_layout(&M, input);
         assert!(layout.pill.width <= 800);
         assert!(layout.pill.x >= 0);
+    }
+
+    #[test]
+    fn title_badges_and_progress_parse_cleanly_and_badge_overhang_fits_headroom() {
+        assert_eq!(parse_title_badge_count("(3) Slack - #general"), Some(3));
+        assert_eq!(parse_title_badge_count("[12] Inbox"), Some(12));
+        assert_eq!(parse_title_badge_count("(2026) Annual Report"), None);
+        assert_eq!(parse_title_badge_count("(0) Notifications"), None);
+        assert_eq!(
+            dock_entry_badge(&[String::from("(4) Mail")], Some(2)),
+            Some(4)
+        );
+        assert_eq!(dock_entry_badge(&[String::from("Mail")], Some(5)), Some(5));
+        assert_eq!(dock_entry_badge(&[String::from("Mail")], Some(0)), None);
+
+        let p = parse_title_progress("42% - Exporting build.zip").expect("pct");
+        assert!((p - 0.42).abs() < 0.001);
+        assert_eq!(parse_title_progress("140% overflow"), None);
+        assert_eq!(
+            dock_entry_progress(&[String::from("(75%) Copying")], None),
+            Some(0.75)
+        );
+        assert_eq!(dock_entry_progress(&[], Some(1.4)), Some(1.0));
+
+        for &dpi in &[96_u32, 144, 192] {
+            let max_bounce = [1.0_f32; 5];
+            let input = DockInput {
+                screen_width: 1920,
+                dpi,
+                app_count: 4,
+                right_count: 1,
+                has_trash: true,
+                cursor_x: Some(960.0),
+                mag_strength: 1.0,
+                bounce_offsets: &max_bounce,
+                item_presence: &[],
+                hide_progress: 0.0,
+            };
+            let layout = compute_dock_layout(&M, input);
+            let badge_overhang = scale(8, dpi) as f32;
+            assert!(
+                layout
+                    .items
+                    .iter()
+                    .all(|item| item.y - badge_overhang >= 0.0)
+            );
+        }
     }
 }

@@ -6,28 +6,27 @@ use otto_core::{
     ShapeTokens, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
-    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1Bitmap, ID2D1DCRenderTarget,
     ID2D1Factory, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_ALIGNMENT_CENTER,
-    IDWriteTextFormat,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_TEXT_ALIGNMENT_CENTER, IDWriteTextFormat,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::glass::GlassPainter;
-use crate::surface::{DibSurface, draw_on, upload_bgra_bitmap};
+use crate::surface::{
+    DibSurface, create_dc_render_target, draw_on, draw_with_recovery, upload_bgra_bitmap,
+};
 use crate::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
@@ -49,10 +48,13 @@ const ICON_RIM: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 1.0,
     a: 0.30,
 };
-const PIXEL_FORMAT: D2D1_PIXEL_FORMAT = D2D1_PIXEL_FORMAT {
-    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-};
+
+struct CachedDockIcon {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    bitmap: ID2D1Bitmap,
+}
 
 const fn rgb(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -72,6 +74,8 @@ pub struct DockRenderItem<'a> {
     pub active: bool,
     pub hidden: bool,
     pub focused: bool,
+    pub badge_count: Option<u32>,
+    pub progress: Option<f32>,
 }
 
 pub struct DockRenderer {
@@ -79,10 +83,11 @@ pub struct DockRenderer {
     target: ID2D1DCRenderTarget,
     stroke_style: ID2D1StrokeStyle,
     tooltip_format: IDWriteTextFormat,
+    badge_format: IDWriteTextFormat,
     surface: DibSurface,
     dpi: u32,
     font_px: f32,
-    icons: HashMap<String, ID2D1Bitmap>,
+    icons: HashMap<String, CachedDockIcon>,
     brushes: BrushPalette,
     glass: GlassPainter,
 }
@@ -91,15 +96,7 @@ impl DockRenderer {
     pub fn new(width: i32, height: i32, dpi: u32) -> Result<Self> {
         unsafe {
             let factory = shared_d2d_factory()?;
-            let properties = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: PIXEL_FORMAT,
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            };
-            let target = factory.CreateDCRenderTarget(&properties)?;
+            let target = create_dc_render_target(&factory)?;
 
             let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
                 startCap: D2D1_CAP_STYLE_ROUND,
@@ -120,6 +117,12 @@ impl DockRenderer {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
+            let badge_format = create_text_format(
+                &dwrite,
+                scale(10, dpi).max(9) as f32,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
 
             let surface = DibSurface::new(width, height)?;
             let brushes = BrushPalette::new(&target)?;
@@ -129,6 +132,7 @@ impl DockRenderer {
                 target,
                 stroke_style,
                 tooltip_format,
+                badge_format,
                 surface,
                 dpi,
                 font_px,
@@ -141,6 +145,10 @@ impl DockRenderer {
 
     pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
         self.glass.set_backdrop(capture, origin);
+    }
+
+    pub fn set_pointer(&self, pointer: Option<(f32, f32)>) {
+        self.glass.set_pointer(pointer);
     }
 
     pub fn clear_backdrop(&self) {
@@ -160,7 +168,15 @@ impl DockRenderer {
     pub fn set_icon(&mut self, key: String, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
         self.surface.bind(&self.target, self.surface.size())?;
         let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
-        self.icons.insert(key, bitmap);
+        self.icons.insert(
+            key,
+            CachedDockIcon {
+                width,
+                height,
+                pixels: pixels.to_vec(),
+                bitmap,
+            },
+        );
         Ok(())
     }
 
@@ -168,16 +184,53 @@ impl DockRenderer {
         self.icons.retain(|k, _| alive.contains(&k.as_str()));
     }
 
+    pub(crate) fn recreate_target(&mut self) -> Result<()> {
+        let target = create_dc_render_target(&self.factory)?;
+        let brushes = BrushPalette::new(&target)?;
+        self.surface.bind(&target, self.surface.size())?;
+        let mut reuploaded = Vec::with_capacity(self.icons.len());
+        for icon in self.icons.values() {
+            reuploaded.push(upload_bgra_bitmap(
+                &target,
+                icon.width,
+                icon.height,
+                &icon.pixels,
+                PixelLimits::ICON,
+            )?);
+        }
+        for (icon, bitmap) in self.icons.values_mut().zip(reuploaded) {
+            icon.bitmap = bitmap;
+        }
+        self.target = target;
+        self.brushes = brushes;
+        self.glass.invalidate_gpu();
+        Ok(())
+    }
+
     pub fn present(
-        &self,
+        &mut self,
         hwnd: isize,
         origin: (i32, i32),
         layout: &DockLayout,
         items: &[DockRenderItem<'_>],
         appearance: Appearance,
     ) -> Result<()> {
-        self.draw(layout, items, appearance)?;
+        draw_with_recovery(
+            self,
+            |renderer| renderer.draw(layout, items, appearance),
+            Self::recreate_target,
+        )?;
         self.surface.present(hwnd, origin)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_preview(
+        &self,
+        layout: &DockLayout,
+        items: &[DockRenderItem<'_>],
+        appearance: Appearance,
+    ) -> Result<()> {
+        self.draw(layout, items, appearance)
     }
 
     fn draw(
@@ -231,7 +284,8 @@ impl DockRenderer {
                     }
                     if let Some(apple_kind) = item.apple_icon {
                         self.draw_apple_icon(&effective_slot, apple_kind)?;
-                    } else if let Some(bitmap) = self.icons.get(item.key) {
+                    } else if let Some(icon) = self.icons.get(item.key) {
+                        let bitmap = &icon.bitmap;
                         let dest = D2D_RECT_F {
                             left: effective_slot.x,
                             top: effective_slot.y,
@@ -267,6 +321,17 @@ impl DockRenderer {
 
                     if item.focused {
                         self.draw_focus_ring(&effective_slot);
+                    }
+                    if let Some(progress) = item.progress
+                        && slot.opacity > 0.5
+                    {
+                        self.draw_progress_pill(&effective_slot, progress, &palette);
+                    }
+                    if let Some(count) = item.badge_count
+                        && count > 0
+                        && slot.opacity > 0.5
+                    {
+                        self.draw_badge(&effective_slot, count);
                     }
                 }
 
@@ -998,6 +1063,90 @@ impl DockRenderer {
                 &self.brushes.text_primary,
                 stroke,
                 &self.stroke_style,
+            );
+        }
+    }
+
+    fn draw_progress_pill(
+        &self,
+        slot: &DockItemLayout,
+        progress: f32,
+        palette: &LiquidGlassPalette,
+    ) {
+        let p = progress.clamp(0.0, 1.0);
+        let pad_x = slot.size * 0.14;
+        let bar_h = (scale(4, self.dpi) as f32).max(3.5);
+        let bottom = slot.y + slot.size - (scale(2, self.dpi) as f32).max(2.0);
+        let top = bottom - bar_h;
+        let left = slot.x + pad_x;
+        let right = slot.x + slot.size - pad_x;
+        let width = (right - left).max(bar_h);
+        let radius = bar_h * 0.5;
+        let track = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left,
+                top,
+                right: left + width,
+                bottom,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let fill_w = (width * p).clamp(bar_h, width);
+        let fill = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left,
+                top,
+                right: left + fill_w,
+                bottom,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            let track_brush = &self.brushes.color_brush(palette.slider_track);
+            self.target.FillRoundedRectangle(&track, track_brush);
+            self.target.FillRoundedRectangle(&fill, &self.brushes.white);
+            self.target
+                .DrawRoundedRectangle(&track, &self.brushes.specular_rim, 0.75, None);
+        }
+    }
+
+    fn draw_badge(&self, slot: &DockItemLayout, count: u32) {
+        let label = if count > 99 {
+            String::from("99+")
+        } else {
+            count.to_string()
+        };
+        let h = (scale(15, self.dpi) as f32).max(13.0);
+        let extra = label.len().saturating_sub(1) as f32 * (scale(5, self.dpi) as f32);
+        let w = (h + extra).max(h);
+        let right = slot.x + slot.size + scale(2, self.dpi) as f32;
+        let top = slot.y - scale(3, self.dpi) as f32;
+        let rect = D2D_RECT_F {
+            left: right - w,
+            top,
+            right,
+            bottom: top + h,
+        };
+        let pill = D2D1_ROUNDED_RECT {
+            rect,
+            radiusX: h * 0.5,
+            radiusY: h * 0.5,
+        };
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        unsafe {
+            let badge_fill = &self.brushes.color_brush(rgb(255, 59, 48, 0.98));
+            let rim = &self.brushes.color_brush(rgb(255, 255, 255, 0.85));
+            self.target.FillRoundedRectangle(&pill, badge_fill);
+            self.target.DrawRoundedRectangle(&pill, rim, 1.0, None);
+            self.target.DrawText(
+                &wide,
+                &self.badge_format,
+                &rect,
+                &self.brushes.white,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                DWRITE_MEASURING_MODE_NATURAL,
             );
         }
     }

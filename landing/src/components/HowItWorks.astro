@@ -1,0 +1,44 @@
+---
+import { Download, Mail, RotateCcw } from "lucide-astro";
+
+const steps = [
+  {
+    icon: Mail,
+    title: "Daftar lewat email",
+    description: "Masukkan alamat email tanpa perlu membuat akun.",
+  },
+  {
+    icon: Download,
+    title: "Terima penginstal Windows",
+    description: "Undangan dikirim bertahap lengkap dengan berkas pasang per-user.",
+  },
+  {
+    icon: RotateCcw,
+    title: "Pasang dan pulihkan kapan saja",
+    description: "Taskbar dan area kerja Windows dapat dikembalikan dengan satu perintah.",
+  },
+];
+---
+
+<section id="cara-kerja" class="w-full max-w-5xl scroll-mt-24">
+  <div class="mb-6 text-left">
+    <h2 class="text-2xl font-medium tracking-[-0.02em] text-ink sm:text-3xl">Alur beta</h2>
+    <p class="mt-2 max-w-xl text-sm leading-relaxed text-ink-soft">
+      Dirancang aman dicoba tanpa mengubah pengaturan sistem secara permanen.
+    </p>
+  </div>
+
+  <ol class="grid gap-4 sm:grid-cols-3">
+    {steps.map((step) => (
+      <li class="flex flex-col gap-3 rounded-xl border border-line bg-surface p-5 text-left shadow-[0_1px_2px_rgb(15_17_21/0.04)]">
+        <span class="inline-flex size-8 items-center justify-center rounded-lg border border-line bg-surface-subtle text-ink-soft">
+          <step.icon size={16} strokeWidth={1.5} aria-hidden="true" />
+        </span>
+        <div>
+          <h3 class="text-base font-medium text-ink">{step.title}</h3>
+          <p class="mt-1 text-sm leading-relaxed text-ink-soft">{step.description}</p>
+        </div>
+      </li>
+    ))}
+  </ol>
+</section>

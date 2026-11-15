@@ -1,0 +1,20 @@
+PackageIdentifier: howlil.OttoOS
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: howlil
+PublisherUrl: https://github.com/howlil/otto-os
+PublisherSupportUrl: https://github.com/howlil/otto-os/issues
+PackageName: Otto OS
+PackageUrl: https://github.com/howlil/otto-os
+License: MIT
+LicenseUrl: https://github.com/howlil/otto-os/blob/main/LICENSE
+ShortDescription: Native macOS-style notch top bar, Dock, and window controls for Windows 11.
+Description: Otto OS brings a macOS-inspired menu bar, Dynamic Island notch modules, magnetic Dock, Control Center, and Genie window animations to Windows 11 22H2+ using native Win32, Direct2D, DirectWrite, and WGC APIs.
+Tags:
+  - dock
+  - menubar
+  - notch
+  - taskbar
+  - windows11
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

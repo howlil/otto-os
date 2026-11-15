@@ -1,8 +1,16 @@
+use std::f32::consts::PI;
+
 use crate::Rect;
 
 const STRIP_COUNT: usize = 128;
-const BOUNDS_PADDING: i32 = 2;
+const BOUNDS_PADDING: i32 = 4;
 const ENVELOPE_SAMPLES: usize = 200;
+const PHASE_ONE_SPLIT: f32 = 0.36;
+const FUNNEL_CURVE_POWER: f32 = 1.12;
+const DOCK_SINK_RATIO: f32 = 0.35;
+const MIN_CHUTE_RATIO: f32 = 0.45;
+const END_CHUTE_RATIO: f32 = 0.65;
+const COLLAPSE_RAIL_THRESHOLD: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenieDirection {
@@ -10,15 +18,44 @@ pub enum GenieDirection {
     Restore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenieBoundary {
+    pub y: f32,
+    pub left: f32,
+    pub right: f32,
+    pub v: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenieClip {
+    pub edge_y: f32,
+    pub sink_y: f32,
+    pub clip_below: bool,
+    pub strength: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenieGeometry {
     pub strips: Vec<GenieStrip>,
+    pub boundaries: Vec<GenieBoundary>,
+    pub clip: GenieClip,
+    pub opacity: f32,
 }
 
 impl GenieGeometry {
     #[must_use]
     pub const fn empty() -> Self {
-        Self { strips: Vec::new() }
+        Self {
+            strips: Vec::new(),
+            boundaries: Vec::new(),
+            clip: GenieClip {
+                edge_y: 0.0,
+                sink_y: 0.0,
+                clip_below: true,
+                strength: 0.0,
+            },
+            opacity: 0.0,
+        }
     }
 
     #[must_use]
@@ -33,17 +70,18 @@ impl GenieGeometry {
     }
 
     fn covered_bounds(&self) -> Option<Rect> {
-        let first = self.strips.first()?;
-        let mut left = first.destination_left;
-        let mut top = first.destination_top;
-        let mut right = first.destination_left + first.destination_width;
-        let mut bottom = first.destination_top + first.destination_height;
+        let first = self.boundaries.first()?;
+        let mut left = first.left;
+        let mut right = first.right;
+        let mut top = self.clamp_visible_y(first.y);
+        let mut bottom = top;
 
-        for strip in self.strips.iter().skip(1) {
-            left = left.min(strip.destination_left);
-            top = top.min(strip.destination_top);
-            right = right.max(strip.destination_left + strip.destination_width);
-            bottom = bottom.max(strip.destination_top + strip.destination_height);
+        for boundary in self.boundaries.iter().skip(1) {
+            left = left.min(boundary.left);
+            right = right.max(boundary.right);
+            let y = self.clamp_visible_y(boundary.y);
+            top = top.min(y);
+            bottom = bottom.max(y);
         }
 
         let x = left.floor() as i32;
@@ -53,9 +91,21 @@ impl GenieGeometry {
         Some(Rect {
             x,
             y,
-            width: right - x,
-            height: bottom - y,
+            width: (right - x).max(1),
+            height: (bottom - y).max(1),
         })
+    }
+
+    fn clamp_visible_y(&self, y: f32) -> f32 {
+        if self.clip.strength <= 0.0 {
+            return y;
+        }
+        let clamped = if self.clip.clip_below {
+            y.min(self.clip.sink_y)
+        } else {
+            y.max(self.clip.sink_y)
+        };
+        lerp(y, clamped, self.clip.strength)
     }
 }
 
@@ -68,13 +118,6 @@ pub struct GenieStrip {
     pub destination_width: f32,
     pub destination_height: f32,
     pub opacity: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WarpBoundary {
-    y: f32,
-    left: f32,
-    right: f32,
 }
 
 #[must_use]
@@ -97,117 +140,122 @@ pub fn compute_genie_geometry(
 }
 
 fn compute_warp_geometry(source: Rect, target: Rect, progress: f32) -> GenieGeometry {
-    let source_width = source.width as f32;
     let source_height = source.height as f32;
-    let target_width = target.width as f32;
     let target_height = target.height as f32;
-    let source_center_x = source.x as f32 + source_width * 0.5;
-    let target_center_x = target.x as f32 + target_width * 0.5;
     let source_center_y = source.y as f32 + source_height * 0.5;
     let target_center_y = target.y as f32 + target_height * 0.5;
     let target_is_below = target_center_y >= source_center_y;
-    let opacity = 1.0 - smooth_step(((progress - 0.90) / 0.10).clamp(0.0, 1.0));
-    let boundaries = (0..=STRIP_COUNT)
-        .map(|index| {
-            let position = index as f32 / STRIP_COUNT as f32;
-            compute_boundary(
-                source,
-                target,
-                source_width,
-                target_width,
-                source_height,
-                target_height,
-                source_center_x,
-                target_center_x,
-                target_is_below,
-                position,
-                progress,
-            )
-        })
-        .collect::<Vec<_>>();
+    let dir = if target_is_below { 1.0_f32 } else { -1.0_f32 };
 
+    let w_trail = if target_is_below {
+        source.y as f32
+    } else {
+        (source.y + source.height) as f32
+    };
+    let w_lead = if target_is_below {
+        (source.y + source.height) as f32
+    } else {
+        source.y as f32
+    };
+    let d_entry = if target_is_below {
+        target.y as f32
+    } else {
+        (target.y + target.height) as f32
+    };
+    let d_sink = d_entry + dir * (target_height * DOCK_SINK_RATIO).max(4.0);
+    let entry_distance = (d_entry - w_trail) * dir;
+    let rail_len = if entry_distance > COLLAPSE_RAIL_THRESHOLD {
+        entry_distance
+    } else {
+        source_height.max(1.0)
+    };
+
+    let (trail_y, lead_y, funnel, clip_strength, collapse) = if progress <= PHASE_ONE_SPLIT {
+        let t1 = (progress / PHASE_ONE_SPLIT).clamp(0.0, 1.0);
+        let e_drop = 1.0 - (1.0 - t1) * (1.0 - t1);
+        let e_funnel = smooth_step(t1);
+        let clip_ramp = smooth_step(((t1 - 0.55) / 0.45).clamp(0.0, 1.0));
+        (
+            w_trail,
+            lerp(w_lead, d_entry, e_drop),
+            e_funnel,
+            clip_ramp,
+            0.0,
+        )
+    } else {
+        let t2 = ((progress - PHASE_ONE_SPLIT) / (1.0 - PHASE_ONE_SPLIT)).clamp(0.0, 1.0);
+        let e_slide = t2 * t2 * (2.2 - 1.2 * t2);
+        let chute_span = entry_distance.max(source_height * MIN_CHUTE_RATIO);
+        let trail_y = lerp(w_trail, d_sink, e_slide);
+        let lead_y = trail_y + dir * lerp(chute_span, source_height * END_CHUTE_RATIO, e_slide);
+        let collapse = if entry_distance <= COLLAPSE_RAIL_THRESHOLD {
+            smooth_step(t2)
+        } else {
+            0.0
+        };
+        (trail_y, lead_y, 1.0, 1.0, collapse)
+    };
+
+    let opacity = 1.0 - smooth_step(((progress - 0.96) / 0.04).clamp(0.0, 1.0));
+    let source_left = source.x as f32;
+    let source_right = (source.x + source.width) as f32;
+    let target_left = target.x as f32;
+    let target_right = (target.x + target.width) as f32;
+
+    let mut boundaries = Vec::with_capacity(STRIP_COUNT + 1);
+    for index in 0..=STRIP_COUNT {
+        let v = index as f32 / STRIP_COUNT as f32;
+        let s = if target_is_below { v } else { 1.0 - v };
+        let y = lerp(trail_y, lead_y, s);
+        let u_rail = (((y - w_trail) * dir) / rail_len).clamp(0.0, 1.0);
+        let s_curve = 0.5 - 0.5 * (PI * u_rail.powf(FUNNEL_CURVE_POWER)).cos();
+        let profile = s_curve.max(collapse);
+        let left = lerp(source_left, lerp(source_left, target_left, profile), funnel);
+        let right = lerp(
+            source_right,
+            lerp(source_right, target_right, profile),
+            funnel,
+        );
+        boundaries.push(GenieBoundary { y, left, right, v });
+    }
+
+    let strips = build_strips(&boundaries, source_height, opacity);
+
+    GenieGeometry {
+        strips,
+        boundaries,
+        clip: GenieClip {
+            edge_y: d_entry,
+            sink_y: d_sink,
+            clip_below: target_is_below,
+            strength: clip_strength,
+        },
+        opacity,
+    }
+}
+
+fn build_strips(boundaries: &[GenieBoundary], source_height: f32, opacity: f32) -> Vec<GenieStrip> {
     let mut strips = Vec::with_capacity(STRIP_COUNT);
     for (index, pair) in boundaries.windows(2).enumerate() {
         let top = pair[0];
         let bottom = pair[1];
         let destination_left = top.left.min(bottom.left);
         let destination_right = top.right.max(bottom.right);
+        let destination_top = top.y.min(bottom.y);
+        let destination_bottom = top.y.max(bottom.y);
         let source_top = source_height * index as f32 / STRIP_COUNT as f32;
         let source_bottom = source_height * (index + 1) as f32 / STRIP_COUNT as f32;
         strips.push(GenieStrip {
             source_top,
             source_height: source_bottom - source_top,
             destination_left,
-            destination_top: top.y,
+            destination_top,
             destination_width: (destination_right - destination_left).max(1.0),
-            destination_height: (bottom.y - top.y).max(0.5),
+            destination_height: (destination_bottom - destination_top).max(0.5),
             opacity,
         });
     }
-
-    GenieGeometry { strips }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_boundary(
-    source: Rect,
-    target: Rect,
-    source_width: f32,
-    target_width: f32,
-    source_height: f32,
-    target_height: f32,
-    source_center_x: f32,
-    target_center_x: f32,
-    target_is_below: bool,
-    position: f32,
-    progress: f32,
-) -> WarpBoundary {
-    let near_target = if target_is_below {
-        position
-    } else {
-        1.0 - position
-    };
-    let delay = (1.0 - near_target).powf(1.8) * 0.40;
-    let local_progress = normalized_progress(progress, delay);
-    let eased = smooth_step(local_progress);
-
-    let source_y = source.y as f32 + source_height * position;
-    let target_y = target.y as f32 + target_height * position;
-    let y = lerp(source_y, target_y, eased);
-
-    let total_y_dist = (target_y - source_y).abs().max(1.0);
-    let v = ((y - source_y).abs() / total_y_dist).clamp(0.0, 1.0);
-
-    let s_curve = v * v * (3.0 - 2.0 * v);
-    let mut center_x = lerp(source_center_x, target_center_x, s_curve);
-    let bow = ((1.0 - v) * v * 4.0)
-        * (target_center_x - source_center_x)
-        * 0.14
-        * (progress * std::f32::consts::PI).sin();
-    center_x += bow;
-
-    let trailing_progress = normalized_progress(progress, 0.40);
-    let top_width = lerp(source_width, target_width, smooth_step(trailing_progress));
-    let funnel = (1.0 - v).powf(1.6);
-    let base_width = lerp(target_width, top_width, funnel);
-    let pinch = ((1.0 - v) * v * 4.0) * 0.16 * (progress * std::f32::consts::PI).sin();
-    let min_allowed = target_width.min(source_width);
-    let max_allowed = source_width.max(target_width);
-    let width = (base_width * (1.0 - pinch)).clamp(min_allowed, max_allowed);
-
-    WarpBoundary {
-        y,
-        left: center_x - width * 0.5,
-        right: center_x + width * 0.5,
-    }
-}
-
-fn normalized_progress(progress: f32, delay: f32) -> f32 {
-    if progress <= delay {
-        0.0
-    } else {
-        ((progress - delay) / (1.0 - delay)).clamp(0.0, 1.0)
-    }
+    strips
 }
 
 fn normalized_transition(progress: f32) -> f32 {
@@ -367,6 +415,15 @@ mod canvas_tests {
 mod tests {
     use super::*;
 
+    const fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     const SOURCE: Rect = Rect {
         x: 120,
         y: 80,
@@ -391,16 +448,86 @@ mod tests {
     }
 
     #[test]
-    fn minimize_finishes_at_target_without_extra_offset() {
+    fn minimize_finishes_inside_dock_entry_aligned_to_target_span() {
         let geometry = compute_genie_geometry(SOURCE, TARGET, 1.0, GenieDirection::Minimize);
-        let first = geometry.strips.first().expect("strips are present");
-        let last = geometry.strips.last().expect("strips are present");
-        assert!((first.destination_left - TARGET.x as f32).abs() < 0.01);
-        assert!((first.destination_top - TARGET.y as f32).abs() < 0.01);
-        assert!((last.destination_left - TARGET.x as f32).abs() < 0.01);
-        assert!(
-            (last.destination_top + last.destination_height - TARGET.bottom() as f32).abs() < 0.01
+        let first = geometry.boundaries.first().expect("boundaries are present");
+        let last = geometry.boundaries.last().expect("boundaries are present");
+        assert!((first.left - TARGET.x as f32).abs() < 0.01);
+        assert!((first.right - TARGET.right() as f32).abs() < 0.01);
+        assert!(first.y >= TARGET.y as f32);
+        assert!(first.y <= TARGET.bottom() as f32);
+        assert!((last.left - TARGET.x as f32).abs() < 0.01);
+        assert!((last.right - TARGET.right() as f32).abs() < 0.01);
+        assert!(geometry.clip.strength >= 0.99);
+        assert!(geometry.opacity <= 0.001);
+    }
+
+    #[test]
+    fn phase_one_holds_trailing_edge_while_funneling_leading_edge_to_dock() {
+        let geometry =
+            compute_genie_geometry(SOURCE, TARGET, PHASE_ONE_SPLIT, GenieDirection::Minimize);
+        let top = geometry.boundaries.first().expect("boundaries are present");
+        let bottom = geometry.boundaries.last().expect("boundaries are present");
+        let middle = &geometry.boundaries[geometry.boundaries.len() / 2];
+        assert!((top.y - SOURCE.y as f32).abs() < 0.01);
+        assert!((top.left - SOURCE.x as f32).abs() < 0.01);
+        assert!((top.right - SOURCE.right() as f32).abs() < 0.01);
+        assert!((bottom.y - TARGET.y as f32).abs() < 0.01);
+        assert!((bottom.left - TARGET.x as f32).abs() < 0.01);
+        assert!((bottom.right - TARGET.right() as f32).abs() < 0.01);
+        assert!(middle.left > SOURCE.x as f32 && middle.left < TARGET.x as f32);
+        assert!(middle.right < SOURCE.right() as f32 && middle.right > TARGET.right() as f32);
+    }
+
+    #[test]
+    fn phase_two_slides_down_fixed_funnel_rails() {
+        let funnel =
+            compute_genie_geometry(SOURCE, TARGET, PHASE_ONE_SPLIT, GenieDirection::Minimize);
+        let sliding = compute_genie_geometry(SOURCE, TARGET, 0.65, GenieDirection::Minimize);
+        let slide_top = sliding.boundaries.first().expect("boundaries are present");
+        assert!(slide_top.y > SOURCE.y as f32);
+        let nearest = funnel
+            .boundaries
+            .iter()
+            .min_by(|a, b| {
+                (a.y - slide_top.y)
+                    .abs()
+                    .total_cmp(&(b.y - slide_top.y).abs())
+            })
+            .expect("funnel boundary exists");
+        let rail_step = (TARGET.y - SOURCE.y) as f32 / STRIP_COUNT as f32;
+        let expected_left_tolerance =
+            ((TARGET.x - SOURCE.x) as f32 * rail_step / (TARGET.y - SOURCE.y) as f32).abs() * 2.5
+                + 1.0;
+        assert!((slide_top.left - nearest.left).abs() <= expected_left_tolerance);
+    }
+
+    #[test]
+    fn maximized_window_overlapping_dock_starts_unclipped_at_zero() {
+        let maximized = rect(0, 32, 1920, 1048);
+        let dock = rect(928, 1004, 64, 64);
+        let start = compute_genie_geometry(maximized, dock, 0.0, GenieDirection::Minimize);
+        assert!(start.clip.strength.abs() < 0.001);
+        assert!((start.boundaries.last().unwrap().y - maximized.bottom() as f32).abs() < 0.001);
+        let end = compute_genie_geometry(maximized, dock, 1.0, GenieDirection::Minimize);
+        assert!((end.clip.strength - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn target_above_window_mirrors_two_phase_funnel_cleanly() {
+        let window_below = rect(200, 600, 700, 350);
+        let dock_above = rect(500, 80, 64, 64);
+        let phase1 = compute_genie_geometry(
+            window_below,
+            dock_above,
+            PHASE_ONE_SPLIT,
+            GenieDirection::Minimize,
         );
+        let bottom = phase1.boundaries.last().unwrap();
+        let top = phase1.boundaries.first().unwrap();
+        assert!((bottom.y - window_below.bottom() as f32).abs() < 0.01);
+        assert!((top.y - dock_above.bottom() as f32).abs() < 0.01);
+        assert!(!phase1.clip.clip_below);
     }
 
     #[test]

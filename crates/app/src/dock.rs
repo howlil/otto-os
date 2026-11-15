@@ -5,23 +5,26 @@ use std::time::Instant;
 use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
 use otto_core::{
-    BarKey, CaptureRegion, ChangeGate, CommandOutcome, DockDropEffect, DockDropInput, DockEffect,
-    DockFocus, DockFocusOutcome, DockInput, DockLayout, DockMetrics, DockPreferences,
-    MotionMetrics, MotionPreference, Rect, StableOrder, TickCadence, WindowCommand, WindowIdentity,
-    advance_bounce_phase, animate_value, bounce_offset, capture_interval_ms, capture_wanted,
-    compute_dock_layout, dock_activation_effect, dock_capacity, dock_command_effect,
-    dock_drop_effect, scale, split_dock_overflow,
+    BACKDROP_PADDING_PT, BarKey, CaptureRegion, ChangeGate, CommandOutcome, DockDropEffect,
+    DockDropInput, DockEffect, DockFocus, DockFocusOutcome, DockInput, DockLayout, DockMetrics,
+    DockPreferences, MotionMetrics, MotionPreference, Rect, ResolvedTheme, StableOrder,
+    TickCadence, WindowCommand, WindowIdentity, advance_bounce_phase, animate_value, bounce_offset,
+    build_dock_accessible_tree, capture_interval_for, capture_wanted, compute_dock_layout,
+    dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, dock_entry_badge,
+    dock_entry_progress, scale, split_dock_overflow,
 };
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
-    DockEntry, DockItemKind, PrimaryScreen, collect_dock_entries, current_process_id,
-    cursor_position, empty_recycle_bin, enable_drag_accept_files, execute_window_command,
-    extract_dock_icon, extract_dropped_files, has_maximized_or_fullscreen_window, hide_application,
+    DockEntry, DockEntryOptions, DockItemKind, IconBitmap, PrimaryScreen, WM_APP_UIA_INVOKE,
+    collect_dock_entries_with_options, current_process_id, cursor_position, empty_recycle_bin,
+    enable_drag_accept_files, execute_window_command, extract_dock_icon, extract_dropped_files,
+    extract_window_icon, handle_wm_getobject, has_maximized_or_fullscreen_window, hide_application,
     is_escape_down, is_running_on_battery, is_window_minimized, launch_new_instance,
     motion_preference, open_file_with_dock_entry, other_applications_visible, overflow_dock_entry,
-    primary_screen, quit_application, remove_pinned_app, reorder_pinned_apps, route_bar_keys,
-    routes_keys_to, show_application, shutdown_recycle_bin_task, signal_command_failure,
-    stop_routing_if_targets, toggle_pin_entry, watch_bottom_edge, window_change_generations,
+    primary_screen, quit_application, read_downloads_active_progress, read_notification_app_counts,
+    remove_pinned_app, reorder_pinned_apps, route_bar_keys, routes_keys_to, show_application,
+    shutdown_recycle_bin_task, signal_command_failure, stop_routing_if_targets, toggle_pin_entry,
+    watch_bottom_edge, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -30,12 +33,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos,
-    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 use windows::core::Result;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_GETOBJECT: u32 = 0x003D;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_DROPFILES: u32 = 0x0233;
 const DOCK_POLL_TIMER: usize = 10;
@@ -108,6 +112,9 @@ pub(crate) struct Dock {
     focus: DockFocus,
     backdrop: Option<BackdropFeed>,
     backdrop_gate: ChangeGate,
+    notification_counts: HashMap<String, u32>,
+    downloads_progress: Option<f32>,
+    badge_poll_tick: u32,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
@@ -119,7 +126,8 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let motion = motion_preference();
     let motion_metrics = MotionMetrics::default();
     let mut order = StableOrder::default();
-    let entries = collect_dock_entries(own_pid, &mut order);
+    let entries =
+        collect_dock_entries_with_options(own_pid, &mut order, entry_options(preferences));
     let mut presence = HashMap::new();
     for entry in &entries {
         presence.insert(entry.key.clone(), 1.0);
@@ -172,6 +180,9 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
             .get()
             .then(|| BackdropFeed::start(hwnd, WM_APP_DOCK_BACKDROP, vec![hwnd])),
         backdrop_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
+        notification_counts: read_notification_app_counts(),
+        downloads_progress: read_downloads_active_progress(),
+        badge_poll_tick: 0,
     };
     dock.place();
     dock.present(runtime);
@@ -192,7 +203,9 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
 
 pub fn stop(runtime: &RuntimeContext) {
     shutdown_recycle_bin_task();
-    if let Some(dock) = runtime.dock.borrow_mut().take() {
+    if let Ok(mut guard) = runtime.dock.try_borrow_mut()
+        && let Some(dock) = guard.take()
+    {
         unsafe {
             let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_POLL_TIMER);
             let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_ANIM_TIMER);
@@ -202,19 +215,38 @@ pub fn stop(runtime: &RuntimeContext) {
 
 pub fn handle_message(
     runtime: &RuntimeContext,
-    _hwnd: isize,
+    hwnd: isize,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     if matches!(
         message,
-        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY | WM_APP_UIA_INVOKE
     ) {
         wake(runtime);
     }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
+        WM_CLOSE => Some(LRESULT(0)),
+        WM_GETOBJECT => runtime
+            .dock
+            .try_borrow()
+            .ok()
+            .and_then(|guard| {
+                let dock = guard.as_ref()?;
+                handle_wm_getobject(hwnd, wparam.0, lparam.0, WM_APP_UIA_INVOKE, || {
+                    let entries = dock.combined_entries();
+                    let labels: Vec<&str> =
+                        entries.iter().map(|entry| entry.title.as_str()).collect();
+                    build_dock_accessible_tree(&dock.layout, dock.window_origin(), &labels)
+                })
+            })
+            .map(LRESULT),
+        WM_APP_UIA_INVOKE => {
+            with_dock(runtime, |dock| dock.activate_index(runtime, wparam.0));
+            Some(LRESULT(0))
+        }
         WM_APP_DOCK_KEY => {
             if let Some(key) = BarKey::from_code(wparam.0) {
                 with_dock(runtime, |dock| dock.on_dock_key(runtime, key));
@@ -270,6 +302,10 @@ pub fn handle_message(
             with_dock(runtime, |dock| dock.rebuild(runtime));
             Some(LRESULT(0))
         }
+        WM_SETTINGCHANGE => {
+            with_dock(runtime, Dock::refresh_motion);
+            None
+        }
         _ => None,
     }
 }
@@ -312,23 +348,87 @@ pub fn repaint(runtime: &RuntimeContext) {
     });
 }
 
-#[must_use]
-pub fn dock_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Option<Rect> {
-    let guard = runtime.dock.try_borrow().ok()?;
-    let dock = guard.as_ref()?;
-    let entries = dock.combined_entries();
-    let index = entries
-        .iter()
-        .position(|entry| entry.hwnds.contains(&hwnd))?;
+fn item_screen_rect(dock: &Dock, index: usize) -> Option<Rect> {
     let item = dock.layout.items.get(index)?;
     let (origin_x, origin_y) = dock.window_origin();
     let size = item.size.round().max(1.0) as i32;
     Some(Rect {
         x: origin_x + item.x.round() as i32,
-        y: origin_y + item.y.round() as i32,
+        y: (origin_y + item.y.round() as i32).min(dock.screen.height - 4),
         width: size,
         height: size,
     })
+}
+
+fn dock_target_in(dock: &Dock, hwnd: isize) -> Option<Rect> {
+    let (visible, hidden) = dock.displayed_entries();
+    if let Some(index) = visible.iter().position(|entry| entry.hwnds.contains(&hwnd)) {
+        return item_screen_rect(dock, index);
+    }
+    if hidden.iter().any(|entry| entry.hwnds.contains(&hwnd))
+        && let Some(overflow_index) = visible
+            .iter()
+            .position(|entry| matches!(entry.kind, DockItemKind::Overflow { .. }))
+    {
+        return item_screen_rect(dock, overflow_index);
+    }
+    None
+}
+
+#[must_use]
+pub fn dock_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Option<Rect> {
+    let guard = runtime.dock.try_borrow().ok()?;
+    let dock = guard.as_ref()?;
+    dock_target_in(dock, hwnd)
+}
+
+#[must_use]
+pub fn fallback_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Rect {
+    if let Ok(guard) = runtime.dock.try_borrow()
+        && let Some(dock) = guard.as_ref()
+    {
+        if let Some(target) = dock_target_in(dock, hwnd) {
+            return target;
+        }
+        let size = scale(dock.metrics.base_icon_size, dock.screen.dpi).max(24);
+        let (origin_x, origin_y) = dock.window_origin();
+        let x = origin_x + dock.layout.pill.x + (dock.layout.pill.width - size) / 2;
+        let y = (origin_y + dock.layout.pill.y + (dock.layout.pill.height - size) / 2)
+            .min(dock.screen.height - 4);
+        return Rect {
+            x,
+            y,
+            width: size,
+            height: size,
+        };
+    }
+    let screen = primary_screen();
+    let size = scale(48, screen.dpi).max(24);
+    Rect {
+        x: (screen.width - size) / 2,
+        y: screen.height - size - 4,
+        width: size,
+        height: size,
+    }
+}
+
+#[must_use]
+pub fn fallback_card_context(runtime: &RuntimeContext, hwnd: isize) -> (Option<IconBitmap>, bool) {
+    let dark_theme = crate::theme_state::appearance(runtime).theme == ResolvedTheme::Dark;
+    let icon = runtime
+        .dock
+        .try_borrow()
+        .ok()
+        .and_then(|guard| {
+            let dock = guard.as_ref()?;
+            let entry = dock
+                .entries
+                .iter()
+                .find(|entry| entry.hwnds.contains(&hwnd))?;
+            extract_dock_icon(entry)
+        })
+        .or_else(|| extract_window_icon(hwnd));
+    (icon, dark_theme)
 }
 
 fn report(outcome: CommandOutcome) {
@@ -355,10 +455,41 @@ fn show_window(runtime: &RuntimeContext, window: WindowIdentity, target: Option<
 
 pub fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences) {
     with_dock(runtime, |dock| {
+        let entries_changed = dock.preferences.show_downloads != preferences.show_downloads
+            || dock.preferences.show_trash != preferences.show_trash;
         dock.preferences = preferences;
         dock.metrics = preferences.metrics();
         dock.ensure_animating();
+        if entries_changed {
+            dock.refresh_entries(runtime);
+        }
         dock.rebuild(runtime);
+    });
+}
+
+pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_dock(runtime, |dock| {
+        if enabled {
+            if dock.backdrop.is_none() {
+                dock.backdrop = Some(BackdropFeed::start(
+                    dock.hwnd,
+                    WM_APP_DOCK_BACKDROP,
+                    vec![dock.hwnd],
+                ));
+            }
+        } else {
+            dock.backdrop = None;
+            dock.renderer.clear_backdrop();
+            dock.present(runtime);
+        }
+        dock.sync_backdrop(runtime, true);
+    });
+}
+
+pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+    with_dock(runtime, |dock| {
+        dock.sync_backdrop(runtime, true);
+        dock.present(runtime);
     });
 }
 
@@ -440,9 +571,23 @@ fn sync_icons(renderer: &mut DockRenderer, entries: &[DockEntry]) {
     renderer.retain_icons(&alive);
 }
 
+const fn entry_options(preferences: DockPreferences) -> DockEntryOptions {
+    DockEntryOptions {
+        show_downloads: preferences.show_downloads,
+        show_trash: preferences.show_trash,
+    }
+}
+
 impl Dock {
     fn refresh_entries(&mut self, runtime: &RuntimeContext) {
-        self.entries = collect_dock_entries(self.own_pid, &mut self.order);
+        self.entries = collect_dock_entries_with_options(
+            self.own_pid,
+            &mut self.order,
+            entry_options(self.preferences),
+        );
+        for entry in &self.entries {
+            self.presence.entry(entry.key.clone()).or_insert(1.0);
+        }
         let updated = self.combined_entries();
         sync_icons(&mut self.renderer, &updated);
         self.recompute_layout();
@@ -582,7 +727,8 @@ impl Dock {
 
     fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted = capture_wanted(&appearance, self.backdrop.is_some());
+        let wanted =
+            !runtime.capture_visible.get() && capture_wanted(&appearance, self.backdrop.is_some());
         let hidden = self.anim.hide_progress >= DOCK_HIDDEN_PROGRESS;
         let (origin_x, origin_y) = self.window_origin();
         let window = Rect {
@@ -591,8 +737,9 @@ impl Dock {
             width: self.layout.window_width,
             height: self.layout.window_height,
         };
+        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
         let region =
-            CaptureRegion::clipped_to_screen(window, self.screen.width, self.screen.height);
+            CaptureRegion::padded_to_screen(window, pad, self.screen.width, self.screen.height);
         let Some(feed) = self.backdrop.as_mut() else {
             return;
         };
@@ -608,7 +755,11 @@ impl Dock {
             return;
         }
         if let Some(region) = region {
-            feed.request(region, capture_interval_ms(is_running_on_battery()), force);
+            feed.request(
+                region,
+                capture_interval_for(is_running_on_battery(), self.hovering),
+                force,
+            );
         }
     }
 
@@ -626,7 +777,11 @@ impl Dock {
         if !self.entries_gate.should_refresh(topology) {
             return false;
         }
-        let latest = collect_dock_entries(self.own_pid, &mut self.order);
+        let latest = collect_dock_entries_with_options(
+            self.own_pid,
+            &mut self.order,
+            entry_options(self.preferences),
+        );
         if latest == self.entries {
             return false;
         }
@@ -679,17 +834,34 @@ impl Dock {
         true
     }
 
-    fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
-        let mut dirty = false;
+    fn refresh_motion(&mut self) {
         let next_motion = motion_preference();
         if next_motion != self.motion {
             self.motion = next_motion;
             self.ensure_animating();
         }
+    }
+
+    fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
+        let mut dirty = false;
         self.cancel_drag_on_escape();
         let generations = window_change_generations();
         if self.refresh_entries_if_changed(generations.map(|changes| changes.topology)) {
             dirty = true;
+        }
+        self.badge_poll_tick = self.badge_poll_tick.wrapping_add(1);
+        if dirty
+            || self
+                .badge_poll_tick
+                .is_multiple_of(DOCK_ENTRIES_FALLBACK_TICKS)
+        {
+            let next_counts = read_notification_app_counts();
+            let next_progress = read_downloads_active_progress();
+            if next_counts != self.notification_counts || next_progress != self.downloads_progress {
+                self.notification_counts = next_counts;
+                self.downloads_progress = next_progress;
+                dirty = true;
+            }
         }
 
         let (gx, gy) = cursor_position();
@@ -917,9 +1089,11 @@ impl Dock {
         if near_pill {
             self.hovering = true;
             self.last_cursor_x = Some(x as f32);
+            self.renderer.set_pointer(Some((x as f32, y as f32)));
             self.ensure_animating();
         } else if self.hovering {
             self.hovering = false;
+            self.renderer.set_pointer(None);
             self.ensure_animating();
         }
     }
@@ -937,6 +1111,7 @@ impl Dock {
             && local_y <= self.layout.pill.bottom();
         if !still_over_dock && self.hovering {
             self.hovering = false;
+            self.renderer.set_pointer(None);
             self.ensure_animating();
         }
     }
@@ -1239,28 +1414,92 @@ impl Dock {
         })
     }
 
-    fn present(&self, runtime: &RuntimeContext) {
+    fn present(&mut self, runtime: &RuntimeContext) {
         let all = self.combined_entries();
         let render_items: Vec<DockRenderItem<'_>> = all
             .iter()
             .enumerate()
-            .map(|(index, e)| DockRenderItem {
-                key: &e.key,
-                title: &e.title,
-                apple_icon: e.apple_icon,
-                running: e.running,
-                active: e.active,
-                hidden: e.hidden,
-                focused: self.focus.current() == Some(index),
+            .map(|(index, e)| {
+                let notif_count = entry_notification_count(&self.notification_counts, e);
+                let badge_count = dock_entry_badge(&e.window_titles, notif_count);
+                let progress = if matches!(e.kind, DockItemKind::Downloads) {
+                    self.downloads_progress
+                } else {
+                    dock_entry_progress(&e.window_titles, None)
+                };
+                DockRenderItem {
+                    key: &e.key,
+                    title: &e.title,
+                    apple_icon: e.apple_icon,
+                    running: e.running,
+                    active: e.active,
+                    hidden: e.hidden,
+                    focused: self.focus.current() == Some(index),
+                    badge_count,
+                    progress,
+                }
             })
             .collect();
         let appearance = crate::theme_state::appearance(runtime);
-        let _ = self.renderer.present(
-            self.hwnd,
-            self.window_origin(),
-            &self.layout,
-            &render_items,
-            appearance,
+        crate::host::log_present_error(
+            "dock",
+            self.renderer.present(
+                self.hwnd,
+                self.window_origin(),
+                &self.layout,
+                &render_items,
+                appearance,
+            ),
+        );
+    }
+}
+
+fn entry_notification_count(counts: &HashMap<String, u32>, entry: &DockEntry) -> Option<u32> {
+    if counts.is_empty() {
+        return None;
+    }
+    if let Some(app) = entry.app.as_ref() {
+        let name_key = app.name.trim().to_ascii_lowercase();
+        if let Some(&count) = counts.get(&name_key) {
+            return Some(count);
+        }
+        let exe_key = app.executable.trim().to_ascii_lowercase();
+        if let Some(&count) = counts.get(&exe_key) {
+            return Some(count);
+        }
+        if let Some(stem) = std::path::Path::new(&app.executable)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            && let Some(&count) = counts.get(&stem.to_ascii_lowercase())
+        {
+            return Some(count);
+        }
+    }
+    let title_key = entry.title.trim().to_ascii_lowercase();
+    if let Some(&count) = counts.get(&title_key) {
+        return Some(count);
+    }
+    if let DockItemKind::App { exe_path } = &entry.kind
+        && let Some(stem) = std::path::Path::new(exe_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        && let Some(&count) = counts.get(&stem.to_ascii_lowercase())
+    {
+        return Some(count);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LPARAM, LRESULT, RuntimeContext, WM_CLOSE, WPARAM, handle_message};
+
+    #[test]
+    fn wm_close_is_absorbed_without_destroying_surface() {
+        let runtime = RuntimeContext::new(false);
+        assert_eq!(
+            handle_message(&runtime, 0, WM_CLOSE, WPARAM(0), LPARAM(0)),
+            Some(LRESULT(0))
         );
     }
 }

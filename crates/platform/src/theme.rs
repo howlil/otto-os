@@ -1,17 +1,23 @@
 use std::mem::size_of;
 
 use otto_core::{ContrastColors, Rgba, SystemAppearance};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
     COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
 };
-use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+use windows::Win32::System::Power::{
+    GetSystemPowerStatus, HPOWERNOTIFY, RegisterPowerSettingNotification, SYSTEM_POWER_STATUS,
+    UnregisterPowerSettingNotification,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
+use windows::Win32::System::SystemServices::GUID_POWER_SAVING_STATUS;
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    DEVICE_NOTIFY_WINDOW_HANDLE, SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW,
 };
 use windows::core::w;
 
@@ -75,7 +81,7 @@ pub fn is_transparency_enabled() -> bool {
 
 const BATTERY_SAVER_ON: u8 = 1;
 
-const fn battery_saver_from_flag(flag: u8) -> bool {
+pub(crate) const fn battery_saver_from_flag(flag: u8) -> bool {
     flag & BATTERY_SAVER_ON != 0
 }
 
@@ -137,6 +143,32 @@ pub fn system_contrast_colors() -> Option<ContrastColors> {
     })
 }
 
+pub struct PowerNotificationGuard(HPOWERNOTIFY);
+
+impl PowerNotificationGuard {
+    #[must_use]
+    pub fn register(hwnd: isize) -> Option<Self> {
+        if hwnd == 0 {
+            return None;
+        }
+        let handle = unsafe {
+            RegisterPowerSettingNotification(
+                HANDLE(hwnd as *mut _),
+                &GUID_POWER_SAVING_STATUS,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        }
+        .ok()?;
+        (!handle.is_invalid()).then_some(Self(handle))
+    }
+}
+
+impl Drop for PowerNotificationGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { UnregisterPowerSettingNotification(self.0) };
+    }
+}
+
 #[must_use]
 pub fn read_system_appearance() -> SystemAppearance {
     SystemAppearance {
@@ -149,8 +181,8 @@ pub fn read_system_appearance() -> SystemAppearance {
 #[cfg(test)]
 mod tests {
     use super::{
-        battery_saver_from_flag, is_battery_saver_active, on_battery_from_line,
-        read_system_appearance,
+        PowerNotificationGuard, battery_saver_from_flag, is_battery_saver_active,
+        on_battery_from_line, read_system_appearance,
     };
 
     #[test]
@@ -174,5 +206,10 @@ mod tests {
         if is_battery_saver_active() {
             assert!(!appearance.transparency);
         }
+    }
+
+    #[test]
+    fn power_notification_registration_rejects_null_window() {
+        assert!(PowerNotificationGuard::register(0).is_none());
     }
 }

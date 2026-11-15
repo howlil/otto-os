@@ -20,15 +20,15 @@ impl LyricsStatus {
     #[must_use]
     pub const fn placeholder(self) -> &'static str {
         match self {
-            Self::Idle | Self::Loading => "Memuat lirik...",
+            Self::Idle | Self::Loading => "Loading lyrics\u{2026}",
             Self::Ready
             | Self::NotFound {
                 searched_online: true,
-            } => "Lirik tidak ditemukan",
+            } => "No lyrics found",
             Self::NotFound {
                 searched_online: false,
-            } => "Lirik tersimpan tidak ada \u{b7} aktifkan lirik online",
-            Self::Failed => "Lirik gagal dimuat \u{b7} coba lagi nanti",
+            } => "No saved lyrics \u{b7} turn on online lyrics",
+            Self::Failed => "Lyrics failed to load \u{b7} try again later",
         }
     }
 
@@ -42,6 +42,7 @@ impl LyricsStatus {
 pub struct LyricsView<'a> {
     pub sheet: Option<&'a LyricsSheet>,
     pub status: LyricsStatus,
+    pub animated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,24 +81,89 @@ impl LyricsSheet {
     }
 
     #[must_use]
-    pub fn visible_window(&self, position_ms: u64, window_size: usize) -> (usize, &[LyricLine]) {
-        if self.lines.is_empty() || window_size == 0 {
-            return (0, &[]);
-        }
-
-        let active = self.active_line_index(position_ms).unwrap_or(0);
-        let half = window_size / 2;
-        let start = active.saturating_sub(half);
-        let end = (start + window_size).min(self.lines.len());
-        let start = if end - start < window_size {
-            end.saturating_sub(window_size)
-        } else {
-            start
+    pub fn scroll_position(&self, position_ms: u64) -> f32 {
+        let Some(active) = self.active_line_index(position_ms) else {
+            return 0.0;
         };
+        if active >= 1 {
+            let (start, end) = self.scroll_window(active);
+            if position_ms < end {
+                return (active - 1) as f32 + ease_window(position_ms, start, end);
+            }
+        }
+        let next = active + 1;
+        if next < self.lines.len() {
+            let (start, end) = self.scroll_window(next);
+            if position_ms > start {
+                return active as f32 + ease_window(position_ms, start, end);
+            }
+        }
+        active as f32
+    }
 
-        (active.saturating_sub(start), &self.lines[start..end])
+    fn scroll_window(&self, step: usize) -> (u64, u64) {
+        let target = self.lines[step].timestamp_ms;
+        let prev = self.lines[step - 1].timestamp_ms;
+        let prev_settle = if step == 1 {
+            0
+        } else {
+            ((target - prev) / 2).min(LYRIC_SCROLL_SETTLE_MS)
+        };
+        let min_start = prev + prev_settle;
+        let next_settle = self
+            .lines
+            .get(step + 1)
+            .map_or(LYRIC_SCROLL_SETTLE_MS, |next| {
+                ((next.timestamp_ms - target) / 2).min(LYRIC_SCROLL_SETTLE_MS)
+            });
+        let start = target.saturating_sub(LYRIC_SCROLL_LEAD_MS).max(min_start);
+        let end = target + next_settle;
+        (start, end)
+    }
+
+    #[must_use]
+    pub fn next_line_delay_ms(&self, position_ms: u64, playback_rate_permille: u32) -> Option<u64> {
+        let next_idx = self
+            .lines
+            .partition_point(|line| line.timestamp_ms <= position_ms);
+        let next = self.lines.get(next_idx)?;
+        let media_wait = next.timestamp_ms.saturating_sub(position_ms).max(1);
+        Some(crate::media::media_wait_to_real_ms(
+            media_wait,
+            playback_rate_permille,
+        ))
+    }
+
+    #[must_use]
+    pub fn line_progress(&self, position_ms: u64) -> f32 {
+        let Some(active) = self.active_line_index(position_ms) else {
+            return 0.0;
+        };
+        let start = self.lines[active].timestamp_ms;
+        let span = self
+            .lines
+            .get(active + 1)
+            .map_or(LYRIC_LAST_LINE_MS, |next| {
+                (next.timestamp_ms - start).min(LYRIC_FILL_MAX_MS)
+            })
+            .max(1);
+        ((position_ms - start) as f32 / span as f32).clamp(0.0, 1.0)
     }
 }
+
+fn ease_window(position_ms: u64, start: u64, end: u64) -> f32 {
+    let span = end.saturating_sub(start);
+    if span == 0 {
+        return 1.0;
+    }
+    let t = (position_ms.saturating_sub(start) as f32 / span as f32).clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+pub const LYRIC_SCROLL_LEAD_MS: u64 = 120;
+pub const LYRIC_SCROLL_SETTLE_MS: u64 = 120;
+pub const LYRIC_FILL_MAX_MS: u64 = 6_000;
+pub const LYRIC_LAST_LINE_MS: u64 = 4_000;
 
 pub const MAX_LRC_LINES: usize = 1_000;
 pub const MAX_LRC_TOTAL_TEXT_BYTES: usize = 131_072;
@@ -189,7 +255,10 @@ pub fn parse_lrc(content: &str) -> LyricsSheet {
 
 #[cfg(test)]
 mod tests {
-    use super::LyricsStatus;
+    use super::{
+        LYRIC_FILL_MAX_MS, LYRIC_LAST_LINE_MS, LYRIC_SCROLL_LEAD_MS, LYRIC_SCROLL_SETTLE_MS,
+        LyricLine, LyricsSheet, LyricsStatus,
+    };
 
     #[test]
     fn lyrics_status_explains_why_no_lines_are_shown() {
@@ -197,14 +266,14 @@ mod tests {
         assert!(!LyricsStatus::Failed.is_pending());
         assert_eq!(
             LyricsStatus::Failed.placeholder(),
-            "Lirik gagal dimuat \u{b7} coba lagi nanti"
+            "Lyrics failed to load \u{b7} try again later"
         );
         assert_eq!(
             LyricsStatus::NotFound {
                 searched_online: true
             }
             .placeholder(),
-            "Lirik tidak ditemukan"
+            "No lyrics found"
         );
         assert!(
             LyricsStatus::NotFound {
@@ -291,37 +360,91 @@ mod tests {
         assert_eq!(sheet.active_line(30_000), Some("After"));
     }
 
+    fn five_line_sheet() -> LyricsSheet {
+        LyricsSheet::new(
+            [1_000, 2_000, 3_000, 4_000, 20_000]
+                .into_iter()
+                .map(|timestamp_ms| LyricLine {
+                    timestamp_ms,
+                    text: format!("L{timestamp_ms}"),
+                })
+                .collect(),
+        )
+    }
+
     #[test]
-    fn visible_window_slices_around_active_line() {
-        let sheet = LyricsSheet::new(vec![
+    fn scroll_rests_on_the_first_line_before_any_line_is_active() {
+        let sheet = five_line_sheet();
+        assert!(sheet.scroll_position(0).abs() < f32::EPSILON);
+        assert!(sheet.scroll_position(1_000).abs() < f32::EPSILON);
+        assert!(sheet.scroll_position(1_500).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scroll_anticipates_and_settles_smoothly_around_each_timestamp() {
+        let sheet = five_line_sheet();
+        assert!(sheet.scroll_position(2_000 - LYRIC_SCROLL_LEAD_MS).abs() < f32::EPSILON);
+        let mid = sheet.scroll_position(2_000);
+        assert!((mid - 0.875).abs() < 0.01);
+        assert!((sheet.scroll_position(2_000 + LYRIC_SCROLL_SETTLE_MS) - 1.0).abs() < f32::EPSILON);
+        assert!((sheet.scroll_position(3_500) - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scroll_never_moves_backwards_while_playing_forward() {
+        let sheet = five_line_sheet();
+        let mut last = 0.0;
+        for position in (0..25_000).step_by(17) {
+            let now = sheet.scroll_position(position);
+            assert!(now + f32::EPSILON >= last);
+            last = now;
+        }
+
+        let tight_and_duplicate = LyricsSheet::new(vec![
             LyricLine {
                 timestamp_ms: 1_000,
-                text: "L1".into(),
+                text: "A".into(),
             },
             LyricLine {
-                timestamp_ms: 2_000,
-                text: "L2".into(),
+                timestamp_ms: 1_080,
+                text: "B".into(),
             },
             LyricLine {
-                timestamp_ms: 3_000,
-                text: "L3".into(),
+                timestamp_ms: 1_080,
+                text: "C".into(),
             },
             LyricLine {
-                timestamp_ms: 4_000,
-                text: "L4".into(),
-            },
-            LyricLine {
-                timestamp_ms: 5_000,
-                text: "L5".into(),
+                timestamp_ms: 1_120,
+                text: "D".into(),
             },
         ]);
+        let mut prev = 0.0;
+        for position in 900..=1_400 {
+            let now = tight_and_duplicate.scroll_position(position);
+            assert!(now + f32::EPSILON >= prev, "backward scroll at {position}");
+            prev = now;
+        }
+    }
 
-        let (active_rel, window) = sheet.visible_window(3_000, 3);
-        assert_eq!(active_rel, 1);
-        assert_eq!(window.len(), 3);
-        assert_eq!(window[0].text, "L2");
-        assert_eq!(window[1].text, "L3");
-        assert_eq!(window[2].text, "L4");
+    #[test]
+    fn next_line_delay_scales_with_playback_rate() {
+        let sheet = five_line_sheet();
+        assert_eq!(sheet.next_line_delay_ms(850, 1_000), Some(150));
+        assert_eq!(sheet.next_line_delay_ms(1_750, 1_000), Some(250));
+        assert_eq!(sheet.next_line_delay_ms(1_750, 2_000), Some(125));
+        assert_eq!(sheet.next_line_delay_ms(20_000, 1_000), None);
+    }
+
+    #[test]
+    fn line_progress_fills_across_the_gap_and_caps_long_gaps() {
+        let sheet = five_line_sheet();
+        assert!(sheet.line_progress(500).abs() < f32::EPSILON);
+        assert!(sheet.line_progress(1_000).abs() < f32::EPSILON);
+        assert!((sheet.line_progress(1_500) - 0.5).abs() < f32::EPSILON);
+        assert!((sheet.line_progress(4_000 + LYRIC_FILL_MAX_MS) - 1.0).abs() < f32::EPSILON);
+        assert!((sheet.line_progress(4_000 + LYRIC_FILL_MAX_MS / 2) - 0.5).abs() < f32::EPSILON);
+        assert!((sheet.line_progress(20_000 + LYRIC_LAST_LINE_MS / 2) - 0.5).abs() < f32::EPSILON);
+        assert!((sheet.line_progress(99_000) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

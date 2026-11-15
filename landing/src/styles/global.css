@@ -1,0 +1,134 @@
+@import "tailwindcss";
+@import "@fontsource-variable/plus-jakarta-sans";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #0f1115;
+  --color-ink-soft: #3c4350;
+  --color-muted: #4b5563;
+  --color-line: rgb(15 17 21 / 0.1);
+  --color-line-strong: rgb(15 17 21 / 0.18);
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f1f6fb;
+
+  --color-accent: #ff6a2b;
+  --color-accent-hover: #e9571c;
+  --color-accent-text: #b83b0a;
+  --color-accent-soft: #ffe3d6;
+
+  --color-positive: #15803d;
+  --color-warning-ink: #92400e;
+  --color-danger: #b91c1c;
+
+  --color-sky-top: #a9d8f5;
+  --color-sky-mid: #d7eefc;
+  --color-sky-low: #f7fbff;
+
+  --color-shell: #202124;
+  --color-shell-ink: #f5f5f7;
+  --color-shell-muted: #a8abb2;
+
+  --color-window-minimize: #febc2e;
+  --color-window-zoom: #28c840;
+  --color-window-close: #ff5f57;
+
+  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-rise: rise 420ms var(--ease-standard) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@layer base {
+  html {
+    --site-nav-height: 4rem;
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply font-sans text-ink;
+    min-height: 100dvh;
+    background-color: var(--color-sky-low);
+    background-image: radial-gradient(
+      120% 55% at 50% 0%,
+      var(--color-sky-top) 0%,
+      var(--color-sky-mid) 40%,
+      var(--color-sky-low) 100%
+    );
+  }
+}
+
+@layer components {
+  .dock-item {
+    transform-origin: bottom center;
+    transition: transform 160ms var(--ease-standard);
+  }
+
+  .dock-item:hover {
+    transform: translateY(-4px) scale(1.18);
+  }
+
+  .dock-item:hover + .dock-item,
+  .dock-item:has(+ .dock-item:hover) {
+    transform: translateY(-2px) scale(1.08);
+  }
+
+  .eq-bar {
+    display: block;
+    width: 2px;
+    height: 100%;
+    border-radius: 1px;
+    background: currentColor;
+    transform-origin: bottom;
+    animation: eq 900ms ease-in-out infinite;
+  }
+
+  .faq-item[open] .faq-chevron {
+    transform: rotate(180deg);
+  }
+
+  .faq-chevron {
+    transition: transform 160ms var(--ease-standard);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .animate-rise,
+  .eq-bar {
+    animation: none;
+  }
+
+  .dock-item,
+  .dock-item:hover,
+  .dock-item:hover + .dock-item,
+  .dock-item:has(+ .dock-item:hover),
+  .faq-chevron {
+    transition: none;
+    transform: none;
+  }
+}

@@ -6,8 +6,8 @@ pub struct SnapshotBudget {
 
 impl SnapshotBudget {
     pub const GENIE: Self = Self {
-        max_entries: 4,
-        max_bytes: 64 * 1024 * 1024,
+        max_entries: 10,
+        max_bytes: 16 * 1024 * 1024,
     };
 }
 

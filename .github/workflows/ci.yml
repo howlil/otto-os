@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust Gate (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test core, render, and app crates
+        run: cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
+
+      - name: Test headless platform units
+        run: cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1
+
+  landing:
+    name: Landing Site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: landing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck landing site
+        run: bun x tsc --noEmit
+
+      - name: Run landing tests
+        run: bun test
+
+      - name: Build landing site
+        run: bun run build

@@ -8,7 +8,8 @@ use crate::menu::{
     CMD_CC_LYRICS_ONLINE, CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE,
     CMD_CC_SOUND, CMD_CC_THEME_AUTO, CMD_CC_THEME_DARK, CMD_CC_THEME_LIGHT, CMD_CC_THEME_TOGGLE,
     CMD_CC_WIFI, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW, CMD_DOCK_PIN,
-    CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, CMD_WIN_MINIMIZE, MenuRow,
+    CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, CMD_OPEN_LOGS, CMD_OTTO_SETTINGS,
+    CMD_WIN_MINIMIZE, MenuRow,
 };
 use crate::ports::ControlCenterAction;
 use crate::theme::ThemeMode;
@@ -195,6 +196,8 @@ pub fn control_center_effect(cmd: usize) -> Option<ControlCenterEffect> {
 pub enum WindowMenuEffect {
     CycleTheme,
     GenieMinimize,
+    OpenOttoSettings,
+    OpenLogs,
     Native(usize),
 }
 
@@ -202,6 +205,8 @@ pub enum WindowMenuEffect {
 pub fn window_menu_effect(cmd: usize, minimize_available: bool) -> WindowMenuEffect {
     match cmd {
         CMD_CC_THEME_TOGGLE => WindowMenuEffect::CycleTheme,
+        CMD_OTTO_SETTINGS => WindowMenuEffect::OpenOttoSettings,
+        CMD_OPEN_LOGS => WindowMenuEffect::OpenLogs,
         CMD_WIN_MINIMIZE if minimize_available => WindowMenuEffect::GenieMinimize,
         _ => WindowMenuEffect::Native(cmd),
     }

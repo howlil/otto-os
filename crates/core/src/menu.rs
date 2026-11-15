@@ -1,6 +1,5 @@
 use crate::app_model::{AppCommand, AppInfo, Capability, WindowCommand, WindowInfo};
 use crate::layout::{HitTarget, Rect, scale};
-use crate::theme::ThemeMode;
 
 pub const CMD_NONE: usize = 0;
 pub const CMD_QUIT: usize = 1;
@@ -70,6 +69,10 @@ pub const CMD_CC_THEME_LIGHT: usize = 76;
 pub const CMD_CC_THEME_DARK: usize = 77;
 pub const CMD_CC_THEME_AUTO: usize = 78;
 pub const CMD_CC_LYRICS_ONLINE: usize = 79;
+pub const CMD_OTTO_SETTINGS: usize = 80;
+pub const CMD_OPEN_LOGS: usize = 81;
+pub const CMD_NOTIF_CLEAR_ALL: usize = 82;
+pub const CMD_NOTIF_REQUEST_ACCESS: usize = 83;
 pub const CMD_OVERFLOW_MENU_BASE: usize = 90;
 pub const CMD_DOCK_PIN: usize = 100;
 pub const CMD_DOCK_TOGGLE: usize = 101;
@@ -78,6 +81,55 @@ pub const CMD_DOCK_EMPTY_TRASH: usize = 103;
 pub const CMD_DOCK_QUIT: usize = 104;
 pub const CMD_DOCK_HIDE: usize = 105;
 pub const CMD_DOCK_WINDOW_BASE: usize = 200;
+pub const CMD_NOTIF_DISMISS_BASE: usize = 1000;
+pub const MAX_VISIBLE_NOTIFICATIONS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationSummary {
+    pub id: u32,
+    pub app_id: String,
+    pub app_name: String,
+    pub title: String,
+    pub body: String,
+    pub timestamp_label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotificationAccess {
+    Allowed,
+    Denied,
+    #[default]
+    RequiresPackageIdentity,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NotificationCenterSnapshot {
+    pub access: NotificationAccess,
+    pub items: Vec<NotificationSummary>,
+}
+
+#[must_use]
+pub const fn notification_dismiss_index(cmd: usize, len: usize) -> Option<usize> {
+    if cmd < CMD_NOTIF_DISMISS_BASE {
+        return None;
+    }
+    let idx = cmd - CMD_NOTIF_DISMISS_BASE;
+    if idx < len { Some(idx) } else { None }
+}
+
+#[must_use]
+pub fn format_relative_age(elapsed_secs: u64) -> String {
+    if elapsed_secs < 60 {
+        String::from("now")
+    } else if elapsed_secs < 3600 {
+        format!("{}m", elapsed_secs / 60)
+    } else if elapsed_secs < 86_400 {
+        format!("{}h", elapsed_secs / 3600)
+    } else {
+        format!("{}d", elapsed_secs / 86_400)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuRow {
@@ -97,6 +149,13 @@ pub enum MenuRow {
         year: u16,
         month: u8,
         today: Option<u8>,
+    },
+    Notification {
+        id: usize,
+        app_name: String,
+        title: String,
+        body: String,
+        timestamp_label: String,
     },
     Separator,
 }
@@ -406,6 +465,15 @@ impl PopupMenuLayout {
                     Some(MenuRow::Item { label, .. })
                         if label.chars().next().and_then(|first| first.to_lowercase().next())
                             == Some(wanted)
+                ) || matches!(
+                    rows.get(row.index),
+                    Some(MenuRow::Notification { app_name, title, .. })
+                        if app_name
+                            .chars()
+                            .chain(title.chars())
+                            .next()
+                            .and_then(|first| first.to_lowercase().next())
+                            == Some(wanted)
                 )
             })
             .map(|row| row.index)
@@ -441,17 +509,23 @@ fn measure_columns(
         + scale(metrics.check_col_width, dpi)
         + scale(metrics.right_pad, dpi);
     let (mut label, mut shortcut) = (0, 0);
+    let mut notification_card_width = 0;
     for row in rows {
-        if let MenuRow::Item {
-            label: text,
-            shortcut: keys,
-            ..
-        } = row
-        {
-            label = label.max(measure.label_width(text));
-            if !keys.is_empty() {
-                shortcut = shortcut.max(measure.shortcut_width(keys));
+        match row {
+            MenuRow::Item {
+                label: text,
+                shortcut: keys,
+                ..
+            } => {
+                label = label.max(measure.label_width(text));
+                if !keys.is_empty() {
+                    shortcut = shortcut.max(measure.shortcut_width(keys));
+                }
             }
+            MenuRow::Notification { .. } => {
+                notification_card_width = scale(284, dpi);
+            }
+            MenuRow::Slider { .. } | MenuRow::Calendar { .. } | MenuRow::Separator => {}
         }
     }
     let gap = if shortcut > 0 {
@@ -460,7 +534,9 @@ fn measure_columns(
         0
     };
     ColumnWidths {
-        width: (fixed + label + gap + shortcut).clamp(min_w, max_w.max(min_w)),
+        width: (fixed + label + gap + shortcut)
+            .max(notification_card_width)
+            .clamp(min_w, max_w.max(min_w)),
         shortcut,
     }
 }
@@ -497,6 +573,7 @@ pub fn compute_popup_menu_layout(
                 false,
                 false,
             ),
+            MenuRow::Notification { id, .. } => (*id, scale(52, dpi), false, false, true),
             MenuRow::Separator => (
                 CMD_NONE,
                 scale(metrics.separator_height, dpi),
@@ -762,6 +839,8 @@ pub fn build_apple_menu_rows() -> Vec<MenuRow> {
     vec![
         MenuRow::item(CMD_START, "Open Start", ""),
         MenuRow::Separator,
+        MenuRow::item(CMD_OTTO_SETTINGS, "Otto Settings...", ""),
+        MenuRow::item(CMD_OPEN_LOGS, "Open Logs Folder", ""),
         MenuRow::item(CMD_SETTINGS, "System Settings...", ""),
         MenuRow::item(CMD_TASKMGR, "Force Quit (Task Manager)...", ""),
         MenuRow::Separator,
@@ -961,79 +1040,89 @@ pub fn build_top_bar_menu_rows(target: HitTarget, context: &MenuContext<'_>) -> 
 }
 
 #[must_use]
-pub fn build_control_center_rows(
-    volume: u8,
-    brightness: u8,
-    now_playing: Option<(&str, &str, bool)>,
-    theme_mode: ThemeMode,
-    online_lyrics: bool,
-) -> Vec<MenuRow> {
-    let mut rows = vec![
-        MenuRow::Slider {
-            id: CMD_CC_VOLUME,
-            label: String::from("Sound"),
-            value: volume,
-        },
-        MenuRow::Slider {
-            id: CMD_CC_BRIGHTNESS,
-            label: String::from("Display"),
-            value: brightness,
-        },
-        MenuRow::Separator,
-        MenuRow::item(
-            CMD_CC_THEME_TOGGLE,
-            format!("Theme: {} (Click to Cycle)", theme_mode.label()),
-            "",
-        ),
-        MenuRow::check_item(
-            CMD_CC_LYRICS_ONLINE,
-            if online_lyrics {
-                "Online Lyrics: On"
-            } else {
-                "Online Lyrics: Off"
-            },
-            online_lyrics,
-            true,
-        ),
-        MenuRow::Separator,
-    ];
-    if let Some((title, artist, playing)) = now_playing {
-        let headline = if artist.is_empty() {
-            String::from(title)
-        } else {
-            format!("{title} - {artist}")
-        };
-        rows.push(MenuRow::heading(headline));
-        rows.push(MenuRow::item(
-            CMD_CC_MEDIA_TOGGLE,
-            if playing { "Pause" } else { "Play" },
-            "",
-        ));
-        rows.push(MenuRow::item(CMD_CC_MEDIA_NEXT, "Next Track", ""));
-        rows.push(MenuRow::item(CMD_CC_MEDIA_PREVIOUS, "Previous Track", ""));
-        rows.push(MenuRow::Separator);
-    }
-    rows.push(MenuRow::item(CMD_CC_WIFI, "Wi-Fi Settings...", ""));
-    rows.push(MenuRow::item(CMD_CC_BLUETOOTH, "Bluetooth Settings...", ""));
-    rows.push(MenuRow::item(CMD_CC_FOCUS, "Focus Settings...", ""));
-    rows.push(MenuRow::Separator);
-    rows.push(MenuRow::item(CMD_CC_DISPLAY, "Display Settings...", ""));
-    rows.push(MenuRow::item(CMD_CC_SOUND, "Sound Settings...", ""));
-    rows
+pub fn build_calendar_rows(year: u16, month: u8, today: Option<u8>) -> Vec<MenuRow> {
+    build_calendar_notification_rows(year, month, today, &NotificationCenterSnapshot::default())
 }
 
 #[must_use]
-pub fn build_calendar_rows(year: u16, month: u8, today: Option<u8>) -> Vec<MenuRow> {
-    vec![
+pub fn build_calendar_notification_rows(
+    year: u16,
+    month: u8,
+    today: Option<u8>,
+    notifications: &NotificationCenterSnapshot,
+) -> Vec<MenuRow> {
+    let mut rows = vec![
         MenuRow::Calendar { year, month, today },
         MenuRow::Separator,
         MenuRow::item(CMD_CAL_PREVIOUS, "Previous Month", ""),
         MenuRow::item(CMD_CAL_NEXT, "Next Month", ""),
         MenuRow::item(CMD_CAL_TODAY, "Go to Today", ""),
         MenuRow::Separator,
-        MenuRow::item(CMD_CC_CALENDAR, "Open Windows Notifications", ""),
-        MenuRow::item(CMD_CAL_SETTINGS, "Date & Time Settings...", ""),
-    ]
+    ];
+    match notifications.access {
+        NotificationAccess::Allowed => {
+            if notifications.items.is_empty() {
+                rows.push(MenuRow::heading("Notifications"));
+                rows.push(MenuRow::heading("No Recent Notifications"));
+            } else {
+                rows.push(MenuRow::heading(format!(
+                    "Notifications ({})",
+                    notifications.items.len()
+                )));
+                for (index, item) in notifications
+                    .items
+                    .iter()
+                    .take(MAX_VISIBLE_NOTIFICATIONS)
+                    .enumerate()
+                {
+                    rows.push(MenuRow::Notification {
+                        id: CMD_NOTIF_DISMISS_BASE + index,
+                        app_name: item.app_name.clone(),
+                        title: item.title.clone(),
+                        body: item.body.clone(),
+                        timestamp_label: item.timestamp_label.clone(),
+                    });
+                }
+                rows.push(MenuRow::item(
+                    CMD_NOTIF_CLEAR_ALL,
+                    "Clear All Notifications",
+                    "",
+                ));
+            }
+        }
+        NotificationAccess::Denied => {
+            rows.push(MenuRow::heading("Notification Access Denied"));
+            rows.push(MenuRow::item(
+                CMD_NOTIF_REQUEST_ACCESS,
+                "Check Notification Permission",
+                "",
+            ));
+        }
+        NotificationAccess::RequiresPackageIdentity => {
+            rows.push(MenuRow::heading("Notifications"));
+            rows.push(MenuRow::heading("Requires Package Identity"));
+        }
+        NotificationAccess::Unavailable => {
+            rows.push(MenuRow::heading("Notifications"));
+            rows.push(MenuRow::item(
+                CMD_NOTIF_REQUEST_ACCESS,
+                "Enable Notification Feed",
+                "",
+            ));
+        }
+    }
+    rows.push(MenuRow::Separator);
+    rows.push(MenuRow::item(
+        CMD_CC_CALENDAR,
+        "Open Windows Notifications",
+        "",
+    ));
+    rows.push(MenuRow::item(
+        CMD_CAL_SETTINGS,
+        "Date & Time Settings...",
+        "",
+    ));
+    rows
 }
 
 #[must_use]
@@ -1397,48 +1486,6 @@ mod tests {
     }
 
     #[test]
-    fn control_center_slider_maps_pointer_to_percent() {
-        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto, false);
-        let layout = layout_for(&rows, MenuAnchor::BelowPoint { x: 1500, y: 34 });
-        let row = layout.rows[0].rect;
-        let left = row.x + layout.slider_inset;
-        let right = row.right() - layout.slider_inset;
-        assert_eq!(layout.slider_value_at(0, left - 50), Some(0));
-        assert_eq!(layout.slider_value_at(0, right + 50), Some(100));
-        let mid = layout
-            .slider_value_at(0, i32::midpoint(left, right))
-            .unwrap();
-        assert!((49..=51).contains(&mid));
-        assert_eq!(layout.slider_value_at(3, left), None);
-    }
-
-    #[test]
-    fn control_center_exposes_online_lyrics_as_a_checked_opt_in() {
-        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto, true);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            MenuRow::Item {
-                id: CMD_CC_LYRICS_ONLINE,
-                checked: true,
-                enabled: true,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn control_center_labels_settings_shortcuts_as_settings() {
-        let rows = build_control_center_rows(40, 70, None, ThemeMode::Auto, false);
-        for row in rows {
-            if let MenuRow::Item { id, label, .. } = row
-                && matches!(id, CMD_CC_WIFI | CMD_CC_BLUETOOTH | CMD_CC_FOCUS)
-            {
-                assert!(label.ends_with("Settings..."), "{label}");
-            }
-        }
-    }
-
-    #[test]
     fn calendar_row_is_tall_and_not_interactive() {
         let rows = build_calendar_rows(2026, 11, Some(11));
         let layout = layout_for(&rows, MenuAnchor::BelowPoint { x: 1500, y: 34 });
@@ -1487,5 +1534,61 @@ mod tests {
         let rows = build_window_tiling_menu_rows(&WindowMenuState::of(&window(locked)));
         assert_eq!(rows.len(), 1);
         assert!(ids(&rows, true).is_empty());
+    }
+
+    #[test]
+    fn calendar_notification_rows_cover_populated_empty_denied_and_unpackaged_modes() {
+        let populated = NotificationCenterSnapshot {
+            access: NotificationAccess::Allowed,
+            items: (0..7)
+                .map(|i| NotificationSummary {
+                    id: 100 + i,
+                    app_id: String::from("Contoso.Mail"),
+                    app_name: String::from("Mail"),
+                    title: format!("Message {i}"),
+                    body: String::from("Body preview"),
+                    timestamp_label: format_relative_age(120),
+                })
+                .collect(),
+        };
+        let rows = build_calendar_notification_rows(2026, 11, Some(16), &populated);
+        let notif_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row, MenuRow::Notification { .. }))
+            .collect();
+        assert_eq!(notif_rows.len(), MAX_VISIBLE_NOTIFICATIONS);
+        assert_eq!(
+            notification_dismiss_index(CMD_NOTIF_DISMISS_BASE + 2, 5),
+            Some(2)
+        );
+        assert_eq!(
+            notification_dismiss_index(CMD_NOTIF_DISMISS_BASE + 5, 5),
+            None
+        );
+        assert_eq!(notification_dismiss_index(CMD_NOTIF_CLEAR_ALL, 5), None);
+
+        let layout = layout_for(&rows, MenuAnchor::BelowPoint { x: 1500, y: 34 });
+        assert!(layout.window.width >= 284);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item { id, .. } if *id == CMD_NOTIF_CLEAR_ALL
+        )));
+
+        let denied = NotificationCenterSnapshot {
+            access: NotificationAccess::Denied,
+            items: Vec::new(),
+        };
+        let denied_rows = build_calendar_notification_rows(2026, 11, Some(16), &denied);
+        assert!(denied_rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item { id, .. } if *id == CMD_NOTIF_REQUEST_ACCESS
+        )));
+
+        let unpackaged = NotificationCenterSnapshot::default();
+        let unpackaged_rows = build_calendar_notification_rows(2026, 11, Some(16), &unpackaged);
+        assert!(unpackaged_rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item { id, .. } if *id == CMD_CC_CALENDAR
+        )));
     }
 }

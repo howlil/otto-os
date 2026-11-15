@@ -1,0 +1,56 @@
+---
+import BrandMark from "./ui/BrandMark.astro";
+
+interface Props {
+  activePath?: string;
+}
+
+const { activePath = "/" } = Astro.props;
+const contactEmail = "";
+const repoUrl = "https://github.com/howlil/otto-os";
+const issuesUrl = "https://github.com/howlil/otto-os/issues";
+---
+
+<footer class="border-t border-line bg-surface/60 px-4 py-8 text-sm text-ink-soft">
+  <div class="mx-auto flex max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+      <BrandMark size={18} />
+      <span class="text-xs text-muted">Shell desktop Windows 11 · Tahap pre-launch</span>
+    </div>
+    <nav aria-label="Footer" class="flex flex-wrap items-center gap-5">
+      <a
+        href="/privacy"
+        aria-current={activePath === "/privacy" ? "page" : undefined}
+        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+      >
+        Kebijakan privasi
+      </a>
+      <a
+        href={repoUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+      >
+        GitHub
+      </a>
+      <a
+        href={issuesUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+      >
+        Dukungan & isu
+      </a>
+      {
+        contactEmail && (
+          <a
+            href={`mailto:${contactEmail}`}
+            class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+          >
+            {contactEmail}
+          </a>
+        )
+      }
+    </nav>
+  </div>
+</footer>

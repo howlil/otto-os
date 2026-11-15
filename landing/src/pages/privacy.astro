@@ -1,0 +1,40 @@
+---
+import { ArrowLeft } from "lucide-astro";
+import Base from "../layouts/Base.astro";
+import Nav from "../components/Nav.astro";
+import Footer from "../components/Footer.astro";
+---
+
+<Base
+  title="Kebijakan privasi — Otto OS"
+  description="Data yang disimpan saat kamu mendaftar waitlist beta Otto OS dan cara meminta penghapusan data."
+>
+  <Nav isSubpage />
+  <main id="main-content" class="mx-auto w-full max-w-2xl flex-1 px-4 pt-28 pb-20 sm:pt-32">
+    <a
+      href="/"
+      class="inline-flex items-center gap-1.5 rounded-md text-sm font-medium text-accent-text transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+    >
+      <ArrowLeft size={16} strokeWidth={1.5} aria-hidden="true" />
+      <span>Kembali ke beranda</span>
+    </a>
+    <h1 class="mt-6 text-3xl leading-tight font-medium tracking-[-0.02em] text-ink sm:text-4xl">
+      Kebijakan privasi
+    </h1>
+    <div class="mt-6 space-y-4 text-sm leading-relaxed text-ink-soft sm:text-base">
+      <p>
+        Saat mendaftar waitlist, kami menyimpan alamat email, sumber pendaftaran, serta hash acak untuk pengeditan profil sesi. Jika kamu mengisi pertanyaan opsional, versi Windows dan frekuensi perpindahan aplikasi juga disimpan. Jika tidak diisi atau dilewati, dua kolom tersebut tetap kosong.
+      </p>
+      <p>
+        Untuk mencegah spam pada endpoint pendaftaran, layanan menyimpan sementara alamat IP dalam jendela pembatas laju 10 menit di Cloudflare D1. Catatan jendela yang sudah lewat dibersihkan otomatis ketika permintaan baru masuk.
+      </p>
+      <p>
+        Aplikasi desktop Otto OS berjalan lokal tanpa telemetri dan tanpa analitik jarak jauh. Email waitlist hanya digunakan untuk undangan beta serta pembaruan rilis, dan tidak pernah dijual atau dibagikan ke pihak ketiga.
+      </p>
+      <p>
+        Kamu dapat meminta penghapusan email kapan saja dengan membalas email undangan dari kami atau membuka permintaan penghapusan lewat halaman dukungan GitHub.
+      </p>
+    </div>
+  </main>
+  <Footer activePath="/privacy" />
+</Base>

@@ -7,6 +7,7 @@ pub fn theme_mode(runtime: &RuntimeContext) -> ThemeMode {
 
 pub fn set_theme_mode(runtime: &RuntimeContext, mode: ThemeMode) {
     runtime.theme_mode.set(mode);
+    runtime.pending_theme_mode.set(Some(mode));
     refresh_theme(runtime);
 }
 
@@ -33,6 +34,7 @@ pub fn refresh_theme(runtime: &RuntimeContext) {
     crate::bar::apply_appearance(runtime, appearance);
     crate::dock::repaint(runtime);
     crate::menu::repaint(runtime);
+    crate::control_center::repaint(runtime);
     crate::window_controls::apply_appearance(runtime, appearance);
 }
 

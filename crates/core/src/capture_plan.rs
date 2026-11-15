@@ -1,8 +1,11 @@
 use crate::layout::Rect;
 use crate::material::Appearance;
 
+const ACTIVE_INTERVAL_MS: u32 = 33;
+const ACTIVE_ON_BATTERY_INTERVAL_MS: u32 = 120;
 const CALM_INTERVAL_MS: u32 = 400;
 const CALM_ON_BATTERY_INTERVAL_MS: u32 = 1_000;
+pub const BACKDROP_PADDING_PT: i32 = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureRegion {
@@ -28,6 +31,23 @@ impl CaptureRegion {
     }
 
     #[must_use]
+    pub fn padded_to_screen(
+        rect: Rect,
+        padding: i32,
+        screen_width: i32,
+        screen_height: i32,
+    ) -> Option<Self> {
+        let pad = padding.max(0);
+        let padded = Rect {
+            x: rect.x.saturating_sub(pad),
+            y: rect.y.saturating_sub(pad),
+            width: rect.width.saturating_add(pad.saturating_mul(2)),
+            height: rect.height.saturating_add(pad.saturating_mul(2)),
+        };
+        Self::clipped_to_screen(padded, screen_width, screen_height)
+    }
+
+    #[must_use]
     pub const fn origin(&self) -> (i32, i32) {
         (self.x, self.y)
     }
@@ -40,10 +60,16 @@ impl CaptureRegion {
 
 #[must_use]
 pub const fn capture_interval_ms(on_battery: bool) -> u32 {
-    if on_battery {
-        CALM_ON_BATTERY_INTERVAL_MS
-    } else {
-        CALM_INTERVAL_MS
+    capture_interval_for(on_battery, false)
+}
+
+#[must_use]
+pub const fn capture_interval_for(on_battery: bool, active: bool) -> u32 {
+    match (on_battery, active) {
+        (true, true) => ACTIVE_ON_BATTERY_INTERVAL_MS,
+        (true, false) => CALM_ON_BATTERY_INTERVAL_MS,
+        (false, true) => ACTIVE_INTERVAL_MS,
+        (false, false) => CALM_INTERVAL_MS,
     }
 }
 
@@ -119,7 +145,9 @@ impl CaptureGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureGate, CaptureRegion, capture_interval_ms, capture_wanted};
+    use super::{
+        CaptureGate, CaptureRegion, capture_interval_for, capture_interval_ms, capture_wanted,
+    };
     use crate::layout::Rect;
     use crate::material::{Appearance, ContrastColors};
     use crate::theme::ResolvedTheme;
@@ -172,6 +200,30 @@ mod tests {
             height: 100,
         };
         assert_eq!(CaptureRegion::clipped_to_screen(below, 1920, 1080), None);
+        assert_eq!(
+            CaptureRegion::padded_to_screen(inside, 20, 1920, 1080),
+            Some(CaptureRegion {
+                x: 80,
+                y: 80,
+                width: 340,
+                height: 90,
+            })
+        );
+        let top_bar = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 32,
+        };
+        assert_eq!(
+            CaptureRegion::padded_to_screen(top_bar, 24, 1920, 1080),
+            Some(CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 56,
+            })
+        );
     }
 
     #[test]
@@ -189,6 +241,17 @@ mod tests {
     fn capture_slows_down_on_battery() {
         assert_eq!(capture_interval_ms(false), 400);
         assert!(capture_interval_ms(true) > capture_interval_ms(false));
+    }
+
+    #[test]
+    fn active_capture_runs_faster_than_calm_while_staying_slower_on_battery() {
+        assert_eq!(capture_interval_for(false, true), 33);
+        assert_eq!(capture_interval_for(false, false), 400);
+        assert_eq!(capture_interval_for(true, true), 120);
+        assert_eq!(capture_interval_for(true, false), 1_000);
+        assert!(capture_interval_for(false, true) < capture_interval_for(false, false));
+        assert!(capture_interval_for(true, true) < capture_interval_for(true, false));
+        assert!(capture_interval_for(true, true) > capture_interval_for(false, true));
     }
 
     #[test]

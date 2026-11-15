@@ -1,9 +1,26 @@
 use crate::media::TrackKey;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactSlotKind {
+    #[default]
+    Focus,
+    Media,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactContent {
     Focus,
     Media(TrackKey),
+}
+
+impl CompactContent {
+    #[must_use]
+    pub const fn kind(&self) -> CompactSlotKind {
+        match self {
+            Self::Focus => CompactSlotKind::Focus,
+            Self::Media(_) => CompactSlotKind::Media,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +40,10 @@ pub struct IslandInputs {
     pub hud: bool,
     pub focus_active: bool,
     pub media: Option<TrackKey>,
+    pub media_paused_hold: Option<TrackKey>,
+    pub media_primary: bool,
     pub dismissed: Option<CompactContent>,
+    pub dismissed_secondary: Option<CompactContent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,25 +51,49 @@ pub struct IslandTargets {
     pub panel: f32,
     pub hud: f32,
     pub compact: f32,
+    pub secondary: f32,
 }
 
 impl IslandInputs {
     #[must_use]
     pub fn compact_content(&self) -> Option<CompactContent> {
-        let focus = self
-            .focus_active
+        let focus = self.active_focus();
+        let media = self.active_media();
+        if self.media_primary {
+            media.or(focus)
+        } else {
+            focus.or(media)
+        }
+    }
+
+    #[must_use]
+    pub fn secondary_compact_content(&self) -> Option<CompactContent> {
+        let focus = self.active_focus()?;
+        let media = self.active_media()?;
+        if self.media_primary {
+            Some(focus)
+        } else {
+            Some(media)
+        }
+    }
+
+    fn active_focus(&self) -> Option<CompactContent> {
+        self.focus_active
             .then_some(CompactContent::Focus)
-            .filter(|content| self.is_not_dismissed(content));
-        focus.or_else(|| {
-            self.media
-                .as_ref()
-                .map(|track| CompactContent::Media(track.clone()))
-                .filter(|content| self.is_not_dismissed(content))
-        })
+            .filter(|content| self.is_not_dismissed(content))
+    }
+
+    fn active_media(&self) -> Option<CompactContent> {
+        self.media
+            .as_ref()
+            .or(self.media_paused_hold.as_ref())
+            .map(|track| CompactContent::Media(track.clone()))
+            .filter(|content| self.is_not_dismissed(content))
     }
 
     fn is_not_dismissed(&self, content: &CompactContent) -> bool {
         self.dismissed.as_ref() != Some(content)
+            && self.dismissed_secondary.as_ref() != Some(content)
     }
 }
 
@@ -76,6 +120,9 @@ pub fn island_targets(inputs: &IslandInputs) -> IslandTargets {
         panel: flag(matches!(mode, IslandMode::Expanded | IslandMode::Alert)),
         hud: flag(mode == IslandMode::Hud),
         compact: flag(inputs.compact_content().is_some()),
+        secondary: flag(
+            matches!(mode, IslandMode::Compact(_)) && inputs.secondary_compact_content().is_some(),
+        ),
     }
 }
 
@@ -99,7 +146,10 @@ mod tests {
             hud: true,
             focus_active: true,
             media: Some(track("Song")),
+            media_paused_hold: None,
+            media_primary: false,
             dismissed: None,
+            dismissed_secondary: None,
         }
     }
 
@@ -122,6 +172,49 @@ mod tests {
             IslandMode::Compact(CompactContent::Media(track("Song")))
         );
         inputs.media = None;
+        assert_eq!(resolve_island(&inputs), IslandMode::Collapsed);
+    }
+
+    #[test]
+    fn a_paused_track_stays_compact_only_while_its_hold_lasts() {
+        let held = IslandInputs {
+            media_paused_hold: Some(track("Song")),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&held),
+            IslandMode::Compact(CompactContent::Media(track("Song")))
+        );
+        assert!((island_targets(&held).compact - 1.0).abs() < f32::EPSILON);
+        let expired = IslandInputs::default();
+        assert_eq!(resolve_island(&expired), IslandMode::Collapsed);
+    }
+
+    #[test]
+    fn a_playing_track_wins_over_a_held_one_and_focus_wins_over_both() {
+        let mut inputs = IslandInputs {
+            media: Some(track("Now")),
+            media_paused_hold: Some(track("Before")),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Compact(CompactContent::Media(track("Now")))
+        );
+        inputs.focus_active = true;
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Compact(CompactContent::Focus)
+        );
+    }
+
+    #[test]
+    fn dismissing_a_held_track_collapses_the_island() {
+        let inputs = IslandInputs {
+            media_paused_hold: Some(track("Song")),
+            dismissed: Some(CompactContent::Media(track("Song"))),
+            ..IslandInputs::default()
+        };
         assert_eq!(resolve_island(&inputs), IslandMode::Collapsed);
     }
 
@@ -200,5 +293,38 @@ mod tests {
             ..inputs
         };
         assert_eq!(resolve_island(&alert), IslandMode::Alert);
+    }
+
+    #[test]
+    fn dual_active_modules_place_focus_primary_and_media_secondary_until_swapped() {
+        let mut inputs = IslandInputs {
+            focus_active: true,
+            media: Some(track("Song")),
+            ..IslandInputs::default()
+        };
+        assert_eq!(inputs.compact_content(), Some(CompactContent::Focus));
+        assert_eq!(
+            inputs.secondary_compact_content(),
+            Some(CompactContent::Media(track("Song")))
+        );
+        let targets = island_targets(&inputs);
+        assert!((targets.compact - 1.0).abs() < f32::EPSILON);
+        assert!((targets.secondary - 1.0).abs() < f32::EPSILON);
+
+        inputs.media_primary = true;
+        assert_eq!(
+            inputs.compact_content(),
+            Some(CompactContent::Media(track("Song")))
+        );
+        assert_eq!(
+            inputs.secondary_compact_content(),
+            Some(CompactContent::Focus)
+        );
+
+        inputs.hud = true;
+        assert!(island_targets(&inputs).secondary.abs() < f32::EPSILON);
+        inputs.hud = false;
+        inputs.panel_requested = true;
+        assert!(island_targets(&inputs).secondary.abs() < f32::EPSILON);
     }
 }

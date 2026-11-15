@@ -1,5 +1,6 @@
 use crate::layout::{HitTarget, Layout};
 use crate::media::NotchExpandedTab;
+use crate::pomodoro::FocusSubMode;
 
 const KEYBOARD_CANDIDATES: [HitTarget; 13] = [
     HitTarget::Start,
@@ -35,30 +36,114 @@ impl Layout {
 
     #[must_use]
     pub fn keyboard_targets_with_media(&self, media_present: bool) -> Vec<HitTarget> {
-        let mut targets = self.keyboard_targets();
+        let mut bar_items: Vec<(i32, HitTarget)> = KEYBOARD_CANDIDATES
+            .into_iter()
+            .filter(|target| !self.is_hidden(*target))
+            .filter_map(|target| {
+                self.slot_rect(target)
+                    .filter(|slot| !slot.is_empty())
+                    .map(|slot| (slot.x, target))
+            })
+            .collect();
+        if !self.privacy_dots.is_empty() {
+            bar_items.push((self.privacy_dots.x, HitTarget::PrivacyIndicator));
+        }
+        if self.panel_expansion <= 0.55 && !self.notch.is_empty() {
+            bar_items.push((self.notch.x, HitTarget::Notch));
+        }
+        if self.secondary_expansion > 0.25 && !self.notch_secondary.is_empty() {
+            bar_items.push((self.notch_secondary.x, HitTarget::NotchSecondary));
+        }
+        bar_items.sort_by_key(|(x, _)| *x);
+        let mut targets: Vec<HitTarget> = bar_items.into_iter().map(|(_, target)| target).collect();
         let showing_media = media_present && self.active_tab == NotchExpandedTab::Media;
         targets.extend(
             NOTCH_KEYBOARD_CANDIDATES
                 .into_iter()
                 .filter(|target| self.notch_control_rect(*target).is_some())
                 .filter(|target| match target {
-                    HitTarget::NotchTabPomodoro => true,
-                    HitTarget::PomodoroPlayPause
+                    HitTarget::NotchTabPomodoro
+                    | HitTarget::NotchTabShelf
+                    | HitTarget::NotchTabClipboard
+                    | HitTarget::PomodoroExtendFive
+                    | HitTarget::PomodoroStartNext
+                    | HitTarget::PrivacyMicMute => true,
+                    HitTarget::NotchTabMedia => media_present,
+                    HitTarget::FocusMode(_)
+                    | HitTarget::PomodoroPreset(_)
                     | HitTarget::PomodoroReset
-                    | HitTarget::PomodoroSkip => !showing_media,
-                    _ => media_present,
+                    | HitTarget::PomodoroPlayPause
+                    | HitTarget::PomodoroSkip => self.active_tab == NotchExpandedTab::Pomodoro,
+                    HitTarget::ShelfPager
+                    | HitTarget::ShelfAdd
+                    | HitTarget::ShelfClear
+                    | HitTarget::ShelfItem(_)
+                    | HitTarget::ShelfCopyItem(_)
+                    | HitTarget::ShelfRemoveItem(_) => self.active_tab == NotchExpandedTab::Shelf,
+                    HitTarget::ClipboardPager
+                    | HitTarget::ClipboardPauseToggle
+                    | HitTarget::ClipboardClear
+                    | HitTarget::ClipboardItem(_)
+                    | HitTarget::ClipboardRemoveItem(_) => {
+                        self.active_tab == NotchExpandedTab::Clipboard
+                    }
+                    _ => showing_media,
                 }),
         );
         targets
     }
 }
 
-const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 10] = [
+const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 54] = [
     HitTarget::NotchTabPomodoro,
-    HitTarget::PomodoroPlayPause,
-    HitTarget::PomodoroReset,
-    HitTarget::PomodoroSkip,
+    HitTarget::NotchTabShelf,
+    HitTarget::NotchTabClipboard,
     HitTarget::NotchTabMedia,
+    HitTarget::FocusMode(FocusSubMode::Pomodoro),
+    HitTarget::FocusMode(FocusSubMode::Timer),
+    HitTarget::FocusMode(FocusSubMode::Stopwatch),
+    HitTarget::PomodoroPreset(0),
+    HitTarget::PomodoroPreset(1),
+    HitTarget::PomodoroPreset(2),
+    HitTarget::PomodoroPreset(3),
+    HitTarget::PomodoroReset,
+    HitTarget::PomodoroPlayPause,
+    HitTarget::PomodoroSkip,
+    HitTarget::PomodoroExtendFive,
+    HitTarget::PomodoroStartNext,
+    HitTarget::PrivacyMicMute,
+    HitTarget::ShelfPager,
+    HitTarget::ShelfAdd,
+    HitTarget::ShelfClear,
+    HitTarget::ShelfItem(0),
+    HitTarget::ShelfCopyItem(0),
+    HitTarget::ShelfRemoveItem(0),
+    HitTarget::ShelfItem(1),
+    HitTarget::ShelfCopyItem(1),
+    HitTarget::ShelfRemoveItem(1),
+    HitTarget::ShelfItem(2),
+    HitTarget::ShelfCopyItem(2),
+    HitTarget::ShelfRemoveItem(2),
+    HitTarget::ShelfItem(3),
+    HitTarget::ShelfCopyItem(3),
+    HitTarget::ShelfRemoveItem(3),
+    HitTarget::ShelfItem(4),
+    HitTarget::ShelfCopyItem(4),
+    HitTarget::ShelfRemoveItem(4),
+    HitTarget::ShelfItem(5),
+    HitTarget::ShelfCopyItem(5),
+    HitTarget::ShelfRemoveItem(5),
+    HitTarget::ClipboardPager,
+    HitTarget::ClipboardPauseToggle,
+    HitTarget::ClipboardClear,
+    HitTarget::ClipboardItem(0),
+    HitTarget::ClipboardRemoveItem(0),
+    HitTarget::ClipboardItem(1),
+    HitTarget::ClipboardRemoveItem(1),
+    HitTarget::ClipboardItem(2),
+    HitTarget::ClipboardRemoveItem(2),
+    HitTarget::ClipboardItem(3),
+    HitTarget::ClipboardRemoveItem(3),
     HitTarget::MediaLyricsToggle,
     HitTarget::MediaPrevious,
     HitTarget::MediaPlayPause,
@@ -70,6 +155,8 @@ const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 10] = [
 pub enum BarKey {
     Previous,
     Next,
+    Up,
+    Down,
     First,
     Last,
     Activate,
@@ -79,9 +166,11 @@ pub enum BarKey {
 }
 
 impl BarKey {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Previous,
         Self::Next,
+        Self::Up,
+        Self::Down,
         Self::First,
         Self::Last,
         Self::Activate,
@@ -175,7 +264,7 @@ impl BarFocus {
             self.current = Some(first);
             return BarFocusOutcome::Moved(first);
         };
-        if key == BarKey::Activate {
+        if key == BarKey::Activate || key == BarKey::Down {
             self.current = None;
             return BarFocusOutcome::Activate(current);
         }
@@ -185,7 +274,9 @@ impl BarFocus {
             BarKey::Last => last,
             BarKey::Next | BarKey::NextTab => (index + 1) % targets.len(),
             BarKey::Previous | BarKey::PreviousTab => index.checked_sub(1).unwrap_or(last),
-            BarKey::Activate | BarKey::Exit => return BarFocusOutcome::Unchanged,
+            BarKey::Up | BarKey::Down | BarKey::Activate | BarKey::Exit => {
+                return BarFocusOutcome::Unchanged;
+            }
         };
         let target = targets[next];
         self.current = Some(target);
@@ -204,8 +295,24 @@ mod tests {
         HitTarget, Metrics, NotchLayoutInput, compute_layout_for_app, compute_layout_with_notch,
     };
     use crate::media::NotchExpandedTab;
+    use crate::pomodoro::FocusSubMode;
+    use crate::pomodoro_view::PomodoroSurface;
 
     fn open_media_layout(media_tab: bool) -> crate::layout::Layout {
+        open_layout(
+            if media_tab {
+                NotchExpandedTab::Media
+            } else {
+                NotchExpandedTab::Pomodoro
+            },
+            PomodoroSurface::Running,
+        )
+    }
+
+    fn open_layout(
+        active_tab: NotchExpandedTab,
+        pomodoro_surface: PomodoroSurface,
+    ) -> crate::layout::Layout {
         compute_layout_with_notch(
             &Metrics::MACBOOK_PRO_14,
             1920,
@@ -215,14 +322,12 @@ mod tests {
                 hud_expansion: 0.0,
                 compact_expansion: 0.0,
                 panel_expansion: 1.0,
-                alert_mode: false,
-                active_tab: if media_tab {
-                    NotchExpandedTab::Media
-                } else {
-                    NotchExpandedTab::Pomodoro
-                },
+                pomodoro_surface,
+                active_tab,
                 control_center_enabled: true,
-                lyrics_expanded: false,
+                lyrics_progress: 0.0,
+                tab_blend: 1.0,
+                ..NotchLayoutInput::default()
             },
         )
     }
@@ -232,9 +337,11 @@ mod tests {
         let media = open_media_layout(true);
         let targets = media.keyboard_targets_with_media(true);
         assert_eq!(
-            &targets[targets.len() - 7..],
+            &targets[targets.len() - 9..],
             &[
                 HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabShelf,
+                HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
                 HitTarget::MediaLyricsToggle,
                 HitTarget::MediaPrevious,
@@ -247,6 +354,8 @@ mod tests {
         assert!(!without_media.contains(&HitTarget::MediaPlayPause));
         assert!(!without_media.contains(&HitTarget::NotchTabMedia));
         assert!(without_media.contains(&HitTarget::NotchTabPomodoro));
+        assert!(without_media.contains(&HitTarget::NotchTabShelf));
+        assert!(without_media.contains(&HitTarget::NotchTabClipboard));
 
         let pomodoro_targets = open_media_layout(false).keyboard_targets_with_media(true);
         assert!(pomodoro_targets.contains(&HitTarget::NotchTabMedia));
@@ -260,12 +369,81 @@ mod tests {
                 .contains(&HitTarget::PomodoroPlayPause)
         );
 
+        let shelf_targets = open_layout(NotchExpandedTab::Shelf, PomodoroSurface::Running)
+            .keyboard_targets_with_media(true);
+        assert!(!shelf_targets.contains(&HitTarget::PomodoroPlayPause));
+        assert!(!shelf_targets.contains(&HitTarget::MediaPlayPause));
+        assert!(shelf_targets.contains(&HitTarget::NotchTabShelf));
+        assert!(shelf_targets.contains(&HitTarget::NotchTabClipboard));
+
         let closed = compute_layout_for_app(&Metrics::MACBOOK_PRO_14, 1920, 96, "Finder");
         assert!(
             !closed
                 .keyboard_targets_with_media(true)
                 .contains(&HitTarget::MediaPlayPause)
         );
+    }
+
+    fn notch_tail(layout: &crate::layout::Layout, count: usize) -> Vec<HitTarget> {
+        let targets = layout.keyboard_targets_with_media(true);
+        targets[targets.len() - count..].to_vec()
+    }
+
+    #[test]
+    fn pomodoro_keyboard_order_follows_the_surface() {
+        assert_eq!(
+            notch_tail(
+                &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Setup),
+                12
+            ),
+            [
+                HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabShelf,
+                HitTarget::NotchTabClipboard,
+                HitTarget::NotchTabMedia,
+                HitTarget::FocusMode(FocusSubMode::Pomodoro),
+                HitTarget::FocusMode(FocusSubMode::Timer),
+                HitTarget::FocusMode(FocusSubMode::Stopwatch),
+                HitTarget::PomodoroPreset(0),
+                HitTarget::PomodoroPreset(1),
+                HitTarget::PomodoroPreset(2),
+                HitTarget::PomodoroPreset(3),
+                HitTarget::PomodoroPlayPause,
+            ]
+        );
+        assert_eq!(
+            notch_tail(
+                &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Running),
+                10
+            ),
+            [
+                HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabShelf,
+                HitTarget::NotchTabClipboard,
+                HitTarget::NotchTabMedia,
+                HitTarget::FocusMode(FocusSubMode::Pomodoro),
+                HitTarget::FocusMode(FocusSubMode::Timer),
+                HitTarget::FocusMode(FocusSubMode::Stopwatch),
+                HitTarget::PomodoroReset,
+                HitTarget::PomodoroPlayPause,
+                HitTarget::PomodoroSkip,
+            ]
+        );
+        assert_eq!(
+            notch_tail(
+                &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Alert),
+                2
+            ),
+            [HitTarget::PomodoroExtendFive, HitTarget::PomodoroStartNext]
+        );
+    }
+
+    #[test]
+    fn alert_keyboard_order_hides_every_other_notch_control() {
+        let alert = open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Alert);
+        let targets = alert.keyboard_targets_with_media(true);
+        assert!(!targets.contains(&HitTarget::NotchTabPomodoro));
+        assert!(!targets.contains(&HitTarget::PomodoroPlayPause));
     }
 
     #[test]
@@ -456,5 +634,100 @@ mod tests {
             assert_eq!(BarKey::from_code(key.code()), Some(key));
         }
         assert_eq!(BarKey::from_code(BarKey::ALL.len()), None);
+    }
+
+    #[test]
+    fn down_activates_and_up_leaves_bar_focus_unchanged() {
+        let mut focus = BarFocus::default();
+        assert_eq!(focus.enter(&TARGETS), Some(HitTarget::Start));
+        assert_eq!(
+            focus.handle(BarKey::Up, &TARGETS),
+            BarFocusOutcome::Unchanged
+        );
+        assert_eq!(
+            focus.handle(BarKey::Down, &TARGETS),
+            BarFocusOutcome::Activate(HitTarget::Start)
+        );
+        assert!(!focus.is_active());
+    }
+
+    #[test]
+    fn clipboard_keyboard_order_follows_visible_items() {
+        let layout = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Clipboard,
+                clipboard: crate::ClipboardLayoutInput {
+                    visible_count: 2,
+                    has_pager: true,
+                    has_items: true,
+                    paused: false,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        let targets = layout.keyboard_targets_with_media(false);
+        assert!(targets.contains(&HitTarget::ClipboardPager));
+        assert!(targets.contains(&HitTarget::ClipboardPauseToggle));
+        assert!(targets.contains(&HitTarget::ClipboardClear));
+        assert!(targets.contains(&HitTarget::ClipboardItem(0)));
+        assert!(targets.contains(&HitTarget::ClipboardRemoveItem(0)));
+        assert!(targets.contains(&HitTarget::ClipboardItem(1)));
+        assert!(targets.contains(&HitTarget::ClipboardRemoveItem(1)));
+        assert!(!targets.contains(&HitTarget::ClipboardItem(2)));
+        assert!(!targets.contains(&HitTarget::ClipboardRemoveItem(2)));
+    }
+
+    #[test]
+    fn collapsed_notch_secondary_privacy_and_shelf_actions_join_keyboard_order() {
+        let collapsed = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 0.0,
+                secondary_expansion: 1.0,
+                privacy: crate::layout::PrivacyLayoutState {
+                    compact_dots: true,
+                    panel_mic_control: true,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        let collapsed_targets = collapsed.keyboard_targets_with_media(false);
+        assert!(collapsed_targets.contains(&HitTarget::PrivacyIndicator));
+        assert!(collapsed_targets.contains(&HitTarget::Notch));
+        assert!(collapsed_targets.contains(&HitTarget::NotchSecondary));
+
+        let shelf = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Shelf,
+                shelf: crate::layout::ShelfLayoutInput {
+                    visible_count: 2,
+                    has_pager: false,
+                    has_items: true,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        let shelf_targets = shelf.keyboard_targets_with_media(false);
+        assert!(!shelf_targets.contains(&HitTarget::Notch));
+        assert!(shelf_targets.contains(&HitTarget::ShelfItem(0)));
+        assert!(shelf_targets.contains(&HitTarget::ShelfCopyItem(0)));
+        assert!(shelf_targets.contains(&HitTarget::ShelfRemoveItem(0)));
+        assert!(shelf_targets.contains(&HitTarget::ShelfItem(1)));
+        assert!(shelf_targets.contains(&HitTarget::ShelfCopyItem(1)));
+        assert!(shelf_targets.contains(&HitTarget::ShelfRemoveItem(1)));
+        assert!(!shelf_targets.contains(&HitTarget::ShelfItem(2)));
     }
 }

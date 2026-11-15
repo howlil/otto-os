@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use otto_core::{
     AppCommand, AppInfo, AppleIconKind, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW,
     CMD_DOCK_PIN, CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, Capability, CropRegion,
-    MenuRow, PixelLimits, Rect, StableOrder, WindowPresence, bgra_layout, crop_bgra, group_windows,
-    is_blank_frame, resize_bgra, scale_dimension,
+    MenuRow, PixelLimits, Rect, ShelfThumbnail, StableOrder, WindowPresence, bgra_layout,
+    crop_bgra, group_windows, is_blank_frame, resize_bgra, scale_dimension,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -19,8 +19,8 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BitBlt, DIB_RGB_COLORS, DeleteObject, GetDIBits,
-    GetObjectW, HGDIOBJ, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
-    MonitorFromPoint, MonitorFromWindow, SRCCOPY,
+    GetMonitorInfoW, GetObjectW, HGDIOBJ, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow, SRCCOPY,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
@@ -33,10 +33,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GA_ROOT, GCLP_HICON, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetClassLongPtrW,
     GetClassNameW, GetCursorPos, GetForegroundWindow, GetIconInfo, GetWindow, GetWindowLongW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HICON, ICON_BIG, ICONINFO,
-    IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MINIMIZE, SC_RESTORE,
-    SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_GETICON,
-    WM_NULL, WM_SYSCOMMAND, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId, HICON,
+    ICON_BIG, ICONINFO, IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed, PostMessageW,
+    SC_MINIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, SetForegroundWindow,
+    ShowWindow, WINDOWPLACEMENT, WM_GETICON, WM_NULL, WM_SYSCOMMAND, WPF_RESTORETOMAXIMIZED,
+    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -87,6 +88,7 @@ pub struct DockEntry {
     pub minimized: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveWindowTarget {
     pub hwnd: isize,
@@ -97,6 +99,8 @@ pub struct ActiveWindowTarget {
     pub maximized: bool,
     pub dpi: u32,
     pub on_primary: bool,
+    pub active: bool,
+    pub sample_unobstructed: bool,
     pub caption: Option<otto_core::NativeCaption>,
 }
 
@@ -192,36 +196,173 @@ pub fn has_maximized_or_fullscreen_window(
     probe.found
 }
 
-#[must_use]
-pub fn active_window_target(own_pid: u32) -> Option<ActiveWindowTarget> {
-    let fg = crate::os_events::current_foreground();
-    if fg.0.is_null() {
-        return None;
-    }
-    let target = visible_root_owner(fg);
-    if !is_normal_visible_window(target, own_pid) {
-        return None;
-    }
-    let rect = visible_window_rect(target);
-    if rect.right - rect.left < 200 || rect.bottom - rect.top < 80 {
-        return None;
-    }
-    let maximized = unsafe { IsZoomed(target).as_bool() };
+const MIN_TARGET_WIDTH: i32 = 200;
+const MIN_TARGET_HEIGHT: i32 = 80;
 
-    let (_, monitor_dpi) = window_and_monitor_dpi(target);
-    let monitor = unsafe { MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST) };
-    let primary = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-    Some(ActiveWindowTarget {
-        hwnd: target.0 as isize,
+fn window_target(
+    hwnd: HWND,
+    rect: RECT,
+    primary: HMONITOR,
+    active: bool,
+    above: &[Rect],
+) -> ActiveWindowTarget {
+    let (_, monitor_dpi) = window_and_monitor_dpi(hwnd);
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let caption = crate::caption::covering_caption_of(hwnd);
+    let sample_unobstructed = caption.is_some_and(|cap| {
+        let sample = cap.sample_rect();
+        !above
+            .iter()
+            .any(|higher| higher.intersection(&sample).is_some())
+    });
+    ActiveWindowTarget {
+        hwnd: hwnd.0 as isize,
         left: rect.left,
         top: rect.top,
         right: rect.right,
         bottom: rect.bottom,
-        maximized,
+        maximized: unsafe { IsZoomed(hwnd).as_bool() },
         dpi: monitor_dpi,
         on_primary: monitor == primary,
-        caption: crate::caption::native_caption_of(target),
-    })
+        active,
+        sample_unobstructed,
+        caption,
+    }
+}
+
+fn should_record_sample_occluder(hwnd: HWND, own_pid: u32) -> Option<(bool, Rect, u32)> {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let class = window_class_name(hwnd);
+        if is_shell_or_desktop_class(&class) {
+            return None;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex_style & WS_EX_TRANSPARENT.0 != 0 {
+            return None;
+        }
+        if pid == own_pid
+            && !matches!(
+                class.as_str(),
+                "OttoPopupMenu" | "OttoNotchPanel" | "OttoControlCenter"
+            )
+        {
+            return None;
+        }
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return None;
+        }
+        let rect = visible_window_rect(hwnd);
+        let bounds = Rect {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        };
+        if bounds.width <= 0 || bounds.height <= 0 {
+            return None;
+        }
+        let is_normal = pid != own_pid
+            && !(ex_style & WS_EX_TOOLWINDOW.0 != 0 && ex_style & WS_EX_APPWINDOW.0 == 0)
+            && ex_style & WS_EX_NOACTIVATE.0 == 0
+            && GetWindowTextLengthW(hwnd) > 0;
+        Some((is_normal, bounds, pid))
+    }
+}
+
+struct TargetSweep {
+    own_pid: u32,
+    primary: HMONITOR,
+    foreground: HWND,
+    active_root: HWND,
+    above_normal: Vec<Rect>,
+    sample_occluders: Vec<Rect>,
+    uipi_cache: Vec<(u32, bool)>,
+    targets: Vec<ActiveWindowTarget>,
+}
+
+impl TargetSweep {
+    fn is_uipi_blocked(&mut self, hwnd: HWND, pid: u32) -> bool {
+        if let Some(&(_, blocked)) = self.uipi_cache.iter().find(|&&(cached, _)| cached == pid) {
+            return blocked;
+        }
+        let blocked = crate::window_model::is_window_uipi_blocked(hwnd);
+        self.uipi_cache.push((pid, blocked));
+        blocked
+    }
+}
+
+unsafe extern "system" fn collect_window_target(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let sweep = unsafe { &mut *(lparam.0 as *mut TargetSweep) };
+    let Some((is_normal, bounds, pid)) = should_record_sample_occluder(hwnd, sweep.own_pid) else {
+        return BOOL(1);
+    };
+    if is_normal {
+        if bounds.width >= MIN_TARGET_WIDTH
+            && bounds.height >= MIN_TARGET_HEIGHT
+            && !sweep.is_uipi_blocked(hwnd, pid)
+        {
+            let rect = RECT {
+                left: bounds.x,
+                top: bounds.y,
+                right: bounds.right(),
+                bottom: bounds.bottom(),
+            };
+            let active = hwnd == sweep.foreground || hwnd == sweep.active_root;
+            let target = window_target(hwnd, rect, sweep.primary, active, &sweep.sample_occluders);
+            let keep = target.caption.is_some_and(|caption| {
+                let cover = caption.cover_rect();
+                !sweep
+                    .above_normal
+                    .iter()
+                    .any(|above| above.contains_rect(&cover))
+            });
+            if keep {
+                sweep.targets.push(target);
+            }
+        }
+        sweep.above_normal.push(bounds);
+    }
+    sweep.sample_occluders.push(bounds);
+    BOOL(1)
+}
+
+#[must_use]
+pub fn visible_window_targets(own_pid: u32) -> Vec<ActiveWindowTarget> {
+    let foreground = crate::os_events::current_foreground();
+    let active_root = if foreground.0.is_null() {
+        foreground
+    } else {
+        visible_root_owner(foreground)
+    };
+    let mut sweep = TargetSweep {
+        own_pid,
+        primary: unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) },
+        foreground,
+        active_root,
+        above_normal: Vec::new(),
+        sample_occluders: Vec::new(),
+        uipi_cache: Vec::new(),
+        targets: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(collect_window_target), LPARAM(&raw mut sweep as isize));
+    }
+    sweep.targets
 }
 
 #[must_use]
@@ -237,31 +378,160 @@ pub fn window_bounds(hwnd_val: isize) -> Option<Rect> {
     })
 }
 
-const CAPTURE_RESPONSIVENESS_PROBE_MS: u32 = 50;
+#[must_use]
+pub fn restored_window_bounds(hwnd_val: isize) -> Option<Rect> {
+    let hwnd = HWND(hwnd_val as *mut c_void);
+    if !unsafe { IsIconic(hwnd).as_bool() } {
+        return window_bounds(hwnd_val);
+    }
+    let mut placement = WINDOWPLACEMENT {
+        length: size_of::<WINDOWPLACEMENT>() as u32,
+        ..WINDOWPLACEMENT::default()
+    };
+    unsafe { GetWindowPlacement(hwnd, &raw mut placement) }.ok()?;
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..MONITORINFO::default()
+    };
+    let has_info = unsafe { GetMonitorInfoW(monitor, &raw mut info).as_bool() };
+    if placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0 && has_info {
+        let work = info.rcWork;
+        let width = work.right - work.left;
+        let height = work.bottom - work.top;
+        return (width > 0 && height > 0).then_some(Rect {
+            x: work.left,
+            y: work.top,
+            width,
+            height,
+        });
+    }
+    let normal = placement.rcNormalPosition;
+    let width = normal.right - normal.left;
+    let height = normal.bottom - normal.top;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let (dx, dy) = if has_info {
+        (
+            info.rcWork.left - info.rcMonitor.left,
+            info.rcWork.top - info.rcMonitor.top,
+        )
+    } else {
+        (0, 0)
+    };
+    Some(Rect {
+        x: normal.left + dx,
+        y: normal.top + dy,
+        width,
+        height,
+    })
+}
 
 #[must_use]
-pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
-    let hwnd = HWND(hwnd_val as *mut c_void);
-    let frame = window_bounds(hwnd_val)?;
-    let outer = outer_window_rect(hwnd).unwrap_or(frame);
-    let frame_layout = bgra_layout(
-        u32::try_from(frame.width).ok()?,
-        u32::try_from(frame.height).ok()?,
-        PixelLimits::WINDOW_SNAPSHOT,
-    )
+pub fn is_window_uipi(hwnd_val: isize) -> bool {
+    crate::window_model::is_window_uipi_blocked(HWND(hwnd_val as *mut c_void))
+}
+
+const CAPTURE_RESPONSIVENESS_PROBE_MS: u32 = 50;
+
+fn is_window_unobstructed(target: HWND, frame: Rect) -> bool {
+    struct OcclusionProbe {
+        target: HWND,
+        frame: Rect,
+        own_pid: u32,
+        reached_target: bool,
+        occluded: bool,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let probe = unsafe { &mut *(lparam.0 as *mut OcclusionProbe) };
+        if hwnd == probe.target {
+            probe.reached_target = true;
+            return BOOL(0);
+        }
+        if let Some((_, bounds, _)) = should_record_sample_occluder(hwnd, probe.own_pid)
+            && bounds.intersection(&probe.frame).is_some()
+        {
+            probe.occluded = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    if !unsafe { IsWindowVisible(target).as_bool() } || unsafe { IsIconic(target).as_bool() } {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let _ = unsafe {
+        DwmGetWindowAttribute(
+            target,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    if cloaked != 0 {
+        return false;
+    }
+    let mut probe = OcclusionProbe {
+        target,
+        frame,
+        own_pid: current_process_id(),
+        reached_target: false,
+        occluded: false,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
+    }
+    probe.reached_target && !probe.occluded
+}
+
+fn copy_from_screen(
+    screen: &ScreenDc,
+    frame: Rect,
+    frame_layout: otto_core::BgraLayout,
+) -> Option<Vec<u8>> {
+    let canvas = CaptureCanvas::create(screen, frame_layout)?;
+    unsafe {
+        BitBlt(
+            canvas.dc(),
+            0,
+            0,
+            frame.width,
+            frame.height,
+            Some(screen.handle()),
+            frame.x,
+            frame.y,
+            SRCCOPY,
+        )
+    }
     .ok()?;
+    let region = CropRegion {
+        x: 0,
+        y: 0,
+        width: frame_layout.width,
+        height: frame_layout.height,
+    };
+    crop_bgra(&canvas.copy_pixels(), canvas.layout(), region)
+        .filter(|pixels| !is_blank_frame(region.width, region.height, pixels))
+}
+
+fn capture_via_print_window(
+    hwnd: HWND,
+    screen: &ScreenDc,
+    frame: Rect,
+    frame_layout: otto_core::BgraLayout,
+) -> Option<Vec<u8>> {
+    if !is_window_responsive(hwnd) {
+        return None;
+    }
+    let outer = outer_window_rect(hwnd).unwrap_or(frame);
     let canvas_layout = bgra_layout(
         u32::try_from(outer.width.max(frame.width)).ok()?,
         u32::try_from(outer.height.max(frame.height)).ok()?,
         PixelLimits::WINDOW_SNAPSHOT,
     )
     .ok()?;
-    if !is_window_responsive(hwnd) {
-        return None;
-    }
-    let screen = ScreenDc::acquire()?;
-    let canvas = CaptureCanvas::create(&screen, canvas_layout)?;
-
+    let canvas = CaptureCanvas::create(screen, canvas_layout)?;
     let (window_dpi, monitor_dpi) = window_and_monitor_dpi(hwnd);
     let painted_length =
         |length: i32| scale_dimension(u32::try_from(length).unwrap_or(0), window_dpi, monitor_dpi);
@@ -277,14 +547,50 @@ pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
         PixelLimits::WINDOW_SNAPSHOT,
     )
     .ok()?;
-    let printed = unsafe { PrintWindow(hwnd, canvas.dc(), PRINT_WINDOW_FLAGS(2)) }
+    unsafe { PrintWindow(hwnd, canvas.dc(), PRINT_WINDOW_FLAGS(2)) }
         .as_bool()
         .then(|| crop_bgra(&canvas.copy_pixels(), canvas.layout(), printed_region))
         .flatten()
         .filter(|pixels| !is_blank_frame(printed_layout.width, printed_layout.height, pixels))
-        .and_then(|pixels| resize_bgra(&pixels, printed_layout, frame_layout));
+        .and_then(|pixels| resize_bgra(&pixels, printed_layout, frame_layout))
+}
 
-    let pixels = printed.or_else(|| copy_foreground_window(hwnd, &screen, &canvas, frame))?;
+#[must_use]
+pub fn capture_window(hwnd_val: isize) -> Option<WindowSnapshot> {
+    let hwnd = HWND(hwnd_val as *mut c_void);
+    let frame = window_bounds(hwnd_val)?;
+    if !unsafe { IsWindowVisible(hwnd).as_bool() } || unsafe { IsIconic(hwnd).as_bool() } {
+        return None;
+    }
+    let frame_layout = bgra_layout(
+        u32::try_from(frame.width).ok()?,
+        u32::try_from(frame.height).ok()?,
+        PixelLimits::WINDOW_SNAPSHOT,
+    )
+    .ok()?;
+    let screen = ScreenDc::acquire()?;
+    let virtual_bounds = crate::screen::virtual_screen();
+    let on_screen = virtual_bounds.contains_rect(&frame);
+    let unobstructed = on_screen && is_window_unobstructed(hwnd, frame);
+
+    let mut pixels = if unobstructed && !unsafe { IsHungAppWindow(hwnd).as_bool() } {
+        copy_from_screen(&screen, frame, frame_layout)
+    } else {
+        None
+    };
+
+    if pixels.is_none() {
+        pixels = capture_via_print_window(hwnd, &screen, frame, frame_layout);
+    }
+
+    if pixels.is_none() && !unobstructed && on_screen {
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground == hwnd || visible_root_owner(foreground) == hwnd {
+            pixels = copy_from_screen(&screen, frame, frame_layout);
+        }
+    }
+
+    let pixels = pixels?;
     Some(WindowSnapshot {
         rect: frame,
         width: frame_layout.width,
@@ -311,39 +617,6 @@ fn window_and_monitor_dpi(hwnd: HWND) -> (u32, u32) {
     } else {
         (window_dpi, monitor_dpi)
     }
-}
-
-fn copy_foreground_window(
-    hwnd: HWND,
-    screen: &ScreenDc,
-    canvas: &CaptureCanvas,
-    frame: Rect,
-) -> Option<Vec<u8>> {
-    if unsafe { GetForegroundWindow() } != hwnd {
-        return None;
-    }
-    unsafe {
-        BitBlt(
-            canvas.dc(),
-            0,
-            0,
-            frame.width,
-            frame.height,
-            Some(screen.handle()),
-            frame.x,
-            frame.y,
-            SRCCOPY,
-        )
-    }
-    .ok()?;
-    let region = CropRegion {
-        x: 0,
-        y: 0,
-        width: u32::try_from(frame.width).ok()?,
-        height: u32::try_from(frame.height).ok()?,
-    };
-    crop_bgra(&canvas.copy_pixels(), canvas.layout(), region)
-        .filter(|pixels| !is_blank_frame(region.width, region.height, pixels))
 }
 
 fn opaque(mut pixels: Vec<u8>) -> Vec<u8> {
@@ -592,7 +865,30 @@ fn merge_finder_windows(apps: &mut Vec<AppInfo>) -> Option<AppInfo> {
 }
 
 #[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DockEntryOptions {
+    pub show_downloads: bool,
+    pub show_trash: bool,
+}
+
+impl Default for DockEntryOptions {
+    fn default() -> Self {
+        Self {
+            show_downloads: true,
+            show_trash: true,
+        }
+    }
+}
+
 pub fn collect_dock_entries(own_pid: u32, order: &mut StableOrder) -> Vec<DockEntry> {
+    collect_dock_entries_with_options(own_pid, order, DockEntryOptions::default())
+}
+
+pub fn collect_dock_entries_with_options(
+    own_pid: u32,
+    order: &mut StableOrder,
+    options: DockEntryOptions,
+) -> Vec<DockEntry> {
     let pinned = available_pinned_apps();
     let mut apps: Vec<AppInfo> = group_windows(crate::window_model::enumerate_windows(own_pid))
         .into_iter()
@@ -655,23 +951,27 @@ pub fn collect_dock_entries(own_pid: u32, order: &mut StableOrder) -> Vec<DockEn
         }
     }
 
-    entries.push(fixed_dock_entry(
-        "__downloads__",
-        "Downloads",
-        DockItemKind::Downloads,
-        AppleIconKind::Folder,
-    ));
-    let is_full = is_recycle_bin_full();
-    entries.push(fixed_dock_entry(
-        "__trash__",
-        "Trash",
-        DockItemKind::Trash { is_full },
-        if is_full {
-            AppleIconKind::TrashFull
-        } else {
-            AppleIconKind::Trash
-        },
-    ));
+    if options.show_downloads {
+        entries.push(fixed_dock_entry(
+            "__downloads__",
+            "Downloads",
+            DockItemKind::Downloads,
+            AppleIconKind::Folder,
+        ));
+    }
+    if options.show_trash {
+        let is_full = is_recycle_bin_full();
+        entries.push(fixed_dock_entry(
+            "__trash__",
+            "Trash",
+            DockItemKind::Trash { is_full },
+            if is_full {
+                AppleIconKind::TrashFull
+            } else {
+                AppleIconKind::Trash
+            },
+        ));
+    }
     entries
 }
 
@@ -837,6 +1137,11 @@ pub fn extract_dock_icon(entry: &DockEntry) -> Option<IconBitmap> {
     let raw = file_icon_bitmap(exe_path)
         .or_else(|| entry.hwnds.first().copied().and_then(window_icon_bitmap))?;
     Some(normalize_to_macos_squircle(&raw))
+}
+
+#[must_use]
+pub fn extract_window_icon(hwnd_val: isize) -> Option<IconBitmap> {
+    window_icon_bitmap(hwnd_val).map(|raw| normalize_to_macos_squircle(&raw))
 }
 
 fn enable_dwm_transitions(hwnd: HWND) {
@@ -1484,11 +1789,61 @@ fn read_pinned_file() -> Option<Vec<PinnedApp>> {
 }
 
 fn available_pinned_apps() -> Vec<PinnedApp> {
+    match pinned_config_path().map(fs::read_to_string) {
+        Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            let defaults = discover_default_pinned_apps();
+            let _ = save_pinned_apps(&defaults);
+            return defaults;
+        }
+        _ => {}
+    }
     read_pinned_file()
         .unwrap_or_default()
         .into_iter()
         .filter(|pin| Path::new(&pin.executable).exists())
         .collect()
+}
+
+fn build_default_pinned_apps(
+    candidates: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<PinnedApp> {
+    let mut pins = Vec::new();
+    for path in candidates {
+        if !exists(path) {
+            continue;
+        }
+        let exe = path.to_string_lossy().into_owned();
+        let key = exe.to_ascii_lowercase();
+        if !pins.iter().any(|existing: &PinnedApp| existing.key == key) {
+            pins.push(PinnedApp {
+                key,
+                executable: exe,
+            });
+        }
+    }
+    pins
+}
+
+fn discover_default_pinned_apps() -> Vec<PinnedApp> {
+    let mut candidates = Vec::new();
+    if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
+        candidates.push(PathBuf::from(pf86).join("Microsoft\\Edge\\Application\\msedge.exe"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(&pf).join("Microsoft\\Edge\\Application\\msedge.exe"));
+        candidates.push(PathBuf::from(pf).join("Google\\Chrome\\Application\\chrome.exe"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(&local).join("Microsoft\\WindowsApps\\wt.exe"));
+        candidates.push(PathBuf::from(local).join("Programs\\Microsoft VS Code\\Code.exe"));
+    }
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        candidates.push(PathBuf::from(&windir).join("System32\\notepad.exe"));
+    }
+    let mut pins = build_default_pinned_apps(&candidates, std::path::Path::exists);
+    pins.truncate(4);
+    pins
 }
 
 #[must_use]
@@ -1509,12 +1864,23 @@ pub fn reorder_pinned_apps(moved_key: &str, target_key: &str) -> bool {
     move_pin(&mut list, moved_key, target_key) && save_pinned_apps(&list)
 }
 
+fn downloads_directory() -> Option<PathBuf> {
+    let base = std::env::var_os("USERPROFILE")?;
+    Some(PathBuf::from(base).join("Downloads"))
+}
+
+fn is_active_download_temp_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".crdownload", ".part", ".partial", ".tmp", ".opdownload"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 #[must_use]
 pub fn read_downloads_stack_items(max_items: usize) -> Vec<StackItem> {
-    let Some(base) = std::env::var_os("USERPROFILE") else {
+    let Some(downloads_dir) = downloads_directory() else {
         return Vec::new();
     };
-    let downloads_dir = PathBuf::from(base).join("Downloads");
     let Ok(entries) = fs::read_dir(downloads_dir) else {
         return Vec::new();
     };
@@ -1522,7 +1888,10 @@ pub fn read_downloads_stack_items(max_items: usize) -> Vec<StackItem> {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.eq_ignore_ascii_case("desktop.ini") {
+        if name.starts_with('.')
+            || name.eq_ignore_ascii_case("desktop.ini")
+            || is_active_download_temp_name(&name)
+        {
             continue;
         }
         let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
@@ -1538,6 +1907,67 @@ pub fn read_downloads_stack_items(max_items: usize) -> Vec<StackItem> {
         .take(max_items)
         .map(|(_, item)| item)
         .collect()
+}
+
+#[must_use]
+pub fn read_downloads_stack_thumbnails(
+    items: &[StackItem],
+    max_px: u32,
+) -> Vec<Option<ShelfThumbnail>> {
+    items
+        .iter()
+        .map(|item| {
+            let path = item.path.to_string_lossy();
+            crate::shelf::extract_shell_thumbnail(&path, max_px, false).1
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn read_downloads_active_progress() -> Option<f32> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant, SystemTime};
+
+    const CACHE_TTL: Duration = Duration::from_secs(2);
+    const ACTIVE_WINDOW: Duration = Duration::from_secs(1800);
+
+    static CACHE: OnceLock<Mutex<Option<(Instant, Option<f32>)>>> = OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    let now = Instant::now();
+    if let Ok(guard) = lock.lock()
+        && let Some((cached_at, value)) = *guard
+        && now.saturating_duration_since(cached_at) < CACHE_TTL
+    {
+        return value;
+    }
+
+    let now_sys = SystemTime::now();
+    let mut active = false;
+    if let Some(dir) = downloads_directory()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !is_active_download_temp_name(&name) {
+                continue;
+            }
+            let recent = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now_sys.duration_since(m).ok())
+                .is_some_and(|age| age <= ACTIVE_WINDOW);
+            if recent {
+                active = true;
+                break;
+            }
+        }
+    }
+    let result = active.then_some(0.5);
+    if let Ok(mut guard) = lock.lock() {
+        *guard = Some((Instant::now(), result));
+    }
+    result
 }
 
 pub fn enable_drag_accept_files(hwnd_val: isize) {
@@ -1618,8 +2048,9 @@ fn save_pinned_apps(apps: &[PinnedApp]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DockEntry, DockItemKind, MAX_PINNED_APPS, PinnedApp, build_dock_context_menu_rows,
-        format_pinned, move_pin, parse_pinned, pinned_from_read, toggled_pins, window_covers_dock,
+        DockEntry, DockItemKind, MAX_PINNED_APPS, PinnedApp, build_default_pinned_apps,
+        build_dock_context_menu_rows, format_pinned, move_pin, parse_pinned, pinned_from_read,
+        toggled_pins, window_covers_dock,
     };
     use otto_core::{
         AppIdentity, CMD_DOCK_WINDOW_BASE, MenuRow, WindowIdentity, WindowInfo, WindowPresence,
@@ -1807,5 +2238,39 @@ mod tests {
         assert!(!move_pin(&mut pins, "b", "b"));
         assert!(!move_pin(&mut pins, "b", "unknown"));
         assert_eq!(pins.len(), 3);
+    }
+
+    #[test]
+    fn default_pinned_apps_seed_only_existing_unique_candidates() {
+        let candidates = vec![
+            std::path::PathBuf::from("C:\\Tools\\Edge.exe"),
+            std::path::PathBuf::from("c:\\tools\\edge.exe"),
+            std::path::PathBuf::from("C:\\Tools\\Missing.exe"),
+            std::path::PathBuf::from("C:\\Windows\\System32\\notepad.exe"),
+        ];
+        let seeded = build_default_pinned_apps(&candidates, |path| {
+            !path.to_string_lossy().contains("Missing")
+        });
+        assert_eq!(
+            seeded,
+            vec![
+                pin("c:\\tools\\edge.exe", "C:\\Tools\\Edge.exe"),
+                pin(
+                    "c:\\windows\\system32\\notepad.exe",
+                    "C:\\Windows\\System32\\notepad.exe"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn active_download_temp_names_filter_cleanly() {
+        assert!(super::is_active_download_temp_name(
+            "Unconfirmed 123.crdownload"
+        ));
+        assert!(super::is_active_download_temp_name("archive.zip.part"));
+        assert!(super::is_active_download_temp_name("setup.TMP"));
+        assert!(!super::is_active_download_temp_name("notes.pdf"));
+        assert!(!super::is_active_download_temp_name("photo.png"));
     }
 }

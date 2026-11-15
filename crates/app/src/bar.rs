@@ -1,4 +1,6 @@
 use std::mem::size_of;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::backdrop_feed::BackdropFeed;
@@ -7,23 +9,29 @@ use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, ChangeGate,
-    HitTarget, Layout, LyricsStatus, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind,
-    NotchLayoutInput, NotchPort, NowPlaying, TickCadence, compute_layout_with_notch,
-    detect_hud_event, is_top_bar_menu_target, scale,
+    Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, BrandIcon,
+    ChangeGate, ControlCenterPage, HitTarget, Layout, LyricsStatus, Metrics, MotionPreference,
+    NotchAction, NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort, NotchStyle,
+    NowPlaying, SHELF_THUMBNAIL_MAX_PX, ShelfPayload, ShelfThumbnail, TickCadence,
+    build_bar_accessible_tree, compute_layout_with_notch, decode_bar_hit_target, detect_hud_event,
+    is_top_bar_menu_target, scale,
 };
-use otto_core::{CaptureRegion, Rect, capture_interval_ms, capture_wanted};
+use otto_core::{BACKDROP_PADDING_PT, CaptureRegion, Rect, capture_interval_for, capture_wanted};
 use otto_platform::is_running_on_battery;
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
-    AppBar, BackdropMaterial, LyricsOutcome, LyricsRequest, LyricsService, PrimaryScreen,
-    WindowsNotchPort, acknowledge_idle_wake, adjust_volume, apply_backdrop_material,
-    current_process_id, cursor_position, enable_backdrop_blur, foreground_application,
-    is_escape_down, motion_preference, open_quick_settings, open_spotlight_search, primary_screen,
-    read_system_status, register_idle_wake, register_notch_hotkeys, restore_shell_from_recovery,
-    route_bar_keys, routes_keys_to, step_display_brightness, stop_routing_bar_keys,
-    stop_routing_if_targets, suppress_native_osd, toggle_tray_overflow, unregister_idle_wake,
-    unregister_notch_hotkeys, watch_top_edge, window_bounds, window_change_generations,
+    AppBar, ClipboardListenerGuard, ClipboardRead, LyricsOutcome, LyricsRequest, LyricsService,
+    PowerNotificationGuard, PrimaryScreen, ShelfDropEvent, ShelfDropQueue, ShelfDropRegion,
+    ShelfDropTargetGuard, WM_APP_SHELF_EVENT, WM_APP_UIA_INVOKE, WM_CLIPBOARDUPDATE,
+    WindowsNotchPort, acknowledge_idle_wake, adjust_volume, clipboard_sequence_number,
+    current_process_id, cursor_position, foreground_application, handle_wm_getobject,
+    is_escape_down, motion_preference, notify_bluetooth_hardware_change, open_spotlight_search,
+    primary_screen, read_clipboard_payload, read_system_status, register_bluetooth_hud_target,
+    register_idle_wake, register_notch_hotkeys, register_shelf_drop_target, route_bar_keys,
+    routes_keys_to, step_display_brightness, stop_routing_bar_keys, stop_routing_if_targets,
+    suppress_native_osd, take_bluetooth_hud_event, toggle_tray_overflow,
+    unregister_bluetooth_hud_target, unregister_idle_wake, unregister_notch_hotkeys,
+    watch_top_edge, window_bounds, window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -31,20 +39,30 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUERYENDSESSION, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    GetSystemMetrics, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostQuitMessage, SM_CXDRAG,
+    SM_CYDRAG, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, ShowWindow,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED,
+    WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCDESTROY, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
 };
 use windows::core::Result;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
-const BLUR_TINT_ALPHA: f32 = 0.28;
+const WM_GETOBJECT: u32 = 0x003D;
+const WM_POINTERUPDATE: u32 = 0x0245;
+const WM_POINTERDOWN: u32 = 0x0246;
+const WM_POINTERUP: u32 = 0x0247;
+const WM_POINTERCAPTURECHANGED: u32 = 0x024C;
+const SWIPE_COLLAPSE_THRESHOLD_PT: i32 = 24;
 const STATUS_TIMER: usize = 1;
 const HUD_ANIM_TIMER: usize = 2;
 const DEADLINE_TIMER: usize = 3;
 const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_DEVICECHANGE: u32 = 0x0219;
+const DBT_DEVNODES_CHANGED: usize = 0x0007;
+const DBT_DEVICEARRIVAL: usize = 0x8000;
+const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
 const PBT_APMSUSPEND: usize = 0x0004;
 const PBT_APMRESUMESUSPEND: usize = 0x0007;
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
@@ -54,11 +72,53 @@ const FOREGROUND_FALLBACK_TICKS: u32 = 8;
 const WM_APP_BAR_KEY: u32 = 0x8000 + 21;
 const WM_APP_IDLE_WAKE: u32 = 0x8000 + 22;
 const WM_APP_BAR_BACKDROP: u32 = 0x8000 + 24;
+const WM_APP_BAR_BLUETOOTH_HUD: u32 = 0x8000 + 28;
 const STATUS_IDLE_MS: u32 = 1000;
 const STATUS_IDLE_AFTER_TICKS: u32 = 16;
 const MEDIA_EVERY_TICKS: u8 = 4;
 const MAINTAIN_EVERY_TICKS: u8 = 8;
 const HUD_ANIM_MS: u32 = 8;
+
+struct PendingShelfDrag {
+    slot: u8,
+    source_hwnd: isize,
+    start_x: i32,
+    start_y: i32,
+    payload: ShelfPayload,
+}
+
+pub(crate) enum DeferredModalAction {
+    PickShelfFiles,
+    StartShelfDrag {
+        capture_hwnd: isize,
+        payload: ShelfPayload,
+    },
+}
+
+pub(crate) enum PreparedModalAction {
+    PickShelfFiles {
+        port: WindowsNotchPort,
+    },
+    StartShelfDrag {
+        capture_hwnd: isize,
+        payload: ShelfPayload,
+        local_drag: Arc<AtomicBool>,
+        port: WindowsNotchPort,
+    },
+}
+
+pub(crate) enum CompletedModalAction {
+    PickedShelfFiles(Vec<(ShelfPayload, bool, Option<ShelfThumbnail>)>),
+    FinishedShelfDrag,
+}
+
+struct LocalDragGuard(Arc<AtomicBool>);
+
+impl Drop for LocalDragGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Bar {
@@ -70,12 +130,21 @@ pub(crate) struct Bar {
     renderer: Renderer,
     screen: PrimaryScreen,
     metrics: Metrics,
-    tint: f32,
-    backdrop_requested: bool,
     layout: Layout,
     controls: BarControlsController,
     notch_port: WindowsNotchPort,
     notch: NotchController,
+    shelf_queue: ShelfDropQueue,
+    shelf_local_drag: Arc<AtomicBool>,
+    notch_shelf_region: Arc<ShelfDropRegion>,
+    notch_drop_target: Option<ShelfDropTargetGuard>,
+    panel_drop_target: Option<ShelfDropTargetGuard>,
+    clipboard_listener: Option<ClipboardListenerGuard>,
+    power_listener: Option<PowerNotificationGuard>,
+    last_clipboard_seq: u32,
+    suppressed_clipboard_seq: Option<u32>,
+    pending_shelf_drag: Option<PendingShelfDrag>,
+    touch_swipe: Option<(u32, i32, i32)>,
     hovered: Option<HitTarget>,
     tracking_bar_mouse: bool,
     tracking_panel_mouse: bool,
@@ -83,6 +152,7 @@ pub(crate) struct Bar {
     foreground_gate: ChangeGate,
     cadence: TickCadence,
     focus: BarFocus,
+    focus_notch_tab_on_expand: bool,
     seek_drag_hwnd: Option<isize>,
     lyrics: LyricsService,
     lyrics_track: Option<(String, String)>,
@@ -102,7 +172,7 @@ pub fn start(
     runtime: &RuntimeContext,
     hwnd: isize,
     panel_hwnd: isize,
-    blur: bool,
+    _blur: bool,
     control_center_enabled: bool,
 ) -> Result<()> {
     let mut appbar = AppBar::register(hwnd);
@@ -111,17 +181,40 @@ pub fn start(
         || (String::from("Finder"), None),
         |foreground| (foreground.name, foreground.window),
     );
-    let metrics = Metrics::default();
+    let metrics = Metrics::for_style(runtime.notch_style());
     let screen = primary_screen();
     let notch_port = WindowsNotchPort;
-    let media = notch_port.read_now_playing();
+    let media_enabled = runtime.media_module_enabled.get();
+    let privacy_enabled = runtime.privacy_indicators_enabled.get();
+    let focus_enabled = runtime.focus_module_enabled.get();
+    let shelf_enabled = runtime.drop_shelf_enabled.get();
+    let clipboard_enabled = runtime.clipboard_history_enabled.get();
+    let hud_enabled = runtime.notch_hud_enabled.get();
+    let media = if media_enabled {
+        notch_port.read_now_playing()
+    } else {
+        None
+    };
     let notch_tab = if media.as_ref().is_some_and(NowPlaying::is_active) {
         NotchExpandedTab::Media
-    } else {
+    } else if focus_enabled {
         NotchExpandedTab::Pomodoro
+    } else if shelf_enabled {
+        NotchExpandedTab::Shelf
+    } else {
+        NotchExpandedTab::Clipboard
     };
-    let notch = NotchController::new(media, notch_tab);
+    let mut notch = NotchController::new(media, notch_tab);
+    notch.set_focus_enabled(focus_enabled);
+    notch.set_shelf_enabled(shelf_enabled);
+    notch.set_clipboard_enabled(clipboard_enabled);
+    notch.set_media_enabled(media_enabled);
+    notch.set_privacy_enabled(privacy_enabled);
+    notch.set_hud_enabled(hud_enabled);
     let status = read_system_status();
+    if privacy_enabled {
+        let _ = notch.sync_privacy_state(notch_port.read_privacy_state());
+    }
     let controls = BarControlsController::new(status, active_app.clone(), active_window);
     let layout = compute_layout_with_notch(
         &metrics,
@@ -130,33 +223,51 @@ pub fn start(
         &active_app,
         notch.layout_input(control_center_enabled),
     );
-    let appearance = crate::theme_state::appearance(runtime);
-    let tint = if blur && appearance.uses_backdrop() && enable_backdrop_blur(hwnd) {
-        BLUR_TINT_ALPHA
-    } else {
-        0.0
-    };
-    let max_panel_h = scale(
-        metrics
-            .notch_expanded_height
-            .max(metrics.notch_lyrics_height)
-            + 4,
-        screen.dpi,
-    );
+    let (max_panel_w, max_panel_h) = max_panel_surface_size(screen.dpi);
     let renderer = Renderer::new(
         layout.bar.width,
         layout.bar.height,
-        layout.panel_window.width,
+        max_panel_w,
         max_panel_h,
         screen.dpi,
-        tint,
+        0.0,
     )?;
+    renderer.set_brand_icon(runtime.brand_icon());
 
-    appbar.hide_system_taskbar();
+    if runtime.dock_enabled.get() && runtime.dock_preferences.get().hide_taskbar {
+        appbar.hide_system_taskbar();
+    }
     appbar.reserve_top(screen.width, screen.height, layout.bar.height);
-    register_notch_hotkeys(hwnd);
+    if runtime.hotkeys_enabled.get() {
+        register_notch_hotkeys(hwnd);
+    }
 
     let lyrics = LyricsService::start();
+    let shelf_queue = ShelfDropQueue::new();
+    let shelf_local_drag = Arc::new(AtomicBool::new(false));
+    let notch_pad = scale(12, screen.dpi);
+    let notch_shelf_region = ShelfDropRegion::restricted(
+        layout.notch.x - notch_pad,
+        0,
+        layout.notch.right() + notch_pad,
+        layout.bar.height + notch_pad,
+    );
+    let (notch_drop_target, panel_drop_target) = if shelf_enabled {
+        register_drop_targets(
+            hwnd,
+            panel_hwnd,
+            &shelf_queue,
+            &notch_shelf_region,
+            &shelf_local_drag,
+        )
+    } else {
+        (None, None)
+    };
+    let clipboard_listener = clipboard_enabled
+        .then(|| ClipboardListenerGuard::register(hwnd))
+        .flatten();
+    let power_listener = PowerNotificationGuard::register(hwnd);
+    let last_clipboard_seq = clipboard_sequence_number();
 
     let mut bar = Bar {
         hwnd,
@@ -167,12 +278,21 @@ pub fn start(
         renderer,
         screen,
         metrics,
-        tint,
-        backdrop_requested: blur,
         layout,
         controls,
         notch_port,
         notch,
+        shelf_queue,
+        shelf_local_drag,
+        notch_shelf_region,
+        notch_drop_target,
+        panel_drop_target,
+        clipboard_listener,
+        power_listener,
+        last_clipboard_seq,
+        suppressed_clipboard_seq: None,
+        pending_shelf_drag: None,
+        touch_swipe: None,
         hovered: None,
         tracking_bar_mouse: false,
         tracking_panel_mouse: false,
@@ -180,6 +300,7 @@ pub fn start(
         foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
         cadence: TickCadence::new(STATUS_POLL_MS, STATUS_IDLE_MS, STATUS_IDLE_AFTER_TICKS),
         focus: BarFocus::default(),
+        focus_notch_tab_on_expand: false,
         seek_drag_hwnd: None,
         lyrics,
         lyrics_track: None,
@@ -196,9 +317,18 @@ pub fn start(
             .get()
             .then(|| BackdropFeed::start(hwnd, WM_APP_BAR_BACKDROP, vec![hwnd, panel_hwnd])),
     };
+    bar.notch.set_clock(status.clock);
+    bar.notch
+        .set_lyrics_in_compact(bar.online_lyrics_enabled && bar.notch.media_enabled());
+    if !runtime.onboarding_seen.get() && hud_enabled {
+        bar.notch.trigger_hud(NotchHudKind::Welcome);
+        runtime.pending_onboarding_seen.set(Some(true));
+    }
+    bar.sync_bar_shelf_region();
     bar.place();
     bar.present(runtime);
     bar.sync_backdrop(runtime, true);
+    bar.schedule_deadline();
 
     unsafe {
         SetTimer(
@@ -210,6 +340,9 @@ pub fn start(
     }
     bar.ensure_anim_timer();
     register_idle_wake(hwnd, WM_APP_IDLE_WAKE);
+    if hud_enabled {
+        register_bluetooth_hud_target(hwnd, WM_APP_BAR_BLUETOOTH_HUD);
+    }
 
     *runtime.bar.borrow_mut() = Some(bar);
     Ok(())
@@ -217,7 +350,10 @@ pub fn start(
 
 pub fn stop(runtime: &RuntimeContext) {
     unregister_idle_wake();
-    if let Some(mut bar) = runtime.bar.borrow_mut().take() {
+    unregister_bluetooth_hud_target();
+    if let Ok(mut guard) = runtime.bar.try_borrow_mut()
+        && let Some(mut bar) = guard.take()
+    {
         unsafe {
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), STATUS_TIMER);
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), HUD_ANIM_TIMER);
@@ -227,6 +363,10 @@ pub fn stop(runtime: &RuntimeContext) {
         stop_routing_bar_keys();
         bar.lyrics.shutdown();
     }
+}
+
+fn is_primary_bar_window(runtime: &RuntimeContext, hwnd: isize) -> bool {
+    hwnd != 0 && hwnd == runtime.bar_hwnd.get()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -241,27 +381,46 @@ pub fn handle_message(
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_QUERYENDSESSION => Some(LRESULT(1)),
+        WM_CLOSE => {
+            if is_primary_bar_window(runtime, hwnd) {
+                unsafe { PostQuitMessage(0) };
+            } else {
+                unsafe {
+                    let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
+                }
+                with_bar(runtime, |bar| {
+                    bar.panel_visible = false;
+                });
+            }
+            Some(LRESULT(0))
+        }
         WM_APP_IDLE_WAKE => Some(LRESULT(0)),
+        WM_APP_SHELF_EVENT => {
+            handle_shelf_drop_events(runtime);
+            Some(LRESULT(0))
+        }
+        WM_CLIPBOARDUPDATE => {
+            with_bar(runtime, |bar| bar.on_clipboard_update(runtime));
+            Some(LRESULT(0))
+        }
+        WM_NCDESTROY => {
+            with_bar(runtime, Bar::revoke_drop_targets);
+            None
+        }
         WM_APP_BAR_BACKDROP => {
             with_bar(runtime, |bar| bar.on_backdrop(runtime));
             Some(LRESULT(0))
         }
         WM_ENDSESSION => {
             if wparam.0 != 0 {
-                let _ = otto_platform::restore_hidden_windows();
-                let _ = restore_shell_from_recovery();
+                runtime.pending_end_session.set(true);
             }
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == STATUS_TIMER => {
-            let mut appearance_due = false;
             with_bar(runtime, |bar| {
                 bar.tick(runtime);
-                appearance_due = bar.periodic_due(MAINTAIN_EVERY_TICKS);
             });
-            if appearance_due {
-                crate::theme_state::refresh_system_appearance(runtime);
-            }
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == HUD_ANIM_TIMER => {
@@ -287,33 +446,89 @@ pub fn handle_message(
             crate::theme_state::refresh_system_appearance(runtime);
             Some(LRESULT(1))
         }
+        WM_DEVICECHANGE
+            if matches!(
+                wparam.0,
+                DBT_DEVNODES_CHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
+            ) =>
+        {
+            notify_bluetooth_hardware_change();
+            Some(LRESULT(0))
+        }
+        WM_APP_BAR_BLUETOOTH_HUD => {
+            if let Some(kind) = take_bluetooth_hud_event() {
+                with_bar(runtime, |bar| bar.on_bluetooth_hud(runtime, kind));
+            }
+            Some(LRESULT(0))
+        }
         WM_HOTKEY => {
             with_bar(runtime, |bar| bar.on_hotkey(runtime, wparam.0 as i32));
             Some(LRESULT(0))
         }
         WM_APP_BAR_KEY => {
             if let Some(key) = BarKey::from_code(wparam.0) {
-                with_bar(runtime, |bar| bar.on_bar_key(runtime, key));
+                let modal = with_bar_result(runtime, |bar| bar.on_bar_key(runtime, key)).flatten();
+                if let Some(modal) = modal {
+                    queue_modal_action(runtime, modal);
+                }
+            }
+            Some(LRESULT(0))
+        }
+        WM_GETOBJECT => with_bar_result(runtime, |bar| {
+            let notch_panel_only = hwnd == bar.panel_hwnd;
+            bar.accessible_wm_getobject(hwnd, wparam.0, lparam.0, notch_panel_only)
+        })
+        .flatten()
+        .map(LRESULT),
+        WM_APP_UIA_INVOKE => {
+            if let Some(target) = i32::try_from(wparam.0).ok().and_then(decode_bar_hit_target) {
+                let modal =
+                    with_bar_result(runtime, |bar| bar.invoke_accessible_target(runtime, target))
+                        .flatten();
+                if let Some(modal) = modal {
+                    queue_modal_action(runtime, modal);
+                }
             }
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);
-            with_bar(runtime, |bar| {
+            let modal = with_bar_result(runtime, |bar| {
                 if bar.notch.is_seek_dragging() {
                     bar.drag_seek(runtime, hwnd, x, y);
+                    None
+                } else if let Some(modal) = bar.maybe_start_shelf_drag(hwnd, x, y) {
+                    Some(modal)
                 } else {
                     bar.on_mouse_move(runtime, hwnd, x, y);
+                    None
                 }
-            });
+            })
+            .flatten();
+            if let Some(modal) = modal {
+                queue_modal_action(runtime, modal);
+            }
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
-            with_bar(runtime, |bar| bar.release_seek(runtime, true));
+            let pending = with_bar_result(runtime, |bar| {
+                bar.release_seek(runtime, true);
+                bar.pending_shelf_drag.take()
+            })
+            .flatten();
+            if let Some(drag) = pending {
+                let _ = release_capture_if_owned(drag.source_hwnd);
+                with_bar(runtime, |bar| {
+                    let _ = bar.run_notch_target(runtime, HitTarget::ShelfItem(drag.slot));
+                });
+            }
             Some(LRESULT(0))
         }
         WM_CAPTURECHANGED => {
-            with_bar(runtime, |bar| bar.release_seek(runtime, false));
+            with_bar(runtime, |bar| {
+                bar.release_seek(runtime, false);
+                bar.pending_shelf_drag = None;
+            });
             Some(LRESULT(0))
         }
         WM_MOUSELEAVE => {
@@ -326,9 +541,32 @@ pub fn handle_message(
             with_bar(runtime, |bar| bar.on_mouse_wheel(runtime, x, y, delta));
             Some(LRESULT(0))
         }
+        WM_POINTERDOWN => {
+            let pointer_id = (wparam.0 & 0xFFFF) as u32;
+            let (x, y) = unpack_point(lparam);
+            with_bar(runtime, |bar| bar.on_pointer_down(pointer_id, x, y));
+            None
+        }
+        WM_POINTERUPDATE => {
+            let pointer_id = (wparam.0 & 0xFFFF) as u32;
+            let (x, y) = unpack_point(lparam);
+            with_bar(runtime, |bar| {
+                bar.on_pointer_update(runtime, pointer_id, x, y);
+            });
+            None
+        }
+        WM_POINTERUP | WM_POINTERCAPTURECHANGED => {
+            let pointer_id = (wparam.0 & 0xFFFF) as u32;
+            with_bar(runtime, |bar| bar.clear_touch_swipe(pointer_id));
+            None
+        }
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_point(lparam);
-            with_bar(runtime, |bar| bar.on_left_click(runtime, hwnd, x, y));
+            let modal =
+                with_bar_result(runtime, |bar| bar.on_left_click(runtime, hwnd, x, y)).flatten();
+            if let Some(modal) = modal {
+                queue_modal_action(runtime, modal);
+            }
             Some(LRESULT(0))
         }
         WM_RBUTTONUP => {
@@ -340,7 +578,12 @@ pub fn handle_message(
             with_bar(runtime, |bar| bar.rebuild(runtime));
             Some(LRESULT(0))
         }
-        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_DWMCOLORIZATIONCOLORCHANGED => {
+        WM_SETTINGCHANGE => {
+            crate::theme_state::refresh_system_appearance(runtime);
+            with_bar(runtime, Bar::refresh_motion);
+            None
+        }
+        WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_DWMCOLORIZATIONCOLORCHANGED => {
             crate::theme_state::refresh_system_appearance(runtime);
             None
         }
@@ -365,6 +608,7 @@ const fn wakes_status_tick(message: u32) -> bool {
             | WM_RBUTTONUP
             | WM_MOUSEWHEEL
             | WM_POWERBROADCAST
+            | WM_APP_SHELF_EVENT
             | otto_platform::APPBAR_CALLBACK_MESSAGE
     )
 }
@@ -372,6 +616,8 @@ const fn wakes_status_tick(message: u32) -> bool {
 fn wake_for_message(runtime: &RuntimeContext, message: u32) {
     if message == WM_APP_IDLE_WAKE {
         acknowledge_idle_wake();
+        with_bar(runtime, |bar| bar.idle_wake(runtime));
+        return;
     }
     if wakes_status_tick(message) {
         wake(runtime);
@@ -391,6 +637,169 @@ fn with_bar(runtime: &RuntimeContext, action: impl FnOnce(&mut Bar)) {
     }
 }
 
+fn with_bar_result<T>(runtime: &RuntimeContext, action: impl FnOnce(&mut Bar) -> T) -> Option<T> {
+    let mut guard = runtime.bar.try_borrow_mut().ok()?;
+    guard.as_mut().map(action)
+}
+
+enum ProcessedShelfEvent {
+    DragEnter,
+    DragLeave,
+    Drop(Vec<(ShelfPayload, bool, Option<ShelfThumbnail>)>),
+}
+
+fn handle_shelf_drop_events(runtime: &RuntimeContext) {
+    let Some((shelf_enabled, queue, port)) = with_bar_result(runtime, |bar| {
+        (
+            bar.notch.shelf_enabled(),
+            bar.shelf_queue.clone(),
+            bar.notch_port,
+        )
+    }) else {
+        return;
+    };
+    let events = queue.drain();
+    if events.is_empty() || !shelf_enabled {
+        return;
+    }
+    let processed: Vec<ProcessedShelfEvent> = events
+        .into_iter()
+        .map(|ev| match ev {
+            ShelfDropEvent::DragEnter => ProcessedShelfEvent::DragEnter,
+            ShelfDropEvent::DragLeave => ProcessedShelfEvent::DragLeave,
+            ShelfDropEvent::Drop(payloads) => {
+                let enriched = payloads
+                    .into_iter()
+                    .map(|payload| match &payload {
+                        ShelfPayload::File(path) => {
+                            let (is_dir, thumb) =
+                                port.inspect_shelf_file(path, SHELF_THUMBNAIL_MAX_PX);
+                            (payload, is_dir, thumb)
+                        }
+                        ShelfPayload::Text(_) | ShelfPayload::Url(_) => (payload, false, None),
+                    })
+                    .collect();
+                ProcessedShelfEvent::Drop(enriched)
+            }
+        })
+        .collect();
+    with_bar(runtime, |bar| {
+        bar.ensure_anim_timer();
+        let now = Instant::now();
+        let mut changed = false;
+        for ev in processed {
+            let update = match ev {
+                ProcessedShelfEvent::DragEnter => bar.notch.handle_shelf_drag_enter(),
+                ProcessedShelfEvent::DragLeave => bar.notch.handle_shelf_drag_leave(now),
+                ProcessedShelfEvent::Drop(items) => bar.notch.handle_shelf_drop(items),
+            };
+            changed |= update.changed;
+        }
+        if changed {
+            bar.recompute_layout();
+            bar.sync_panel_visibility();
+            bar.present(runtime);
+        }
+        bar.schedule_deadline();
+    });
+}
+
+fn queue_modal_action(runtime: &RuntimeContext, action: DeferredModalAction) {
+    if let Ok(mut pending) = runtime.pending_modal_action.try_borrow_mut()
+        && pending.is_none()
+    {
+        *pending = Some(action);
+    }
+}
+
+pub(crate) fn prepare_modal_action(
+    runtime: &RuntimeContext,
+    action: DeferredModalAction,
+) -> Option<PreparedModalAction> {
+    match action {
+        DeferredModalAction::PickShelfFiles => {
+            let port = with_bar_result(runtime, |bar| {
+                if !bar.notch.begin_shelf_modal_picker() {
+                    return None;
+                }
+                bar.recompute_layout();
+                bar.sync_panel_visibility();
+                bar.present(runtime);
+                Some(bar.notch_port)
+            })
+            .flatten()?;
+            Some(PreparedModalAction::PickShelfFiles { port })
+        }
+        DeferredModalAction::StartShelfDrag {
+            capture_hwnd,
+            payload,
+        } => {
+            let (local_drag, port) = with_bar_result(runtime, |bar| {
+                let _ = bar.notch.set_shelf_drag_out(true);
+                (Arc::clone(&bar.shelf_local_drag), bar.notch_port)
+            })?;
+            Some(PreparedModalAction::StartShelfDrag {
+                capture_hwnd,
+                payload,
+                local_drag,
+                port,
+            })
+        }
+    }
+}
+
+pub(crate) fn run_prepared_modal_action(action: PreparedModalAction) -> CompletedModalAction {
+    match action {
+        PreparedModalAction::PickShelfFiles { port } => {
+            let picked = port.pick_shelf_files();
+            let enriched = picked
+                .into_iter()
+                .map(|path| {
+                    let (is_dir, thumb) = port.inspect_shelf_file(&path, SHELF_THUMBNAIL_MAX_PX);
+                    (ShelfPayload::File(path), is_dir, thumb)
+                })
+                .collect();
+            CompletedModalAction::PickedShelfFiles(enriched)
+        }
+        PreparedModalAction::StartShelfDrag {
+            capture_hwnd,
+            payload,
+            local_drag,
+            port,
+        } => {
+            let _ = release_capture_if_owned(capture_hwnd);
+            local_drag.store(true, Ordering::Release);
+            let guard = LocalDragGuard(local_drag);
+            let _ = port.start_shelf_drag(capture_hwnd, &payload);
+            drop(guard);
+            CompletedModalAction::FinishedShelfDrag
+        }
+    }
+}
+
+pub(crate) fn finish_modal_action(runtime: &RuntimeContext, completion: CompletedModalAction) {
+    with_bar(runtime, |bar| {
+        bar.ensure_anim_timer();
+        match completion {
+            CompletedModalAction::PickedShelfFiles(enriched) => {
+                let update = bar.notch.finish_shelf_modal_picker(enriched);
+                if update.changed {
+                    bar.recompute_layout();
+                    bar.sync_panel_visibility();
+                    bar.present(runtime);
+                }
+            }
+            CompletedModalAction::FinishedShelfDrag => {
+                let _ = bar.notch.set_shelf_drag_out(false);
+                bar.recompute_layout();
+                bar.sync_panel_visibility();
+                bar.present(runtime);
+            }
+        }
+        bar.schedule_deadline();
+    });
+}
+
 pub fn refresh_plugin_layout(runtime: &RuntimeContext, control_center_enabled: bool) {
     with_bar(runtime, |bar| {
         bar.control_center_enabled = control_center_enabled;
@@ -407,16 +816,8 @@ pub fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
     });
 }
 
-pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
+pub fn apply_appearance(runtime: &RuntimeContext, _appearance: Appearance) {
     with_bar(runtime, |bar| {
-        if bar.backdrop_requested {
-            let material = if appearance.uses_backdrop() {
-                BackdropMaterial::Acrylic
-            } else {
-                BackdropMaterial::None
-            };
-            let _ = apply_backdrop_material(bar.hwnd, material);
-        }
         bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
@@ -425,13 +826,240 @@ pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
 pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.online_lyrics_enabled = enabled;
+        bar.notch
+            .set_lyrics_in_compact(enabled && bar.notch.media_enabled());
         bar.lyrics_track = None;
-        bar.request_lyrics_for_current_track();
+        if bar.notch.media_enabled() {
+            bar.request_lyrics_for_current_track();
+        }
+        bar.recompute_layout();
+        bar.present(runtime);
+        bar.schedule_deadline();
     });
 }
 
+pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        if enabled {
+            if bar.backdrop.is_none() {
+                bar.backdrop = Some(BackdropFeed::start(
+                    bar.hwnd,
+                    WM_APP_BAR_BACKDROP,
+                    vec![bar.hwnd, bar.panel_hwnd],
+                ));
+            }
+        } else {
+            bar.backdrop = None;
+            bar.renderer.clear_bar_backdrop();
+            bar.present(runtime);
+        }
+        bar.sync_backdrop(runtime, true);
+    });
+}
+
+pub fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_privacy_enabled(enabled);
+        if enabled {
+            let _ = bar
+                .notch
+                .sync_privacy_state(bar.notch_port.read_privacy_state());
+        }
+        bar.recompute_layout();
+        bar.present(runtime);
+    });
+}
+
+pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_clipboard_enabled(enabled);
+        if enabled {
+            if bar.clipboard_listener.is_none() {
+                bar.clipboard_listener = ClipboardListenerGuard::register(bar.hwnd);
+                bar.last_clipboard_seq = clipboard_sequence_number();
+                bar.suppressed_clipboard_seq = None;
+            }
+        } else {
+            bar.clipboard_listener = None;
+        }
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.ensure_anim_timer();
+    });
+}
+
+pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_shelf_enabled(enabled);
+        if enabled {
+            bar.ensure_shelf_drop_targets();
+        } else {
+            bar.notch_drop_target = None;
+            bar.panel_drop_target = None;
+            bar.pending_shelf_drag = None;
+            let _ = bar.shelf_queue.drain();
+        }
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.ensure_anim_timer();
+    });
+}
+
+pub fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_hud_enabled(enabled);
+        if enabled {
+            register_bluetooth_hud_target(bar.hwnd, WM_APP_BAR_BLUETOOTH_HUD);
+        } else {
+            unregister_bluetooth_hud_target();
+        }
+        bar.recompute_layout();
+        bar.present(runtime);
+        bar.schedule_deadline();
+    });
+}
+
+pub fn set_media_module_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_media_enabled(enabled);
+        bar.notch
+            .set_lyrics_in_compact(enabled && bar.online_lyrics_enabled);
+        bar.lyrics_track = None;
+        bar.lyrics_generation = bar.lyrics_generation.wrapping_add(1);
+        if enabled {
+            let latest_media = bar.notch_port.read_now_playing();
+            let _ = bar.notch.set_media(latest_media);
+            bar.request_lyrics_for_current_track();
+        }
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.ensure_anim_timer();
+        bar.schedule_deadline();
+    });
+}
+
+pub fn set_focus_module_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        bar.notch.set_focus_enabled(enabled);
+        runtime.focus_active.set(bar.notch.focus_active());
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.ensure_anim_timer();
+        bar.schedule_deadline();
+    });
+}
+
+pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
+    with_bar(runtime, |bar| {
+        if hidden {
+            bar.appbar.hide_system_taskbar();
+        } else {
+            bar.appbar.show_system_taskbar();
+        }
+        bar.present(runtime);
+    });
+}
+
+pub fn set_hotkeys_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        if enabled {
+            register_notch_hotkeys(bar.hwnd);
+        } else {
+            unregister_notch_hotkeys(bar.hwnd);
+        }
+    });
+}
+
+pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+    with_bar(runtime, |bar| {
+        bar.sync_backdrop(runtime, true);
+        bar.present(runtime);
+    });
+}
+
+pub fn set_brand_icon(runtime: &RuntimeContext, brand_icon: BrandIcon) {
+    with_bar(runtime, |bar| {
+        bar.renderer.set_brand_icon(brand_icon);
+        bar.present(runtime);
+    });
+}
+
+pub fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
+    with_bar(runtime, |bar| {
+        let next_metrics = Metrics::for_style(style);
+        if next_metrics.bar_height == bar.metrics.bar_height {
+            bar.metrics = next_metrics;
+            bar.recompute_layout();
+            bar.sync_panel_visibility();
+            bar.present(runtime);
+        } else {
+            bar.rebuild_with_metrics(runtime, next_metrics);
+            bar.sync_panel_visibility();
+        }
+    });
+}
+
+fn max_panel_surface_size(dpi: u32) -> (i32, i32) {
+    let classic = Metrics::MACBOOK_PRO_14;
+    let island = Metrics::DYNAMIC_ISLAND;
+    let max_pts_w = (classic.notch_expanded_width + classic.notch_expanded_ear_radius * 2 + 8)
+        .max(island.notch_expanded_width + island.notch_expanded_ear_radius * 2 + 8);
+    let max_pts_h = (classic.notch_top_inset
+        + classic
+            .notch_expanded_height
+            .max(classic.notch_lyrics_height)
+        + 4)
+    .max(island.notch_top_inset + island.notch_expanded_height.max(island.notch_lyrics_height) + 4);
+    (scale(max_pts_w, dpi), scale(max_pts_h, dpi))
+}
+
+fn register_drop_targets(
+    hwnd: isize,
+    panel_hwnd: isize,
+    shelf_queue: &ShelfDropQueue,
+    notch_shelf_region: &Arc<ShelfDropRegion>,
+    shelf_local_drag: &Arc<AtomicBool>,
+) -> (Option<ShelfDropTargetGuard>, Option<ShelfDropTargetGuard>) {
+    let notch_target = register_shelf_drop_target(
+        hwnd,
+        shelf_queue.clone(),
+        Arc::clone(notch_shelf_region),
+        Arc::clone(shelf_local_drag),
+    );
+    let panel_target = register_shelf_drop_target(
+        panel_hwnd,
+        shelf_queue.clone(),
+        ShelfDropRegion::full_window(),
+        Arc::clone(shelf_local_drag),
+    );
+    (notch_target, panel_target)
+}
+
 impl Bar {
+    fn ensure_shelf_drop_targets(&mut self) {
+        if self.notch_drop_target.is_some() && self.panel_drop_target.is_some() {
+            return;
+        }
+        let (notch_target, panel_target) = register_drop_targets(
+            self.hwnd,
+            self.panel_hwnd,
+            &self.shelf_queue,
+            &self.notch_shelf_region,
+            &self.shelf_local_drag,
+        );
+        self.notch_drop_target = notch_target;
+        self.panel_drop_target = panel_target;
+    }
+
     fn request_lyrics_for_current_track(&mut self) {
+        if !self.notch.media_enabled() {
+            self.lyrics_track = None;
+            return;
+        }
         let Some(media) = self.notch.media() else {
             self.lyrics_track = None;
             return;
@@ -448,8 +1076,8 @@ impl Bar {
             duration_ms: media.duration_ms,
             allow_online: self.online_lyrics_enabled,
         });
-        self.lyrics_generation = generation;
         if accepted {
+            self.lyrics_generation = generation;
             self.lyrics_track = Some(track);
             self.notch.begin_lyrics_request();
         }
@@ -460,6 +1088,14 @@ impl Bar {
     }
 
     fn recompute_layout(&mut self) {
+        let renderer = &self.renderer;
+        if self.notch.sync_compact_title_width(
+            Instant::now(),
+            crate::notch::unix_now_ms(),
+            |text| renderer.compact_title_points(text),
+        ) {
+            self.ensure_anim_timer();
+        }
         self.layout = compute_layout_with_notch(
             &self.metrics,
             self.screen.width,
@@ -467,6 +1103,94 @@ impl Bar {
             self.controls.active_app(),
             self.notch_input(),
         );
+        self.sync_bar_shelf_region();
+    }
+
+    fn sync_bar_shelf_region(&self) {
+        let pad = scale(12, self.screen.dpi);
+        self.notch_shelf_region.set_rect(
+            self.layout.notch.x - pad,
+            0,
+            self.layout.notch.right() + pad,
+            self.layout.bar.height + pad,
+        );
+    }
+
+    fn revoke_drop_targets(&mut self) {
+        unregister_bluetooth_hud_target();
+        self.notch_drop_target = None;
+        self.panel_drop_target = None;
+        self.clipboard_listener = None;
+        self.power_listener = None;
+    }
+
+    fn on_bluetooth_hud(&mut self, runtime: &RuntimeContext, kind: NotchHudKind) {
+        if !self.notch.hud_enabled() {
+            return;
+        }
+        self.notch.trigger_hud(kind);
+        self.ensure_anim_timer();
+        self.present(runtime);
+        self.schedule_deadline();
+    }
+
+    fn on_clipboard_update(&mut self, runtime: &RuntimeContext) {
+        if !self.notch.clipboard_enabled() {
+            return;
+        }
+        if self.notch.clipboard_state().paused {
+            self.last_clipboard_seq = clipboard_sequence_number();
+            self.suppressed_clipboard_seq = None;
+            return;
+        }
+        let seq = clipboard_sequence_number();
+        if self.suppressed_clipboard_seq == Some(seq) {
+            self.suppressed_clipboard_seq = None;
+            self.last_clipboard_seq = seq;
+            return;
+        }
+        if seq == self.last_clipboard_seq {
+            return;
+        }
+        match read_clipboard_payload() {
+            ClipboardRead::Captured { seq, payload } => {
+                self.last_clipboard_seq = seq;
+                self.suppressed_clipboard_seq = None;
+                if self.notch.sync_clipboard_capture(payload) {
+                    self.recompute_layout();
+                    if self.panel_visible {
+                        self.present(runtime);
+                    }
+                }
+            }
+            ClipboardRead::SensitiveOrEmpty { seq } => {
+                self.last_clipboard_seq = seq;
+                self.suppressed_clipboard_seq = None;
+            }
+            ClipboardRead::Busy => {}
+        }
+    }
+
+    fn maybe_start_shelf_drag(
+        &mut self,
+        source_hwnd: isize,
+        raw_x: i32,
+        raw_y: i32,
+    ) -> Option<DeferredModalAction> {
+        let pending = self.pending_shelf_drag.as_ref()?;
+        let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
+        let dx = (x - pending.start_x).abs();
+        let dy = (y - pending.start_y).abs();
+        let cx = unsafe { GetSystemMetrics(SM_CXDRAG) }.max(4);
+        let cy = unsafe { GetSystemMetrics(SM_CYDRAG) }.max(4);
+        if dx < cx && dy < cy {
+            return None;
+        }
+        let pending = self.pending_shelf_drag.take()?;
+        Some(DeferredModalAction::StartShelfDrag {
+            capture_hwnd: pending.source_hwnd,
+            payload: pending.payload,
+        })
     }
 
     fn seek_ratio_at(&self, x: i32) -> Option<f32> {
@@ -497,9 +1221,7 @@ impl Bar {
             }
         };
         let _ = release_capture_if_owned(hwnd);
-        if let Some(NotchEffect::Platform(action)) = update.effect {
-            self.notch_port.execute(action);
-        }
+        self.apply_notch_effect(update.effect);
         self.present(runtime);
     }
 
@@ -560,7 +1282,7 @@ impl Bar {
             y,
         };
         let popup_open = crate::menu::active_top_bar_target(runtime).is_some()
-            || crate::menu::is_control_center_open(runtime)
+            || crate::control_center::is_open(runtime)
             || crate::menu::is_calendar_open(runtime);
         if self
             .visibility
@@ -571,11 +1293,14 @@ impl Bar {
     }
 
     fn apply_visibility(&mut self, runtime: &RuntimeContext) {
+        self.notch.set_presented(self.visibility.is_visible());
         if self.visibility.is_visible() {
             self.place();
             self.present(runtime);
+            self.schedule_deadline();
             return;
         }
+        self.schedule_deadline();
         crate::menu::close(runtime);
         unsafe {
             let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
@@ -650,23 +1375,23 @@ impl Bar {
     }
 
     fn rebuild(&mut self, runtime: &RuntimeContext) {
+        self.rebuild_with_metrics(runtime, Metrics::for_style(runtime.notch_style()));
+    }
+
+    fn rebuild_with_metrics(&mut self, runtime: &RuntimeContext, metrics: Metrics) {
         self.screen = primary_screen();
+        self.metrics = metrics;
         self.recompute_layout();
-        let max_panel_h = scale(
-            self.metrics
-                .notch_expanded_height
-                .max(self.metrics.notch_lyrics_height)
-                + 4,
-            self.screen.dpi,
-        );
+        let (max_panel_w, max_panel_h) = max_panel_surface_size(self.screen.dpi);
         if let Ok(renderer) = Renderer::new(
             self.layout.bar.width,
             self.layout.bar.height,
-            self.layout.panel_window.width,
+            max_panel_w,
             max_panel_h,
             self.screen.dpi,
-            self.tint,
+            0.0,
         ) {
+            renderer.set_brand_icon(runtime.brand_icon());
             self.renderer = renderer;
             if let Some(feed) = self.backdrop.as_mut() {
                 feed.reset();
@@ -686,7 +1411,8 @@ impl Bar {
 
     fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted = capture_wanted(&appearance, self.backdrop.is_some());
+        let wanted =
+            !runtime.capture_visible.get() && capture_wanted(&appearance, self.backdrop.is_some());
         let visible = self.visibility.is_visible();
         let Some(feed) = self.backdrop.as_mut() else {
             return;
@@ -708,12 +1434,14 @@ impl Bar {
             width: self.layout.bar.width,
             height: self.layout.bar.height,
         };
+        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
         let Some(region) =
-            CaptureRegion::clipped_to_screen(bar_rect, self.screen.width, self.screen.height)
+            CaptureRegion::padded_to_screen(bar_rect, pad, self.screen.width, self.screen.height)
         else {
             return;
         };
-        let interval = capture_interval_ms(is_running_on_battery());
+        let active = self.panel_visible || self.hovered.is_some();
+        let interval = capture_interval_for(is_running_on_battery(), active);
         feed.request(region, interval, force);
     }
 
@@ -728,8 +1456,15 @@ impl Bar {
     fn wake(&mut self, runtime: &RuntimeContext) {
         if let Some(interval) = self.cadence.wake() {
             self.set_status_interval(interval);
-            self.tick(runtime);
+            self.run_tick(runtime, true);
         }
+    }
+
+    fn idle_wake(&mut self, runtime: &RuntimeContext) {
+        if let Some(interval) = self.cadence.wake() {
+            self.set_status_interval(interval);
+        }
+        self.run_tick(runtime, true);
     }
 
     fn set_status_interval(&self, interval: u32) {
@@ -743,8 +1478,8 @@ impl Bar {
         }
     }
 
-    fn periodic_due(&self, every_ticks: u8) -> bool {
-        self.cadence.is_idle() || self.maintain_ticks.is_multiple_of(every_ticks)
+    const fn periodic_due(&self, every_ticks: u8) -> bool {
+        periodic_tick_due(self.maintain_ticks, every_ticks)
     }
 
     fn hidden_for_full_screen(&self) -> bool {
@@ -767,16 +1502,32 @@ impl Bar {
             || self.notch.hud_state().is_some()
             || self.notch.lyrics_view().status == LyricsStatus::Loading
             || crate::menu::active_top_bar_target(runtime).is_some()
-            || crate::menu::is_control_center_open(runtime)
+            || crate::control_center::is_open(runtime)
             || crate::menu::is_calendar_open(runtime)
     }
 
+    fn refresh_motion(&mut self) {
+        let next_motion = motion_preference();
+        if next_motion != self.motion {
+            self.motion = next_motion;
+            self.ensure_anim_timer();
+        }
+    }
+
     fn tick(&mut self, runtime: &RuntimeContext) {
+        self.run_tick(runtime, false);
+    }
+
+    fn run_tick(&mut self, runtime: &RuntimeContext, force_media: bool) {
         self.maintain_ticks = self.maintain_ticks.wrapping_add(1);
         self.track_reveal(runtime);
-        crate::window_controls::poll_foreground(runtime);
+        if !self.cadence.is_idle() || self.periodic_due(MAINTAIN_EVERY_TICKS) {
+            crate::window_controls::poll_foreground(runtime);
+        }
         if self.periodic_due(MAINTAIN_EVERY_TICKS) {
-            suppress_native_osd();
+            if self.notch.hud_enabled() {
+                suppress_native_osd();
+            }
             self.appbar.maintain(
                 self.screen.width,
                 self.screen.height,
@@ -814,6 +1565,8 @@ impl Bar {
                     LyricsOutcome::Failed => (None, LyricsStatus::Failed),
                 };
                 self.notch.finish_lyrics(sheet, status);
+                self.recompute_layout();
+                self.ensure_anim_timer();
                 dirty = true;
             }
         }
@@ -839,23 +1592,9 @@ impl Bar {
         if self.notch.is_seek_dragging() && is_escape_down() {
             self.release_seek(runtime, false);
         }
-        let latest = read_system_status();
-        if let Some(event) = detect_hud_event(self.controls.status(), latest) {
-            self.notch.trigger_hud(event);
+        if self.refresh_media(force_media) {
             dirty = true;
         }
-        if self.controls.apply_status(latest) {
-            dirty = true;
-        }
-        if self.periodic_due(MEDIA_EVERY_TICKS) {
-            let latest_media = self.notch_port.read_now_playing();
-            if self.notch.set_media(latest_media) {
-                self.recompute_layout();
-                dirty = true;
-            }
-            self.request_lyrics_for_current_track();
-        }
-        self.motion = motion_preference();
         if dirty {
             self.ensure_anim_timer();
             self.present(runtime);
@@ -870,6 +1609,52 @@ impl Bar {
         if let Some(interval) = self.cadence.observe(busy) {
             self.set_status_interval(interval);
         }
+    }
+
+    fn refresh_media(&mut self, force_media: bool) -> bool {
+        let mut dirty = false;
+        if should_refresh_system_status(force_media, self.cadence.is_idle(), self.maintain_ticks)
+            && self.refresh_system_status()
+        {
+            dirty = true;
+        }
+        if self.notch.privacy_enabled()
+            && self
+                .notch
+                .sync_privacy_state(self.notch_port.read_privacy_state())
+        {
+            self.recompute_layout();
+            dirty = true;
+        }
+        if self.notch.media_enabled() && should_refresh_media(force_media, self.maintain_ticks) {
+            let latest_media = self.notch_port.read_now_playing();
+            if self.notch.set_media(latest_media) {
+                self.recompute_layout();
+                dirty = true;
+            }
+            self.request_lyrics_for_current_track();
+        }
+        dirty
+    }
+
+    fn refresh_system_status(&mut self) -> bool {
+        let mut latest = read_system_status();
+        let previous = self.controls.status();
+        if latest.input_lang.is_empty() && !previous.input_lang.is_empty() {
+            latest.input_lang = previous.input_lang;
+        }
+        let mut dirty = false;
+        if self.notch.hud_enabled()
+            && let Some(event) = detect_hud_event(previous, latest)
+        {
+            self.notch.trigger_hud(event);
+            dirty = true;
+        }
+        self.notch.set_clock(latest.clock);
+        if self.controls.apply_status(latest) {
+            dirty = true;
+        }
+        dirty
     }
 
     fn schedule_deadline(&self) {
@@ -896,11 +1681,38 @@ impl Bar {
         }
     }
 
-    fn apply_notch_update(&mut self, runtime: &RuntimeContext, update: crate::notch::NotchUpdate) {
-        if let Some(NotchEffect::Platform(action)) = update.effect {
-            self.notch_port.execute(action);
+    fn apply_notch_effect(&mut self, effect: Option<NotchEffect>) -> bool {
+        let Some(effect) = effect else {
+            return false;
+        };
+        match effect {
+            NotchEffect::Platform(action) => {
+                self.notch_port.execute(action.clone());
+                if matches!(action, NotchAction::ToggleMicMute) {
+                    let _ = self
+                        .notch
+                        .sync_privacy_state(self.notch_port.read_privacy_state());
+                    true
+                } else {
+                    false
+                }
+            }
+            NotchEffect::PickShelfFiles => false,
+            NotchEffect::CopyClipboard(payload) => {
+                if let Some(seq) = self.notch_port.copy_clipboard(&payload) {
+                    self.suppressed_clipboard_seq = Some(seq);
+                    self.last_clipboard_seq = seq;
+                    false
+                } else {
+                    self.notch.clear_clipboard_copied_feedback()
+                }
+            }
         }
-        if update.changed {
+    }
+
+    fn apply_notch_update(&mut self, runtime: &RuntimeContext, update: crate::notch::NotchUpdate) {
+        let effect_changed = self.apply_notch_effect(update.effect);
+        if update.changed || effect_changed {
             self.recompute_layout();
             self.sync_panel_visibility();
             self.present(runtime);
@@ -923,6 +1735,7 @@ impl Bar {
             }
             PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => {
                 self.notch.resume(now);
+                notify_bluetooth_hardware_change();
                 self.schedule_deadline();
             }
             _ => {}
@@ -938,10 +1751,8 @@ impl Bar {
             self.panel_visible,
             self.motion,
         );
-        if let Some(NotchEffect::Platform(action)) = update.effect {
-            self.notch_port.execute(action);
-        }
-        if update.changed {
+        let effect_changed = self.apply_notch_effect(update.effect);
+        if update.changed || effect_changed {
             self.settle_ticks = 10;
             self.recompute_layout();
             self.sync_panel_visibility();
@@ -997,11 +1808,24 @@ impl Bar {
 
     fn leave_keyboard_focus(&mut self, runtime: &RuntimeContext) {
         stop_routing_if_targets(self.hwnd);
+        self.focus_notch_tab_on_expand = false;
         self.focus.exit();
         self.present(runtime);
     }
 
     fn sync_keyboard_focus(&mut self, runtime: &RuntimeContext) {
+        if self.focus_notch_tab_on_expand && self.layout.panel_expansion > 0.55 {
+            self.focus_notch_tab_on_expand = false;
+            let tab_target = active_notch_tab_target(self.notch.active_tab());
+            let targets = self.keyboard_targets();
+            if targets.contains(&tab_target)
+                && self.focus.enter(&[tab_target]).is_some()
+                && route_bar_keys(self.hwnd, WM_APP_BAR_KEY)
+            {
+                self.present(runtime);
+                return;
+            }
+        }
         if !self.focus.is_active() {
             return;
         }
@@ -1012,7 +1836,53 @@ impl Bar {
         }
     }
 
-    fn on_bar_key(&mut self, runtime: &RuntimeContext, key: BarKey) {
+    fn accessible_wm_getobject(
+        &self,
+        hwnd: isize,
+        wparam: usize,
+        lparam: isize,
+        notch_panel_only: bool,
+    ) -> Option<isize> {
+        handle_wm_getobject(hwnd, wparam, lparam, WM_APP_UIA_INVOKE, || {
+            let app_name = self.controls.active_app();
+            let media_present = self
+                .notch
+                .display_media(crate::notch::unix_now_ms())
+                .is_some();
+            build_bar_accessible_tree(
+                &self.layout,
+                (0, 0),
+                app_name,
+                media_present,
+                notch_panel_only,
+            )
+        })
+    }
+
+    fn invoke_accessible_target(
+        &mut self,
+        runtime: &RuntimeContext,
+        target: HitTarget,
+    ) -> Option<DeferredModalAction> {
+        self.ensure_anim_timer();
+        if is_notch_target(target) {
+            let modal = self.run_notch_target(runtime, target);
+            self.present(runtime);
+            return modal;
+        }
+        if let Some(action) = BarControlsController::click_action(target) {
+            match action {
+                BarControlAction::ControlCenter(page) => {
+                    self.toggle_control_center(runtime, page, true);
+                }
+                other => self.perform(runtime, other),
+            }
+            self.present(runtime);
+        }
+        None
+    }
+
+    fn on_bar_key(&mut self, runtime: &RuntimeContext, key: BarKey) -> Option<DeferredModalAction> {
         let targets = self.keyboard_targets();
         if let Some(from_end) = self.focus.dock_handoff(key, &targets)
             && crate::dock::keyboard_entry_count(runtime) > 0
@@ -1020,30 +1890,53 @@ impl Bar {
             self.focus.exit();
             crate::dock::enter_keyboard_focus(runtime, from_end);
             self.present(runtime);
-            return;
+            return None;
         }
         if self.focus.current() == Some(HitTarget::MediaSeekbar)
             && let Some(delta_ms) = keyboard_seek_delta(key)
         {
             self.seek_from_keyboard(runtime, delta_ms);
-            return;
+            return None;
         }
         match self.focus.handle(key, &targets) {
             BarFocusOutcome::Moved(_) => self.present(runtime),
             BarFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
             BarFocusOutcome::Unchanged | BarFocusOutcome::Activate(HitTarget::MediaSeekbar) => {}
             BarFocusOutcome::Activate(target) if is_notch_target(target) => {
-                self.run_notch_target(runtime, target);
+                let was_collapsed = self.layout.panel_expansion <= 0.55;
+                let modal = self.run_notch_target(runtime, target);
+                if matches!(target, HitTarget::Notch | HitTarget::PrivacyIndicator) && was_collapsed
+                {
+                    let tab_target = active_notch_tab_target(self.notch.active_tab());
+                    let targets = self.keyboard_targets();
+                    if self.layout.panel_expansion > 0.55 && targets.contains(&tab_target) {
+                        let _ = self.focus.enter(&[tab_target]);
+                        self.focus_notch_tab_on_expand = false;
+                    } else if self.panel_visible {
+                        let _ = self.focus.enter(&[HitTarget::Notch]);
+                        self.focus_notch_tab_on_expand = true;
+                    }
+                } else {
+                    self.focus_notch_tab_on_expand = false;
+                    stop_routing_if_targets(self.hwnd);
+                }
                 self.present(runtime);
+                return modal;
             }
             BarFocusOutcome::Activate(target) => {
                 self.leave_keyboard_focus(runtime);
                 self.present(runtime);
                 if let Some(action) = BarControlsController::click_action(target) {
-                    self.perform(runtime, action);
+                    match action {
+                        BarControlAction::ControlCenter(page) => {
+                            self.toggle_control_center(runtime, page, true);
+                        }
+                        other => self.perform(runtime, other),
+                    }
                 }
             }
         }
+        None
     }
 
     fn on_hotkey(&mut self, runtime: &RuntimeContext, hotkey_id: i32) {
@@ -1053,6 +1946,12 @@ impl Bar {
             } else {
                 self.enter_keyboard_focus(runtime);
             }
+            return;
+        }
+        if hotkey_id == otto_platform::HOTKEY_CONTROL_CENTER {
+            self.leave_keyboard_focus(runtime);
+            self.toggle_control_center(runtime, ControlCenterPage::Main, true);
+            self.present(runtime);
             return;
         }
         self.ensure_anim_timer();
@@ -1147,20 +2046,86 @@ impl Bar {
         }
     }
 
+    fn on_pointer_down(&mut self, pointer_id: u32, x: i32, y: i32) {
+        if self.notch.panel_expansion() <= 0.55 || !self.layout.notch.contains(x, y) {
+            return;
+        }
+        if matches!(
+            self.layout.hit_test(x, y),
+            Some(HitTarget::ShelfItem(_) | HitTarget::MediaSeekbar)
+        ) {
+            return;
+        }
+        self.touch_swipe = Some((pointer_id, x, y));
+    }
+
+    fn on_pointer_update(&mut self, runtime: &RuntimeContext, pointer_id: u32, x: i32, y: i32) {
+        let Some((active_id, sx, sy)) = self.touch_swipe else {
+            return;
+        };
+        if active_id != pointer_id {
+            return;
+        }
+        let threshold = scale(SWIPE_COLLAPSE_THRESHOLD_PT, self.screen.dpi);
+        if is_upward_touch_swipe((sx, sy), (x, y), threshold) {
+            self.touch_swipe = None;
+            self.ensure_anim_timer();
+            let update = self.notch.collapse_from_gesture();
+            self.apply_notch_update(runtime, update);
+        }
+    }
+
+    fn clear_touch_swipe(&mut self, pointer_id: u32) {
+        if self
+            .touch_swipe
+            .is_some_and(|(active_id, _, _)| active_id == pointer_id)
+        {
+            self.touch_swipe = None;
+        }
+    }
+
     fn on_mouse_wheel(&mut self, runtime: &RuntimeContext, x: i32, y: i32, delta: i16) {
         self.ensure_anim_timer();
         let hit = self.hovered.or_else(|| self.layout.hit_test(x, y));
+        if self.notch.panel_expansion() > 0.55 {
+            let header_bottom = self
+                .layout
+                .notch_tab_strip
+                .bottom()
+                .max(self.layout.bar.height);
+            let in_header_strip = self.layout.notch.contains(x, y) && y <= header_bottom;
+            if should_wheel_collapse_notch(in_header_strip, hit, self.notch.active_tab(), delta) {
+                let update = self.notch.collapse_from_gesture();
+                self.apply_notch_update(runtime, update);
+                return;
+            }
+        }
         if self.notch.panel_expansion() > 0.55
             && let Some(
                 target @ (HitTarget::Notch
-                | HitTarget::PomodoroPhase
+                | HitTarget::FocusMode(_)
+                | HitTarget::PomodoroPreset(_)
                 | HitTarget::PomodoroPlayPause
                 | HitTarget::PomodoroReset
-                | HitTarget::PomodoroSkip),
+                | HitTarget::PomodoroSkip
+                | HitTarget::NotchTabShelf
+                | HitTarget::NotchTabClipboard
+                | HitTarget::ShelfAdd
+                | HitTarget::ShelfClear
+                | HitTarget::ShelfPager
+                | HitTarget::ShelfItem(_)
+                | HitTarget::ShelfCopyItem(_)
+                | HitTarget::ShelfRemoveItem(_)
+                | HitTarget::ClipboardPauseToggle
+                | HitTarget::ClipboardClear
+                | HitTarget::ClipboardPager
+                | HitTarget::ClipboardItem(_)
+                | HitTarget::ClipboardRemoveItem(_)),
             ) = hit
         {
             let update = self.notch.handle_wheel(target, delta);
             if update.changed {
+                self.recompute_layout();
                 self.present(runtime);
             }
             return;
@@ -1183,12 +2148,13 @@ impl Bar {
                     });
                 }
                 BarControlAction::StepBrightness(delta) => {
-                    let pct = step_display_brightness(delta);
-                    let mut status = self.controls.status();
-                    status.brightness = pct;
-                    self.controls.apply_status(status);
-                    self.notch
-                        .trigger_hud(NotchHudKind::Brightness { percent: pct });
+                    if let Some(pct) = step_display_brightness(delta) {
+                        let mut status = self.controls.status();
+                        status.brightness = Some(pct);
+                        self.controls.apply_status(status);
+                        self.notch
+                            .trigger_hud(NotchHudKind::Brightness { percent: pct });
+                    }
                 }
                 _ => return,
             }
@@ -1200,24 +2166,28 @@ impl Bar {
         let update = self
             .notch
             .handle_seek_step(delta_ms, crate::notch::unix_now_ms());
-        if let Some(NotchEffect::Platform(action)) = update.effect {
-            self.notch_port.execute(action);
-        }
-        if update.changed {
+        let effect_changed = self.apply_notch_effect(update.effect);
+        if update.changed || effect_changed {
             self.present(runtime);
         }
     }
 
-    fn run_notch_target(&mut self, runtime: &RuntimeContext, target: HitTarget) {
+    fn run_notch_target(
+        &mut self,
+        runtime: &RuntimeContext,
+        target: HitTarget,
+    ) -> Option<DeferredModalAction> {
+        if target == HitTarget::PrivacyIndicator {
+            let _ = self
+                .notch
+                .sync_privacy_state(self.notch_port.read_privacy_state());
+        }
         let update = self.notch.handle_click(target);
-        if let Some(NotchEffect::Platform(action)) = update.effect {
-            self.notch_port.execute(action);
+        if matches!(update.effect, Some(NotchEffect::PickShelfFiles)) {
+            return Some(DeferredModalAction::PickShelfFiles);
         }
-        if update.changed {
-            self.recompute_layout();
-            self.sync_panel_visibility();
-            self.present(runtime);
-        }
+        self.apply_notch_update(runtime, update);
+        None
     }
 
     fn on_left_click(
@@ -1226,13 +2196,11 @@ impl Bar {
         source_hwnd: isize,
         raw_x: i32,
         raw_y: i32,
-    ) {
+    ) -> Option<DeferredModalAction> {
         self.ensure_anim_timer();
         self.leave_keyboard_focus(runtime);
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
-        let Some(target) = self.layout.hit_test(x, y) else {
-            return;
-        };
+        let target = self.layout.hit_test(x, y)?;
 
         if target == HitTarget::MediaSeekbar {
             if let Some(ratio) = self.seek_ratio_at(x)
@@ -1244,17 +2212,42 @@ impl Bar {
                 self.seek_drag_hwnd = Some(source_hwnd);
                 self.present(runtime);
             }
-            return;
+            return None;
+        }
+
+        if let HitTarget::ShelfItem(slot) = target
+            && let Some(payload) = self.notch.shelf_item_payload(slot)
+        {
+            unsafe {
+                let _ = SetCapture(HWND(source_hwnd as *mut _));
+            }
+            self.pending_shelf_drag = Some(PendingShelfDrag {
+                slot,
+                source_hwnd,
+                start_x: x,
+                start_y: y,
+                payload,
+            });
+            return None;
+        }
+
+        if target == HitTarget::Notch
+            && self.notch.panel_expansion() > 0.55
+            && self.notch.active_tab() == NotchExpandedTab::Shelf
+            && self.notch.shelf_state().items.is_empty()
+            && self.layout.shelf_dropzone.contains(x, y)
+        {
+            return self.run_notch_target(runtime, HitTarget::ShelfAdd);
         }
 
         if is_notch_target(target) {
-            self.run_notch_target(runtime, target);
-            return;
+            return self.run_notch_target(runtime, target);
         }
 
         if let Some(action) = BarControlsController::click_action(target) {
             self.perform(runtime, action);
         }
+        None
     }
 
     fn open_menu(&self, runtime: &RuntimeContext, target: HitTarget, anchor_x: Option<i32>) {
@@ -1267,12 +2260,37 @@ impl Bar {
                 bar_hwnd: self.hwnd,
                 target,
                 anchor_x: anchor_x.unwrap_or(slot.x),
-                anchor_y: self.layout.bar.height + 4,
+                anchor_y: self.layout.popup_anchor_y(self.screen.dpi),
                 app_name: self.controls.active_app(),
                 window: self.controls.active_window(),
                 hidden: &self.layout.hidden_targets,
             },
         );
+    }
+
+    fn toggle_control_center(
+        &self,
+        runtime: &RuntimeContext,
+        page: ControlCenterPage,
+        focused: bool,
+    ) {
+        if !self.control_center_enabled {
+            return;
+        }
+        if crate::control_center::is_open(runtime)
+            && crate::control_center::active_page(runtime) == Some(page)
+        {
+            crate::control_center::close(runtime);
+            return;
+        }
+        crate::menu::close(runtime);
+        let anchor_right = self.anchor_right(HitTarget::ControlCenter);
+        let anchor_y = self.layout.popup_anchor_y(self.screen.dpi);
+        if focused {
+            crate::control_center::open_at_page_focused(runtime, page, anchor_right, anchor_y);
+        } else {
+            crate::control_center::open_at_page(runtime, page, anchor_right, anchor_y);
+        }
     }
 
     fn anchor_right(&self, target: HitTarget) -> i32 {
@@ -1302,21 +2320,9 @@ impl Bar {
                     self.screen.width,
                 );
             }
-            BarControlAction::ControlCenter => {
-                if !self.control_center_enabled {
-                    return;
-                }
-                if crate::menu::is_control_center_open(runtime) {
-                    crate::menu::close(runtime);
-                } else {
-                    crate::menu::open_control_center(
-                        runtime,
-                        self.anchor_right(HitTarget::ControlCenter),
-                        self.layout.bar.height + 4,
-                    );
-                }
+            BarControlAction::ControlCenter(page) => {
+                self.toggle_control_center(runtime, page, false);
             }
-            BarControlAction::QuickSettings => open_quick_settings(),
             BarControlAction::Search => open_spotlight_search(),
             BarControlAction::Clock => {
                 if crate::menu::is_calendar_open(runtime) {
@@ -1325,7 +2331,7 @@ impl Bar {
                     crate::menu::open_calendar(
                         runtime,
                         self.anchor_right(HitTarget::Clock),
-                        self.layout.bar.height + 4,
+                        self.layout.popup_anchor_y(self.screen.dpi),
                     );
                 }
             }
@@ -1342,6 +2348,19 @@ impl Bar {
     ) {
         self.ensure_anim_timer();
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
+        if let Some(HitTarget::ShelfItem(slot)) = self.layout.hit_test(x, y) {
+            let update = self.notch.handle_shelf_right_click(slot);
+            self.apply_notch_update(runtime, update);
+            return;
+        }
+        if self.layout.secondary_expansion > 0.25 && self.layout.notch_secondary.contains(x, y) {
+            let update = self.notch.dismiss_secondary_compact(Instant::now());
+            if update.changed {
+                self.recompute_layout();
+                self.present(runtime);
+                return;
+            }
+        }
         if self.layout.notch.contains(x, y) {
             let update = self.notch.dismiss_compact(Instant::now());
             if update.changed {
@@ -1359,36 +2378,52 @@ impl Bar {
         self.present(runtime);
     }
 
-    fn present(&self, runtime: &RuntimeContext) {
+    fn present(&mut self, runtime: &RuntimeContext) {
+        runtime.focus_active.set(self.notch.focus_active());
         let hovered = self
             .hovered
             .or_else(|| crate::menu::active_top_bar_target(runtime));
         let appearance = crate::theme_state::appearance(runtime);
-        let media = self.notch.display_media(crate::notch::unix_now_ms());
-        let _ = self.renderer.present(
-            self.hwnd,
-            (0, 0),
-            &self.layout,
-            self.controls.status(),
-            self.controls.active_app(),
-            hovered,
-            self.focus.current(),
-            self.notch.hud_state(),
-            self.notch.pomodoro(),
-            media.as_ref(),
-            self.notch.anim_phase(),
-            appearance,
-        );
-        if self.panel_visible {
-            let _ = self.renderer.present_panel(
-                self.panel_hwnd,
+        let media = self
+            .notch
+            .media_scene(Instant::now(), crate::notch::unix_now_ms());
+        let status = self.controls.status();
+        let pomodoro = self.notch.pomodoro_scene(Instant::now());
+        let privacy = self.notch.privacy_state();
+        crate::host::log_present_error(
+            "bar",
+            self.renderer.present(
+                self.hwnd,
+                (0, 0),
                 &self.layout,
+                status,
+                self.controls.active_app(),
                 hovered,
                 self.focus.current(),
-                self.notch.pomodoro(),
+                self.notch.hud_state(),
+                &pomodoro,
                 media.as_ref(),
                 self.notch.anim_phase(),
-                self.notch.lyrics_view(),
+                appearance,
+                privacy,
+            ),
+        );
+        if self.panel_visible {
+            crate::host::log_present_error(
+                "bar-panel",
+                self.renderer.present_panel(
+                    self.panel_hwnd,
+                    &self.layout,
+                    hovered,
+                    self.focus.current(),
+                    &pomodoro,
+                    media.as_ref(),
+                    self.notch.anim_phase(),
+                    self.notch.lyrics_view(),
+                    self.notch.shelf_state(),
+                    self.notch.clipboard_state(),
+                    privacy,
+                ),
             );
         }
     }
@@ -1402,18 +2437,44 @@ fn keyboard_seek_delta(key: BarKey) -> Option<i64> {
     }
 }
 
+const fn active_notch_tab_target(tab: NotchExpandedTab) -> HitTarget {
+    match tab {
+        NotchExpandedTab::Pomodoro => HitTarget::NotchTabPomodoro,
+        NotchExpandedTab::Shelf => HitTarget::NotchTabShelf,
+        NotchExpandedTab::Clipboard => HitTarget::NotchTabClipboard,
+        NotchExpandedTab::Media => HitTarget::NotchTabMedia,
+    }
+}
+
 fn is_notch_target(target: HitTarget) -> bool {
     matches!(
         target,
         HitTarget::Notch
-            | HitTarget::PomodoroPhase
+            | HitTarget::NotchSecondary
+            | HitTarget::FocusMode(_)
+            | HitTarget::PomodoroPreset(_)
             | HitTarget::PomodoroPlayPause
             | HitTarget::PomodoroReset
             | HitTarget::PomodoroSkip
             | HitTarget::PomodoroStartNext
             | HitTarget::PomodoroExtendFive
             | HitTarget::NotchTabPomodoro
+            | HitTarget::NotchTabShelf
+            | HitTarget::NotchTabClipboard
             | HitTarget::NotchTabMedia
+            | HitTarget::ShelfAdd
+            | HitTarget::ShelfClear
+            | HitTarget::ShelfPager
+            | HitTarget::ShelfItem(_)
+            | HitTarget::ShelfCopyItem(_)
+            | HitTarget::ShelfRemoveItem(_)
+            | HitTarget::ClipboardPauseToggle
+            | HitTarget::ClipboardClear
+            | HitTarget::ClipboardPager
+            | HitTarget::ClipboardItem(_)
+            | HitTarget::ClipboardRemoveItem(_)
+            | HitTarget::PrivacyIndicator
+            | HitTarget::PrivacyMicMute
             | HitTarget::MediaPlayPause
             | HitTarget::MediaPrevious
             | HitTarget::MediaNext
@@ -1423,4 +2484,209 @@ fn is_notch_target(target: HitTarget) -> bool {
 
 pub fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) {
     with_bar(runtime, |bar| bar.enter_from_dock(runtime, from_end));
+}
+
+pub fn toggle_focus_mode(runtime: &RuntimeContext) {
+    with_bar(runtime, |bar| {
+        bar.ensure_anim_timer();
+        let update = bar.notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        bar.apply_notch_update(runtime, update);
+        bar.schedule_deadline();
+        runtime.focus_active.set(bar.notch.focus_active());
+    });
+}
+
+pub fn open_notch_media(runtime: &RuntimeContext) {
+    with_bar(runtime, |bar| {
+        if !bar.notch.media_enabled() || bar.notch.media().is_none() {
+            return;
+        }
+        bar.ensure_anim_timer();
+        bar.notch.open_media_tab();
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.schedule_deadline();
+    });
+}
+
+pub fn open_otto_settings(runtime: &RuntimeContext) {
+    with_bar(runtime, |bar| {
+        crate::menu::close(runtime);
+        crate::control_center::open_at_page(
+            runtime,
+            ControlCenterPage::OttoSettings,
+            bar.anchor_right(HitTarget::ControlCenter),
+            bar.layout.bar.height + 4,
+        );
+    });
+}
+
+const fn periodic_tick_due(maintain_ticks: u8, every_ticks: u8) -> bool {
+    maintain_ticks.is_multiple_of(every_ticks)
+}
+
+const fn should_refresh_system_status(force: bool, is_idle: bool, maintain_ticks: u8) -> bool {
+    force || !is_idle || periodic_tick_due(maintain_ticks, MEDIA_EVERY_TICKS)
+}
+
+const fn should_refresh_media(force: bool, maintain_ticks: u8) -> bool {
+    force || periodic_tick_due(maintain_ticks, MEDIA_EVERY_TICKS)
+}
+
+const fn should_wheel_collapse_notch(
+    in_header_strip: bool,
+    hit: Option<HitTarget>,
+    active_tab: NotchExpandedTab,
+    delta: i16,
+) -> bool {
+    if delta <= 0 {
+        return false;
+    }
+    in_header_strip
+        || matches!(
+            hit,
+            Some(
+                HitTarget::NotchTabPomodoro
+                    | HitTarget::NotchTabShelf
+                    | HitTarget::NotchTabClipboard
+                    | HitTarget::NotchTabMedia
+            )
+        )
+        || (matches!(hit, Some(HitTarget::Notch)) && matches!(active_tab, NotchExpandedTab::Media))
+}
+
+const fn is_upward_touch_swipe(start: (i32, i32), current: (i32, i32), threshold: i32) -> bool {
+    let dy = start.1 - current.1;
+    let dx = (current.0 - start.0).abs();
+    let min_dy = if threshold > 1 { threshold } else { 1 };
+    dy >= min_dy && dy > dx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DeferredModalAction, HitTarget, LPARAM, LRESULT, MAINTAIN_EVERY_TICKS, MEDIA_EVERY_TICKS,
+        NotchExpandedTab, RuntimeContext, WM_CLOSE, WPARAM, handle_message, is_primary_bar_window,
+        is_upward_touch_swipe, periodic_tick_due, queue_modal_action, should_refresh_media,
+        should_refresh_system_status, should_wheel_collapse_notch,
+    };
+
+    #[test]
+    fn periodic_maintenance_keeps_strided_intervals_while_idle() {
+        assert!(periodic_tick_due(0, MAINTAIN_EVERY_TICKS));
+        assert!(!periodic_tick_due(1, MAINTAIN_EVERY_TICKS));
+        assert!(!periodic_tick_due(7, MAINTAIN_EVERY_TICKS));
+        assert!(periodic_tick_due(8, MAINTAIN_EVERY_TICKS));
+    }
+
+    #[test]
+    fn wake_events_bypass_media_and_status_stride_gates() {
+        assert!(!should_refresh_media(false, 1));
+        assert!(should_refresh_media(true, 1));
+        assert!(should_refresh_media(false, MEDIA_EVERY_TICKS));
+        assert!(!should_refresh_system_status(false, true, 1));
+        assert!(should_refresh_system_status(true, true, 1));
+        assert!(should_refresh_system_status(false, false, 1));
+        assert!(should_refresh_system_status(false, true, MEDIA_EVERY_TICKS));
+    }
+
+    #[test]
+    fn primary_bar_window_check_distinguishes_bar_and_panel_hwnds() {
+        let runtime = RuntimeContext::new(false);
+        assert!(!is_primary_bar_window(&runtime, 0));
+        runtime.bar_hwnd.set(101);
+        assert!(is_primary_bar_window(&runtime, 101));
+        assert!(!is_primary_bar_window(&runtime, 202));
+        assert_eq!(
+            handle_message(&runtime, 202, WM_CLOSE, WPARAM(0), LPARAM(0)),
+            Some(LRESULT(0))
+        );
+    }
+
+    #[test]
+    fn queue_modal_action_keeps_first_pending_modal_until_drained() {
+        let runtime = RuntimeContext::new(false);
+        queue_modal_action(&runtime, DeferredModalAction::PickShelfFiles);
+        queue_modal_action(
+            &runtime,
+            DeferredModalAction::StartShelfDrag {
+                capture_hwnd: 55,
+                payload: otto_core::ShelfPayload::Text(String::from("ignored")),
+            },
+        );
+        let first = runtime.pending_modal_action.borrow_mut().take();
+        assert!(matches!(first, Some(DeferredModalAction::PickShelfFiles)));
+    }
+
+    #[test]
+    fn wheel_collapse_preserves_pomodoro_and_shelf_body_scrolling() {
+        assert!(should_wheel_collapse_notch(
+            true,
+            Some(HitTarget::Notch),
+            NotchExpandedTab::Pomodoro,
+            120,
+        ));
+        assert!(!should_wheel_collapse_notch(
+            true,
+            Some(HitTarget::Notch),
+            NotchExpandedTab::Pomodoro,
+            -120,
+        ));
+        assert!(should_wheel_collapse_notch(
+            false,
+            Some(HitTarget::NotchTabPomodoro),
+            NotchExpandedTab::Pomodoro,
+            120,
+        ));
+        assert!(!should_wheel_collapse_notch(
+            false,
+            Some(HitTarget::PomodoroPreset(0)),
+            NotchExpandedTab::Pomodoro,
+            120,
+        ));
+        assert!(!should_wheel_collapse_notch(
+            false,
+            Some(HitTarget::ShelfItem(0)),
+            NotchExpandedTab::Shelf,
+            120,
+        ));
+        assert!(should_wheel_collapse_notch(
+            false,
+            Some(HitTarget::Notch),
+            NotchExpandedTab::Media,
+            120,
+        ));
+    }
+
+    #[test]
+    fn upward_touch_swipe_requires_vertical_displacement_over_threshold() {
+        assert!(is_upward_touch_swipe((500, 100), (505, 70), 24));
+        assert!(!is_upward_touch_swipe((500, 100), (500, 80), 24));
+        assert!(!is_upward_touch_swipe((500, 100), (500, 130), 24));
+        assert!(!is_upward_touch_swipe((500, 100), (550, 70), 24));
+    }
+
+    #[test]
+    fn end_session_message_queues_pending_end_session_when_wparam_nonzero() {
+        let runtime = RuntimeContext::new(false);
+        assert_eq!(
+            handle_message(&runtime, 0, super::WM_ENDSESSION, WPARAM(0), LPARAM(0)),
+            Some(LRESULT(0))
+        );
+        assert!(!runtime.pending_end_session.get());
+        assert_eq!(
+            handle_message(&runtime, 0, super::WM_ENDSESSION, WPARAM(1), LPARAM(0)),
+            Some(LRESULT(0))
+        );
+        assert!(runtime.pending_end_session.get());
+    }
+
+    #[test]
+    fn prepare_modal_action_returns_none_without_active_bar() {
+        let runtime = RuntimeContext::new(false);
+        assert!(
+            super::prepare_modal_action(&runtime, DeferredModalAction::PickShelfFiles).is_none()
+        );
+    }
 }

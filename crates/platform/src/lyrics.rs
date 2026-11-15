@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::str::Chars;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -13,6 +14,7 @@ use windows::core::HSTRING;
 use crate::winrt_io::{await_until, read_stream_bounded};
 
 pub const MAX_LYRICS_BYTES: usize = 256 * 1024;
+pub const MAX_LYRICS_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const LYRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 pub const LYRICS_QUEUE_DEPTH: usize = 2;
 pub const LYRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -209,21 +211,49 @@ fn request_url(
     let content = response.Content().ok()?;
     let mut declared_length = 0u64;
     if matches!(content.TryComputeLength(&mut declared_length), Ok(true))
-        && declared_length > MAX_LYRICS_BYTES as u64
+        && declared_length > MAX_LYRICS_RESPONSE_BYTES as u64
     {
         return None;
     }
     let stream = await_until!(content.ReadAsInputStreamAsync(), deadline)?;
-    let body = read_stream_bounded(&stream, MAX_LYRICS_BYTES, deadline, cancelled)?;
+    let body = read_stream_bounded(&stream, MAX_LYRICS_RESPONSE_BYTES, deadline, cancelled)?;
     String::from_utf8(body).ok()
 }
 
+fn primary_artist(artist: &str) -> &str {
+    let end = artist.find([',', '&', ';']).unwrap_or(artist.len());
+    let first = artist[..end].trim();
+    let first = first.strip_suffix(" - Topic").unwrap_or(first).trim();
+    if first.is_empty() {
+        artist.trim()
+    } else {
+        first
+    }
+}
+
+fn strip_artist_prefix<'a>(title: &'a str, artist: &str) -> &'a str {
+    let Some((prefix, rest)) = title.split_once(" - ") else {
+        return title;
+    };
+    let artist = primary_artist(artist).to_lowercase();
+    let prefix = prefix.trim().to_lowercase();
+    let rest = rest.trim();
+    if artist.is_empty() || prefix.is_empty() || rest.is_empty() {
+        return title;
+    }
+    if artist.contains(&prefix) || prefix.contains(&artist) {
+        rest
+    } else {
+        title
+    }
+}
+
 fn lookup_urls(title: &str, artist: &str, duration_ms: u64) -> Vec<String> {
-    let clean_title = clean_track_title(title);
+    let clean_title = clean_track_title(strip_artist_prefix(title, artist));
     let track = url_encode(&clean_title);
     let artist_name = url_encode(artist);
     let seconds = duration_ms / 1000;
-    let mut urls = Vec::with_capacity(4);
+    let mut urls = Vec::with_capacity(5);
     if seconds > 0 {
         urls.push(format!(
             "https://lrclib.net/api/get?track_name={track}&artist_name={artist_name}&duration={seconds}"
@@ -235,11 +265,18 @@ fn lookup_urls(title: &str, artist: &str, duration_ms: u64) -> Vec<String> {
     urls.push(format!(
         "https://lrclib.net/api/search?track_name={track}&artist_name={artist_name}"
     ));
-    if clean_title != title {
-        urls.push(format!(
+    let fuzzy_queries = [
+        format!("{clean_title} {}", primary_artist(artist)),
+        format!("{title} {artist}"),
+    ];
+    for query in fuzzy_queries {
+        let url = format!(
             "https://lrclib.net/api/search?q={}",
-            url_encode(&format!("{title} {artist}"))
-        ));
+            url_encode(query.trim())
+        );
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
     }
     urls
 }
@@ -259,7 +296,11 @@ fn fetch_lyrics_online(
     if let Ok(headers) = client.DefaultRequestHeaders() {
         let _ = headers.TryAppendWithoutValidation(
             &HSTRING::from("User-Agent"),
-            &HSTRING::from("OttoOS/0.1.0 (https://github.com/otto-os)"),
+            &HSTRING::from(concat!(
+                "OttoOS/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/howlil/otto-os)"
+            )),
         );
     }
     let deadline = Instant::now() + LYRICS_REQUEST_TIMEOUT;
@@ -354,10 +395,15 @@ pub struct LyricsResponse {
 struct LyricsShared {
     latest_generation: AtomicU64,
     stopping: AtomicBool,
+    dispatch_gate: Mutex<()>,
 }
 
 impl LyricsShared {
     fn is_superseded(&self, generation: u64) -> bool {
+        let _guard = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.stopping.load(Ordering::Acquire)
             || self.latest_generation.load(Ordering::Acquire) != generation
     }
@@ -378,6 +424,7 @@ impl LyricsService {
         let shared = Arc::new(LyricsShared {
             latest_generation: AtomicU64::new(0),
             stopping: AtomicBool::new(false),
+            dispatch_gate: Mutex::new(()),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -397,10 +444,19 @@ impl LyricsService {
         let Some(requests) = self.requests.as_ref() else {
             return false;
         };
+        let _guard = self
+            .shared
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = request.generation;
+        if requests.try_send(request).is_err() {
+            return false;
+        }
         self.shared
             .latest_generation
-            .store(request.generation, Ordering::Release);
-        requests.try_send(request).is_ok()
+            .store(generation, Ordering::Release);
+        true
     }
 
     #[must_use]
@@ -473,11 +529,35 @@ mod tests {
     #[test]
     fn lookup_urls_start_with_the_most_specific_query() {
         let urls = lookup_urls("Song (Live)", "A & B", 61_000);
-        assert_eq!(urls.len(), 4);
+        assert_eq!(urls.len(), 5);
         assert!(urls[0].contains("duration=61"));
         assert!(urls[0].contains("track_name=Song&artist_name=A+%26+B"));
-        assert!(urls[3].contains("/api/search?q=Song+%28Live%29+A+%26+B"));
-        assert_eq!(lookup_urls("Song", "Artist", 0).len(), 2);
+        assert!(urls[3].ends_with("/api/search?q=Song+A"));
+        assert!(urls[4].ends_with("/api/search?q=Song+%28Live%29+A+%26+B"));
+        assert_eq!(lookup_urls("Song", "Artist", 0).len(), 3);
+    }
+
+    #[test]
+    fn artist_prefixed_titles_search_for_the_song_not_the_artist() {
+        let urls = lookup_urls("Coldplay - Yellow (Official Video)", "Coldplay - Topic", 0);
+        assert!(urls[0].contains("track_name=Yellow&artist_name=Coldplay+-+Topic"));
+        assert!(urls[2].ends_with("/api/search?q=Yellow+Coldplay"));
+        assert_eq!(
+            strip_artist_prefix("Fix You - Live from Buenos Aires", "Coldplay"),
+            "Fix You - Live from Buenos Aires"
+        );
+        assert_eq!(
+            strip_artist_prefix("Coldplay - Yellow", "Coldplay"),
+            "Yellow"
+        );
+    }
+
+    #[test]
+    fn primary_artist_takes_the_first_credited_name() {
+        assert_eq!(primary_artist("The Weeknd, Daft Punk"), "The Weeknd");
+        assert_eq!(primary_artist("A & B"), "A");
+        assert_eq!(primary_artist("Coldplay - Topic"), "Coldplay");
+        assert_eq!(primary_artist("Solo"), "Solo");
     }
 
     #[test]
@@ -528,6 +608,33 @@ mod tests {
             assert!(sender.try_send(request(generation)).is_ok());
         }
         assert!(sender.try_send(request(99)).is_err());
+    }
+
+    #[test]
+    fn full_queue_does_not_advance_latest_generation() {
+        let (sender, _request_receiver) = sync_channel::<LyricsRequest>(LYRICS_QUEUE_DEPTH);
+        let (_response_sender, responses) = sync_channel::<LyricsResponse>(LYRICS_QUEUE_DEPTH);
+        let shared = Arc::new(LyricsShared {
+            latest_generation: AtomicU64::new(0),
+            stopping: AtomicBool::new(false),
+            dispatch_gate: Mutex::new(()),
+        });
+        let service = LyricsService {
+            requests: Some(sender),
+            responses,
+            shared: Arc::clone(&shared),
+            worker: None,
+        };
+        for generation in 1..=(LYRICS_QUEUE_DEPTH as u64) {
+            assert!(service.request(request(generation)));
+        }
+        let last_accepted = LYRICS_QUEUE_DEPTH as u64;
+        assert!(!service.request(request(99)));
+        assert_eq!(
+            shared.latest_generation.load(Ordering::Acquire),
+            last_accepted
+        );
+        assert!(!shared.is_superseded(last_accepted));
     }
 
     #[test]

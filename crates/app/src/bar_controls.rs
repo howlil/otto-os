@@ -1,11 +1,10 @@
-use otto_core::{HitTarget, SystemStatus, WindowInfo, is_top_bar_menu_target};
+use otto_core::{ControlCenterPage, HitTarget, SystemStatus, WindowInfo, is_top_bar_menu_target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BarControlAction {
     TopBarMenu(HitTarget),
     Tray,
-    ControlCenter,
-    QuickSettings,
+    ControlCenter(ControlCenterPage),
     Search,
     Clock,
     AdjustVolume(i16),
@@ -78,8 +77,13 @@ impl BarControlsController {
         }
         match target {
             HitTarget::Tray => Some(BarControlAction::Tray),
-            HitTarget::ControlCenter => Some(BarControlAction::ControlCenter),
-            HitTarget::QuickSettings => Some(BarControlAction::QuickSettings),
+            HitTarget::ControlCenter | HitTarget::StatusBattery | HitTarget::QuickSettings => {
+                Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+            }
+            HitTarget::StatusWifi => Some(BarControlAction::ControlCenter(ControlCenterPage::Wifi)),
+            HitTarget::StatusVolume => {
+                Some(BarControlAction::ControlCenter(ControlCenterPage::Sound))
+            }
             HitTarget::Search => Some(BarControlAction::Search),
             HitTarget::Clock => Some(BarControlAction::Clock),
             _ => None,
@@ -92,7 +96,10 @@ impl BarControlsController {
         notch_expanded: bool,
     ) -> Option<BarControlAction> {
         match target {
-            HitTarget::QuickSettings => Some(BarControlAction::AdjustVolume(delta)),
+            HitTarget::QuickSettings
+            | HitTarget::StatusWifi
+            | HitTarget::StatusVolume
+            | HitTarget::StatusBattery => Some(BarControlAction::AdjustVolume(delta)),
             HitTarget::ControlCenter => Some(BarControlAction::StepBrightness(delta)),
             HitTarget::Notch if !notch_expanded => Some(BarControlAction::StepBrightness(delta)),
             _ => None,
@@ -104,8 +111,8 @@ impl BarControlsController {
 mod tests {
     use super::{BarControlAction, BarControlsController};
     use otto_core::{
-        AppIdentity, HitTarget, SystemStatus, WindowIdentity, WindowInfo, WindowPresence,
-        WindowRole, WindowTraits,
+        AppIdentity, ControlCenterPage, HitTarget, SystemStatus, WindowIdentity, WindowInfo,
+        WindowPresence, WindowRole, WindowTraits,
     };
 
     fn window(hwnd: isize) -> WindowInfo {
@@ -166,6 +173,22 @@ mod tests {
             BarControlsController::click_action(HitTarget::MenuOverflow),
             Some(BarControlAction::TopBarMenu(HitTarget::MenuOverflow))
         );
+        assert_eq!(
+            BarControlsController::click_action(HitTarget::ControlCenter),
+            Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+        );
+        assert_eq!(
+            BarControlsController::click_action(HitTarget::StatusWifi),
+            Some(BarControlAction::ControlCenter(ControlCenterPage::Wifi))
+        );
+        assert_eq!(
+            BarControlsController::click_action(HitTarget::StatusVolume),
+            Some(BarControlAction::ControlCenter(ControlCenterPage::Sound))
+        );
+        assert_eq!(
+            BarControlsController::click_action(HitTarget::StatusBattery),
+            Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+        );
         assert_eq!(BarControlsController::click_action(HitTarget::Notch), None);
     }
 
@@ -174,6 +197,14 @@ mod tests {
         assert_eq!(
             BarControlsController::wheel_action(HitTarget::QuickSettings, 120, false),
             Some(BarControlAction::AdjustVolume(120))
+        );
+        assert_eq!(
+            BarControlsController::wheel_action(HitTarget::StatusVolume, 120, false),
+            Some(BarControlAction::AdjustVolume(120))
+        );
+        assert_eq!(
+            BarControlsController::wheel_action(HitTarget::ControlCenter, 120, false),
+            Some(BarControlAction::StepBrightness(120))
         );
         assert_eq!(
             BarControlsController::wheel_action(HitTarget::Notch, -120, false),

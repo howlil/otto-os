@@ -107,6 +107,25 @@ impl ThemeMode {
             Self::Dark => "Dark",
         }
     }
+
+    #[must_use]
+    pub const fn config_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    #[must_use]
+    pub fn parse_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
 }
 
 impl ResolvedTheme {
@@ -144,6 +163,15 @@ mod tests {
         assert_eq!(ThemeMode::Auto.next(), ThemeMode::Dark);
         assert_eq!(ThemeMode::Dark.next(), ThemeMode::Light);
         assert_eq!(ThemeMode::Light.next(), ThemeMode::Auto);
+    }
+
+    #[test]
+    fn theme_mode_round_trips_config_values() {
+        for mode in [ThemeMode::Auto, ThemeMode::Light, ThemeMode::Dark] {
+            assert_eq!(ThemeMode::parse_config(mode.config_value()), Some(mode));
+        }
+        assert_eq!(ThemeMode::parse_config(" DARK "), Some(ThemeMode::Dark));
+        assert_eq!(ThemeMode::parse_config("unknown"), None);
     }
 
     #[test]

@@ -261,6 +261,16 @@ impl AppBar {
         Self::set_tray_visibility(SW_HIDE);
     }
 
+    pub fn show_system_taskbar(&mut self) {
+        if !self.taskbar_hidden {
+            return;
+        }
+        self.taskbar_hidden = false;
+        write_recovery(self.recovery());
+        Self::set_tray_visibility(SW_SHOW);
+        self.set_taskbar_state(self.original_state);
+    }
+
     pub fn maintain(&mut self, screen_width: i32, screen_height: i32, bar_height: i32) {
         if self.taskbar_hidden {
             Self::set_tray_visibility(SW_HIDE);

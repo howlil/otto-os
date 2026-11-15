@@ -6,18 +6,21 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, FindWindowW,
-    GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow, OBJID_CURSOR, OBJID_WINDOW, PostMessageW,
-    SW_HIDE, ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW,
+    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, FindWindowW, GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow,
+    OBJID_CURSOR, OBJID_WINDOW, PostMessageW, SW_HIDE, ShowWindow, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS,
 };
 use windows::core::{PCWSTR, w};
 
-const HOOKED_EVENT_RANGES: [(u32, u32); 5] = [
+const HOOKED_EVENT_RANGES: [(u32, u32); 7] = [
     (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
     (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+    (EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER),
     (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
     (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+    (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
     (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
 ];
 
@@ -42,9 +45,10 @@ pub struct WindowChangeGenerations {
 enum WindowChange {
     Topology,
     Geometry,
+    OverlaySync,
 }
 
-fn classify_window_event(event: u32, top_level: bool) -> Option<WindowChange> {
+fn classify_window_event(event: u32, top_level: bool, is_foreground: bool) -> Option<WindowChange> {
     if !top_level {
         return None;
     }
@@ -58,15 +62,28 @@ fn classify_window_event(event: u32, top_level: bool) -> Option<WindowChange> {
         | EVENT_OBJECT_CLOAKED
         | EVENT_OBJECT_UNCLOAKED => Some(WindowChange::Topology),
         EVENT_OBJECT_LOCATIONCHANGE => Some(WindowChange::Geometry),
+        EVENT_OBJECT_REORDER => Some(WindowChange::OverlaySync),
+        EVENT_OBJECT_NAMECHANGE if is_foreground => Some(WindowChange::OverlaySync),
         _ => None,
     }
 }
 
 fn record_window_change(change: WindowChange) {
-    if change == WindowChange::Topology {
-        TOPOLOGY_GENERATION.fetch_add(1, Ordering::AcqRel);
+    match change {
+        WindowChange::Topology => {
+            TOPOLOGY_GENERATION.fetch_add(1, Ordering::AcqRel);
+            GEOMETRY_GENERATION.fetch_add(1, Ordering::AcqRel);
+        }
+        WindowChange::Geometry => {
+            GEOMETRY_GENERATION.fetch_add(1, Ordering::AcqRel);
+        }
+        WindowChange::OverlaySync => {}
     }
-    GEOMETRY_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+#[must_use]
+pub const fn is_name_change_sync(event: u32) -> bool {
+    event == EVENT_OBJECT_NAMECHANGE
 }
 
 #[must_use]
@@ -216,21 +233,17 @@ unsafe extern "system" fn win_event_proc(
         if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.0.is_null() {
             return;
         }
-        let change = classify_window_event(event, is_top_level_or_gone(hwnd));
+        let is_foreground = event == EVENT_OBJECT_NAMECHANGE && hwnd == current_foreground();
+        let change = classify_window_event(event, is_top_level_or_gone(hwnd), is_foreground);
         if let Some(change) = change {
             record_window_change(change);
         }
         if event == EVENT_SYSTEM_FOREGROUND {
             LAST_FOREGROUND.store(hwnd.0 as isize, Ordering::Release);
         }
-        let relevant = event == EVENT_SYSTEM_FOREGROUND
-            || (event == EVENT_OBJECT_SHOW
-                && hwnd.0 as isize == LAST_FOREGROUND.load(Ordering::Acquire))
-            || (event == EVENT_OBJECT_LOCATIONCHANGE && current_foreground() == hwnd);
+        let relevant = event == EVENT_SYSTEM_FOREGROUND || change.is_some();
         if relevant {
             post_window_sync(hwnd, event);
-        }
-        if relevant || change == Some(WindowChange::Topology) {
             crate::idle_wake::request_idle_wake();
         }
     }));
@@ -250,7 +263,7 @@ pub fn suppress_native_osd() {
 mod tests {
     use windows::Win32::UI::WindowsAndMessaging::{
         EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
-        EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
+        EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
         EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
     };
 
@@ -269,7 +282,7 @@ mod tests {
             EVENT_OBJECT_UNCLOAKED,
         ] {
             assert_eq!(
-                classify_window_event(event, true),
+                classify_window_event(event, true, false),
                 Some(WindowChange::Topology)
             );
         }
@@ -278,18 +291,41 @@ mod tests {
     #[test]
     fn top_level_moves_change_only_geometry() {
         assert_eq!(
-            classify_window_event(EVENT_OBJECT_LOCATIONCHANGE, true),
+            classify_window_event(EVENT_OBJECT_LOCATIONCHANGE, true, false),
             Some(WindowChange::Geometry)
         );
     }
 
     #[test]
-    fn child_windows_and_unrelated_events_are_ignored() {
-        assert_eq!(classify_window_event(EVENT_OBJECT_SHOW, false), None);
+    fn zorder_and_foreground_name_changes_sync_overlays_without_bumping_topology() {
         assert_eq!(
-            classify_window_event(EVENT_OBJECT_LOCATIONCHANGE, false),
+            classify_window_event(EVENT_OBJECT_REORDER, true, false),
+            Some(WindowChange::OverlaySync)
+        );
+        assert_eq!(
+            classify_window_event(EVENT_OBJECT_NAMECHANGE, true, true),
+            Some(WindowChange::OverlaySync)
+        );
+    }
+
+    #[test]
+    fn child_windows_and_unrelated_events_are_ignored() {
+        assert_eq!(classify_window_event(EVENT_OBJECT_SHOW, false, false), None);
+        assert_eq!(
+            classify_window_event(EVENT_OBJECT_LOCATIONCHANGE, false, false),
             None
         );
-        assert_eq!(classify_window_event(EVENT_OBJECT_NAMECHANGE, true), None);
+        assert_eq!(
+            classify_window_event(EVENT_OBJECT_REORDER, false, false),
+            None
+        );
+        assert_eq!(
+            classify_window_event(EVENT_OBJECT_NAMECHANGE, true, false),
+            None
+        );
+        assert_eq!(
+            classify_window_event(EVENT_OBJECT_NAMECHANGE, false, true),
+            None
+        );
     }
 }

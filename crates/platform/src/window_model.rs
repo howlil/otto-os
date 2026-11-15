@@ -156,6 +156,20 @@ fn own_process_is_elevated() -> bool {
     *ELEVATED.get_or_init(|| token_is_elevated(unsafe { GetCurrentProcess() }).unwrap_or(false))
 }
 
+pub(crate) fn is_window_uipi_blocked(hwnd: HWND) -> bool {
+    if own_process_is_elevated() {
+        return false;
+    }
+    let (process_id, _) = owner_ids(hwnd);
+    if process_id == 0 {
+        return false;
+    }
+    let Some(process) = ProcessHandle::open(process_id) else {
+        return true;
+    };
+    token_is_elevated(process.0).unwrap_or(true)
+}
+
 fn read_process_facts(process_id: u32) -> Option<ProcessFacts> {
     let process = ProcessHandle::open(process_id)?;
     let target_elevated = token_is_elevated(process.0).unwrap_or(true);

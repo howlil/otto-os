@@ -1,7 +1,20 @@
 pub const NORMAL_PLAYBACK_RATE_PERMILLE: u32 = 1_000;
 const MAX_PLAYBACK_RATE_PERMILLE: u32 = 16_000;
 pub const POSITION_DRIFT_TOLERANCE_MS: u64 = 750;
+pub const LYRIC_DRIFT_TOLERANCE_MS: u64 = 120;
 pub const KEYBOARD_SEEK_STEP_MS: i64 = 5_000;
+
+#[must_use]
+pub(crate) const fn media_wait_to_real_ms(media_wait_ms: u64, playback_rate_permille: u32) -> u64 {
+    let rate = if playback_rate_permille == 0 {
+        1
+    } else if playback_rate_permille > MAX_PLAYBACK_RATE_PERMILLE {
+        MAX_PLAYBACK_RATE_PERMILLE
+    } else {
+        playback_rate_permille
+    } as u64;
+    (media_wait_ms * NORMAL_PLAYBACK_RATE_PERMILLE as u64).div_ceil(rate)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -34,10 +47,29 @@ impl MediaCapabilities {
 #[must_use]
 pub const fn unsupported_reason(command: MediaCommand) -> &'static str {
     match command {
-        MediaCommand::TogglePlayPause => "Sumber ini tidak bisa diputar atau dijeda",
-        MediaCommand::Next => "Sumber ini tidak mendukung lagu berikutnya",
-        MediaCommand::Previous => "Sumber ini tidak mendukung lagu sebelumnya",
-        MediaCommand::Seek(_) => "Sumber ini tidak mendukung pencarian posisi",
+        MediaCommand::TogglePlayPause => "This source can't play or pause",
+        MediaCommand::Next => "This source doesn't support the next track",
+        MediaCommand::Previous => "This source doesn't support the previous track",
+        MediaCommand::Seek(_) => "This source doesn't support seeking",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSubtitle {
+    Unsupported(MediaCommand),
+    Lyric,
+    Artist,
+}
+
+#[must_use]
+pub const fn expanded_media_subtitle(
+    engaged_unsupported: Option<MediaCommand>,
+    lyric_available: bool,
+) -> MediaSubtitle {
+    match engaged_unsupported {
+        Some(command) => MediaSubtitle::Unsupported(command),
+        None if lyric_available => MediaSubtitle::Lyric,
+        None => MediaSubtitle::Artist,
     }
 }
 
@@ -125,6 +157,11 @@ impl NowPlaying {
 
     #[must_use]
     pub fn presents_like(&self, other: &Self, now_unix_ms: i64) -> bool {
+        self.presents_like_within(other, now_unix_ms, POSITION_DRIFT_TOLERANCE_MS)
+    }
+
+    #[must_use]
+    pub fn presents_like_within(&self, other: &Self, now_unix_ms: i64, tolerance_ms: u64) -> bool {
         self.is_same_track(other)
             && self.playing == other.playing
             && self.duration_ms == other.duration_ms
@@ -134,7 +171,7 @@ impl NowPlaying {
             && self
                 .position_at(now_unix_ms)
                 .abs_diff(other.position_at(now_unix_ms))
-                <= POSITION_DRIFT_TOLERANCE_MS
+                <= tolerance_ms
     }
 
     #[must_use]
@@ -150,13 +187,12 @@ impl NowPlaying {
         if !self.playing || self.position_updated_unix_ms.is_none() {
             return None;
         }
-        let rate = u64::from(
-            self.playback_rate_permille
-                .clamp(1, MAX_PLAYBACK_RATE_PERMILLE),
-        );
         let position = self.position_at(now_unix_ms);
         let media_wait = 1_000 - position % 1_000;
-        Some((media_wait * u64::from(NORMAL_PLAYBACK_RATE_PERMILLE)).div_ceil(rate))
+        Some(media_wait_to_real_ms(
+            media_wait,
+            self.playback_rate_permille,
+        ))
     }
 
     const fn clamped_position(&self, position_ms: u64) -> u64 {
@@ -250,7 +286,7 @@ pub fn format_duration(ms: u64) -> String {
     if hours > 0 {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
-        format!("{minutes:02}:{seconds:02}")
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -266,15 +302,41 @@ pub enum MediaCommand {
 pub enum NotchExpandedTab {
     #[default]
     Pomodoro,
+    Shelf,
+    Clipboard,
     Media,
 }
 
 impl NotchExpandedTab {
+    pub const ALL: [Self; 4] = [Self::Pomodoro, Self::Shelf, Self::Clipboard, Self::Media];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Pomodoro => 0,
+            Self::Shelf => 1,
+            Self::Clipboard => 2,
+            Self::Media => 3,
+        }
+    }
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Pomodoro => "Focus",
+            Self::Shelf => "Shelf",
+            Self::Clipboard => "Clipboard",
             Self::Media => "Now Playing",
+        }
+    }
+
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Pomodoro => "Focus",
+            Self::Shelf => "Shelf",
+            Self::Clipboard => "Clip",
+            Self::Media => "Music",
         }
     }
 }
@@ -322,8 +384,8 @@ mod tests {
         assert!(active.is_active());
         assert_eq!(active.display_artist(), "Artist");
         assert!((active.progress_ratio() - 0.25).abs() < f32::EPSILON);
-        assert_eq!(active.elapsed_formatted(), "00:30");
-        assert_eq!(active.remaining_formatted(), "-01:30");
+        assert_eq!(active.elapsed_formatted(), "0:30");
+        assert_eq!(active.remaining_formatted(), "-1:30");
     }
 
     fn playing_at(position_ms: u64, updated_unix_ms: i64) -> NowPlaying {
@@ -384,9 +446,10 @@ mod tests {
 
     #[test]
     fn format_duration_handles_zero_seconds_minutes_and_hours() {
-        assert_eq!(format_duration(0), "00:00");
-        assert_eq!(format_duration(5_000), "00:05");
-        assert_eq!(format_duration(65_000), "01:05");
+        assert_eq!(format_duration(0), "0:00");
+        assert_eq!(format_duration(5_000), "0:05");
+        assert_eq!(format_duration(65_000), "1:05");
+        assert_eq!(format_duration(754_000), "12:34");
         assert_eq!(format_duration(3_665_000), "1:01:05");
     }
 
@@ -591,6 +654,44 @@ mod tests {
     fn notch_expanded_tab_defaults_and_labels() {
         assert_eq!(NotchExpandedTab::default(), NotchExpandedTab::Pomodoro);
         assert_eq!(NotchExpandedTab::Pomodoro.label(), "Focus");
+        assert_eq!(NotchExpandedTab::Shelf.label(), "Shelf");
+        assert_eq!(NotchExpandedTab::Clipboard.label(), "Clipboard");
+        assert_eq!(NotchExpandedTab::Clipboard.short_label(), "Clip");
         assert_eq!(NotchExpandedTab::Media.label(), "Now Playing");
+        assert_eq!(NotchExpandedTab::Media.short_label(), "Music");
+        assert_eq!(
+            NotchExpandedTab::ALL.map(NotchExpandedTab::index),
+            [0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn expanded_subtitle_prefers_an_engaged_unsupported_reason_over_lyrics_and_artist() {
+        assert_eq!(
+            expanded_media_subtitle(Some(MediaCommand::Next), true),
+            MediaSubtitle::Unsupported(MediaCommand::Next)
+        );
+        assert_eq!(
+            expanded_media_subtitle(Some(MediaCommand::Previous), false),
+            MediaSubtitle::Unsupported(MediaCommand::Previous)
+        );
+    }
+
+    #[test]
+    fn expanded_subtitle_shows_the_active_lyric_whenever_one_exists() {
+        assert_eq!(expanded_media_subtitle(None, true), MediaSubtitle::Lyric);
+        assert_eq!(expanded_media_subtitle(None, false), MediaSubtitle::Artist);
+    }
+
+    #[test]
+    fn unsupported_reasons_read_in_english() {
+        assert_eq!(
+            unsupported_reason(MediaCommand::Next),
+            "This source doesn't support the next track"
+        );
+        assert_eq!(
+            unsupported_reason(MediaCommand::Seek(0)),
+            "This source doesn't support seeking"
+        );
     }
 }

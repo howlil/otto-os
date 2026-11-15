@@ -60,7 +60,7 @@ impl DockFocus {
             self.current = Some(0);
             return DockFocusOutcome::Moved(0);
         }
-        if key == BarKey::Activate {
+        if key == BarKey::Activate || key == BarKey::Down {
             self.current = None;
             return DockFocusOutcome::Activate(current);
         }
@@ -72,7 +72,7 @@ impl DockFocus {
             BarKey::Last => Some(last),
             BarKey::NextTab => current.checked_add(1).filter(|index| *index <= last),
             BarKey::PreviousTab => current.checked_sub(1),
-            BarKey::Activate | BarKey::Exit => None,
+            BarKey::Up | BarKey::Down | BarKey::Activate | BarKey::Exit => None,
         };
         match next {
             Some(index) if index == current => DockFocusOutcome::Unchanged,
@@ -195,6 +195,14 @@ mod tests {
         assert_eq!(focus.current(), Some(0));
         assert!(!focus.revalidate(3));
         assert!(focus.revalidate(0));
+        assert!(!focus.is_active());
+    }
+
+    #[test]
+    fn down_activates_and_up_leaves_dock_focus_unchanged() {
+        let mut focus = at(2);
+        assert_eq!(focus.handle(BarKey::Up, 5), DockFocusOutcome::Unchanged);
+        assert_eq!(focus.handle(BarKey::Down, 5), DockFocusOutcome::Activate(2));
         assert!(!focus.is_active());
     }
 }

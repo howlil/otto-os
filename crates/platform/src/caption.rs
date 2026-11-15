@@ -1,18 +1,30 @@
 use std::mem::size_of;
 
-use otto_core::{NativeCaption, NativeCaptionStyle};
-use windows::Win32::Foundation::{HWND, RECT};
+use otto_core::{
+    NATIVE_CORNER_RADIUS_DIP, NativeCaption, NativeCaptionStyle, PixelLimits, ResizeEdge,
+    bgra_layout, extract_cover_rows, scale,
+};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWINDOWATTRIBUTE, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetDC, GetPixel, MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ReleaseDC,
+    BitBlt, GetDC, GetPixel, MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ReleaseDC, SRCCOPY,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, ReleaseCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetWindowLongW, IsZoomed, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+    EnumWindows, GW_HWNDNEXT, GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindow,
+    GetWindowLongW, HTCAPTION, HTRIGHT, HTTOP, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
+    WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_SYSMENU,
 };
+use windows::core::BOOL;
+
+use crate::gdi::{CaptureCanvas, ScreenDc};
 
 const CORNER_DO_NOT_ROUND: u32 = 1;
 const INVALID_PIXEL: u32 = 0xFFFF_FFFF;
@@ -86,19 +98,60 @@ pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
         return None;
     }
     let maximized = unsafe { IsZoomed(window) }.as_bool();
+    let rounded_top_right = has_rounded_top_right(window, maximized);
     NativeCaption::new(
         style,
         frame.right,
         frame.top + buttons.top,
         height,
+        rounded_top_right,
+        caption_dpi(window),
+    )
+    .map(|caption| {
+        caption
+            .measured(buttons.right - buttons.left)
+            .with_top_border_inset(top_border_inset_for(rounded_top_right, buttons.top))
+    })
+}
+
+const fn top_border_inset_for(rounded_top_right: bool, buttons_top: i32) -> bool {
+    rounded_top_right && buttons_top <= 0
+}
+
+fn standard_caption_of(window: HWND) -> Option<NativeCaption> {
+    let style = caption_style(unsafe { GetWindowLongW(window, GWL_STYLE) } as u32);
+    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+    let maximized = unsafe { IsZoomed(window) }.as_bool();
+    NativeCaption::standard(
+        style,
+        frame.right,
+        frame.top,
         has_rounded_top_right(window, maximized),
         caption_dpi(window),
     )
 }
 
 #[must_use]
+pub(crate) fn covering_caption_of(window: HWND) -> Option<NativeCaption> {
+    native_caption_of(window).or_else(|| standard_caption_of(window))
+}
+
+#[must_use]
 pub fn native_caption(window_hwnd: isize) -> Option<NativeCaption> {
     native_caption_of(HWND(window_hwnd as *mut _))
+}
+
+#[must_use]
+pub fn window_corner_radius_px(window_hwnd: isize) -> f32 {
+    let window = HWND(window_hwnd as *mut _);
+    if !unsafe { IsWindow(Some(window)).as_bool() } {
+        return 0.0;
+    }
+    let maximized = unsafe { IsZoomed(window).as_bool() };
+    if !has_rounded_top_right(window, maximized) {
+        return 0.0;
+    }
+    scale(NATIVE_CORNER_RADIUS_DIP, caption_dpi(window)) as f32
 }
 
 #[must_use]
@@ -114,6 +167,293 @@ pub fn sample_screen_color(x: i32, y: i32) -> Option<[u8; 3]> {
     }
 }
 
+#[must_use]
+pub fn sample_caption_strip(
+    caption: NativeCaption,
+    frame_left: i32,
+    min_top: i32,
+) -> Option<Vec<[u8; 3]>> {
+    let rect = caption.clipped_sample_rect(frame_left, min_top);
+    if rect.width <= 0 || rect.height <= 0 {
+        return None;
+    }
+    let width = u32::try_from(rect.width).ok()?;
+    let height = u32::try_from(rect.height).ok()?;
+    let layout = bgra_layout(width, height, PixelLimits::ICON).ok()?;
+    let screen = ScreenDc::acquire()?;
+    let canvas = CaptureCanvas::create(&screen, layout)?;
+    let copied = unsafe {
+        BitBlt(
+            canvas.dc(),
+            0,
+            0,
+            rect.width,
+            rect.height,
+            Some(screen.handle()),
+            rect.x,
+            rect.y,
+            SRCCOPY,
+        )
+    };
+    let top_skip = (rect.y - caption.top).max(0) as usize;
+    if copied.is_ok()
+        && let Some(rows) =
+            extract_cover_rows(&canvas.copy_pixels(), width as usize, height as usize)
+    {
+        return Some(pad_skipped_top_rows(rows, top_skip));
+    }
+    drop(canvas);
+    drop(screen);
+    sample_screen_color(rect.x + rect.width / 2, rect.y + rect.height / 2)
+        .map(|rgb| vec![rgb; top_skip + height as usize])
+}
+
+fn pad_skipped_top_rows(rows: Vec<[u8; 3]>, top_skip: usize) -> Vec<[u8; 3]> {
+    if top_skip == 0 {
+        return rows;
+    }
+    let Some(&first) = rows.first() else {
+        return rows;
+    };
+    let mut padded = Vec::with_capacity(top_skip + rows.len());
+    padded.resize(top_skip, first);
+    padded.extend_from_slice(&rows);
+    padded
+}
+
+const fn pack_screen_coords(screen_x: i32, screen_y: i32) -> LPARAM {
+    let packed = ((screen_y as i16 as u16 as usize) << 16) | (screen_x as i16 as u16 as usize);
+    LPARAM(packed as isize)
+}
+
+#[must_use]
+pub fn activate_window_no_restore(target_hwnd: isize) -> bool {
+    unsafe { SetForegroundWindow(HWND(target_hwnd as *mut _)).as_bool() }
+}
+
+fn forward_nonclient_lbutton_down(
+    target_hwnd: isize,
+    hit_test: u32,
+    screen_x: i32,
+    screen_y: i32,
+) -> bool {
+    let target = HWND(target_hwnd as *mut _);
+    unsafe {
+        let _ = ReleaseCapture();
+        let _ = SetForegroundWindow(target);
+        PostMessageW(
+            Some(target),
+            WM_NCLBUTTONDOWN,
+            WPARAM(hit_test as usize),
+            pack_screen_coords(screen_x, screen_y),
+        )
+        .is_ok()
+    }
+}
+
+#[must_use]
+pub fn forward_caption_drag(target_hwnd: isize, screen_x: i32, screen_y: i32) -> bool {
+    forward_nonclient_lbutton_down(target_hwnd, HTCAPTION, screen_x, screen_y)
+}
+
+#[must_use]
+pub fn forward_resize_drag(
+    target_hwnd: isize,
+    edge: ResizeEdge,
+    screen_x: i32,
+    screen_y: i32,
+) -> bool {
+    let hit_test = match edge {
+        ResizeEdge::Top => HTTOP,
+        ResizeEdge::TopRight => HTTOPRIGHT,
+        ResizeEdge::Right => HTRIGHT,
+    };
+    forward_nonclient_lbutton_down(target_hwnd, hit_test, screen_x, screen_y)
+}
+
+#[must_use]
+pub fn forward_caption_context_menu(target_hwnd: isize, screen_x: i32, screen_y: i32) -> bool {
+    let target = HWND(target_hwnd as *mut _);
+    unsafe {
+        let _ = SetForegroundWindow(target);
+        PostMessageW(
+            Some(target),
+            WM_NCRBUTTONUP,
+            WPARAM(HTCAPTION as usize),
+            pack_screen_coords(screen_x, screen_y),
+        )
+        .is_ok()
+    }
+}
+
+#[must_use]
+pub fn place_overlay_above(overlay_hwnd: isize, target_hwnd: isize) -> bool {
+    let overlay = HWND(overlay_hwnd as *mut _);
+    let target = HWND(target_hwnd as *mut _);
+    unsafe {
+        if !IsWindow(Some(overlay)).as_bool() || !IsWindow(Some(target)).as_bool() {
+            return false;
+        }
+        let target_ex = GetWindowLongW(target, GWL_EXSTYLE) as u32;
+        let overlay_ex = GetWindowLongW(overlay, GWL_EXSTYLE) as u32;
+        let target_topmost = target_ex & WS_EX_TOPMOST.0 != 0;
+        let overlay_topmost = overlay_ex & WS_EX_TOPMOST.0 != 0;
+        if overlay_topmost && !target_topmost {
+            let _ = SetWindowPos(
+                overlay,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        let prev = GetWindow(target, GW_HWNDPREV)
+            .ok()
+            .filter(|hwnd| !hwnd.0.is_null());
+        if prev == Some(overlay) && overlay_topmost == target_topmost {
+            if !IsWindowVisible(overlay).as_bool() {
+                let _ = SetWindowPos(
+                    overlay,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
+            return true;
+        }
+        let insert_after = if target_topmost {
+            prev.unwrap_or(HWND_TOPMOST)
+        } else {
+            match prev {
+                Some(hwnd) if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0 => {
+                    HWND_TOP
+                }
+                Some(hwnd) => hwnd,
+                None => HWND_TOP,
+            }
+        };
+        let _ = SetWindowPos(
+            overlay,
+            Some(insert_after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+    true
+}
+
+fn lowest_anchor_hwnd(overlay: HWND, anchors: &[isize]) -> Option<HWND> {
+    struct Probe<'a> {
+        overlay: HWND,
+        anchors: &'a [isize],
+        lowest: Option<HWND>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let probe = unsafe { &mut *(lparam.0 as *mut Probe<'_>) };
+        let raw = hwnd.0 as isize;
+        if hwnd != probe.overlay
+            && probe.anchors.contains(&raw)
+            && unsafe { IsWindowVisible(hwnd).as_bool() }
+            && (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0) != 0
+        {
+            probe.lowest = Some(hwnd);
+        }
+        BOOL(1)
+    }
+    if anchors.is_empty() {
+        return None;
+    }
+    let mut probe = Probe {
+        overlay,
+        anchors,
+        lowest: None,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
+    }
+    probe.lowest
+}
+
+#[must_use]
+pub fn place_overlay_below(overlay_hwnd: isize, anchors: &[isize]) -> bool {
+    let overlay = HWND(overlay_hwnd as *mut _);
+    unsafe {
+        if !IsWindow(Some(overlay)).as_bool() {
+            return false;
+        }
+        let Some(anchor) = lowest_anchor_hwnd(overlay, anchors) else {
+            return SetWindowPos(
+                overlay,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .is_ok();
+        };
+        let overlay_topmost = (GetWindowLongW(overlay, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0;
+        if !overlay_topmost {
+            let _ = SetWindowPos(
+                overlay,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        let already_below = GetWindow(anchor, GW_HWNDNEXT)
+            .ok()
+            .is_some_and(|next| next == overlay);
+        if already_below {
+            return true;
+        }
+        SetWindowPos(
+            overlay,
+            Some(anchor),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+        .is_ok()
+    }
+}
+
+#[must_use]
+pub fn drag_threshold() -> (i32, i32) {
+    (
+        unsafe { GetSystemMetrics(SM_CXDRAG) }.max(1),
+        unsafe { GetSystemMetrics(SM_CYDRAG) }.max(1),
+    )
+}
+
+#[must_use]
+pub const fn drag_threshold_exceeded(
+    start: (i32, i32),
+    current: (i32, i32),
+    threshold: (i32, i32),
+) -> bool {
+    (current.0 - start.0).abs() >= threshold.0 || (current.1 - start.1).abs() >= threshold.1
+}
+
+#[must_use]
+pub fn double_click_ms() -> u32 {
+    unsafe { GetDoubleClickTime() }
+}
+
 fn rgb_from_colorref(pixel: u32) -> Option<[u8; 3]> {
     (pixel != INVALID_PIXEL).then_some([
         (pixel & 0xFF) as u8,
@@ -124,7 +464,10 @@ fn rgb_from_colorref(pixel: u32) -> Option<[u8; 3]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{caption_style, rgb_from_colorref};
+    use super::{
+        caption_style, drag_threshold_exceeded, pad_skipped_top_rows, rgb_from_colorref,
+        top_border_inset_for,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     };
@@ -158,5 +501,41 @@ mod tests {
     #[test]
     fn a_failed_pixel_read_is_not_a_colour() {
         assert_eq!(rgb_from_colorref(0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn top_border_inset_is_cleared_when_caption_buttons_are_already_offset() {
+        assert!(top_border_inset_for(true, 0));
+        assert!(top_border_inset_for(true, -1));
+        assert!(!top_border_inset_for(true, 2));
+        assert!(!top_border_inset_for(false, 0));
+    }
+
+    #[test]
+    fn skipped_top_rows_pad_sampled_strip_to_caption_origin() {
+        let padded = pad_skipped_top_rows(vec![[10, 20, 30], [40, 50, 60]], 3);
+        assert_eq!(
+            padded,
+            vec![
+                [10, 20, 30],
+                [10, 20, 30],
+                [10, 20, 30],
+                [10, 20, 30],
+                [40, 50, 60],
+            ]
+        );
+    }
+
+    #[test]
+    fn drag_threshold_distinguishes_click_jitter_from_intentional_drag() {
+        assert!(!drag_threshold_exceeded((100, 20), (103, 22), (4, 4)));
+        assert!(drag_threshold_exceeded((100, 20), (104, 20), (4, 4)));
+        assert!(drag_threshold_exceeded((100, 20), (100, 24), (4, 4)));
+    }
+
+    #[test]
+    fn invalid_handles_reject_corner_radius_and_below_placement() {
+        assert!((super::window_corner_radius_px(0) - 0.0).abs() < 0.001);
+        assert!(!super::place_overlay_below(0, &[1, 2]));
     }
 }

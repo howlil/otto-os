@@ -202,14 +202,16 @@ public static class OttoE2ENative
         SendInput(1, new[] { KeyboardInputEvent(key, KeyEventKeyUp) }, Marshal.SizeOf(typeof(NativeInput)));
     }
 
-    public static void SendAltKey(byte key)
+    public static void SendCtrlAltKey(byte key)
     {
+        SendInput(1, new[] { KeyboardInputEvent(0x11, 0) }, Marshal.SizeOf(typeof(NativeInput)));
         SendInput(1, new[] { KeyboardInputEvent(0x12, 0) }, Marshal.SizeOf(typeof(NativeInput)));
         System.Threading.Thread.Sleep(25);
         SendInput(1, new[] { KeyboardInputEvent(key, 0) }, Marshal.SizeOf(typeof(NativeInput)));
         System.Threading.Thread.Sleep(90);
         SendInput(1, new[] { KeyboardInputEvent(key, KeyEventKeyUp) }, Marshal.SizeOf(typeof(NativeInput)));
         SendInput(1, new[] { KeyboardInputEvent(0x12, KeyEventKeyUp) }, Marshal.SizeOf(typeof(NativeInput)));
+        SendInput(1, new[] { KeyboardInputEvent(0x11, KeyEventKeyUp) }, Marshal.SizeOf(typeof(NativeInput)));
         System.Threading.Thread.Sleep(120);
     }
 
@@ -627,6 +629,25 @@ function Get-ControlCenterPoint($bar) {
     }
 }
 
+function Get-StatusWifiPoint($bar) {
+    $padding = Convert-ToScaled 8
+    $gap = Convert-ToScaled 4
+    $clockWidth = Convert-ToScaled 160
+    $controlWidth = Convert-ToScaled 30
+    $searchWidth = Convert-ToScaled 30
+    $statusWidth = Convert-ToScaled 108
+    $iconUnit = [Math]::Max(1, (Convert-ToScaled 15))
+    $clockX = $bar.Right - $padding - $clockWidth
+    $controlX = $clockX - $gap - $controlWidth
+    $searchX = $controlX - $gap - $searchWidth
+    $statusX = $searchX - $gap - $statusWidth
+    $wifiWidth = [int][Math]::Floor(($iconUnit * 148 + 50) / 100)
+    return [pscustomobject]@{
+        X = $statusX + [int]($wifiWidth / 2)
+        Y = $bar.Top + [int]($bar.Height / 2)
+    }
+}
+
 function Get-ClockPoint($bar) {
     $padding = Convert-ToScaled 8
     $clockWidth = Convert-ToScaled 160
@@ -818,6 +839,7 @@ function Assert-InitialTopology($process) {
     $dock = Get-OttoWindow $process.Id 'OttoDockBar' $true
     $panel = Get-OttoWindow $process.Id 'OttoNotchPanel' $true
     $menu = Get-OttoWindow $process.Id 'OttoPopupMenu' $true
+    $controlCenter = Get-OttoWindow $process.Id 'OttoControlCenter' $true
     $controls = Get-OttoWindow $process.Id 'OttoWindowControls' $true
     if (-not $bar -or $bar.Width -lt 400 -or $bar.Height -lt 20 -or $bar.Top -gt 2) {
         throw 'Initial top bar geometry is not valid.'
@@ -825,8 +847,8 @@ function Assert-InitialTopology($process) {
     if (-not $dock -or $dock.Width -lt 100 -or $dock.Height -lt 30) {
         throw 'Initial dock geometry is not valid.'
     }
-    if ($panel -or $menu) {
-        throw 'Initial popup or expanded panel is visible.'
+    if ($panel -or $menu -or $controlCenter) {
+        throw 'Initial popup, Control Center, or expanded panel is visible.'
     }
     if ($controls -and $controls.Left -lt $bar.Right -and $controls.Right -gt $bar.Left -and $controls.Top -lt $bar.Bottom -and $controls.Bottom -gt $bar.Top) {
         [void]$script:observations.Add([pscustomobject][ordered]@{
@@ -854,6 +876,16 @@ function Assert-MenuTopology($process) {
     }
     if ($menu.Left -lt 0 -or $menu.Top -lt 0 -or $menu.Right -gt $script:screenWidth -or $menu.Bottom -gt $script:screenHeight) {
         throw 'Popup menu is outside the primary screen bounds.'
+    }
+}
+
+function Assert-ControlCenterTopology($process) {
+    $cc = Get-OttoWindow $process.Id 'OttoControlCenter' $true
+    if (-not $cc -or $cc.Width -lt (Convert-ToScaled 300) -or $cc.Height -lt (Convert-ToScaled 200)) {
+        throw 'Control Center geometry is not valid.'
+    }
+    if ($cc.Left -lt 0 -or $cc.Top -lt 0 -or $cc.Right -gt $script:screenWidth -or $cc.Bottom -gt $script:screenHeight) {
+        throw 'Control Center is outside the primary screen bounds.'
     }
 }
 
@@ -913,8 +945,26 @@ function Open-ControlCenter($process) {
     $bar = Get-BarMetrics $process
     $point = Get-ControlCenterPoint $bar
     [OttoE2ENative]::ClickWindow($bar.Handle, $point.X, $point.Y)
-    Wait-VisibleWindow $process 'OttoPopupMenu' 'Control Center popup' 3000
-    Assert-MenuTopology $process
+    Wait-VisibleWindow $process 'OttoControlCenter' 'Control Center popover' 3000
+    Assert-ControlCenterTopology $process
+}
+
+function Close-ControlCenter($process) {
+    [OttoE2ENative]::SendKey(0x1B)
+    try {
+        Wait-HiddenWindow $process 'OttoControlCenter' 'Control Center dismissal' 1000
+        return
+    }
+    catch {
+        $cc = Get-OttoWindow $process.Id 'OttoControlCenter' $true
+        if ($cc) {
+            [OttoE2ENative]::RequestClose($cc.Handle)
+        } else {
+            $bar = Get-BarMetrics $process
+            [OttoE2ENative]::ClickAndHold($bar.Left + (Convert-ToScaled 80), $bar.Bottom + (Convert-ToScaled 80))
+        }
+        Wait-HiddenWindow $process 'OttoControlCenter' 'Control Center dismissal fallback' 3000
+    }
 }
 
 function Close-Popup($process) {
@@ -947,7 +997,7 @@ function Close-Popup($process) {
 function Expand-Notch($process) {
     $bar = Get-BarMetrics $process
     [OttoE2ENative]::MoveCursor($bar.Left + (Convert-ToScaled 80), $bar.Bottom + (Convert-ToScaled 80))
-    [OttoE2ENative]::SendAltKey(0x4E)
+    [OttoE2ENative]::SendCtrlAltKey(0x4E)
     try {
         Wait-VisibleWindow $process 'OttoNotchPanel' 'notch expansion' 2500
     }
@@ -970,7 +1020,7 @@ function Expand-Notch($process) {
 function Collapse-Notch($process) {
     $bar = Get-BarMetrics $process
     [OttoE2ENative]::MoveCursor($bar.Left + (Convert-ToScaled 80), $bar.Bottom + (Convert-ToScaled 80))
-    [OttoE2ENative]::SendAltKey(0x4E)
+    [OttoE2ENative]::SendCtrlAltKey(0x4E)
     try {
         Wait-HiddenWindow $process 'OttoNotchPanel' 'notch collapse' 3500
     }
@@ -981,11 +1031,11 @@ function Collapse-Notch($process) {
             [void]$script:observations.Add([pscustomobject][ordered]@{
                 scenario = $script:activeScenario
                 checkpoint = 'notch-hotkey-input'
-                expectation = 'Alt+N closes the expanded notch through the registered global hotkey.'
+                expectation = 'Ctrl+Alt+N closes the expanded notch through the registered global hotkey.'
                 status = 'WARNING'
-                message = "Synthetic Alt+N close was not observed; WM_HOTKEY handler fallback used. screenshot=$fallbackScreenshot"
+                message = "Synthetic Ctrl+Alt+N close was not observed; WM_HOTKEY handler fallback used. screenshot=$fallbackScreenshot"
             })
-            Write-Output 'OBSERVATION_WARNING alt-n-close-input-not-observed'
+            Write-Output 'OBSERVATION_WARNING ctrl-alt-n-close-input-not-observed'
             $barWin = Get-OttoWindow $process.Id 'OttoNotchBar' $true
             [OttoE2ENative]::PostHotkey($barWin.Handle, 1)
             Wait-HiddenWindow $process 'OttoNotchPanel' 'notch collapse handler fallback' 4000
@@ -999,12 +1049,20 @@ function Run-SuccessFlow {
         Assert-InitialTopology $process
         Record-Checkpoint $process '01-baseline' 'Top bar and dock are visible; popup and expanded panel are hidden.'
         Expand-Notch $process
-        Record-Checkpoint $process '02-notch-expanded' 'Alt+N exposes a settled expanded notch panel within screen bounds.' 'OttoNotchPanel'
+        Record-Checkpoint $process '02-notch-expanded' 'Ctrl+Alt+N exposes a settled expanded notch panel within screen bounds.' 'OttoNotchPanel'
         Collapse-Notch $process
         Start-Sleep -Milliseconds 300
         Open-ControlCenter $process
-        Record-Checkpoint $process '03-control-center-open' 'Control Center opens as an in-bounds popup window.' 'OttoPopupMenu'
-        Close-Popup $process
+        Record-Checkpoint $process '03-control-center-open' 'Control Center opens as an in-bounds Liquid Glass bento popover.' 'OttoControlCenter'
+        Close-ControlCenter $process
+        Start-Sleep -Milliseconds 200
+        $bar = Get-BarMetrics $process
+        $wifi = Get-StatusWifiPoint $bar
+        [OttoE2ENative]::ClickWindow($bar.Handle, $wifi.X, $wifi.Y)
+        Wait-VisibleWindow $process 'OttoControlCenter' 'Wi-Fi status deep-link' 3000
+        Assert-ControlCenterTopology $process
+        Record-Checkpoint $process '03b-control-center-wifi' 'Status Wi-Fi icon opens Control Center directly into the Wi-Fi view.' 'OttoControlCenter'
+        Close-ControlCenter $process
         Start-Sleep -Milliseconds 200
         $bar = Get-BarMetrics $process
         $clock = Get-ClockPoint $bar
@@ -1042,7 +1100,7 @@ function Run-FalseFlow {
         [OttoE2ENative]::Click($bar.Left + [int]($bar.Width / 2), $bar.Bottom + (Convert-ToScaled 80))
         Start-Sleep -Milliseconds 300
         Assert-ProcessAlive $process 'outside click'
-        if (Get-OttoWindow $process.Id 'OttoPopupMenu' $true) {
+        if ((Get-OttoWindow $process.Id 'OttoPopupMenu' $true) -or (Get-OttoWindow $process.Id 'OttoControlCenter' $true)) {
             throw 'Clicking outside the surface unexpectedly opened a popup.'
         }
         Record-Checkpoint $process '01-outside-click' 'A click outside Otto is a no-op and leaves the host alive.'
@@ -1086,15 +1144,15 @@ function Run-EdgeFlow {
         Assert-ProcessAlive $process 'media tab without provider'
         Assert-ExpandedTopology $process
         Record-Checkpoint $process '01-empty-media-tab' 'Selecting Now Playing with no active provider keeps the expanded surface stable.' 'OttoNotchPanel'
-        [OttoE2ENative]::SendAltKey(0x50)
+        [OttoE2ENative]::SendCtrlAltKey(0x50)
         Start-Sleep -Milliseconds 300
         Assert-ProcessAlive $process 'pomodoro hotkey'
-        Record-Checkpoint $process '02-pomodoro-hotkey' 'Alt+P changes local focus state without crashing or leaking a surface.' 'OttoNotchPanel'
+        Record-Checkpoint $process '02-pomodoro-hotkey' 'Ctrl+Alt+P changes local focus state without crashing or leaking a surface.' 'OttoNotchPanel'
         for ($index = 0; $index -lt 4; $index++) {
-            [OttoE2ENative]::SendAltKey(0x4E)
+            [OttoE2ENative]::SendCtrlAltKey(0x4E)
         }
         Assert-ProcessAlive $process 'rapid notch toggles'
-        Record-Checkpoint $process '03-rapid-notch-toggles' 'Repeated Alt+N input remains bounded and leaves the process responsive.'
+        Record-Checkpoint $process '03-rapid-notch-toggles' 'Repeated Ctrl+Alt+N input remains bounded and leaves the process responsive.'
         Start-Sleep -Milliseconds 600
         if (Get-OttoWindow $process.Id 'OttoNotchPanel' $true) {
             Collapse-Notch $process
@@ -1111,7 +1169,7 @@ function Run-WorstFlow {
     try {
         Expand-Notch $process
         Open-ControlCenter $process
-        Record-Checkpoint $process '01-loaded-state' 'Panel and popup are both active before teardown stress.' 'OttoPopupMenu'
+        Record-Checkpoint $process '01-loaded-state' 'Panel and Control Center are both active before teardown stress.' 'OttoControlCenter'
         $bar = Get-OttoWindow $process.Id 'OttoNotchBar' $true
         [OttoE2ENative]::RequestClose($bar.Handle)
         if (-not $process.WaitForExit(5000)) {
@@ -1385,13 +1443,19 @@ function Get-CaptionFrameRight($window) {
     return $frame
 }
 
+function Get-CoverCircleCenterX($cover, [int]$slot) {
+    $rightMargin = Convert-ToScaled 14
+    $spacing = Convert-ToScaled 20
+    $closeX = $cover.Right - $rightMargin
+    return [int]($closeX - (2 - $slot) * $spacing)
+}
+
 function Assert-CoverCircle([string]$path, $cover, [int]$slot, [string]$name, [scriptblock]$isColor) {
-    $cell = $cover.Width / 3.0
-    $x = [int]($cover.Left + $cell * ($slot + 0.5))
+    $x = Get-CoverCircleCenterX $cover $slot
     $y = [int](($cover.Top + $cover.Bottom) / 2)
     $color = Get-RegionColor $path ([pscustomobject]@{ X = $x - 2; Y = $y - 2; Width = 4; Height = 4 })
     if (-not (& $isColor $color)) {
-        throw "The $name circle is not drawn at the native button position (rgb=$($color.R),$($color.G),$($color.B) at $x,$y)."
+        throw "The $name circle is not drawn at the expected traffic light position (rgb=$($color.R),$($color.G),$($color.B) at $x,$y)."
     }
 }
 
@@ -1429,9 +1493,8 @@ function Run-WindowCoverFlow {
             throw "The cover fill rgb=$($coverFill.R),$($coverFill.G),$($coverFill.B) does not match the title bar rgb=$($titleBar.R),$($titleBar.G),$($titleBar.B)."
         }
         Write-Output 'CHECKPOINT_PASS scenario=window-cover name=01-covers-native-buttons'
-        $cell = $cover.Width / 3.0
         $y = [int](($cover.Top + $cover.Bottom) / 2)
-        $zoomX = [int]($cover.Left + $cell * 1.5)
+        $zoomX = Get-CoverCircleCenterX $cover 1
         [OttoE2ENative]::Click($zoomX, $y)
         Wait-Until { [OttoE2EWindowState]::IsZoomed($form.Handle) } 'green button to maximize the probe window' 3000
         Start-Sleep -Milliseconds 500
@@ -1443,7 +1506,7 @@ function Run-WindowCoverFlow {
         Start-Sleep -Milliseconds 500
         $cover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
         $y = [int](($cover.Top + $cover.Bottom) / 2)
-        $closeX = [int]($cover.Left + ($cover.Width / 3.0) * 2.5)
+        $closeX = Get-CoverCircleCenterX $cover 2
         [OttoE2ENative]::Click($closeX, $y)
         Wait-Until { -not [OttoE2EWindowState]::IsWindowVisible($form.Handle) } 'red button to close the probe window' 3000
         Write-Output 'CHECKPOINT_PASS scenario=window-cover name=03-close-closes'
@@ -1587,7 +1650,7 @@ function Invoke-GenieMinimize($process, $form, [string]$scenario) {
         throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
     }
     $coverMode = [Math]::Abs($controls.Right - $form.Right) -le $tolerance
-    $pressX = if ($coverMode) { [int]($controls.Left + $controls.Width / 6.0) } else { $controls.Left + (Convert-ToScaled 32) }
+    $pressX = if ($coverMode) { Get-CoverCircleCenterX $controls 0 } else { $controls.Left + (Convert-ToScaled 32) }
     $pressY = if ($coverMode) { [int](($controls.Top + $controls.Bottom) / 2) } else { $controls.Top + (Convert-ToScaled 14) }
     [OttoE2ENative]::MoveCursor($pressX, $pressY)
     Start-Sleep -Milliseconds 300
