@@ -5,4 +5,4 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "otto-waitlist"
-database_id = "7e3b5955-2ec5-4c96-9ed8-6e4da58eed5f"
+database_id = "86a64397-0bdf-4755-81ed-3ce3a26c7c5c"
