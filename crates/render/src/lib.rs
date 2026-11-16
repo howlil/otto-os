@@ -1595,6 +1595,7 @@ impl Renderer {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn draw_notch_hud(&self, layout: &Layout, hud: NotchHudState) -> Result<()> {
         let presentation = present_hud(hud.kind);
         let alpha = hud.content_alpha.clamp(0.0, 1.0);
@@ -2115,6 +2116,7 @@ impl Renderer {
         Ok(())
     }
 
+    #[expect(clippy::similar_names)]
     fn draw_headphones_icon(
         &self,
         cx: f32,
