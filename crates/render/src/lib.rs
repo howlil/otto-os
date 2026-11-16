@@ -2930,6 +2930,7 @@ mod resource_tests {
         shelf
     }
 
+    #[expect(clippy::too_many_lines)]
     fn exercise_batch_1_2_bars_for_dpi(
         renderer: &Renderer,
         metrics: &otto_core::Metrics,
@@ -3803,6 +3804,7 @@ mod resource_tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines)]
     fn dock_badges_progress_and_downloads_stack_render_without_leaking() {
         let _serial = SerialResourceTest::begin();
         let pixels = bitmap_pixels();
