@@ -7,34 +7,35 @@ import HeroVisual from "../components/HeroVisual.astro";
   <div
     aria-hidden="true"
     class="pointer-events-none absolute inset-0 -z-10 bg-[url('/hero-bg.webp')] bg-cover bg-top bg-no-repeat"
-    style="mask-image: linear-gradient(to bottom, black 68%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, black 68%, transparent 100%);"
-  >
-  </div>
+    style="mask-image: linear-gradient(to bottom, black 71%, transparent 100%); -webkit-mask-image: linear-gradient(to bottom, black 71%, transparent 100%);"
+  ></div>
 
-  <div class="mx-auto flex max-w-5xl flex-col items-center px-4 pt-24 pb-12 text-center sm:pt-32 sm:pb-16">
-    <p class="text-sm font-medium text-ink-soft">
-      Pre-launch beta · Windows 11 22H2+ (64-bit)
-    </p>
+  <div class="mx-auto flex w-full max-w-[1260px] flex-col items-center px-4 pt-28 pb-14 text-center sm:px-6 sm:pt-36 sm:pb-20 lg:pt-40">
+    <div class="inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/45 px-3.5 py-1.5 text-[11px] font-semibold tracking-[0.08em] text-ink-soft backdrop-blur-md">
+      <span class="size-1.5 rounded-full bg-accent"></span>
+      EARLY ACCESS <span class="text-ink/25">/</span> WINDOWS 11
+    </div>
 
-    <h1 class="mt-3 max-w-3xl text-4xl leading-[1.05] font-semibold tracking-[-0.03em] text-ink text-balance sm:text-5xl lg:text-6xl">
-      Windows 11, lebih rapi.
+    <h1 class="mt-5 max-w-[850px] text-balance text-[clamp(2.6rem,6.1vw,4.55rem)] leading-[1.055] font-semibold tracking-[-0.055em] text-ink">
+      Windows 11, terasa lebih personal.
     </h1>
 
-    <p class="mt-4 max-w-2xl text-base leading-relaxed text-ink-soft text-pretty sm:text-lg">
-      Bar atas, Dock, kontrol jendela Genie, Control Center, dan Dynamic Island dalam satu aplikasi Rust asli. Taskbar bawaan bisa dikembalikan kapan saja.
+    <p class="mt-5 max-w-[620px] text-pretty text-[15px] leading-[1.75] text-ink-soft sm:text-[17px]">
+      Top Bar, Dynamic Island, Dock, dan kontrol desktop yang menyatu.
+      Dibangun native dengan Rust, tanpa menggantikan Windows.
     </p>
 
-    <div id="daftar" class="mt-8 flex w-full scroll-mt-24 flex-col items-center">
+    <div id="daftar" class="mt-7 flex w-full scroll-mt-24 flex-col items-center sm:mt-8">
       <WaitlistForm client:load />
       <p class="mt-3 text-xs text-muted">
-        Gratis saat beta · Tanpa akun · Tanpa telemetri.
+        Gratis saat beta · Tanpa akun · Tanpa telemetri
       </p>
       <noscript>
         <p class="mt-2 text-xs text-ink-soft">Formulir tetap dapat dikirim tanpa JavaScript.</p>
       </noscript>
     </div>
 
-    <div class="mt-10 w-full sm:mt-12">
+    <div class="mt-12 w-full sm:mt-14">
       <HeroVisual />
     </div>
   </div>
