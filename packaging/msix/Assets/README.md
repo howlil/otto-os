@@ -1,7 +1,9 @@
-Provide the three PNG assets required by `build.ps1` before packaging:
+# Otto OS Store assets
 
-- `StoreLogo.png`
-- `Square150x150Logo.png`
-- `Square44x44Logo.png`
+The checked-in PNG assets are derived from the canonical Orbit O design at `assets/otto-os-orbit.svg`:
 
-The files are intentionally not generated from a placeholder. They must use the final Otto OS brand artwork and the dimensions required by the Windows package manifest.
+- `StoreLogo.png` — 50 × 50 px
+- `Square150x150Logo.png` — 150 × 150 px
+- `Square44x44Logo.png` — 44 × 44 px
+
+Update all three together whenever the canonical logo changes. `packaging/msix/build.ps1` consumes these assets directly.
