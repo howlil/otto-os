@@ -178,7 +178,7 @@ fn extract_notification_summary(
     }
     let (mut title, body) = split_notification_lines(lines);
     if title.is_empty() {
-        title = app_name.clone();
+        title.clone_from(&app_name);
     }
 
     Some((
@@ -233,7 +233,7 @@ fn query_notifications_live() -> NotificationCenterSnapshot {
             collected.push(summary);
         }
     }
-    collected.sort_by(|a, b| b.0.cmp(&a.0));
+    collected.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let items = collected
         .into_iter()
         .take(MAX_FETCHED_NOTIFICATIONS)
