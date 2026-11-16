@@ -144,6 +144,7 @@ pub struct ShelfLayoutInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[expect(clippy::struct_excessive_bools, reason = "Independent layout feature flags")]
 pub struct NotchLayoutInput {
     pub hud_expansion: f32,
     pub compact_expansion: f32,
