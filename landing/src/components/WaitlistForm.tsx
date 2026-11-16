@@ -23,7 +23,7 @@ type Phase =
 const PLATFORM_OPTIONS = WAITLIST_PLATFORMS.map((value) => ({ value, label: value }));
 const USAGE_OPTIONS = WAITLIST_USAGES.map((value) => ({ value, label: value }));
 
-export default function WaitlistForm() {
+export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}) {
   const emailInputRef = useRef<HTMLInputElement>(null);
   const [email, setEmail] = useState("");
   const [website, setWebsite] = useState("");
@@ -150,7 +150,7 @@ export default function WaitlistForm() {
             : "Undangan akan dikirim ke email ini saat batch beta berikutnya dibuka. Isi dua info singkat ini jika ingin membantu pemilihan tester (opsional).";
 
     return (
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface p-5 text-left shadow-[0_8px_24px_rgb(15_17_21/0.06)] sm:p-6">
+      <div className={modal ? "w-full text-left" : "w-full max-w-md rounded-2xl border border-line bg-surface p-5 text-left shadow-[0_8px_24px_rgb(15_17_21/0.06)] sm:p-6"}>
         <p role="status" className="text-base font-medium text-ink">
           {heading}
         </p>
@@ -192,12 +192,13 @@ export default function WaitlistForm() {
                 type="button"
                 variant="ghost"
                 size="md"
+                className={modal ? "rounded-full" : undefined}
                 disabled={savingProfile}
                 onClick={skipProfile}
               >
                 Lewati
               </Button>
-              <Button type="submit" variant="primary" size="md" loading={savingProfile}>
+              <Button type="submit" variant="primary" size="md" loading={savingProfile} className={modal ? "rounded-full" : undefined}>
                 Simpan profil
               </Button>
             </div>
@@ -213,7 +214,7 @@ export default function WaitlistForm() {
       action="/api/waitlist"
       onSubmit={join}
       noValidate
-      className="flex w-full max-w-md flex-col items-stretch gap-3 sm:flex-row sm:items-start"
+      className={modal ? "flex w-full flex-col gap-3" : "flex w-full max-w-md flex-col items-stretch gap-3 sm:flex-row sm:items-start"}
     >
       <div className="min-w-0 flex-1">
         <Input
@@ -224,6 +225,7 @@ export default function WaitlistForm() {
           type="email"
           autoComplete="email"
           placeholder="nama@email.com"
+          className={modal ? "rounded-full" : undefined}
           value={email}
           readOnly={phase === "sending"}
           onChange={(event) => {
@@ -249,7 +251,7 @@ export default function WaitlistForm() {
         variant="primary"
         size="lg"
         loading={phase === "sending"}
-        className="w-full shrink-0 sm:w-auto"
+        className={modal ? "w-full shrink-0 rounded-full" : "w-full shrink-0 sm:w-auto"}
       >
         Daftar beta
       </Button>
