@@ -1,42 +1,38 @@
 ---
-import { Download, Mail, RotateCcw } from "lucide-astro";
-
 const steps = [
   {
-    icon: Mail,
-    title: "Daftar lewat email",
-    description: "Masukkan alamat email tanpa perlu membuat akun.",
+    number: "01",
+    title: "Gabung waitlist",
+    description: "Daftar dengan email tanpa membuat akun.",
   },
   {
-    icon: Download,
-    title: "Terima penginstal Windows",
-    description: "Undangan dikirim bertahap lengkap dengan berkas pasang per-user.",
+    number: "02",
+    title: "Terima akses beta",
+    description: "Undangan dan penginstal Windows dikirim secara bertahap.",
   },
   {
-    icon: RotateCcw,
-    title: "Pasang dan pulihkan kapan saja",
-    description: "Taskbar dan area kerja Windows dapat dikembalikan dengan satu perintah.",
+    number: "03",
+    title: "Coba, lalu pulihkan kapan saja",
+    description: "Taskbar dan area kerja Windows bisa dikembalikan saat diperlukan.",
   },
 ];
 ---
 
-<section id="cara-kerja" class="w-full max-w-5xl scroll-mt-24">
-  <div class="mb-6 text-left">
-    <h2 class="text-2xl font-medium tracking-[-0.02em] text-ink sm:text-3xl">Alur beta</h2>
+<section id="cara-kerja" class="w-full scroll-mt-24">
+  <div class="mb-8 text-left">
+    <h2 class="text-[clamp(1.75rem,3vw,2.25rem)] font-medium tracking-[-0.035em] text-ink">Mulai dengan mudah.</h2>
     <p class="mt-2 max-w-xl text-sm leading-relaxed text-ink-soft">
-      Dirancang aman dicoba tanpa mengubah pengaturan sistem secara permanen.
+      Akses awal Otto OS dalam tiga langkah.
     </p>
   </div>
 
-  <ol class="grid gap-4 sm:grid-cols-3">
+  <ol class="grid gap-6 sm:grid-cols-3 sm:gap-8">
     {steps.map((step) => (
-      <li class="flex flex-col gap-3 rounded-xl border border-line bg-surface p-5 text-left shadow-[0_1px_2px_rgb(15_17_21/0.04)]">
-        <span class="inline-flex size-8 items-center justify-center rounded-lg border border-line bg-surface-subtle text-ink-soft">
-          <step.icon size={16} strokeWidth={1.5} aria-hidden="true" />
-        </span>
+      <li class="flex flex-col gap-3 border-t border-line pt-5 text-left">
+        <span class="font-mono text-xs font-medium tabular-nums text-muted">{step.number}</span>
         <div>
-          <h3 class="text-base font-medium text-ink">{step.title}</h3>
-          <p class="mt-1 text-sm leading-relaxed text-ink-soft">{step.description}</p>
+          <h3 class="text-base font-medium tracking-[-0.015em] text-ink">{step.title}</h3>
+          <p class="mt-2 max-w-xs text-sm leading-relaxed text-ink-soft">{step.description}</p>
         </div>
       </li>
     ))}
