@@ -15,99 +15,62 @@ const links = [
 ];
 ---
 
-<header data-site-nav class="site-nav-shell">
-  <nav aria-label="Navigasi utama" class="site-nav">
+<header class="site-header-shell">
+  <nav aria-label="Navigasi utama" class="site-header-inner">
     <a
       href="/"
-      class="shrink-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
+      class="shrink-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
       aria-label="Otto OS, beranda"
     >
-      <BrandMark size={19} />
+      <BrandMark size={21} />
     </a>
 
-    <ul class="hidden items-center gap-7 whitespace-nowrap sm:flex">
-      {links.map((link) => (
-        <li>
-          <a
-            href={link.href}
-            class="rounded-full px-1 py-2 text-[13px] font-medium text-ink-soft transition-colors duration-150 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-          >
-            {link.label}
-          </a>
-        </li>
-      ))}
-    </ul>
-
-    <a
-      href={isSubpage ? "/#daftar" : "#daftar"}
-      data-waitlist-trigger={isSubpage ? undefined : ""}
-      class="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full bg-ink px-4 text-[13px] font-semibold text-white whitespace-nowrap transition-[background-color,transform] duration-150 hover:bg-[#30343b] active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink motion-reduce:transform-none"
-    >
-      Join Beta <ArrowUpRight size={14} strokeWidth={1.8} />
-    </a>
+    <div class="flex items-center gap-6 sm:gap-9">
+      <ul class="hidden items-center gap-7 whitespace-nowrap sm:flex">
+        {links.map((link) => (
+          <li>
+            <a
+              href={link.href}
+              class="rounded-md py-2 text-[13px] font-medium text-ink-soft/85 transition-colors duration-150 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+            >
+              {link.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+      <a
+        href={isSubpage ? "/#daftar" : "#daftar"}
+        data-waitlist-trigger={isSubpage ? undefined : ""}
+        class="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full bg-ink px-5 text-[13px] font-medium text-white whitespace-nowrap transition-colors duration-150 hover:bg-[#343434] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+      >
+        Join Beta <ArrowUpRight size={14} strokeWidth={1.7} />
+      </a>
+    </div>
   </nav>
 </header>
 
-<script>
-  const header = document.querySelector<HTMLElement>("[data-site-nav]");
-  if (header) {
-    const update = () => header.classList.toggle("is-scrolled", window.scrollY > 24);
-    update();
-    window.addEventListener("scroll", update, { passive: true });
-  }
-</script>
-
 <style>
-  .site-nav-shell {
-    position: fixed;
-    inset: 12px 0 auto;
+  .site-header-shell {
+    position: relative;
     z-index: 50;
-    padding-inline: 14px;
-    pointer-events: none;
+    width: 100%;
+    background: #fdfdfd;
   }
 
-  .site-nav {
+  .site-header-inner {
     display: flex;
-    width: 100%;
-    max-width: 1080px;
-    min-height: 56px;
+    width: min(1100px, calc(100% - 40px));
+    min-height: 76px;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
+    gap: 24px;
     margin-inline: auto;
-    padding: 8px 10px 8px 20px;
-    border: 1px solid rgb(255 255 255 / 72%);
-    border-radius: 9999px;
-    background: rgb(255 255 255 / 63%);
-    box-shadow: 0 12px 30px -23px rgb(20 40 60 / 26%), inset 0 1px 0 rgb(255 255 255 / 65%);
-    backdrop-filter: blur(18px) saturate(1.35);
-    -webkit-backdrop-filter: blur(18px) saturate(1.35);
-    pointer-events: auto;
-    transition: background-color 180ms var(--ease-standard), border-color 180ms var(--ease-standard);
   }
 
-  .is-scrolled .site-nav {
-    background: rgb(255 255 255 / 88%);
-    border-color: rgb(255 255 255 / 90%);
-  }
-
-  @media (max-width: 420px) {
-    .site-nav {
-      padding-left: 15px;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .site-nav {
-      transition: none;
-    }
-  }
-
-  @media (prefers-reduced-transparency: reduce) {
-    .site-nav {
-      background: #fff;
-      backdrop-filter: none;
-      -webkit-backdrop-filter: none;
+  @media (max-width: 640px) {
+    .site-header-inner {
+      min-height: 68px;
+      width: calc(100% - 32px);
     }
   }
 </style>
