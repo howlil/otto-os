@@ -1,16 +1,15 @@
 @import "tailwindcss";
-@import "@fontsource-variable/plus-jakarta-sans";
 
 @theme {
-  --font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 
-  --color-ink: #0f1115;
-  --color-ink-soft: #3c4350;
-  --color-muted: #4b5563;
-  --color-line: rgb(15 17 21 / 0.1);
-  --color-line-strong: rgb(15 17 21 / 0.18);
+  --color-ink: #242424;
+  --color-ink-soft: #525252;
+  --color-muted: #686868;
+  --color-line: rgb(36 36 36 / 0.1);
+  --color-line-strong: rgb(36 36 36 / 0.18);
   --color-surface: #ffffff;
-  --color-surface-subtle: #f1f6fb;
+  --color-surface-subtle: #f7f7f7;
 
   --color-accent: #ff6a2b;
   --color-accent-hover: #e9571c;
@@ -23,7 +22,7 @@
 
   --color-sky-top: #a9d8f5;
   --color-sky-mid: #d7eefc;
-  --color-sky-low: #f7fbff;
+  --color-sky-low: #fdfdfd;
 
   --color-shell: #202124;
   --color-shell-ink: #f5f5f7;
@@ -70,12 +69,6 @@
     @apply font-sans text-ink;
     min-height: 100dvh;
     background-color: var(--color-sky-low);
-    background-image: radial-gradient(
-      120% 55% at 50% 0%,
-      var(--color-sky-top) 0%,
-      var(--color-sky-mid) 40%,
-      var(--color-sky-low) 100%
-    );
   }
 }
 
