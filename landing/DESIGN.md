@@ -1,24 +1,24 @@
 ---
 colors:
-  page: "#f7fbff"
+  page: "#fdfdfd"
   skyTop: "#a9d8f5"
   skyMid: "#d7eefc"
   surface: "#ffffff"
-  ink: "#0f1115"
-  inkSoft: "#3c4350"
-  muted: "#4b5563"
+  ink: "#242424"
+  inkSoft: "#525252"
+  muted: "#686868"
   accent: "#ff6a2b"
   accentHover: "#e9571c"
   accentText: "#b83b0a"
   shell: "#202124"
   shellInk: "#f5f5f7"
 typography:
-  sans: "Plus Jakarta Sans Variable, ui-sans-serif, system-ui, sans-serif"
+  sans: "-apple-system, BlinkMacSystemFont, Segoe UI, ui-sans-serif, system-ui, sans-serif"
 spacing:
   scale: [4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80]
 radius:
   control: "8px"
-  card: "12px"
+  card: "18px"
   panel: "16px"
   cta: "9999px"
   waitlistDialog: "28px"
@@ -33,7 +33,8 @@ motion:
 
 - **Product:** Landing pre-release dan waitlist beta untuk Otto OS, shell desktop Windows 11 berbahasa Rust yang menghadirkan bar atas, Dock, kontrol jendela Genie, Control Center, dan Dynamic Island.
 - **Character:** Tenang, presisi, jujur secara teknis.
-- **World:** Langit desktop pagi yang cerah (`#a9d8f5` ke `#f7fbff`) membingkai shell Otto OS obsidian gelap (`#202124` / `#000000`) tanpa meniru aset sistem operasi lain.
+- **World:** Canvas editorial hampir putih (`#fdfdfd`) dan tipografi sistem yang tenang, dengan warna langit hanya di dalam product demo Windows. Hindari wallpaper halaman penuh, gradient dekoratif, dan floating navbar berlapis kaca.
+- **UI rhythm:** Navbar datar dan ringan; heading medium-weight; satu tombol Join Beta berbentuk pill; satu preview desktop berbingkai tipis; section bawah memakai divider dan teks alih-alih kartu dekoratif.
 - **Moments:**
   1. Pratinjau desktop tunggal di hero yang menampilkan jendela aktif tanpa kartu dekoratif, kontrol kanan-atas, bar atas Liquid Glass, Dynamic Island aktif, serta Dock aplikasi Windows.
   2. Empat pratinjau mikro sejajar pada daftar fitur utama (`Bar atas & Control Center`, `Dock & efek Genie`, `Kontrol jendela`, `Dynamic Island, Pocket & Clip`).
@@ -41,11 +42,11 @@ motion:
 
 ## Palette and contrast
 
-- Semua pasangan teks memenuhi batas minimal WCAG 2.2 AA (`4.5:1`).
+- Semua pasangan teks berukuran biasa memenuhi batas minimal WCAG 2.2 AA (`4.5:1`).
 - CTA pembuka waitlist memakai kapsul obsidian dengan teks putih; jingga `--color-accent: #ff6a2b` dipakai untuk submit (`Daftar beta`, `Simpan profil`) dengan teks gelap `--color-ink: #0f1115` (`6.61:1`).
 - Tautan dan aksen teks di atas permukaan terang menggunakan `--color-accent-text: #b83b0a` (`> 6.3:1`).
-- Muted teks memakai `--color-muted: #4b5563` (`5.05:1` di atas langit biru muda, `7.56:1` di atas putih).
-- Logo menggunakan simbol geometris `Twin-T` dari `otto-os-logo/brand-directions/otto-os-recommended.svg` dan nama `Otto OS` dalam `Plus Jakarta Sans Variable`.
+- Muted teks memakai `--color-muted: #686868` di atas canvas putih; pastikan kontras minimal WCAG 2.2 AA.
+- Logo menggunakan simbol geometris `Twin-T`; nama `Otto OS` mengikuti stack font sistem. Jangan mengimpor aset atau font merek dari website referensi.
 
 ## Frontend structure
 
