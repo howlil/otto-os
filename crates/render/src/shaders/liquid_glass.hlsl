@@ -103,16 +103,21 @@ float3 grade_color(float3 rgb, float tint_scale)
     float chroma = max(diff.r, max(diff.g, diff.b));
     float luma_floor = tint_and_grade.z;
     float luma_ceiling = tint_and_grade.w;
-    float compressed_luma = (luma_ceiling < 0.999)
-        ? (luma / (1.0 + luma / max(luma_ceiling, 1e-3)))
-        : luma;
+    float compressed_luma = luma;
+    if (luma_ceiling < 0.999)
+    {
+        float shoulder = luma / (1.0 + luma / max(luma_ceiling, 1e-3));
+        float roll = smooth_unit(luma * 1.15);
+        compressed_luma = lerp(luma, shoulder, roll);
+    }
     float target_luma = luma_floor + (1.0 - luma_floor) * compressed_luma;
     float luma_scale = (luma > 1e-4) ? (target_luma / luma) : 1.0;
+    float chroma_scale = (luma > 1e-4) ? (0.40 + 0.60 * luma_scale) : 1.0;
     float chroma_relief = 1.0 - 0.30 * smooth_unit(chroma * 2.0);
     float amount = saturate(tint_and_grade.y * tint_scale * chroma_relief);
     float3 tint = float3(soft_and_tint.z, soft_and_tint.w, tint_and_grade.x);
     float3 base = (luma > 1e-4)
-        ? (target_luma + (rgb - luma) * optics_a.x * luma_scale)
+        ? (target_luma + (rgb - luma) * optics_a.x * chroma_scale)
         : float3(target_luma, target_luma, target_luma);
     return saturate(saturate(base) * (1.0 - amount) + tint * amount);
 }
@@ -135,23 +140,46 @@ float4 PSMain(PSInput input) : SV_Target
 
     float lens_band = optics_c.w;
     float lens_mix = optics_d.y;
-    float lens_raw = (lens_mix <= 0.0 || lens_band <= 0.0) ? 0.0 : saturate(1.0 - depth / lens_band);
-    float edge = smooth_unit(lens_raw);
+    float half_short = 0.5 * max(min(shape_rect.z - shape_rect.x, shape_rect.w - shape_rect.y), 2.0);
+    float bezel = (lens_mix <= 0.0 || lens_band <= 0.0) ? 0.0 : max(min(lens_band, half_short * 0.44), 1.0);
+    float u = (bezel > 0.0) ? saturate(1.0 - depth / bezel) : 0.0;
 
     float rim_width = optics_b.y;
     float shadow_depth = optics_c.z;
     float inner_glow_depth = optics_b.w;
-    bool need_normal = (edge > 0.0) || (depth < rim_width + max(shadow_depth, inner_glow_depth));
+    bool need_normal = (u > 0.0) || (depth < rim_width + max(shadow_depth, inner_glow_depth));
     float2 normal = need_normal ? rect_normal(x, y) : float2(0.0, 0.0);
 
-    float shift = (edge > 0.0) ? (optics_d.x * edge * edge) : 0.0;
-    float2 sample_pos = float2(local_x, local_y) - normal * shift;
+    float2 sample_pos = float2(local_x, local_y);
+    float nz3 = 1.0;
+    float meniscus = 0.0;
+    if (u > 0.0)
+    {
+        float u4 = u * u * u * u;
+        float h = pow(max(1.0 - u4, 0.002), 0.25);
+        float slope = min((u * u * u) / (h * h * h), 3.2);
+        float gx = normal.x * slope * 1.25;
+        float gy = normal.y * slope * 1.25;
+        float inv_len = rsqrt(gx * gx + gy * gy + 1.0);
+        float nx3 = gx * inv_len;
+        float ny3 = gy * inv_len;
+        nz3 = inv_len;
+        float eta = 1.0 / 1.50;
+        float k = max(1.0 - eta * eta * (1.0 - nz3 * nz3), 0.0);
+        float mu = eta * nz3 - sqrt(k);
+        float tx = mu * nx3;
+        float ty = mu * ny3;
+        float tz = max(abs(-eta + mu * nz3), 0.25);
+        float refract_mag = optics_d.x * 1.65 * (0.35 + 0.65 * u);
+        sample_pos += float2(tx / tz, ty / tz) * refract_mag;
+        meniscus = smooth_unit(u) * u;
+    }
 
     float3 color = sample_hermite_soft(sample_pos.x / factor, sample_pos.y / factor);
 
-    if (edge > 0.0)
+    if (meniscus > 0.0)
     {
-        float disp = optics_d.w * edge * edge;
+        float disp = optics_d.w * u * u;
         float3 refracted;
         if (disp > 1e-3)
         {
@@ -164,7 +192,7 @@ float4 PSMain(PSInput input) : SV_Target
             refracted = sample_hermite_sharp(sample_pos.x, sample_pos.y);
         }
         float3 graded = grade_color(refracted, optics_d.z);
-        color = lerp(color, graded, lens_mix * edge);
+        color = lerp(color, graded, lens_mix * 0.55 * meniscus);
     }
 
     float span = max(shape_rect.w - shape_rect.y, 1.0);
@@ -172,8 +200,9 @@ float4 PSMain(PSInput input) : SV_Target
     color = lerp(color, float3(1.0, 1.0, 1.0), optics_a.y * upper * upper);
 
     float lit = dot(normal, light_and_sharp.xy);
+    float fresnel = (u > 0.0) ? ((0.04 + 0.96 * pow(saturate(1.0 - nz3), 2.2)) * smooth_unit(u)) : 0.0;
     float inner_band = smooth_unit(saturate(1.0 - depth / max(inner_glow_depth, 1e-3)));
-    float inner_sheen = saturate(inner_band * optics_b.z * (0.35 + 0.65 * max(lit, 0.0)));
+    float inner_sheen = saturate(max(inner_band, fresnel * 0.85) * optics_b.z * (0.28 + 0.72 * max(lit, 0.0)));
     color = lerp(color, float3(1.0, 1.0, 1.0), inner_sheen);
 
     float shadow_reach = saturate((depth - rim_width) / max(shadow_depth, 1e-3));

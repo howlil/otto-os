@@ -14,9 +14,11 @@ use crate::surface::upload_bgra_bitmap;
 
 const BASE_SOFT_FACTOR: usize = 2;
 const MIN_SOFT_FACTOR: usize = 2;
-const BASE_BLUR_PT: usize = 9;
+const BASE_BLUR_PT: usize = 12;
 const MIN_BLUR_RADIUS: usize = 3;
 const BASE_DPI: usize = 96;
+const ADAPTIVE_LIGHT_LUMA_HIGH: f32 = 0.56;
+const ADAPTIVE_DARK_LUMA_LOW: f32 = 0.44;
 
 const LIGHT_QUANT_STEPS: f32 = 24.0;
 
@@ -47,6 +49,7 @@ use crate::glass_gpu::{GpuGlassComposer, SoftCacheKey};
 struct Capture {
     sharp: RgbBuffer,
     origin: (f32, f32),
+    avg_luma: f32,
 }
 
 #[derive(Default)]
@@ -84,10 +87,12 @@ pub(crate) struct GlassComposer {
 
 impl GlassComposer {
     pub(crate) fn set_backdrop(&mut self, sharp: RgbBuffer, origin: (i32, i32)) {
+        let avg_luma = sharp.average_luminance();
         self.generation += 1;
         self.capture = Some(Capture {
             sharp,
             origin: (origin.0 as f32, origin.1 as f32),
+            avg_luma,
         });
         self.soft = None;
         self.composed = None;
@@ -101,6 +106,10 @@ impl GlassComposer {
 
     pub(crate) const fn has_backdrop(&self) -> bool {
         self.capture.is_some()
+    }
+
+    pub(crate) fn backdrop_luminance(&self) -> Option<f32> {
+        self.capture.as_ref().map(|capture| capture.avg_luma)
     }
 
     #[cfg(test)]
@@ -205,9 +214,31 @@ pub(crate) struct GlassPainter {
     composer: RefCell<GlassComposer>,
     uploaded: RefCell<Option<(u64, ID2D1Bitmap)>>,
     pointer: Cell<Option<(f32, f32)>>,
+    dark_ink: Cell<bool>,
 }
 
 impl GlassPainter {
+    pub(crate) fn adaptive_appearance(&self, base: &Appearance) -> Appearance {
+        if base.contrast.is_some() || !base.uses_backdrop() {
+            return *base;
+        }
+        let Some(avg_luma) = self.composer.borrow().backdrop_luminance() else {
+            return *base;
+        };
+        let mut dark_ink = self.dark_ink.get();
+        if avg_luma >= ADAPTIVE_LIGHT_LUMA_HIGH {
+            dark_ink = true;
+        } else if avg_luma <= ADAPTIVE_DARK_LUMA_LOW {
+            dark_ink = false;
+        }
+        self.dark_ink.set(dark_ink);
+        Appearance::glass(if dark_ink {
+            ResolvedTheme::Light
+        } else {
+            ResolvedTheme::Dark
+        })
+    }
+
     pub(crate) fn set_backdrop(&self, sharp: RgbBuffer, origin: (i32, i32)) {
         self.composer.borrow_mut().set_backdrop(sharp, origin);
         self.invalidate_gpu();
@@ -444,10 +475,57 @@ mod tests {
         assert_eq!(soft_factor(144), 3);
         assert_eq!(soft_factor(192), 4);
         assert_eq!(soft_factor(24), 2);
-        assert_eq!(blur_radius(96), 4);
-        assert_eq!(blur_radius(144), 4);
-        assert_eq!(blur_radius(192), 4);
+        assert_eq!(blur_radius(96), 6);
+        assert_eq!(blur_radius(144), 6);
+        assert_eq!(blur_radius(192), 6);
         assert_eq!(blur_radius(24), 3);
+    }
+
+    #[test]
+    fn adaptive_appearance_uses_hysteresis_for_clear_glass_ink() {
+        let painter = GlassPainter::default();
+        let base = Appearance::glass(ResolvedTheme::Dark);
+
+        painter.set_backdrop(RgbBuffer::filled(8, 8, [0.8; 3]), (0, 0));
+        assert_eq!(
+            painter.adaptive_appearance(&base).theme,
+            ResolvedTheme::Light
+        );
+
+        painter.set_backdrop(RgbBuffer::filled(8, 8, [0.5; 3]), (0, 0));
+        assert_eq!(
+            painter.adaptive_appearance(&base).theme,
+            ResolvedTheme::Light
+        );
+
+        painter.set_backdrop(RgbBuffer::filled(8, 8, [0.2; 3]), (0, 0));
+        assert_eq!(
+            painter.adaptive_appearance(&base).theme,
+            ResolvedTheme::Dark
+        );
+
+        painter.set_backdrop(RgbBuffer::filled(8, 8, [0.5; 3]), (0, 0));
+        assert_eq!(
+            painter.adaptive_appearance(&base).theme,
+            ResolvedTheme::Dark
+        );
+    }
+
+    #[test]
+    fn adaptive_appearance_preserves_accessibility_fallbacks() {
+        let painter = GlassPainter::default();
+        painter.set_backdrop(RgbBuffer::filled(8, 8, [0.9; 3]), (0, 0));
+        let opaque = Appearance {
+            transparency: false,
+            ..Appearance::glass(ResolvedTheme::Dark)
+        };
+        let contrast = Appearance {
+            contrast: Some(ContrastColors::BLACK_THEME),
+            ..Appearance::glass(ResolvedTheme::Dark)
+        };
+
+        assert_eq!(painter.adaptive_appearance(&opaque), opaque);
+        assert_eq!(painter.adaptive_appearance(&contrast), contrast);
     }
 
     mod native {

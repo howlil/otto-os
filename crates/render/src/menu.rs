@@ -201,6 +201,7 @@ impl PopupMenuRenderer {
         hovered_row: Option<usize>,
         appearance: Appearance,
     ) -> Result<()> {
+        let appearance = self.glass.adaptive_appearance(&appearance);
         let palette = LiquidGlassPalette::for_appearance(&appearance);
         draw_on(&self.target, &self.surface, (width, height), || unsafe {
             let clear = CLEAR;

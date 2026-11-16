@@ -47,7 +47,7 @@ impl Drop for TrashQueryGuard {
     }
 }
 
-pub(crate) fn resume_recycle_bin_task() {
+pub fn resume_recycle_bin_task() {
     SHUTTING_DOWN.store(false, Ordering::Release);
 }
 
@@ -255,5 +255,7 @@ mod tests {
         assert!(SHUTTING_DOWN.load(Ordering::Acquire));
         assert!(!is_recycle_bin_full());
         assert!(TRASH_QUERY_TASK.lock().unwrap().is_none());
+        resume_recycle_bin_task();
+        assert!(!SHUTTING_DOWN.load(Ordering::Acquire));
     }
 }

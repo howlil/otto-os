@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use otto_core::{Appearance, MaterialVariant, Rgba};
+use otto_core::{Appearance, MaterialVariant, ResolvedTheme, Rgba};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1DCRenderTarget, ID2D1SolidColorBrush};
 use windows::core::Result;
@@ -42,6 +42,7 @@ pub struct LiquidGlassPalette {
     pub specular_rim: D2D1_COLOR_F,
     pub notch_obsidian: D2D1_COLOR_F,
     pub on_accent: D2D1_COLOR_F,
+    pub is_dark: bool,
     pub is_high_contrast: bool,
     pub is_translucent: bool,
 }
@@ -75,6 +76,7 @@ impl LiquidGlassPalette {
             specular_rim: d2d(colors.specular_rim),
             notch_obsidian: d2d(colors.notch_obsidian),
             on_accent: d2d(colors.on_accent),
+            is_dark: appearance.theme == ResolvedTheme::Dark,
             is_high_contrast: variant == MaterialVariant::HighContrast,
             is_translucent: variant == MaterialVariant::Glass,
         }

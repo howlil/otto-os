@@ -10,12 +10,13 @@ use otto_core::{
     DownloadsEffect, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
     EstimatedMenuText, HitTarget, MAX_VISIBLE_NOTIFICATIONS, MenuAnchor, MenuContext, MenuRow,
     MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange,
-    WindowCommand, WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_notification_rows,
-    build_menu_overflow_rows, build_top_bar_menu_rows, build_window_tiling_menu_rows,
-    capture_interval_for, capture_wanted, compute_downloads_stack_layout,
-    compute_popup_menu_layout, control_center_effect, dock_overflow_choice, dock_settings_effect,
-    dock_settings_rows, downloads_effect, downloads_stack_hit_test, next_downloads_stack_focus,
-    notification_dismiss_index, overflow_menu_target, scale, shift_month, window_menu_effect,
+    WindowCommand, WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_rows,
+    build_menu_overflow_rows, build_notification_rows, build_top_bar_menu_rows,
+    build_window_tiling_menu_rows, capture_interval_for, capture_wanted,
+    compute_downloads_stack_layout, compute_popup_menu_layout, control_center_effect,
+    dock_overflow_choice, dock_settings_effect, dock_settings_rows, downloads_effect,
+    downloads_stack_hit_test, next_downloads_stack_focus, notification_dismiss_index,
+    overflow_menu_target, scale, shift_month, window_menu_effect,
 };
 use otto_platform::{
     DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
@@ -67,6 +68,10 @@ enum MenuSource {
     Calendar {
         year: u16,
         month: u8,
+        anchor_right: i32,
+        anchor_y: i32,
+    },
+    Notifications {
         anchor_right: i32,
         anchor_y: i32,
         notification_ids: Vec<u32>,
@@ -352,14 +357,7 @@ fn open_calendar_month(
     with_menu(runtime, |menu| {
         let clock = menu.control_center.read_system_status().clock;
         let today = (clock.year == year && clock.month == month).then_some(clock.day);
-        let notifications = menu.control_center.read_notifications();
-        let notification_ids: Vec<u32> = notifications
-            .items
-            .iter()
-            .take(MAX_VISIBLE_NOTIFICATIONS)
-            .map(|item| item.id)
-            .collect();
-        let rows = build_calendar_notification_rows(year, month, today, &notifications);
+        let rows = build_calendar_rows(year, month, today);
         let probe = MenuAnchor::BelowPoint {
             x: anchor_right - 1,
             y: anchor_y,
@@ -386,6 +384,45 @@ fn open_calendar_month(
                 month,
                 anchor_right,
                 anchor_y,
+            },
+        );
+    });
+}
+
+pub fn open_notifications(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
+    with_menu(runtime, |menu| {
+        let notifications = menu.control_center.read_notifications();
+        let notification_ids = notifications
+            .items
+            .iter()
+            .take(MAX_VISIBLE_NOTIFICATIONS)
+            .map(|item| item.id)
+            .collect();
+        let rows = build_notification_rows(&notifications);
+        let probe = MenuAnchor::BelowPoint {
+            x: anchor_right - 1,
+            y: anchor_y,
+        };
+        let width = resolve_layout(
+            &menu.metrics,
+            menu.screen.dpi,
+            probe,
+            0,
+            &rows,
+            menu.renderer.as_ref(),
+        )
+        .window
+        .width;
+        menu.open(
+            runtime,
+            MenuAnchor::BelowPoint {
+                x: anchor_right - width,
+                y: anchor_y,
+            },
+            rows,
+            MenuSource::Notifications {
+                anchor_right,
+                anchor_y,
                 notification_ids,
             },
         );
@@ -397,6 +434,15 @@ pub fn is_calendar_open(runtime: &RuntimeContext) -> bool {
     runtime.menu.try_borrow().ok().is_some_and(|guard| {
         guard.as_ref().is_some_and(|menu| {
             menu.visible && matches!(menu.source, Some(MenuSource::Calendar { .. }))
+        })
+    })
+}
+
+#[must_use]
+pub fn is_notification_open(runtime: &RuntimeContext) -> bool {
+    runtime.menu.try_borrow().ok().is_some_and(|guard| {
+        guard.as_ref().is_some_and(|menu| {
+            menu.visible && matches!(menu.source, Some(MenuSource::Notifications { .. }))
         })
     })
 }
@@ -572,7 +618,6 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
             month,
             anchor_right,
             anchor_y,
-            notification_ids,
         } => match cmd {
             CMD_CAL_PREVIOUS | CMD_CAL_NEXT => {
                 let delta = if cmd == CMD_CAL_NEXT { 1 } else { -1 };
@@ -580,17 +625,26 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
                 open_calendar_month(runtime, next_year, next_month, anchor_right, anchor_y);
             }
             CMD_CAL_TODAY => open_calendar(runtime, anchor_right, anchor_y),
+            _ => with_menu(runtime, |menu| {
+                menu.execute_control_center_command(runtime, cmd);
+            }),
+        },
+        MenuSource::Notifications {
+            anchor_right,
+            anchor_y,
+            notification_ids,
+        } => match cmd {
             CMD_NOTIF_CLEAR_ALL => {
                 with_menu(runtime, |menu| {
                     let _ = menu.control_center.clear_notifications();
                 });
-                open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+                open_notifications(runtime, anchor_right, anchor_y);
             }
             CMD_NOTIF_REQUEST_ACCESS => {
                 with_menu(runtime, |menu| {
                     let _ = menu.control_center.request_notification_access();
                 });
-                open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+                open_notifications(runtime, anchor_right, anchor_y);
             }
             _ => {
                 if let Some(index) = notification_dismiss_index(cmd, notification_ids.len()) {
@@ -598,7 +652,7 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
                     with_menu(runtime, |menu| {
                         let _ = menu.control_center.dismiss_notification(id);
                     });
-                    open_calendar_month(runtime, year, month, anchor_right, anchor_y);
+                    open_notifications(runtime, anchor_right, anchor_y);
                 } else {
                     with_menu(runtime, |menu| {
                         menu.execute_control_center_command(runtime, cmd);

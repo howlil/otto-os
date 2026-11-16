@@ -78,27 +78,19 @@ pub enum OttoSettingsCategory {
     #[default]
     All,
     Modules,
-    Notch,
-    Dock,
+    NotchAndDock,
     System,
 }
 
 impl OttoSettingsCategory {
-    pub const ALL: [Self; 5] = [
-        Self::All,
-        Self::Modules,
-        Self::Notch,
-        Self::Dock,
-        Self::System,
-    ];
+    pub const ALL: [Self; 4] = [Self::All, Self::Modules, Self::NotchAndDock, Self::System];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Modules => "Modules",
-            Self::Notch => "Notch",
-            Self::Dock => "Dock",
+            Self::NotchAndDock => "Notch & Dock",
             Self::System => "System",
         }
     }
@@ -108,9 +100,28 @@ impl OttoSettingsCategory {
         match self {
             Self::All => 0,
             Self::Modules => 1,
-            Self::Notch => 2,
-            Self::Dock => 3,
-            Self::System => 4,
+            Self::NotchAndDock => 2,
+            Self::System => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OttoSettingGroup {
+    CorePlugins,
+    NotchModules,
+    DockAndBar,
+    SystemAndGlass,
+}
+
+impl OttoSettingGroup {
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::CorePlugins => "Core Plugins",
+            Self::NotchModules => "Notch Modules",
+            Self::DockAndBar => "Dock & Menu Bar",
+            Self::SystemAndGlass => "System & Glass",
         }
     }
 }
@@ -171,23 +182,46 @@ impl OttoSettingKind {
             Self::Dock
             | Self::WindowControls
             | Self::Genie
-            | Self::LiquidGlass
+            | Self::DynamicIsland
             | Self::PrivacyIndicators
             | Self::ClipboardHistory
             | Self::DropShelf
-            | Self::NotchHud => OttoSettingsCategory::Modules,
-            Self::DynamicIsland
+            | Self::NotchHud
             | Self::MediaModule
             | Self::FocusModule
-            | Self::OnlineLyrics
-            | Self::ClassicLogo => OttoSettingsCategory::Notch,
-            Self::DockHideTaskbar
+            | Self::OnlineLyrics => OttoSettingsCategory::Modules,
+            Self::ClassicLogo
+            | Self::DockHideTaskbar
             | Self::DockShowDownloads
             | Self::DockShowTrash
             | Self::DockAutohide
-            | Self::DockMagnification => OttoSettingsCategory::Dock,
-            Self::Hotkeys | Self::LaunchAtLogin | Self::CaptureVisible => {
+            | Self::DockMagnification => OttoSettingsCategory::NotchAndDock,
+            Self::LiquidGlass | Self::Hotkeys | Self::LaunchAtLogin | Self::CaptureVisible => {
                 OttoSettingsCategory::System
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn group(self) -> OttoSettingGroup {
+        match self {
+            Self::Dock | Self::WindowControls | Self::Genie => OttoSettingGroup::CorePlugins,
+            Self::DynamicIsland
+            | Self::PrivacyIndicators
+            | Self::ClipboardHistory
+            | Self::DropShelf
+            | Self::NotchHud
+            | Self::MediaModule
+            | Self::FocusModule
+            | Self::OnlineLyrics => OttoSettingGroup::NotchModules,
+            Self::ClassicLogo
+            | Self::DockHideTaskbar
+            | Self::DockShowDownloads
+            | Self::DockShowTrash
+            | Self::DockAutohide
+            | Self::DockMagnification => OttoSettingGroup::DockAndBar,
+            Self::LiquidGlass | Self::Hotkeys | Self::LaunchAtLogin | Self::CaptureVisible => {
+                OttoSettingGroup::SystemAndGlass
             }
         }
     }
@@ -253,7 +287,6 @@ impl OttoSettingKind {
             Self::Dock
                 | Self::WindowControls
                 | Self::Genie
-                | Self::LiquidGlass
                 | Self::PrivacyIndicators
                 | Self::ClipboardHistory
                 | Self::DropShelf
@@ -271,28 +304,27 @@ pub enum OttoSettingItem {
 }
 
 impl OttoSettingItem {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 21] = [
         Self::Toggle(OttoSettingKind::Dock),
         Self::Toggle(OttoSettingKind::WindowControls),
         Self::Toggle(OttoSettingKind::Genie),
-        Self::Toggle(OttoSettingKind::LiquidGlass),
+        Self::Toggle(OttoSettingKind::DynamicIsland),
         Self::Toggle(OttoSettingKind::PrivacyIndicators),
         Self::Toggle(OttoSettingKind::ClipboardHistory),
         Self::Toggle(OttoSettingKind::DropShelf),
         Self::Toggle(OttoSettingKind::NotchHud),
-        Self::Toggle(OttoSettingKind::DynamicIsland),
         Self::Toggle(OttoSettingKind::MediaModule),
         Self::Toggle(OttoSettingKind::FocusModule),
         Self::Toggle(OttoSettingKind::OnlineLyrics),
-        Self::Toggle(OttoSettingKind::ClassicLogo),
         Self::Toggle(OttoSettingKind::DockHideTaskbar),
         Self::Toggle(OttoSettingKind::DockShowDownloads),
         Self::Toggle(OttoSettingKind::DockShowTrash),
         Self::Toggle(OttoSettingKind::DockAutohide),
         Self::Toggle(OttoSettingKind::DockMagnification),
         Self::DockIconSize,
-        Self::Toggle(OttoSettingKind::Hotkeys),
+        Self::Toggle(OttoSettingKind::ClassicLogo),
         Self::Toggle(OttoSettingKind::LaunchAtLogin),
+        Self::Toggle(OttoSettingKind::Hotkeys),
         Self::Toggle(OttoSettingKind::CaptureVisible),
     ];
 
@@ -300,7 +332,15 @@ impl OttoSettingItem {
     pub const fn category(self) -> OttoSettingsCategory {
         match self {
             Self::Toggle(kind) => kind.category(),
-            Self::DockIconSize => OttoSettingsCategory::Dock,
+            Self::DockIconSize => OttoSettingsCategory::NotchAndDock,
+        }
+    }
+
+    #[must_use]
+    pub const fn group(self) -> OttoSettingGroup {
+        match self {
+            Self::Toggle(kind) => kind.group(),
+            Self::DockIconSize => OttoSettingGroup::DockAndBar,
         }
     }
 
@@ -390,6 +430,17 @@ impl OttoSettingsSnapshot {
     }
 
     #[must_use]
+    pub const fn dependency_badge(&self, item: OttoSettingItem) -> Option<&'static str> {
+        if self.is_item_available(item) {
+            return None;
+        }
+        Some(match item {
+            OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics) => "Requires Media",
+            _ => "Requires Dock",
+        })
+    }
+
+    #[must_use]
     pub const fn item_subtitle(&self, item: OttoSettingItem) -> &'static str {
         if !self.is_item_available(item) {
             return match item {
@@ -443,13 +494,27 @@ impl OttoSettingsSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubPanelGroupSpec {
+    pub title: &'static str,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubPanelGroupLayout {
+    pub title: &'static str,
+    pub header: Rect,
+    pub container: Rect,
+    pub start_index: usize,
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ControlCenterSnapshot {
     pub page: ControlCenterPage,
     pub otto_category: OttoSettingsCategory,
     pub status: SystemStatus,
     pub focus_active: bool,
-    pub theme_mode: ThemeMode,
     pub media: Option<NowPlaying>,
     pub wifi: WifiState,
     pub bluetooth: BluetoothState,
@@ -457,6 +522,7 @@ pub struct ControlCenterSnapshot {
     pub audio_switch_failed: bool,
     pub settings: OttoSettingsSnapshot,
     pub update_status: Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl ControlCenterSnapshot {
@@ -471,6 +537,41 @@ impl ControlCenterSnapshot {
                 self.settings.visible_items(self.otto_category).len()
             }
         }
+    }
+
+    #[must_use]
+    pub fn subpanel_groups(&self) -> Vec<SubPanelGroupSpec> {
+        match self.page {
+            ControlCenterPage::Main | ControlCenterPage::Display => Vec::new(),
+            ControlCenterPage::Wifi => non_empty_group("Wi-Fi Networks", self.wifi.networks.len()),
+            ControlCenterPage::Bluetooth => {
+                non_empty_group("Devices", self.bluetooth.devices.len())
+            }
+            ControlCenterPage::Sound => non_empty_group("Output Devices", self.audio_outputs.len()),
+            ControlCenterPage::OttoSettings => {
+                let items = self.settings.visible_items(self.otto_category);
+                let mut groups: Vec<SubPanelGroupSpec> = Vec::new();
+                for item in items {
+                    let title = item.group().title();
+                    if let Some(last) = groups.last_mut()
+                        && last.title == title
+                    {
+                        last.count += 1;
+                    } else {
+                        groups.push(SubPanelGroupSpec { title, count: 1 });
+                    }
+                }
+                groups
+            }
+        }
+    }
+}
+
+fn non_empty_group(title: &'static str, count: usize) -> Vec<SubPanelGroupSpec> {
+    if count == 0 {
+        Vec::new()
+    } else {
+        vec![SubPanelGroupSpec { title, count }]
     }
 }
 
@@ -487,33 +588,37 @@ pub struct ControlCenterMetrics {
     pub bottom_row_height: i32,
     pub header_height: i32,
     pub slider_card_height: i32,
-    pub theme_strip_height: i32,
     pub category_bar_height: i32,
     pub row_height: i32,
     pub row_gap: i32,
     pub footer_height: i32,
     pub max_visible_rows: i32,
+    pub group_header_height: i32,
+    pub group_gap: i32,
+    pub error_banner_height: i32,
 }
 
 impl ControlCenterMetrics {
     pub const DEFAULT: Self = Self {
-        width: 344,
+        width: 376,
         padding: 12,
         gap: 8,
-        shell_radius: 20,
-        card_radius: 12,
-        connectivity_height: 140,
+        shell_radius: 22,
+        card_radius: 14,
+        connectivity_height: 144,
         display_card_height: 64,
         sound_card_height: 64,
-        bottom_row_height: 124,
-        header_height: 36,
-        slider_card_height: 44,
-        theme_strip_height: 36,
-        category_bar_height: 28,
-        row_height: 46,
-        row_gap: 6,
-        footer_height: 38,
+        bottom_row_height: 128,
+        header_height: 40,
+        slider_card_height: 64,
+        category_bar_height: 32,
+        row_height: 44,
+        row_gap: 0,
+        footer_height: 36,
         max_visible_rows: 6,
+        group_header_height: 24,
+        group_gap: 12,
+        error_banner_height: 28,
     };
 }
 
@@ -542,7 +647,6 @@ pub enum ControlCenterHitTarget {
     BluetoothOpenPage,
     FocusToggle,
     FocusOpenSettings,
-    ThemeTile,
     BatteryTile,
     DisplayOpenPage,
     DisplaySlider,
@@ -556,7 +660,6 @@ pub enum ControlCenterHitTarget {
     OttoSettingsTile,
     BackButton,
     HeaderToggle,
-    ThemeOption(ThemeMode),
     OttoCategoryTab(OttoSettingsCategory),
     SubPanelItem(usize),
     FooterPrimary,
@@ -576,7 +679,6 @@ pub struct ControlCenterLayout {
     pub bluetooth_row: Rect,
     pub focus_toggle: Rect,
     pub focus_settings: Rect,
-    pub theme_tile: Rect,
     pub battery_tile: Rect,
     pub display_card: Rect,
     pub display_header: Rect,
@@ -595,9 +697,10 @@ pub struct ControlCenterLayout {
     pub back_button: Rect,
     pub header_rect: Rect,
     pub header_toggle: Rect,
-    pub theme_options: [Rect; 3],
-    pub category_tabs: [Rect; 5],
+    pub category_tabs: [Rect; 4],
+    pub error_banner: Rect,
     pub list_viewport: Rect,
+    pub groups: Vec<SubPanelGroupLayout>,
     pub items: Vec<Rect>,
     pub scroll_offset: i32,
     pub max_scroll: i32,
@@ -754,8 +857,6 @@ pub struct ControlCenterClickOutcome {
     pub dismiss: bool,
 }
 
-const THEME_MODES: [ThemeMode; 3] = [ThemeMode::Auto, ThemeMode::Light, ThemeMode::Dark];
-
 #[must_use]
 pub const fn next_dock_icon_size(current: i32) -> i32 {
     match current {
@@ -778,6 +879,27 @@ pub fn compute_control_center_layout(
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,
 ) -> ControlCenterLayout {
+    compute_control_center_layout_with(metrics, placement, &[], false)
+}
+
+#[must_use]
+pub fn compute_control_center_layout_for_snapshot(
+    metrics: &ControlCenterMetrics,
+    placement: ControlCenterPlacement,
+    snapshot: &ControlCenterSnapshot,
+) -> ControlCenterLayout {
+    let groups = snapshot.subpanel_groups();
+    let has_error =
+        placement.page == ControlCenterPage::OttoSettings && snapshot.last_error.is_some();
+    compute_control_center_layout_with(metrics, placement, &groups, has_error)
+}
+
+fn compute_control_center_layout_with(
+    metrics: &ControlCenterMetrics,
+    placement: ControlCenterPlacement,
+    groups: &[SubPanelGroupSpec],
+    has_error: bool,
+) -> ControlCenterLayout {
     let dpi = placement.dpi.max(96);
     let width = scale(metrics.width, dpi);
     let pad = scale(metrics.padding, dpi);
@@ -795,7 +917,17 @@ pub fn compute_control_center_layout(
     let height = if placement.page == ControlCenterPage::Main {
         layout_main_page(&mut layout, metrics, dpi, pad, gap, inner_w)
     } else {
-        layout_subpanel_page(&mut layout, metrics, placement, dpi, pad, gap, inner_w)
+        layout_subpanel_page(
+            &mut layout,
+            metrics,
+            placement,
+            groups,
+            has_error,
+            dpi,
+            pad,
+            gap,
+            inner_w,
+        )
     };
 
     let margin = scale(8, dpi);
@@ -852,19 +984,25 @@ fn layout_main_top(
     };
     layout_connectivity_rows(layout, dpi);
 
-    let top_tile_h = (h1 - gap) / 2;
-    let bottom_tile_h = h1 - gap - top_tile_h;
-    layout.theme_tile = Rect {
+    let split_h = (h1 - gap) / 2;
+    layout.focus_toggle = Rect {
         x: right_x,
         y: y1,
         width: right_w,
-        height: top_tile_h,
+        height: split_h,
+    };
+    let gear_d = scale(20, dpi);
+    layout.focus_settings = Rect {
+        x: layout.focus_toggle.right() - gear_d - scale(6, dpi),
+        y: y1 + scale(6, dpi),
+        width: gear_d,
+        height: gear_d,
     };
     layout.battery_tile = Rect {
         x: right_x,
-        y: y1 + top_tile_h + gap,
+        y: layout.focus_toggle.bottom() + gap,
         width: right_w,
-        height: bottom_tile_h,
+        height: h1 - gap - split_h,
     };
     y1 + h1
 }
@@ -880,9 +1018,9 @@ fn layout_main_sliders(
 ) -> i32 {
     let card_pad = scale(10, dpi);
     let card_hdr_h = scale(24, dpi);
-    let badge_d = scale(24, dpi);
-    let slider_h = scale(22, dpi);
-    let badge_gap = scale(8, dpi);
+    let slider_h = scale(26, dpi);
+    let slider_x = pad + card_pad;
+    let slider_w = (inner_w - card_pad * 2).max(1);
 
     let h2 = scale(metrics.display_card_height, dpi);
     let display_row_y = y2 + card_hdr_h + scale(4, dpi);
@@ -898,18 +1036,16 @@ fn layout_main_sliders(
         width: inner_w,
         height: card_hdr_h,
     };
-    layout.display_icon = Rect {
-        x: pad + card_pad,
-        y: display_row_y,
-        width: badge_d,
-        height: badge_d,
-    };
-    let slider_x = layout.display_icon.right() + badge_gap;
-    let slider_w = (layout.display_card.right() - card_pad - slider_x).max(1);
     layout.display_slider = Rect {
         x: slider_x,
-        y: display_row_y + scale(1, dpi),
+        y: display_row_y,
         width: slider_w,
+        height: slider_h,
+    };
+    layout.display_icon = Rect {
+        x: slider_x + scale(2, dpi),
+        y: display_row_y,
+        width: slider_h,
         height: slider_h,
     };
 
@@ -928,16 +1064,17 @@ fn layout_main_sliders(
         width: inner_w,
         height: card_hdr_h,
     };
+    let mute_gap = scale(8, dpi);
     layout.sound_mute = Rect {
-        x: pad + card_pad,
+        x: slider_x,
         y: sound_row_y,
-        width: badge_d,
-        height: badge_d,
+        width: slider_h,
+        height: slider_h,
     };
     layout.sound_slider = Rect {
-        x: slider_x,
-        y: sound_row_y + scale(1, dpi),
-        width: slider_w,
+        x: slider_x + slider_h + mute_gap,
+        y: sound_row_y,
+        width: (slider_w - slider_h - mute_gap).max(1),
         height: slider_h,
     };
     y3 + h3
@@ -953,8 +1090,8 @@ fn layout_main_bottom(
     y4: i32,
 ) -> i32 {
     let h4 = scale(metrics.bottom_row_height, dpi);
-    let bar_h = scale(42, dpi);
-    let media_h = (h4 - gap - bar_h).max(scale(60, dpi));
+    let bar_h = scale(46, dpi);
+    let media_h = (h4 - gap - bar_h).max(scale(64, dpi));
     layout.media_card = Rect {
         x: pad,
         y: y4,
@@ -1007,12 +1144,12 @@ fn layout_main_bottom(
 fn layout_connectivity_rows(layout: &mut ControlCenterLayout, dpi: u32) {
     let card = layout.connectivity_card;
     let inset = scale(8, dpi);
-    let row_gap = scale(4, dpi);
-    let slot_h = ((card.height - inset * 2 - row_gap * 2) / 3).max(scale(24, dpi));
-    let circle_d = (slot_h - scale(6, dpi)).clamp(scale(22, dpi), slot_h);
+    let row_gap = scale(6, dpi);
+    let slot_h = ((card.height - inset * 2 - row_gap) / 2).max(scale(40, dpi));
+    let circle_d = scale(32, dpi).min(slot_h - scale(6, dpi));
     let row_x = card.x + scale(4, dpi);
     let row_w = (card.width - scale(8, dpi)).max(1);
-    let circle_x = row_x + scale(4, dpi);
+    let circle_x = row_x + scale(6, dpi);
 
     let y0 = card.y + inset;
     layout.wifi_row = Rect {
@@ -1041,27 +1178,15 @@ fn layout_connectivity_rows(layout: &mut ControlCenterLayout, dpi: u32) {
         width: circle_d,
         height: circle_d,
     };
-
-    let y2 = y1 + slot_h + row_gap;
-    let settings_w = scale(38, dpi);
-    layout.focus_settings = Rect {
-        x: (row_x + row_w - settings_w).max(row_x),
-        y: y2,
-        width: settings_w,
-        height: slot_h,
-    };
-    layout.focus_toggle = Rect {
-        x: row_x,
-        y: y2,
-        width: (layout.focus_settings.x - row_x).max(circle_d),
-        height: slot_h,
-    };
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_subpanel_page(
     layout: &mut ControlCenterLayout,
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,
+    groups: &[SubPanelGroupSpec],
+    has_error: bool,
     dpi: u32,
     pad: i32,
     gap: i32,
@@ -1077,6 +1202,16 @@ fn layout_subpanel_page(
         }
         ControlCenterPage::OttoSettings => {
             y = layout_subpanel_categories(layout, metrics, dpi, pad, gap, inner_w, y);
+            if has_error {
+                let banner_h = scale(metrics.error_banner_height, dpi);
+                layout.error_banner = Rect {
+                    x: pad,
+                    y,
+                    width: inner_w,
+                    height: banner_h,
+                };
+                y += banner_h + scale(6, dpi);
+            }
         }
         ControlCenterPage::Main | ControlCenterPage::Wifi | ControlCenterPage::Bluetooth => {}
     }
@@ -1084,7 +1219,7 @@ fn layout_subpanel_page(
     let footer_h = scale(metrics.footer_height, dpi);
     if placement.page != ControlCenterPage::Display {
         y = layout_subpanel_list(
-            layout, metrics, placement, dpi, pad, gap, inner_w, y, footer_h,
+            layout, metrics, placement, groups, dpi, pad, gap, inner_w, y, footer_h,
         );
     }
     layout_subpanel_footer(layout, placement.page, pad, gap, inner_w, y, footer_h);
@@ -1107,11 +1242,11 @@ fn layout_subpanel_header(
         width: inner_w,
         height: hdr_h,
     };
-    let back_d = (hdr_h - scale(4, dpi)).max(scale(24, dpi));
+    let back_d = scale(28, dpi);
     layout.back_button = Rect {
         x: pad,
         y: pad + (hdr_h - back_d) / 2,
-        width: scale(32, dpi),
+        width: back_d,
         height: back_d,
     };
     if matches!(page, ControlCenterPage::Wifi | ControlCenterPage::Bluetooth) {
@@ -1138,26 +1273,34 @@ fn layout_subpanel_sound(
 ) -> i32 {
     let slider_card_h = scale(metrics.slider_card_height, dpi);
     let card_pad = scale(10, dpi);
-    let slider_h = scale(22, dpi);
+    let card_hdr_h = scale(24, dpi);
+    let slider_h = scale(26, dpi);
     layout.sound_card = Rect {
         x: pad,
         y,
         width: inner_w,
         height: slider_card_h,
     };
-    let mute_d = scale(24, dpi);
-    let sy = y + (slider_card_h - mute_d) / 2;
-    layout.sound_mute = Rect {
-        x: pad + card_pad,
-        y: sy,
-        width: mute_d,
-        height: mute_d,
+    layout.sound_header = Rect {
+        x: pad,
+        y,
+        width: inner_w,
+        height: card_hdr_h,
     };
-    let sx = layout.sound_mute.right() + scale(8, dpi);
+    let slider_x = pad + card_pad;
+    let slider_w = (inner_w - card_pad * 2).max(1);
+    let mute_gap = scale(8, dpi);
+    let slider_y = y + card_hdr_h + scale(4, dpi);
+    layout.sound_mute = Rect {
+        x: slider_x,
+        y: slider_y,
+        width: slider_h,
+        height: slider_h,
+    };
     layout.sound_slider = Rect {
-        x: sx,
-        y: y + (slider_card_h - slider_h) / 2,
-        width: (layout.sound_card.right() - card_pad - sx).max(1),
+        x: slider_x + slider_h + mute_gap,
+        y: slider_y,
+        width: (slider_w - slider_h - mute_gap).max(1),
         height: slider_h,
     };
     y + slider_card_h + gap
@@ -1174,46 +1317,29 @@ fn layout_subpanel_display(
 ) -> i32 {
     let slider_card_h = scale(metrics.slider_card_height, dpi);
     let card_pad = scale(10, dpi);
-    let badge_d = scale(24, dpi);
-    let slider_h = scale(22, dpi);
+    let card_hdr_h = scale(24, dpi);
+    let slider_h = scale(26, dpi);
     layout.display_card = Rect {
         x: pad,
         y,
         width: inner_w,
         height: slider_card_h,
     };
-    layout.display_icon = Rect {
-        x: pad + card_pad,
-        y: y + (slider_card_h - badge_d) / 2,
-        width: badge_d,
-        height: badge_d,
-    };
-    let dx = layout.display_icon.right() + scale(8, dpi);
+    let dx = pad + card_pad;
+    let dy = y + card_hdr_h + scale(4, dpi);
     layout.display_slider = Rect {
         x: dx,
-        y: y + (slider_card_h - slider_h) / 2,
-        width: (layout.display_card.right() - card_pad - dx).max(1),
+        y: dy,
+        width: (inner_w - card_pad * 2).max(1),
         height: slider_h,
     };
-    let strip_y = y + slider_card_h + gap;
-    let strip_h = scale(metrics.theme_strip_height, dpi);
-    let opt_w = (inner_w - gap * 2) / 3;
-    for (index, rect) in layout.theme_options.iter_mut().enumerate() {
-        let offset = i32::try_from(index).unwrap_or(0);
-        let ox = pad + offset * (opt_w + gap);
-        let w = if index == 2 {
-            pad + inner_w - ox
-        } else {
-            opt_w
-        };
-        *rect = Rect {
-            x: ox,
-            y: strip_y,
-            width: w,
-            height: strip_h,
-        };
-    }
-    strip_y + strip_h + gap
+    layout.display_icon = Rect {
+        x: dx + scale(2, dpi),
+        y: dy,
+        width: slider_h,
+        height: slider_h,
+    };
+    y + slider_card_h + gap
 }
 
 fn layout_subpanel_categories(
@@ -1226,18 +1352,14 @@ fn layout_subpanel_categories(
     y: i32,
 ) -> i32 {
     let chip_h = scale(metrics.category_bar_height, dpi);
-    let chip_gap = scale(4, dpi);
+    let weights = [20i32, 24, 34, 22];
+    let mut cx = pad;
     let tab_count = layout.category_tabs.len();
-    let count = tab_count as i32;
-    let total_gaps = chip_gap * (count - 1);
-    let chip_w = ((inner_w - total_gaps) / count).max(1);
     for (index, rect) in layout.category_tabs.iter_mut().enumerate() {
-        let offset = i32::try_from(index).unwrap_or(0);
-        let cx = pad + offset * (chip_w + chip_gap);
         let w = if index + 1 == tab_count {
-            pad + inner_w - cx
+            (pad + inner_w - cx).max(1)
         } else {
-            chip_w
+            ((inner_w * weights[index] + 50) / 100).max(1)
         };
         *rect = Rect {
             x: cx,
@@ -1245,8 +1367,32 @@ fn layout_subpanel_categories(
             width: w,
             height: chip_h,
         };
+        cx += w;
     }
     y + chip_h + gap
+}
+
+fn compute_subpanel_list_total_height(
+    non_empty: &[SubPanelGroupSpec],
+    row_h: i32,
+    group_hdr_h: i32,
+    group_gap: i32,
+    pad_v: i32,
+) -> i32 {
+    if non_empty.is_empty() {
+        return row_h;
+    }
+    let mut total_h = pad_v;
+    for (idx, group) in non_empty.iter().enumerate() {
+        if idx > 0 {
+            total_h += group_gap;
+        }
+        if !group.title.is_empty() {
+            total_h += group_hdr_h;
+        }
+        total_h += i32::try_from(group.count).unwrap_or(64) * row_h;
+    }
+    total_h
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1254,6 +1400,7 @@ fn layout_subpanel_list(
     layout: &mut ControlCenterLayout,
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,
+    groups: &[SubPanelGroupSpec],
     dpi: u32,
     pad: i32,
     gap: i32,
@@ -1262,15 +1409,26 @@ fn layout_subpanel_list(
     footer_h: i32,
 ) -> i32 {
     let row_h = scale(metrics.row_height, dpi);
-    let row_gap = scale(metrics.row_gap, dpi);
-    let count_i32 = i32::try_from(placement.item_count).unwrap_or(64);
-    let total_h = if count_i32 <= 0 {
-        row_h
+    let group_hdr_h = scale(metrics.group_header_height, dpi);
+    let group_gap = scale(metrics.group_gap, dpi);
+    let bottom_pad = scale(4, dpi);
+
+    let fallback = [SubPanelGroupSpec {
+        title: "",
+        count: placement.item_count,
+    }];
+    let specs: &[SubPanelGroupSpec] = if groups.is_empty() && placement.item_count > 0 {
+        &fallback
     } else {
-        count_i32 * row_h + (count_i32 - 1) * row_gap
+        groups
     };
+
+    let non_empty: Vec<SubPanelGroupSpec> = specs.iter().copied().filter(|g| g.count > 0).collect();
+    let total_h =
+        compute_subpanel_list_total_height(&non_empty, row_h, group_hdr_h, group_gap, bottom_pad);
+
     let cap_rows = metrics.max_visible_rows.max(1);
-    let cap_h = cap_rows * row_h + (cap_rows - 1) * row_gap;
+    let cap_h = cap_rows * row_h + group_hdr_h * 2 + group_gap + scale(18, dpi);
     let max_win_h = (placement.bounds.height - scale(16, dpi)).max(scale(260, dpi));
     let footer_reserve = gap + footer_h + pad;
     let avail_h = (max_win_h - y - footer_reserve).max(row_h);
@@ -1285,17 +1443,72 @@ fn layout_subpanel_list(
     layout.max_scroll = (total_h - viewport_h).max(0);
     layout.scroll_offset = placement.scroll_offset.clamp(0, layout.max_scroll);
 
+    let content_w = if layout.max_scroll > 0 {
+        (inner_w - scale(8, dpi)).max(1)
+    } else {
+        inner_w
+    };
+
     layout.items.reserve(placement.item_count);
-    for index in 0..placement.item_count {
-        let idx = i32::try_from(index).unwrap_or(0);
-        let item_y = y - layout.scroll_offset + idx * (row_h + row_gap);
+    let mut cursor_y = y - layout.scroll_offset;
+    for (g_idx, group) in non_empty.iter().enumerate() {
+        if g_idx > 0 {
+            cursor_y += group_gap;
+        }
+        let header = if group.title.is_empty() {
+            Rect::default()
+        } else {
+            let h = Rect {
+                x: pad,
+                y: cursor_y,
+                width: content_w,
+                height: group_hdr_h,
+            };
+            cursor_y += group_hdr_h;
+            h
+        };
+        let start_index = layout.items.len();
+        let container_y = cursor_y;
+        let group_h = i32::try_from(group.count).unwrap_or(0) * row_h;
+        for _ in 0..group.count {
+            if layout.items.len() >= placement.item_count {
+                break;
+            }
+            layout.items.push(Rect {
+                x: pad,
+                y: cursor_y,
+                width: content_w,
+                height: row_h,
+            });
+            cursor_y += row_h;
+        }
+        let actual_count = layout.items.len() - start_index;
+        if actual_count > 0 {
+            layout.groups.push(SubPanelGroupLayout {
+                title: group.title,
+                header,
+                container: Rect {
+                    x: pad,
+                    y: container_y,
+                    width: content_w,
+                    height: group_h,
+                },
+                start_index,
+                count: actual_count,
+            });
+        }
+    }
+
+    while layout.items.len() < placement.item_count {
         layout.items.push(Rect {
             x: pad,
-            y: item_y,
-            width: inner_w,
+            y: cursor_y,
+            width: content_w,
             height: row_h,
         });
+        cursor_y += row_h;
     }
+
     y + viewport_h + gap
 }
 
@@ -1358,13 +1571,6 @@ impl ControlCenterLayout {
                 return Some(ControlCenterHitTarget::SoundSlider);
             }
         }
-        if self.page == ControlCenterPage::Display {
-            for (index, rect) in self.theme_options.iter().enumerate() {
-                if rect.contains(x, y) {
-                    return Some(ControlCenterHitTarget::ThemeOption(THEME_MODES[index]));
-                }
-            }
-        }
         if self.page == ControlCenterPage::OttoSettings {
             for (index, rect) in self.category_tabs.iter().enumerate() {
                 if rect.contains(x, y) {
@@ -1407,7 +1613,6 @@ impl ControlCenterLayout {
                 ControlCenterHitTarget::FocusOpenSettings,
             ),
             (self.focus_toggle, ControlCenterHitTarget::FocusToggle),
-            (self.theme_tile, ControlCenterHitTarget::ThemeTile),
             (self.battery_tile, ControlCenterHitTarget::BatteryTile),
             (self.display_slider, ControlCenterHitTarget::DisplaySlider),
             (self.display_header, ControlCenterHitTarget::DisplayOpenPage),
@@ -1471,7 +1676,6 @@ impl ControlCenterLayout {
             ControlCenterHitTarget::BluetoothOpenPage => self.bluetooth_row,
             ControlCenterHitTarget::FocusToggle => self.focus_toggle,
             ControlCenterHitTarget::FocusOpenSettings => self.focus_settings,
-            ControlCenterHitTarget::ThemeTile => self.theme_tile,
             ControlCenterHitTarget::BatteryTile => self.battery_tile,
             ControlCenterHitTarget::DisplayOpenPage => self.display_header,
             ControlCenterHitTarget::DisplaySlider => self.display_slider,
@@ -1485,12 +1689,6 @@ impl ControlCenterLayout {
             ControlCenterHitTarget::OttoSettingsTile => self.otto_settings_tile,
             ControlCenterHitTarget::BackButton => self.back_button,
             ControlCenterHitTarget::HeaderToggle => self.header_toggle,
-            ControlCenterHitTarget::ThemeOption(mode) => {
-                let index = THEME_MODES
-                    .iter()
-                    .position(|candidate| *candidate == mode)?;
-                self.theme_options[index]
-            }
             ControlCenterHitTarget::OttoCategoryTab(cat) => self.category_tabs[cat.index()],
             ControlCenterHitTarget::SubPanelItem(index) => {
                 let item = *self.items.get(index)?;
@@ -1508,92 +1706,97 @@ pub fn control_center_action(
     snapshot: &ControlCenterSnapshot,
     target: ControlCenterHitTarget,
 ) -> Option<ControlCenterClickOutcome> {
-    let outcome = match target {
-        ControlCenterHitTarget::WifiToggle => {
-            if !snapshot.wifi.supported {
+    let outcome =
+        match target {
+            ControlCenterHitTarget::WifiToggle => {
+                if !snapshot.wifi.supported {
+                    return None;
+                }
+                stay(ControlCenterCommand::ToggleWifi)
+            }
+            ControlCenterHitTarget::WifiOpenPage => {
+                stay(ControlCenterCommand::OpenPage(ControlCenterPage::Wifi))
+            }
+            ControlCenterHitTarget::BluetoothToggle => {
+                if !snapshot.bluetooth.supported {
+                    return None;
+                }
+                stay(ControlCenterCommand::ToggleBluetooth)
+            }
+            ControlCenterHitTarget::BluetoothOpenPage => {
+                stay(ControlCenterCommand::OpenPage(ControlCenterPage::Bluetooth))
+            }
+            ControlCenterHitTarget::FocusToggle => {
+                if snapshot.settings.system.focus_module {
+                    stay(ControlCenterCommand::ToggleFocus)
+                } else {
+                    stay(ControlCenterCommand::OpenPage(
+                        ControlCenterPage::OttoSettings,
+                    ))
+                }
+            }
+            ControlCenterHitTarget::FocusOpenSettings => dismiss(
+                ControlCenterCommand::OpenSettings(ControlCenterAction::OpenFocus),
+            ),
+            ControlCenterHitTarget::BatteryTile => dismiss(ControlCenterCommand::OpenSettings(
+                ControlCenterAction::OpenPowerSettings,
+            )),
+            ControlCenterHitTarget::DisplayOpenPage => {
+                stay(ControlCenterCommand::OpenPage(ControlCenterPage::Display))
+            }
+            ControlCenterHitTarget::DisplaySlider | ControlCenterHitTarget::SoundSlider => {
                 return None;
             }
-            stay(ControlCenterCommand::ToggleWifi)
-        }
-        ControlCenterHitTarget::WifiOpenPage => {
-            stay(ControlCenterCommand::OpenPage(ControlCenterPage::Wifi))
-        }
-        ControlCenterHitTarget::BluetoothToggle => {
-            if !snapshot.bluetooth.supported {
-                return None;
+            ControlCenterHitTarget::SoundOpenPage => {
+                stay(ControlCenterCommand::OpenPage(ControlCenterPage::Sound))
             }
-            stay(ControlCenterCommand::ToggleBluetooth)
-        }
-        ControlCenterHitTarget::BluetoothOpenPage => {
-            stay(ControlCenterCommand::OpenPage(ControlCenterPage::Bluetooth))
-        }
-        ControlCenterHitTarget::FocusToggle => stay(ControlCenterCommand::ToggleFocus),
-        ControlCenterHitTarget::FocusOpenSettings => dismiss(ControlCenterCommand::OpenSettings(
-            ControlCenterAction::OpenFocus,
-        )),
-        ControlCenterHitTarget::ThemeTile => stay(ControlCenterCommand::CycleTheme),
-        ControlCenterHitTarget::BatteryTile => dismiss(ControlCenterCommand::OpenSettings(
-            ControlCenterAction::OpenPowerSettings,
-        )),
-        ControlCenterHitTarget::DisplayOpenPage => {
-            stay(ControlCenterCommand::OpenPage(ControlCenterPage::Display))
-        }
-        ControlCenterHitTarget::DisplaySlider | ControlCenterHitTarget::SoundSlider => return None,
-        ControlCenterHitTarget::SoundOpenPage => {
-            stay(ControlCenterCommand::OpenPage(ControlCenterPage::Sound))
-        }
-        ControlCenterHitTarget::SoundMuteToggle => stay(ControlCenterCommand::ToggleMute),
-        ControlCenterHitTarget::MediaBody => {
-            if snapshot.settings.system.media_module {
-                dismiss(ControlCenterCommand::OpenNotchMedia)
-            } else {
-                stay(ControlCenterCommand::OpenPage(
-                    ControlCenterPage::OttoSettings,
-                ))
+            ControlCenterHitTarget::SoundMuteToggle => stay(ControlCenterCommand::ToggleMute),
+            ControlCenterHitTarget::MediaBody => {
+                if snapshot.settings.system.media_module {
+                    dismiss(ControlCenterCommand::OpenNotchMedia)
+                } else {
+                    stay(ControlCenterCommand::OpenPage(
+                        ControlCenterPage::OttoSettings,
+                    ))
+                }
             }
-        }
-        ControlCenterHitTarget::MediaPrev => snapshot
-            .settings
-            .system
-            .media_module
-            .then_some(stay(ControlCenterCommand::Media(MediaCommand::Previous)))?,
-        ControlCenterHitTarget::MediaPlayPause => {
-            snapshot
+            ControlCenterHitTarget::MediaPrev => snapshot
                 .settings
                 .system
                 .media_module
-                .then_some(stay(ControlCenterCommand::Media(
-                    MediaCommand::TogglePlayPause,
-                )))?
-        }
-        ControlCenterHitTarget::MediaNext => snapshot
-            .settings
-            .system
-            .media_module
-            .then_some(stay(ControlCenterCommand::Media(MediaCommand::Next)))?,
-        ControlCenterHitTarget::OttoSettingsTile => stay(ControlCenterCommand::OpenPage(
-            ControlCenterPage::OttoSettings,
-        )),
-        ControlCenterHitTarget::BackButton => stay(ControlCenterCommand::Back),
-        ControlCenterHitTarget::HeaderToggle => match snapshot.page {
-            ControlCenterPage::Wifi if snapshot.wifi.supported => {
-                stay(ControlCenterCommand::ToggleWifi)
+                .then_some(stay(ControlCenterCommand::Media(MediaCommand::Previous)))?,
+            ControlCenterHitTarget::MediaPlayPause => {
+                snapshot.settings.system.media_module.then_some(stay(
+                    ControlCenterCommand::Media(MediaCommand::TogglePlayPause),
+                ))?
             }
-            ControlCenterPage::Bluetooth if snapshot.bluetooth.supported => {
-                stay(ControlCenterCommand::ToggleBluetooth)
+            ControlCenterHitTarget::MediaNext => snapshot
+                .settings
+                .system
+                .media_module
+                .then_some(stay(ControlCenterCommand::Media(MediaCommand::Next)))?,
+            ControlCenterHitTarget::OttoSettingsTile => stay(ControlCenterCommand::OpenPage(
+                ControlCenterPage::OttoSettings,
+            )),
+            ControlCenterHitTarget::BackButton => stay(ControlCenterCommand::Back),
+            ControlCenterHitTarget::HeaderToggle => match snapshot.page {
+                ControlCenterPage::Wifi if snapshot.wifi.supported => {
+                    stay(ControlCenterCommand::ToggleWifi)
+                }
+                ControlCenterPage::Bluetooth if snapshot.bluetooth.supported => {
+                    stay(ControlCenterCommand::ToggleBluetooth)
+                }
+                _ => return None,
+            },
+            ControlCenterHitTarget::OttoCategoryTab(cat) => {
+                stay(ControlCenterCommand::SelectOttoCategory(cat))
             }
-            _ => return None,
-        },
-        ControlCenterHitTarget::ThemeOption(mode) => stay(ControlCenterCommand::SetThemeMode(mode)),
-        ControlCenterHitTarget::OttoCategoryTab(cat) => {
-            stay(ControlCenterCommand::SelectOttoCategory(cat))
-        }
-        ControlCenterHitTarget::SubPanelItem(index) => {
-            return subpanel_item_action(snapshot, index);
-        }
-        ControlCenterHitTarget::FooterPrimary => return footer_primary_action(snapshot.page),
-        ControlCenterHitTarget::FooterSecondary => return footer_secondary_action(snapshot),
-    };
+            ControlCenterHitTarget::SubPanelItem(index) => {
+                return subpanel_item_action(snapshot, index);
+            }
+            ControlCenterHitTarget::FooterPrimary => return footer_primary_action(snapshot.page),
+            ControlCenterHitTarget::FooterSecondary => return footer_secondary_action(snapshot),
+        };
     Some(outcome)
 }
 
@@ -1643,9 +1846,14 @@ pub fn scroll_offset_for_item(
     if layout.list_viewport.is_empty() || layout.max_scroll <= 0 {
         return None;
     }
-    let item_top = item.y + layout.scroll_offset - layout.list_viewport.y;
-    let item_bottom = item_top + item.height;
-    let next = if item.y < layout.list_viewport.y {
+    let header_h = layout
+        .groups
+        .iter()
+        .find(|group| group.start_index == index && !group.header.is_empty())
+        .map_or(0, |group| group.header.height);
+    let item_top = item.y - header_h + layout.scroll_offset - layout.list_viewport.y;
+    let item_bottom = item.y + item.height + layout.scroll_offset - layout.list_viewport.y;
+    let next = if item.y - header_h < layout.list_viewport.y {
         item_top
     } else if item.bottom() > layout.list_viewport.bottom() {
         item_bottom - layout.list_viewport.height
@@ -1672,7 +1880,7 @@ fn main_focus_targets(
     layout: &ControlCenterLayout,
     snapshot: &ControlCenterSnapshot,
 ) -> Vec<ControlCenterHitTarget> {
-    let candidates = [
+    let mut candidates = vec![
         (
             layout.wifi_toggle,
             snapshot.wifi.supported,
@@ -1689,6 +1897,8 @@ fn main_focus_targets(
             true,
             ControlCenterHitTarget::BluetoothOpenPage,
         ),
+    ];
+    candidates.extend([
         (
             layout.focus_toggle,
             true,
@@ -1699,7 +1909,6 @@ fn main_focus_targets(
             true,
             ControlCenterHitTarget::FocusOpenSettings,
         ),
-        (layout.theme_tile, true, ControlCenterHitTarget::ThemeTile),
         (
             layout.battery_tile,
             true,
@@ -1751,7 +1960,7 @@ fn main_focus_targets(
             true,
             ControlCenterHitTarget::OttoSettingsTile,
         ),
-    ];
+    ]);
     candidates
         .into_iter()
         .filter_map(|(rect, enabled, target)| (enabled && !rect.is_empty()).then_some(target))
@@ -1786,11 +1995,6 @@ fn subpanel_focus_targets(
         ControlCenterPage::Display => {
             if snapshot.status.brightness.is_some() && !layout.display_slider.is_empty() {
                 out.push(ControlCenterHitTarget::DisplaySlider);
-            }
-            for (index, mode) in THEME_MODES.into_iter().enumerate() {
-                if !layout.theme_options[index].is_empty() {
-                    out.push(ControlCenterHitTarget::ThemeOption(mode));
-                }
             }
         }
         ControlCenterPage::OttoSettings => {
@@ -2130,11 +2334,15 @@ mod tests {
             assert!(layout.window.right() <= bounds().right());
             assert!(layout.window.bottom() <= bounds().bottom());
             assert!(layout.connectivity_card.width > 0);
-            assert!(layout.display_slider.width > 100);
-            assert!(layout.sound_slider.width > 100);
+            assert_eq!(layout.focus_toggle.x, layout.battery_tile.x);
+            assert_eq!(layout.focus_toggle.width, layout.battery_tile.width);
+            assert!(layout.focus_toggle.bottom() < layout.battery_tile.y);
+            assert!(layout.display_slider.width > 200);
+            assert!(layout.sound_slider.width > 180);
+            assert_eq!(layout.sound_mute.x, layout.display_slider.x);
             assert!(layout.sound_mute.right() < layout.sound_slider.x);
-            assert_eq!(layout.display_slider.x, layout.sound_slider.x);
-            assert_eq!(layout.display_slider.width, layout.sound_slider.width);
+            assert_eq!(layout.display_slider.right(), layout.sound_slider.right());
+            assert!(layout.sound_mute.height >= scale(24, dpi));
             assert!(layout.media_body.right() <= layout.media_prev.x);
             assert!(layout.media_card.bottom() < layout.otto_settings_tile.y);
         }
@@ -2159,10 +2367,22 @@ mod tests {
             layout.hit_test(bx, by),
             Some(ControlCenterHitTarget::BluetoothToggle)
         );
+        let (battery_x, battery_y) = center(layout.battery_tile);
+        assert_eq!(
+            layout.hit_test(battery_x, battery_y),
+            Some(ControlCenterHitTarget::BatteryTile)
+        );
         let (fsx, fsy) = center(layout.focus_settings);
         assert_eq!(
             layout.hit_test(fsx, fsy),
             Some(ControlCenterHitTarget::FocusOpenSettings)
+        );
+        assert_eq!(
+            layout.hit_test(
+                layout.focus_toggle.x + 12,
+                layout.focus_toggle.bottom() - 12
+            ),
+            Some(ControlCenterHitTarget::FocusToggle)
         );
         let (mx, my) = center(layout.sound_mute);
         assert_eq!(
@@ -2201,7 +2421,7 @@ mod tests {
             .unwrap();
         assert!((49..=51).contains(&pct));
         assert_eq!(
-            layout.slider_value_at(ControlCenterHitTarget::ThemeTile, mid),
+            layout.slider_value_at(ControlCenterHitTarget::BatteryTile, mid),
             None
         );
     }
@@ -2422,9 +2642,6 @@ mod tests {
             vec![
                 ControlCenterHitTarget::BackButton,
                 ControlCenterHitTarget::DisplaySlider,
-                ControlCenterHitTarget::ThemeOption(ThemeMode::Auto),
-                ControlCenterHitTarget::ThemeOption(ThemeMode::Light),
-                ControlCenterHitTarget::ThemeOption(ThemeMode::Dark),
                 ControlCenterHitTarget::FooterPrimary,
                 ControlCenterHitTarget::FooterSecondary,
             ]
@@ -2561,14 +2778,17 @@ mod tests {
     fn otto_settings_categories_and_dependency_gates_work_deterministically() {
         let mut snap = ControlCenterSnapshot {
             page: ControlCenterPage::OttoSettings,
-            otto_category: OttoSettingsCategory::Dock,
+            otto_category: OttoSettingsCategory::NotchAndDock,
             ..ControlCenterSnapshot::default()
         };
-        let dock_items = snap.settings.visible_items(OttoSettingsCategory::Dock);
-        assert_eq!(dock_items.len(), 6);
+        let dock_bar_items = snap
+            .settings
+            .visible_items(OttoSettingsCategory::NotchAndDock);
+        assert_eq!(dock_bar_items.len(), 7);
+        assert_eq!(dock_bar_items[5], OttoSettingItem::DockIconSize);
         assert_eq!(
-            dock_items.last().copied(),
-            Some(OttoSettingItem::DockIconSize)
+            dock_bar_items[6],
+            OttoSettingItem::Toggle(OttoSettingKind::ClassicLogo)
         );
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(0)),
@@ -2591,22 +2811,20 @@ mod tests {
             })
         );
 
-        snap.otto_category = OttoSettingsCategory::Notch;
-        let notch_items = snap.settings.visible_items(OttoSettingsCategory::Notch);
-        assert_eq!(notch_items.len(), 5);
+        snap.otto_category = OttoSettingsCategory::Modules;
+        let module_items = snap.settings.visible_items(OttoSettingsCategory::Modules);
+        assert_eq!(module_items.len(), 11);
+        let lyrics_idx = module_items
+            .iter()
+            .position(|item| *item == OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics))
+            .expect("lyrics item");
         assert_eq!(
-            notch_items
-                .iter()
-                .position(|item| *item == OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics)),
-            Some(3)
-        );
-        assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(3)),
+            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(lyrics_idx)),
             None
         );
         snap.settings.system.media_module = true;
         assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(3)),
+            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(lyrics_idx)),
             Some(ControlCenterClickOutcome {
                 command: ControlCenterCommand::ToggleSetting(OttoSettingKind::OnlineLyrics),
                 dismiss: false,
@@ -2616,11 +2834,12 @@ mod tests {
         snap.otto_category = OttoSettingsCategory::All;
         assert_eq!(
             snap.subpanel_item_count(ControlCenterPage::OttoSettings),
-            22
+            21
         );
-        assert_eq!(snap.settings.active_module_count(), (2, 10));
+        assert_eq!(snap.settings.active_module_count(), (2, 9));
 
-        let settings_layout = compute_control_center_layout(
+        snap.last_error = Some(String::from("Disable dependent plugin first"));
+        let settings_layout = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
             ControlCenterPlacement {
                 bounds: bounds(),
@@ -2628,15 +2847,21 @@ mod tests {
                 anchor_right: 1700,
                 anchor_y: 34,
                 page: ControlCenterPage::OttoSettings,
-                item_count: 22,
+                item_count: 21,
                 scroll_offset: 0,
             },
+            &snap,
         );
+        assert_eq!(settings_layout.groups.len(), 4);
+        assert!(!settings_layout.error_banner.is_empty());
+        assert!(settings_layout.error_banner.bottom() <= settings_layout.list_viewport.y);
+        let covered: usize = settings_layout.groups.iter().map(|group| group.count).sum();
+        assert_eq!(covered, 21);
         let tab = settings_layout.category_tabs[2];
         assert_eq!(
             settings_layout.hit_test(tab.x + 8, tab.y + 8),
             Some(ControlCenterHitTarget::OttoCategoryTab(
-                OttoSettingsCategory::Notch
+                OttoSettingsCategory::NotchAndDock
             ))
         );
     }
@@ -2648,8 +2873,27 @@ mod tests {
         assert_eq!(focus_row_subtitle(true, false), "Off");
         assert_eq!(focus_row_subtitle(true, true), "Focus On");
 
+        let mut snap = ControlCenterSnapshot::default();
+        assert_eq!(
+            control_center_action(&snap, ControlCenterHitTarget::FocusToggle),
+            Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::OpenPage(ControlCenterPage::OttoSettings),
+                dismiss: false,
+            })
+        );
+        snap.settings.system.focus_module = true;
+        assert_eq!(
+            control_center_action(&snap, ControlCenterHitTarget::FocusToggle),
+            Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::ToggleFocus,
+                dismiss: false,
+            })
+        );
         let layout = main_layout(96);
-        assert!(layout.focus_toggle.right() <= layout.focus_settings.x);
-        assert!(layout.focus_settings.width >= 38);
+        assert!(layout.focus_toggle.contains(
+            layout.focus_settings.x + layout.focus_settings.width / 2,
+            layout.focus_settings.y + layout.focus_settings.height / 2
+        ));
+        assert!(layout.focus_settings.width >= 20);
     }
 }

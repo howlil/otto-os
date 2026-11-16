@@ -23,6 +23,7 @@ impl Renderer {
         appearance: Appearance,
         privacy: &PrivacyState,
     ) -> Result<()> {
+        let appearance = self.glass.adaptive_appearance(&appearance);
         let palette = LiquidGlassPalette::for_appearance(&appearance);
         let surface = &self.bar_surface;
         draw_on(&self.target, surface, surface.size(), || unsafe {
@@ -157,8 +158,11 @@ impl Renderer {
         if layout.control_center_slot.width > 0 {
             self.draw_control_center_slot(layout, fg, muted);
         }
+        if layout.notification_slot.width > 0 {
+            self.draw_notification_slot(layout, fg)?;
+        }
         if layout.clock_slot.width > 0 {
-            self.draw_clock_slot(layout, status, fg)?;
+            self.draw_clock_slot(layout, status, fg);
         }
         Ok(())
     }

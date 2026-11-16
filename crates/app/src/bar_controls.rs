@@ -6,6 +6,7 @@ pub(crate) enum BarControlAction {
     Tray,
     ControlCenter(ControlCenterPage),
     Search,
+    Notifications,
     Clock,
     AdjustVolume(i16),
     StepBrightness(i16),
@@ -85,6 +86,7 @@ impl BarControlsController {
                 Some(BarControlAction::ControlCenter(ControlCenterPage::Sound))
             }
             HitTarget::Search => Some(BarControlAction::Search),
+            HitTarget::Notifications => Some(BarControlAction::Notifications),
             HitTarget::Clock => Some(BarControlAction::Clock),
             _ => None,
         }
@@ -164,6 +166,10 @@ mod tests {
         assert_eq!(
             BarControlsController::click_action(HitTarget::FileMenu),
             Some(BarControlAction::TopBarMenu(HitTarget::FileMenu))
+        );
+        assert_eq!(
+            BarControlsController::click_action(HitTarget::Notifications),
+            Some(BarControlAction::Notifications)
         );
         assert_eq!(
             BarControlsController::click_action(HitTarget::Clock),

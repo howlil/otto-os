@@ -37,49 +37,49 @@ pub struct GlassParams {
 
 impl GlassParams {
     pub const DARK: Self = Self {
-        tint: [0.08, 0.09, 0.13],
-        tint_amount: 0.22,
-        luma_floor: 0.0,
-        luma_ceiling: 0.50,
-        saturation: 1.55,
+        tint: [0.12, 0.14, 0.20],
+        tint_amount: 0.05,
+        luma_floor: 0.01,
+        luma_ceiling: 0.66,
+        saturation: 1.48,
         sheen_alpha: 0.07,
-        rim_base: 0.10,
-        rim_lit: 0.62,
-        rim_bounce: 0.24,
-        rim_width: 1.6,
-        inner_glow: 0.13,
-        inner_glow_depth: 7.0,
-        outline_alpha: 0.10,
-        shadow_strength: 0.08,
-        shadow_depth: 6.0,
-        lens_band: 18.0,
-        lens_shift: 14.0,
+        rim_base: 0.04,
+        rim_lit: 0.94,
+        rim_bounce: 0.44,
+        rim_width: 2.2,
+        inner_glow: 0.26,
+        inner_glow_depth: 13.0,
+        outline_alpha: 0.03,
+        shadow_strength: 0.04,
+        shadow_depth: 8.0,
+        lens_band: 22.0,
+        lens_shift: 18.0,
         lens_mix: 0.92,
-        lens_tint_scale: 0.55,
-        dispersion: 1.8,
+        lens_tint_scale: 0.25,
+        dispersion: 3.0,
     };
 
     pub const LIGHT: Self = Self {
-        tint: [0.96, 0.97, 1.0],
-        tint_amount: 0.32,
-        luma_floor: 0.62,
+        tint: [0.97, 0.98, 1.0],
+        tint_amount: 0.07,
+        luma_floor: 0.52,
         luma_ceiling: 1.0,
-        saturation: 1.48,
-        sheen_alpha: 0.16,
-        rim_base: 0.18,
-        rim_lit: 0.72,
-        rim_bounce: 0.28,
-        rim_width: 1.6,
-        inner_glow: 0.18,
-        inner_glow_depth: 7.0,
-        outline_alpha: 0.06,
-        shadow_strength: 0.06,
+        saturation: 1.42,
+        sheen_alpha: 0.10,
+        rim_base: 0.06,
+        rim_lit: 0.96,
+        rim_bounce: 0.46,
+        rim_width: 2.2,
+        inner_glow: 0.28,
+        inner_glow_depth: 13.0,
+        outline_alpha: 0.04,
+        shadow_strength: 0.02,
         shadow_depth: 6.0,
-        lens_band: 18.0,
-        lens_shift: 14.0,
+        lens_band: 22.0,
+        lens_shift: 18.0,
         lens_mix: 0.92,
-        lens_tint_scale: 0.55,
-        dispersion: 1.6,
+        lens_tint_scale: 0.25,
+        dispersion: 2.6,
     };
 
     #[must_use]
@@ -121,18 +121,25 @@ impl GlassParams {
             .map(|channel| (channel - luma).abs())
             .fold(0.0f32, f32::max);
         let compressed_luma = if self.luma_ceiling < 0.999 {
-            luma / (1.0 + luma / self.luma_ceiling.max(1e-3))
+            let shoulder = luma / (1.0 + luma / self.luma_ceiling.max(1e-3));
+            let roll = smoothstep(luma * 1.15);
+            luma + (shoulder - luma) * roll
         } else {
             luma
         };
         let target_luma = self.luma_floor + (1.0 - self.luma_floor) * compressed_luma;
         let luma_scale = if luma > 1e-4 { target_luma / luma } else { 1.0 };
+        let chroma_scale = if luma > 1e-4 {
+            0.40 + 0.60 * luma_scale
+        } else {
+            1.0
+        };
         let chroma_relief = 1.0 - 0.30 * smoothstep(chroma * 2.0);
         let amount = (self.tint_amount * tint_scale * chroma_relief).clamp(0.0, 1.0);
         let mut graded = [0.0; 3];
         for ((out, channel), tint) in graded.iter_mut().zip(rgb).zip(self.tint) {
             let base = if luma > 1e-4 {
-                target_luma + (channel - luma) * self.saturation * luma_scale
+                target_luma + (channel - luma) * self.saturation * chroma_scale
             } else {
                 target_luma
             };
@@ -304,6 +311,17 @@ impl RgbBuffer {
         let top = mix(self.pixel(x0, y0), self.pixel(x0 + 1, y0), fx);
         let bottom = mix(self.pixel(x0, y0 + 1), self.pixel(x0 + 1, y0 + 1), fx);
         mix(top, bottom, fy)
+    }
+
+    #[must_use]
+    pub fn average_luminance(&self) -> f32 {
+        let count = (self.width * self.height).max(1);
+        let sum: f32 = self
+            .data
+            .chunks_exact(3)
+            .map(|rgb| luminance([rgb[0], rgb[1], rgb[2]]))
+            .sum();
+        (sum / count as f32).clamp(0.0, 1.0)
     }
 
     #[must_use]
@@ -538,32 +556,71 @@ pub fn glass_color_lit(
     y: f32,
     light_dir: (f32, f32),
 ) -> Rgb {
+    const IOR_INV: f32 = 1.0 / 1.50;
+    const BEZEL_SLOPE_GAIN: f32 = 1.25;
+    const BEZEL_SHORT_RATIO: f32 = 0.44;
+
     let distance = shape.distance(x, y);
     let depth = (-distance).max(0.0);
     let factor = backdrop.soft_factor.max(1) as f32;
     let local_x = x - backdrop.origin.0;
     let local_y = y - backdrop.origin.1;
 
-    let edge = smoothstep(lens_edge(params, depth));
+    let half_short = 0.5
+        * (shape.right - shape.left)
+            .min(shape.bottom - shape.top)
+            .max(2.0);
+    let bezel = if params.lens_mix <= 0.0 || params.lens_band <= 0.0 {
+        0.0
+    } else {
+        params
+            .lens_band
+            .min(half_short * BEZEL_SHORT_RATIO)
+            .max(1.0)
+    };
+    let u = if bezel > 0.0 {
+        (1.0 - depth / bezel).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let need_normal =
-        edge > 0.0 || depth < params.rim_width + params.shadow_depth.max(params.inner_glow_depth);
+        u > 0.0 || depth < params.rim_width + params.shadow_depth.max(params.inner_glow_depth);
     let (normal_x, normal_y) = if need_normal {
         shape.normal(x, y)
     } else {
         (0.0, 0.0)
     };
 
-    let (sample_x, sample_y) = if edge > 0.0 {
-        let shift = params.lens_shift * edge * edge;
-        (local_x - normal_x * shift, local_y - normal_y * shift)
+    let (sample_x, sample_y, nz3, meniscus) = if u > 0.0 {
+        let u4 = u * u * u * u;
+        let h = (1.0 - u4).max(0.002).powf(0.25);
+        let slope = ((u * u * u) / (h * h * h)).min(3.2);
+        let gx = normal_x * slope * BEZEL_SLOPE_GAIN;
+        let gy = normal_y * slope * BEZEL_SLOPE_GAIN;
+        let inv_len = 1.0 / (gx * gx + gy * gy + 1.0).sqrt();
+        let nx3 = gx * inv_len;
+        let ny3 = gy * inv_len;
+        let nz3 = inv_len;
+        let k = (1.0 - IOR_INV * IOR_INV * (1.0 - nz3 * nz3)).max(0.0);
+        let mu = IOR_INV * nz3 - k.sqrt();
+        let tx = mu * nx3;
+        let ty = mu * ny3;
+        let tz = (-IOR_INV + mu * nz3).abs().max(0.25);
+        let refract_mag = params.lens_shift * 1.65 * (0.35 + 0.65 * u);
+        (
+            local_x + (tx / tz) * refract_mag,
+            local_y + (ty / tz) * refract_mag,
+            nz3,
+            smoothstep(u) * u,
+        )
     } else {
-        (local_x, local_y)
+        (local_x, local_y, 1.0, 0.0)
     };
 
     let mut color = backdrop.soft.sample(sample_x / factor, sample_y / factor);
 
-    if edge > 0.0 {
-        let disp = params.dispersion * edge * edge;
+    if meniscus > 0.0 {
+        let disp = params.dispersion * u * u;
         let refracted = if disp > 1e-3 {
             [
                 backdrop
@@ -578,7 +635,7 @@ pub fn glass_color_lit(
             backdrop.sharp.sample(sample_x, sample_y)
         };
         let graded = params.grade(refracted, params.lens_tint_scale);
-        color = mix(color, graded, params.lens_mix * edge);
+        color = mix(color, graded, params.lens_mix * 0.55 * meniscus);
     }
 
     let span = (shape.bottom - shape.top).max(1.0);
@@ -586,8 +643,14 @@ pub fn glass_color_lit(
     color = mix(color, WHITE, params.sheen_alpha * upper * upper);
 
     let lit = normal_x * light_dir.0 + normal_y * light_dir.1;
+    let fresnel = if u > 0.0 {
+        (0.04 + 0.96 * (1.0 - nz3).clamp(0.0, 1.0).powf(2.2)) * smoothstep(u)
+    } else {
+        0.0
+    };
     let inner_band = smoothstep((1.0 - depth / params.inner_glow_depth.max(1e-3)).clamp(0.0, 1.0));
-    let inner_sheen = inner_band * params.inner_glow * (0.35 + 0.65 * lit.max(0.0));
+    let inner_sheen =
+        inner_band.max(fresnel * 0.85) * params.inner_glow * (0.28 + 0.72 * lit.max(0.0));
     color = mix(color, WHITE, inner_sheen.clamp(0.0, 1.0));
 
     let shadow_reach = ((depth - params.rim_width) / params.shadow_depth.max(1e-3)).clamp(0.0, 1.0);
@@ -602,13 +665,6 @@ pub fn glass_color_lit(
 
     let outline = smoothstep((OUTLINE_REACH - depth).clamp(0.0, 1.0)) * params.outline_alpha;
     mix(color, BLACK, outline)
-}
-
-fn lens_edge(params: &GlassParams, depth: f32) -> f32 {
-    if params.lens_mix <= 0.0 || params.lens_band <= 0.0 {
-        return 0.0;
-    }
-    (1.0 - depth / params.lens_band).clamp(0.0, 1.0)
 }
 
 fn smoothstep(t: f32) -> f32 {
@@ -854,9 +910,17 @@ mod tests {
             dispersion: 0.0,
             ..GlassParams::DARK
         };
-        let with_disp = glass_color(&GlassParams::DARK, &shape, &backdrop, 160.0, 32.0);
-        let without_disp = glass_color(&no_disp, &shape, &backdrop, 160.0, 32.0);
-        assert!(rgb_distance(with_disp, without_disp) > 0.01);
+        let mut strongest = ([0.0; 3], 0.0f32);
+        for y in 30..=52 {
+            let with_disp = glass_color(&GlassParams::DARK, &shape, &backdrop, 160.0, y as f32);
+            let without_disp = glass_color(&no_disp, &shape, &backdrop, 160.0, y as f32);
+            let distance = rgb_distance(with_disp, without_disp);
+            if distance > strongest.1 {
+                strongest = (with_disp, distance);
+            }
+        }
+        assert!(strongest.1 > 0.01);
+        let with_disp = strongest.0;
         let chroma_spread = (with_disp[0] - with_disp[2])
             .abs()
             .max((with_disp[1] - with_disp[2]).abs());

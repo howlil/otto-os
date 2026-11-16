@@ -13,11 +13,11 @@ Otto OS transforms the Windows 11 desktop experience into an authentic, highly r
 ## 2. Boundary Classification
 
 ### 2.1 macOS Golden Gate General Shell (Core Parity)
-- **Top Bar**: Edge-to-edge menu bar reserving monitor work area, displaying Apple logo (``), bold foreground application name, and contextual application menus (`File`, `Edit`, `View`, `Window`, `Help`). Right-hand system status area displays Tray Overflow, Wi-Fi, Audio Volume, Battery percentage, Control Center, and Clock.
+- **Top Bar**: Edge-to-edge menu bar reserving monitor work area, displaying Apple logo (``), bold foreground application name, and contextual application menus (`File`, `Edit`, `View`, `Window`, `Help`). The right-hand cluster follows `Tray Overflow → Wi-Fi → Audio Volume → Battery → Search → Control Center → Notifications → Date/Time`, with one independent hit target per action and overflow preserving every hidden target.
 - **Dock**: Floating bottom dock with uniform macOS squircles, cosine fish-eye magnification, running/active indicators, Downloads stack, and dynamic Recycle Bin. Clicking active app asserts focus and brings windows to front (no Windows minimize-toggle).
 - **Window Controls**: Traffic lights covering the top-right native caption strip (`[Yellow (Genie Minimize), Green (Zoom/Maximize), Red (Close)]`; top-left placement is retired so native Windows caption buttons are never duplicated; Alt+Click on Green toggles Fullscreen; right-click opens Tiling menu; elevated/non-caption windows keep native controls).
 - **Control Center**: Frosted-glass modular popover with interactive Sound and Display sliders, now playing block, and quick settings toggles/shortcuts.
-- **Notification Center**: Triggered by clicking the Menu Bar date/time, hosting a monthly calendar grid and Windows notification summary.
+- **Calendar & Notification Center**: Date/time opens the monthly calendar grid and date settings. The adjacent bell independently opens grouped Windows notification summaries with per-item dismiss, Clear All, permission recovery, and a Windows Notifications shortcut. Opening any top-bar popup closes the competing Otto popup.
 
 ### 2.2 MacBook Pro PROLED XDR Dynamic Island (Hardware Parity)
 - **Hardware Notch**: Obsidian Black (`#000000`) center pill, visually continuous with the display bezel across all themes.

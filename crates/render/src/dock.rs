@@ -239,6 +239,7 @@ impl DockRenderer {
         items: &[DockRenderItem<'_>],
         appearance: Appearance,
     ) -> Result<()> {
+        let appearance = self.glass.adaptive_appearance(&appearance);
         let palette = LiquidGlassPalette::for_appearance(&appearance);
         draw_on(
             &self.target,

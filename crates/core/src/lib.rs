@@ -59,13 +59,14 @@ pub use control_center::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState,
     ControlCenterClickOutcome, ControlCenterCommand, ControlCenterFocus, ControlCenterFocusOutcome,
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterMetrics, ControlCenterPage,
-    ControlCenterPlacement, ControlCenterSnapshot, OttoSettingItem, OttoSettingKind,
-    OttoSettingsCategory, OttoSettingsSnapshot, PluginSettingsState, SLIDER_KEY_STEP_PERCENT,
-    SystemSettingsState, UPDATE_CHECKING_LABEL, WifiNetwork, WifiState,
-    compute_control_center_layout, control_center_action, control_center_focus_targets,
-    focus_row_subtitle, format_update_status, is_update_available_status, next_dock_icon_size,
-    parse_latest_release_tag, power_mode_label, scroll_offset_for_item, step_slider_percent,
-    subpanel_opener_target,
+    ControlCenterPlacement, ControlCenterSnapshot, OttoSettingGroup, OttoSettingItem,
+    OttoSettingKind, OttoSettingsCategory, OttoSettingsSnapshot, PluginSettingsState,
+    SLIDER_KEY_STEP_PERCENT, SubPanelGroupLayout, SubPanelGroupSpec, SystemSettingsState,
+    UPDATE_CHECKING_LABEL, WifiNetwork, WifiState, compute_control_center_layout,
+    compute_control_center_layout_for_snapshot, control_center_action,
+    control_center_focus_targets, focus_row_subtitle, format_update_status,
+    is_update_available_status, next_dock_icon_size, parse_latest_release_tag, power_mode_label,
+    scroll_offset_for_item, step_slider_percent, subpanel_opener_target,
 };
 pub use cover_color::cover_accent;
 pub use dock::{

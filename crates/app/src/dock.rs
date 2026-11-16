@@ -22,9 +22,9 @@ use otto_platform::{
     is_escape_down, is_running_on_battery, is_window_minimized, launch_new_instance,
     motion_preference, open_file_with_dock_entry, other_applications_visible, overflow_dock_entry,
     primary_screen, quit_application, read_downloads_active_progress, read_notification_app_counts,
-    remove_pinned_app, reorder_pinned_apps, route_bar_keys, routes_keys_to, show_application,
-    shutdown_recycle_bin_task, signal_command_failure, stop_routing_if_targets, toggle_pin_entry,
-    watch_bottom_edge, window_change_generations,
+    remove_pinned_app, reorder_pinned_apps, resume_recycle_bin_task, route_bar_keys,
+    routes_keys_to, show_application, shutdown_recycle_bin_task, signal_command_failure,
+    stop_routing_if_targets, toggle_pin_entry, watch_bottom_edge, window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -32,9 +32,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
+    SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -118,6 +118,7 @@ pub(crate) struct Dock {
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+    resume_recycle_bin_task();
     enable_drag_accept_files(hwnd);
     let own_pid = current_process_id();
     let screen = primary_screen();
@@ -209,6 +210,7 @@ pub fn stop(runtime: &RuntimeContext) {
         unsafe {
             let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_POLL_TIMER);
             let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_ANIM_TIMER);
+            let _ = ShowWindow(HWND(dock.hwnd as *mut _), SW_HIDE);
         }
     }
 }

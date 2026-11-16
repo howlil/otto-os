@@ -194,6 +194,9 @@ pub fn stop(runtime: &RuntimeContext) {
     {
         for overlay in &controls.overlays {
             overlay.kill_timers();
+            unsafe {
+                let _ = ShowWindow(HWND(overlay.hwnd as *mut _), SW_HIDE);
+            }
             if overlay.hwnd != controls.primary {
                 runtime.queue_destroy_hwnd(overlay.hwnd);
             }

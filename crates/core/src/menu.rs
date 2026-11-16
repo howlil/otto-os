@@ -685,7 +685,7 @@ pub const APPLICATION_MENUS: [HitTarget; 5] = [
     HitTarget::HelpMenu,
 ];
 
-pub const OVERFLOW_TARGETS: [HitTarget; 12] = [
+pub const OVERFLOW_TARGETS: [HitTarget; 13] = [
     HitTarget::Start,
     HitTarget::AppMenu,
     HitTarget::FileMenu,
@@ -697,6 +697,7 @@ pub const OVERFLOW_TARGETS: [HitTarget; 12] = [
     HitTarget::QuickSettings,
     HitTarget::Search,
     HitTarget::ControlCenter,
+    HitTarget::Notifications,
     HitTarget::Clock,
 ];
 
@@ -708,6 +709,7 @@ fn overflow_title(target: HitTarget, app_name: &str) -> Option<String> {
         HitTarget::QuickSettings => "Quick Settings",
         HitTarget::Search => "Search",
         HitTarget::ControlCenter => "Control Center",
+        HitTarget::Notifications => "Notifications",
         HitTarget::Clock => "Calendar",
         other => top_bar_menu_title(other)?,
     };
@@ -843,8 +845,6 @@ pub fn build_apple_menu_rows() -> Vec<MenuRow> {
         MenuRow::item(CMD_OPEN_LOGS, "Open Logs Folder", ""),
         MenuRow::item(CMD_SETTINGS, "System Settings...", ""),
         MenuRow::item(CMD_TASKMGR, "Force Quit (Task Manager)...", ""),
-        MenuRow::Separator,
-        MenuRow::item(CMD_CC_THEME_TOGGLE, "Toggle Theme (Light / Dark)", ""),
         MenuRow::Separator,
         MenuRow::item(CMD_SLEEP, "Sleep", ""),
         MenuRow::item(CMD_RESTART, "Restart...", ""),
@@ -1041,47 +1041,59 @@ pub fn build_top_bar_menu_rows(target: HitTarget, context: &MenuContext<'_>) -> 
 
 #[must_use]
 pub fn build_calendar_rows(year: u16, month: u8, today: Option<u8>) -> Vec<MenuRow> {
-    build_calendar_notification_rows(year, month, today, &NotificationCenterSnapshot::default())
-}
-
-#[must_use]
-pub fn build_calendar_notification_rows(
-    year: u16,
-    month: u8,
-    today: Option<u8>,
-    notifications: &NotificationCenterSnapshot,
-) -> Vec<MenuRow> {
-    let mut rows = vec![
+    vec![
         MenuRow::Calendar { year, month, today },
         MenuRow::Separator,
         MenuRow::item(CMD_CAL_PREVIOUS, "Previous Month", ""),
         MenuRow::item(CMD_CAL_NEXT, "Next Month", ""),
         MenuRow::item(CMD_CAL_TODAY, "Go to Today", ""),
         MenuRow::Separator,
-    ];
+        MenuRow::item(CMD_CAL_SETTINGS, "Date & Time Settings...", ""),
+    ]
+}
+
+#[must_use]
+pub fn build_notification_rows(notifications: &NotificationCenterSnapshot) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
     match notifications.access {
         NotificationAccess::Allowed => {
             if notifications.items.is_empty() {
                 rows.push(MenuRow::heading("Notifications"));
                 rows.push(MenuRow::heading("No Recent Notifications"));
             } else {
-                rows.push(MenuRow::heading(format!(
-                    "Notifications ({})",
-                    notifications.items.len()
-                )));
-                for (index, item) in notifications
+                let visible: Vec<_> = notifications
                     .items
                     .iter()
                     .take(MAX_VISIBLE_NOTIFICATIONS)
-                    .enumerate()
-                {
-                    rows.push(MenuRow::Notification {
-                        id: CMD_NOTIF_DISMISS_BASE + index,
-                        app_name: item.app_name.clone(),
-                        title: item.title.clone(),
-                        body: item.body.clone(),
-                        timestamp_label: item.timestamp_label.clone(),
-                    });
+                    .collect();
+                let mut app_ids = Vec::new();
+                for item in &visible {
+                    if !app_ids.contains(&item.app_id) {
+                        app_ids.push(item.app_id.clone());
+                    }
+                }
+                for app_id in app_ids {
+                    let group: Vec<_> = visible
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| item.app_id == app_id)
+                        .collect();
+                    let app_name = &group[0].1.app_name;
+                    let heading = if group.len() > 1 {
+                        format!("{app_name} ({})", group.len())
+                    } else {
+                        app_name.clone()
+                    };
+                    rows.push(MenuRow::heading(heading));
+                    for (index, item) in group {
+                        rows.push(MenuRow::Notification {
+                            id: CMD_NOTIF_DISMISS_BASE + index,
+                            app_name: item.app_name.clone(),
+                            title: item.title.clone(),
+                            body: item.body.clone(),
+                            timestamp_label: item.timestamp_label.clone(),
+                        });
+                    }
                 }
                 rows.push(MenuRow::item(
                     CMD_NOTIF_CLEAR_ALL,
@@ -1115,11 +1127,6 @@ pub fn build_calendar_notification_rows(
     rows.push(MenuRow::item(
         CMD_CC_CALENDAR,
         "Open Windows Notifications",
-        "",
-    ));
-    rows.push(MenuRow::item(
-        CMD_CAL_SETTINGS,
-        "Date & Time Settings...",
         "",
     ));
     rows
@@ -1493,6 +1500,11 @@ mod tests {
         assert_eq!(cal.height, 26 * 8);
         assert_eq!(layout.hit_test(cal.x + 10, cal.y + 10), None);
         assert_eq!(layout.command_at(2), Some(CMD_CAL_PREVIOUS));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, MenuRow::Notification { .. }))
+        );
     }
 
     #[test]
@@ -1520,7 +1532,7 @@ mod tests {
         );
         assert_eq!(overflow_menu_target(commands[1]), Some(HitTarget::HelpMenu));
         assert_eq!(overflow_menu_target(commands[2]), Some(HitTarget::Search));
-        assert_eq!(overflow_menu_target(CMD_OVERFLOW_MENU_BASE + 12), None);
+        assert_eq!(overflow_menu_target(CMD_OVERFLOW_MENU_BASE + 13), None);
         assert_eq!(overflow_menu_target(3), None);
     }
 
@@ -1537,26 +1549,42 @@ mod tests {
     }
 
     #[test]
-    fn calendar_notification_rows_cover_populated_empty_denied_and_unpackaged_modes() {
+    fn notification_rows_group_apps_and_cover_access_modes() {
         let populated = NotificationCenterSnapshot {
             access: NotificationAccess::Allowed,
             items: (0..7)
                 .map(|i| NotificationSummary {
                     id: 100 + i,
-                    app_id: String::from("Contoso.Mail"),
-                    app_name: String::from("Mail"),
+                    app_id: if i == 1 {
+                        String::from("Contoso.Chat")
+                    } else {
+                        String::from("Contoso.Mail")
+                    },
+                    app_name: if i == 1 {
+                        String::from("Chat")
+                    } else {
+                        String::from("Mail")
+                    },
                     title: format!("Message {i}"),
                     body: String::from("Body preview"),
                     timestamp_label: format_relative_age(120),
                 })
                 .collect(),
         };
-        let rows = build_calendar_notification_rows(2026, 11, Some(16), &populated);
+        let rows = build_notification_rows(&populated);
         let notif_rows: Vec<_> = rows
             .iter()
             .filter(|row| matches!(row, MenuRow::Notification { .. }))
             .collect();
         assert_eq!(notif_rows.len(), MAX_VISIBLE_NOTIFICATIONS);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item { label, enabled: false, .. } if label == "Mail (4)"
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item { label, enabled: false, .. } if label == "Chat"
+        )));
         assert_eq!(
             notification_dismiss_index(CMD_NOTIF_DISMISS_BASE + 2, 5),
             Some(2)
@@ -1578,14 +1606,14 @@ mod tests {
             access: NotificationAccess::Denied,
             items: Vec::new(),
         };
-        let denied_rows = build_calendar_notification_rows(2026, 11, Some(16), &denied);
+        let denied_rows = build_notification_rows(&denied);
         assert!(denied_rows.iter().any(|row| matches!(
             row,
             MenuRow::Item { id, .. } if *id == CMD_NOTIF_REQUEST_ACCESS
         )));
 
         let unpackaged = NotificationCenterSnapshot::default();
-        let unpackaged_rows = build_calendar_notification_rows(2026, 11, Some(16), &unpackaged);
+        let unpackaged_rows = build_notification_rows(&unpackaged);
         assert!(unpackaged_rows.iter().any(|row| matches!(
             row,
             MenuRow::Item { id, .. } if *id == CMD_CC_CALENDAR

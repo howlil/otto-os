@@ -617,11 +617,13 @@ function Get-BarMetrics($process) {
 function Get-ControlCenterPoint($bar) {
     $padding = Convert-ToScaled 8
     $gap = Convert-ToScaled 4
-    $clockWidth = Convert-ToScaled 160
+    $clockWidth = Convert-ToScaled 128
+    $notificationWidth = Convert-ToScaled 30
     $controlWidth = Convert-ToScaled 30
     $right = $bar.Right - $padding
     $clockX = $right - $clockWidth
-    $controlRight = $clockX - $gap
+    $notificationX = $clockX - $gap - $notificationWidth
+    $controlRight = $notificationX - $gap
     $controlX = $controlRight - $controlWidth
     return [pscustomobject]@{
         X = $controlX + [int]($controlWidth / 2)
@@ -632,13 +634,15 @@ function Get-ControlCenterPoint($bar) {
 function Get-StatusWifiPoint($bar) {
     $padding = Convert-ToScaled 8
     $gap = Convert-ToScaled 4
-    $clockWidth = Convert-ToScaled 160
+    $clockWidth = Convert-ToScaled 128
+    $notificationWidth = Convert-ToScaled 30
     $controlWidth = Convert-ToScaled 30
     $searchWidth = Convert-ToScaled 30
     $statusWidth = Convert-ToScaled 108
     $iconUnit = [Math]::Max(1, (Convert-ToScaled 15))
     $clockX = $bar.Right - $padding - $clockWidth
-    $controlX = $clockX - $gap - $controlWidth
+    $notificationX = $clockX - $gap - $notificationWidth
+    $controlX = $notificationX - $gap - $controlWidth
     $searchX = $controlX - $gap - $searchWidth
     $statusX = $searchX - $gap - $statusWidth
     $wifiWidth = [int][Math]::Floor(($iconUnit * 148 + 50) / 100)
@@ -650,10 +654,23 @@ function Get-StatusWifiPoint($bar) {
 
 function Get-ClockPoint($bar) {
     $padding = Convert-ToScaled 8
-    $clockWidth = Convert-ToScaled 160
+    $clockWidth = Convert-ToScaled 128
     $clockX = $bar.Right - $padding - $clockWidth
     return [pscustomobject]@{
         X = $clockX + [int]($clockWidth / 2)
+        Y = $bar.Top + [int]($bar.Height / 2)
+    }
+}
+
+function Get-NotificationPoint($bar) {
+    $padding = Convert-ToScaled 8
+    $gap = Convert-ToScaled 4
+    $clockWidth = Convert-ToScaled 128
+    $notificationWidth = Convert-ToScaled 30
+    $clockX = $bar.Right - $padding - $clockWidth
+    $notificationX = $clockX - $gap - $notificationWidth
+    return [pscustomobject]@{
+        X = $notificationX + [int]($notificationWidth / 2)
         Y = $bar.Top + [int]($bar.Height / 2)
     }
 }
@@ -1076,6 +1093,14 @@ function Run-SuccessFlow {
         }
         Assert-MenuTopology $process
         Record-Checkpoint $process '04-calendar-open' 'Clock click opens an in-bounds calendar popup.' 'OttoPopupMenu'
+        Close-Popup $process
+        Start-Sleep -Milliseconds 200
+        $bar = Get-BarMetrics $process
+        $notifications = Get-NotificationPoint $bar
+        [OttoE2ENative]::ClickWindow($bar.Handle, $notifications.X, $notifications.Y)
+        Wait-VisibleWindow $process 'OttoPopupMenu' 'notification popup' 3000
+        Assert-MenuTopology $process
+        Record-Checkpoint $process '04b-notifications-open' 'Bell click opens notifications independently from the calendar.' 'OttoPopupMenu'
         Close-Popup $process
         Start-Sleep -Milliseconds 200
         $bar = Get-BarMetrics $process

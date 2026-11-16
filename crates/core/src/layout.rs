@@ -126,6 +126,7 @@ pub enum HitTarget {
     QuickSettings,
     Search,
     ControlCenter,
+    Notifications,
     Clock,
 }
 
@@ -230,6 +231,7 @@ pub struct Metrics {
     pub status_slot_width: i32,
     pub search_slot_width: i32,
     pub control_center_slot_width: i32,
+    pub notification_slot_width: i32,
     pub clock_slot_width: i32,
     pub right_slot_gap: i32,
     pub hud_pad_points: i32,
@@ -271,7 +273,8 @@ impl Metrics {
         status_slot_width: 108,
         search_slot_width: 30,
         control_center_slot_width: 30,
-        clock_slot_width: 160,
+        notification_slot_width: 30,
+        clock_slot_width: 128,
         right_slot_gap: 4,
         hud_pad_points: 16,
         hud_gap_points: 10,
@@ -396,6 +399,7 @@ pub struct Layout {
     pub status_battery_rect: Rect,
     pub search_slot: Rect,
     pub control_center_slot: Rect,
+    pub notification_slot: Rect,
     pub clock_slot: Rect,
     pub hud: HudGeometry,
 }
@@ -445,6 +449,8 @@ impl Layout {
             Some(HitTarget::Search)
         } else if self.control_center_slot.contains(x, y) {
             Some(HitTarget::ControlCenter)
+        } else if self.notification_slot.contains(x, y) {
+            Some(HitTarget::Notifications)
         } else if self.clock_slot.contains(x, y) {
             Some(HitTarget::Clock)
         } else {
@@ -634,6 +640,7 @@ impl Layout {
             HitTarget::QuickSettings => Some(self.status_slot),
             HitTarget::Search => Some(self.search_slot),
             HitTarget::ControlCenter => Some(self.control_center_slot),
+            HitTarget::Notifications => Some(self.notification_slot),
             HitTarget::Clock => Some(self.clock_slot),
         }
     }
@@ -761,20 +768,22 @@ const LEFT_TARGETS: [HitTarget; 7] = [
     HitTarget::HelpMenu,
 ];
 
-const RIGHT_VISUAL_ORDER: [HitTarget; 5] = [
+const RIGHT_VISUAL_ORDER: [HitTarget; 6] = [
     HitTarget::Clock,
+    HitTarget::Notifications,
     HitTarget::ControlCenter,
     HitTarget::Search,
     HitTarget::QuickSettings,
     HitTarget::Tray,
 ];
 
-const RIGHT_KEEP_PRIORITY: [HitTarget; 5] = [
+const RIGHT_KEEP_PRIORITY: [HitTarget; 6] = [
     HitTarget::Clock,
+    HitTarget::Notifications,
     HitTarget::ControlCenter,
     HitTarget::QuickSettings,
-    HitTarget::Search,
     HitTarget::Tray,
+    HitTarget::Search,
 ];
 
 struct SlotRow {
@@ -2057,6 +2066,10 @@ pub fn compute_layout_with_notch(
     };
     let right_widths = [
         (HitTarget::Clock, scale(metrics.clock_slot_width, dpi)),
+        (
+            HitTarget::Notifications,
+            scale(metrics.notification_slot_width, dpi),
+        ),
         (HitTarget::ControlCenter, scale(control_center_width, dpi)),
         (HitTarget::Search, scale(metrics.search_slot_width, dpi)),
         (
@@ -2102,6 +2115,7 @@ pub fn compute_layout_with_notch(
     let window_slot = row.rect(HitTarget::WindowMenu);
     let help_slot = row.rect(HitTarget::HelpMenu);
     let clock_slot = row.rect(HitTarget::Clock);
+    let notification_slot = row.rect(HitTarget::Notifications);
     let control_center_slot = row.rect(HitTarget::ControlCenter);
     let search_slot = row.rect(HitTarget::Search);
     let status_slot = row.rect(HitTarget::QuickSettings);
@@ -2208,6 +2222,7 @@ pub fn compute_layout_with_notch(
         status_battery_rect,
         search_slot,
         control_center_slot,
+        notification_slot,
         clock_slot,
         hud: hud_geometry,
     }
@@ -2600,7 +2615,8 @@ mod tests {
         assert!(layout.status_slot.x >= layout.tray_slot.right());
         assert!(layout.search_slot.x >= layout.status_slot.right());
         assert!(layout.control_center_slot.x >= layout.search_slot.right());
-        assert!(layout.clock_slot.x >= layout.control_center_slot.right());
+        assert!(layout.notification_slot.x >= layout.control_center_slot.right());
+        assert!(layout.clock_slot.x >= layout.notification_slot.right());
         assert!(layout.clock_slot.right() <= layout.bar.width);
     }
 
@@ -2664,6 +2680,10 @@ mod tests {
             Some(HitTarget::ControlCenter)
         );
         assert_eq!(
+            layout.hit_test(layout.notification_slot.x + 4, 16),
+            Some(HitTarget::Notifications)
+        );
+        assert_eq!(
             layout.hit_test(layout.clock_slot.x + 10, 16),
             Some(HitTarget::Clock)
         );
@@ -2698,7 +2718,7 @@ mod tests {
         }
     }
 
-    const EVERY_SLOT: [HitTarget; 12] = [
+    const EVERY_SLOT: [HitTarget; 13] = [
         HitTarget::Start,
         HitTarget::AppMenu,
         HitTarget::FileMenu,
@@ -2710,6 +2730,7 @@ mod tests {
         HitTarget::QuickSettings,
         HitTarget::Search,
         HitTarget::ControlCenter,
+        HitTarget::Notifications,
         HitTarget::Clock,
     ];
 

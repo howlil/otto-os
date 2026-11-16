@@ -2,7 +2,7 @@ use crate::layout::{HitTarget, Layout};
 use crate::media::NotchExpandedTab;
 use crate::pomodoro::FocusSubMode;
 
-const KEYBOARD_CANDIDATES: [HitTarget; 13] = [
+const KEYBOARD_CANDIDATES: [HitTarget; 14] = [
     HitTarget::Start,
     HitTarget::AppMenu,
     HitTarget::FileMenu,
@@ -15,6 +15,7 @@ const KEYBOARD_CANDIDATES: [HitTarget; 13] = [
     HitTarget::QuickSettings,
     HitTarget::Search,
     HitTarget::ControlCenter,
+    HitTarget::Notifications,
     HitTarget::Clock,
 ];
 
@@ -451,6 +452,7 @@ mod tests {
         let layout = compute_layout_for_app(&Metrics::MACBOOK_PRO_14, 1920, 96, "Finder");
         let targets = layout.keyboard_targets();
         assert_eq!(targets.first(), Some(&HitTarget::Start));
+        assert!(targets.contains(&HitTarget::Notifications));
         assert!(targets.contains(&HitTarget::Clock));
         assert!(!targets.contains(&HitTarget::Notch));
         let xs: Vec<i32> = targets

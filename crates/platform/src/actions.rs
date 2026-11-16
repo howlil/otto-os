@@ -298,25 +298,67 @@ pub fn adjust_volume(wheel_delta: i16) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayOverflowOutcome {
+    Opened,
+    Closed,
+    Unavailable,
+}
+
+fn tray_overflow_size(rect: &RECT) -> Option<(i32, i32)> {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 #[must_use]
-pub fn toggle_tray_overflow(anchor_center_x: i32, bar_height: i32, screen_width: i32) -> bool {
+pub fn close_tray_overflow() -> TrayOverflowOutcome {
     unsafe {
         let Ok(overflow) = FindWindowW(w!("NotifyIconOverflowWindow"), PCWSTR::null()) else {
-            return false;
+            return TrayOverflowOutcome::Unavailable;
         };
         if overflow.0.is_null() {
-            return false;
+            return TrayOverflowOutcome::Unavailable;
         }
         if IsWindowVisible(overflow).as_bool() {
             let _ = ShowWindow(overflow, SW_HIDE);
-            return true;
+        }
+        if IsWindowVisible(overflow).as_bool() {
+            TrayOverflowOutcome::Unavailable
+        } else {
+            TrayOverflowOutcome::Closed
+        }
+    }
+}
+
+#[must_use]
+pub fn toggle_tray_overflow(
+    anchor_center_x: i32,
+    bar_height: i32,
+    screen_width: i32,
+) -> TrayOverflowOutcome {
+    unsafe {
+        let Ok(overflow) = FindWindowW(w!("NotifyIconOverflowWindow"), PCWSTR::null()) else {
+            return TrayOverflowOutcome::Unavailable;
+        };
+        if overflow.0.is_null() {
+            return TrayOverflowOutcome::Unavailable;
+        }
+        if IsWindowVisible(overflow).as_bool() {
+            return close_tray_overflow();
         }
         let _ = ShowWindow(overflow, SW_SHOWNOACTIVATE);
         let mut rect = RECT::default();
-        let _ = GetWindowRect(overflow, &mut rect);
-        let width = (rect.right - rect.left).max(160);
+        if GetWindowRect(overflow, &mut rect).is_err() {
+            let _ = ShowWindow(overflow, SW_HIDE);
+            return TrayOverflowOutcome::Unavailable;
+        }
+        let Some((width, _)) = tray_overflow_size(&rect) else {
+            let _ = ShowWindow(overflow, SW_HIDE);
+            return TrayOverflowOutcome::Unavailable;
+        };
         let x = (anchor_center_x - width / 2).clamp(8, (screen_width - width - 8).max(8));
-        let _ = SetWindowPos(
+        if SetWindowPos(
             overflow,
             Some(HWND_TOPMOST),
             x,
@@ -324,9 +366,18 @@ pub fn toggle_tray_overflow(anchor_center_x: i32, bar_height: i32, screen_width:
             0,
             0,
             SWP_NOSIZE | SWP_SHOWWINDOW,
-        );
+        )
+        .is_err()
+        {
+            let _ = ShowWindow(overflow, SW_HIDE);
+            return TrayOverflowOutcome::Unavailable;
+        }
         let _ = SetForegroundWindow(overflow);
-        true
+        if IsWindowVisible(overflow).as_bool() {
+            TrayOverflowOutcome::Opened
+        } else {
+            TrayOverflowOutcome::Unavailable
+        }
     }
 }
 
@@ -764,5 +815,27 @@ mod tests {
         assert!(!super::record_loaded_font(&mut tracked, font));
         assert_eq!(tracked.len(), 1);
         super::remove_apple_fonts();
+    }
+
+    #[test]
+    fn tray_overflow_rejects_invalid_native_bounds() {
+        assert_eq!(
+            super::tray_overflow_size(&windows::Win32::Foundation::RECT {
+                left: 10,
+                top: 20,
+                right: 210,
+                bottom: 320,
+            }),
+            Some((200, 300))
+        );
+        assert_eq!(
+            super::tray_overflow_size(&windows::Win32::Foundation::RECT {
+                left: 10,
+                top: 20,
+                right: 10,
+                bottom: 320,
+            }),
+            None
+        );
     }
 }

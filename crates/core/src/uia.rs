@@ -5,7 +5,6 @@ use crate::control_center::{
 use crate::dock::DockLayout;
 use crate::layout::{HitTarget, Layout, Rect};
 use crate::pomodoro::FocusSubMode;
-use crate::theme::ThemeMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessibleRole {
@@ -77,6 +76,7 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::Search => 38,
         HitTarget::ControlCenter => 39,
         HitTarget::Clock => 40,
+        HitTarget::Notifications => 41,
         HitTarget::PomodoroPreset(i) => 100 + i as i32,
         HitTarget::FocusMode(mode) => 200 + mode.index() as i32,
         HitTarget::ShelfItem(i) => 300 + i as i32,
@@ -130,6 +130,7 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         38 => Some(HitTarget::Search),
         39 => Some(HitTarget::ControlCenter),
         40 => Some(HitTarget::Clock),
+        41 => Some(HitTarget::Notifications),
         100..=199 => Some(HitTarget::PomodoroPreset((tag - 100) as u8)),
         200 => Some(HitTarget::FocusMode(FocusSubMode::Pomodoro)),
         201 => Some(HitTarget::FocusMode(FocusSubMode::Timer)),
@@ -152,7 +153,6 @@ pub const fn encode_control_center_target(target: ControlCenterHitTarget) -> i32
         ControlCenterHitTarget::BluetoothOpenPage => 4,
         ControlCenterHitTarget::FocusToggle => 5,
         ControlCenterHitTarget::FocusOpenSettings => 6,
-        ControlCenterHitTarget::ThemeTile => 7,
         ControlCenterHitTarget::BatteryTile => 8,
         ControlCenterHitTarget::DisplayOpenPage => 9,
         ControlCenterHitTarget::DisplaySlider => 10,
@@ -168,9 +168,6 @@ pub const fn encode_control_center_target(target: ControlCenterHitTarget) -> i32
         ControlCenterHitTarget::HeaderToggle => 20,
         ControlCenterHitTarget::FooterPrimary => 21,
         ControlCenterHitTarget::FooterSecondary => 22,
-        ControlCenterHitTarget::ThemeOption(ThemeMode::Auto) => 30,
-        ControlCenterHitTarget::ThemeOption(ThemeMode::Light) => 31,
-        ControlCenterHitTarget::ThemeOption(ThemeMode::Dark) => 32,
         ControlCenterHitTarget::OttoCategoryTab(cat) => 40 + cat.index() as i32,
         ControlCenterHitTarget::SubPanelItem(idx) => 1000 + idx as i32,
     }
@@ -185,7 +182,6 @@ pub const fn decode_control_center_target(tag: i32) -> Option<ControlCenterHitTa
         4 => Some(ControlCenterHitTarget::BluetoothOpenPage),
         5 => Some(ControlCenterHitTarget::FocusToggle),
         6 => Some(ControlCenterHitTarget::FocusOpenSettings),
-        7 => Some(ControlCenterHitTarget::ThemeTile),
         8 => Some(ControlCenterHitTarget::BatteryTile),
         9 => Some(ControlCenterHitTarget::DisplayOpenPage),
         10 => Some(ControlCenterHitTarget::DisplaySlider),
@@ -201,9 +197,6 @@ pub const fn decode_control_center_target(tag: i32) -> Option<ControlCenterHitTa
         20 => Some(ControlCenterHitTarget::HeaderToggle),
         21 => Some(ControlCenterHitTarget::FooterPrimary),
         22 => Some(ControlCenterHitTarget::FooterSecondary),
-        30 => Some(ControlCenterHitTarget::ThemeOption(ThemeMode::Auto)),
-        31 => Some(ControlCenterHitTarget::ThemeOption(ThemeMode::Light)),
-        32 => Some(ControlCenterHitTarget::ThemeOption(ThemeMode::Dark)),
         40 => Some(ControlCenterHitTarget::OttoCategoryTab(
             OttoSettingsCategory::All,
         )),
@@ -211,12 +204,9 @@ pub const fn decode_control_center_target(tag: i32) -> Option<ControlCenterHitTa
             OttoSettingsCategory::Modules,
         )),
         42 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::Notch,
+            OttoSettingsCategory::NotchAndDock,
         )),
         43 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::Dock,
-        )),
-        44 => Some(ControlCenterHitTarget::OttoCategoryTab(
             OttoSettingsCategory::System,
         )),
         1000..=99999 => Some(ControlCenterHitTarget::SubPanelItem((tag - 1000) as usize)),
@@ -421,6 +411,10 @@ fn bar_target_metadata(target: HitTarget, app_name: &str) -> (String, String) {
             String::from("otto.bar.control_center"),
             String::from("Control Center"),
         ),
+        HitTarget::Notifications => (
+            String::from("otto.bar.notifications"),
+            String::from("Notifications"),
+        ),
         _ => (String::from("otto.bar.clock"), String::from("Clock")),
     }
 }
@@ -550,11 +544,6 @@ fn control_center_subpanel_meta(
             String::from("Toggle"),
             AccessibleRole::Button,
         ),
-        ControlCenterHitTarget::ThemeOption(mode) => (
-            format!("otto.cc.theme.{mode:?}").to_ascii_lowercase(),
-            format!("{mode:?} Theme"),
-            AccessibleRole::Tab,
-        ),
         ControlCenterHitTarget::OttoCategoryTab(cat) => (
             format!("otto.cc.category.{}", cat.index()),
             format!("{cat:?}"),
@@ -613,11 +602,6 @@ fn control_center_target_meta(target: ControlCenterHitTarget) -> (String, String
         ControlCenterHitTarget::FocusOpenSettings => (
             String::from("otto.cc.focus.settings"),
             String::from("Focus Settings"),
-            AccessibleRole::Button,
-        ),
-        ControlCenterHitTarget::ThemeTile => (
-            String::from("otto.cc.theme"),
-            String::from("Appearance"),
             AccessibleRole::Button,
         ),
         ControlCenterHitTarget::BatteryTile => (
@@ -728,7 +712,6 @@ mod tests {
     use crate::dock::{DockInput, DockMetrics, compute_dock_layout};
     use crate::layout::{HitTarget, Metrics, Rect, compute_layout_for_app};
     use crate::pomodoro::FocusSubMode;
-    use crate::theme::ThemeMode;
 
     #[test]
     fn bar_and_control_center_invoke_tags_round_trip() {
@@ -740,6 +723,7 @@ mod tests {
             HitTarget::ShelfCopyItem(3),
             HitTarget::ShelfRemoveItem(4),
             HitTarget::ClipboardRemoveItem(1),
+            HitTarget::Notifications,
             HitTarget::Clock,
         ] {
             assert_eq!(
@@ -750,8 +734,8 @@ mod tests {
 
         for target in [
             ControlCenterHitTarget::WifiToggle,
-            ControlCenterHitTarget::ThemeOption(ThemeMode::Dark),
-            ControlCenterHitTarget::OttoCategoryTab(OttoSettingsCategory::Notch),
+            ControlCenterHitTarget::BatteryTile,
+            ControlCenterHitTarget::OttoCategoryTab(OttoSettingsCategory::NotchAndDock),
             ControlCenterHitTarget::SubPanelItem(7),
             ControlCenterHitTarget::FooterSecondary,
         ] {

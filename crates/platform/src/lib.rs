@@ -39,12 +39,12 @@ mod worker;
 
 pub use actions::{
     HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
-    MenuCommandResult, MenuNavEvent, adjust_volume, execute_control_center_command,
-    execute_top_bar_command, is_escape_down, is_shift_down, load_apple_fonts,
-    open_calendar_notifications, open_downloads_folder, open_path, open_quick_settings,
-    open_spotlight_search, open_start_menu, open_task_view, play_pomodoro_chime, poll_menu_events,
-    register_notch_hotkeys, remove_apple_fonts, signal_command_failure, toggle_tray_overflow,
-    trim_working_set, unregister_notch_hotkeys,
+    MenuCommandResult, MenuNavEvent, TrayOverflowOutcome, adjust_volume, close_tray_overflow,
+    execute_control_center_command, execute_top_bar_command, is_escape_down, is_shift_down,
+    load_apple_fonts, open_calendar_notifications, open_downloads_folder, open_path,
+    open_quick_settings, open_spotlight_search, open_start_menu, open_task_view,
+    play_pomodoro_chime, poll_menu_events, register_notch_hotkeys, remove_apple_fonts,
+    signal_command_failure, toggle_tray_overflow, trim_working_set, unregister_notch_hotkeys,
 };
 pub use appbar::{
     APPBAR_CALLBACK_MESSAGE, AppBar, ShellNotification, classify_shell_notification,
@@ -142,7 +142,9 @@ pub use theme::{
     is_running_on_battery, is_system_in_dark_mode, is_transparency_enabled, read_system_appearance,
     system_contrast_colors,
 };
-pub use trash::{empty_recycle_bin, is_recycle_bin_full, shutdown_recycle_bin_task};
+pub use trash::{
+    empty_recycle_bin, is_recycle_bin_full, resume_recycle_bin_task, shutdown_recycle_bin_task,
+};
 pub use uia::{WM_APP_UIA_INVOKE, handle_wm_getobject};
 pub use window_model::{
     ApplicationContext, ForegroundApplication, application_of, enumerate_windows,

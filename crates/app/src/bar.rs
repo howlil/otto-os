@@ -22,14 +22,15 @@ use otto_platform::release_capture_if_owned;
 use otto_platform::{
     AppBar, ClipboardListenerGuard, ClipboardRead, LyricsOutcome, LyricsRequest, LyricsService,
     PowerNotificationGuard, PrimaryScreen, ShelfDropEvent, ShelfDropQueue, ShelfDropRegion,
-    ShelfDropTargetGuard, WM_APP_SHELF_EVENT, WM_APP_UIA_INVOKE, WM_CLIPBOARDUPDATE,
-    WindowsNotchPort, acknowledge_idle_wake, adjust_volume, clipboard_sequence_number,
-    current_process_id, cursor_position, foreground_application, handle_wm_getobject,
-    is_escape_down, motion_preference, notify_bluetooth_hardware_change, open_spotlight_search,
-    primary_screen, read_clipboard_payload, read_system_status, register_bluetooth_hud_target,
-    register_idle_wake, register_notch_hotkeys, register_shelf_drop_target, route_bar_keys,
-    routes_keys_to, step_display_brightness, stop_routing_bar_keys, stop_routing_if_targets,
-    suppress_native_osd, take_bluetooth_hud_event, toggle_tray_overflow,
+    ShelfDropTargetGuard, TrayOverflowOutcome, WM_APP_SHELF_EVENT, WM_APP_UIA_INVOKE,
+    WM_CLIPBOARDUPDATE, WindowsNotchPort, acknowledge_idle_wake, adjust_volume,
+    clipboard_sequence_number, close_tray_overflow, current_process_id, cursor_position,
+    foreground_application, handle_wm_getobject, is_escape_down, motion_preference,
+    notify_bluetooth_hardware_change, open_spotlight_search, primary_screen,
+    read_clipboard_payload, read_system_status, register_bluetooth_hud_target, register_idle_wake,
+    register_notch_hotkeys, register_shelf_drop_target, route_bar_keys, routes_keys_to,
+    signal_command_failure, step_display_brightness, stop_routing_bar_keys,
+    stop_routing_if_targets, suppress_native_osd, take_bluetooth_hud_event, toggle_tray_overflow,
     unregister_bluetooth_hud_target, unregister_idle_wake, unregister_notch_hotkeys,
     watch_top_edge, window_bounds, window_change_generations,
 };
@@ -1283,7 +1284,8 @@ impl Bar {
         };
         let popup_open = crate::menu::active_top_bar_target(runtime).is_some()
             || crate::control_center::is_open(runtime)
-            || crate::menu::is_calendar_open(runtime);
+            || crate::menu::is_calendar_open(runtime)
+            || crate::menu::is_notification_open(runtime);
         if self
             .visibility
             .track_pointer(pointer, self.layout.bar.height, popup_open)
@@ -1504,6 +1506,7 @@ impl Bar {
             || crate::menu::active_top_bar_target(runtime).is_some()
             || crate::control_center::is_open(runtime)
             || crate::menu::is_calendar_open(runtime)
+            || crate::menu::is_notification_open(runtime)
     }
 
     fn refresh_motion(&mut self) {
@@ -1581,7 +1584,11 @@ impl Bar {
                 self.recompute_layout();
                 dirty = true;
             }
-            if change.window && crate::menu::active_top_bar_target(runtime).is_some() {
+            if change.window
+                && (crate::menu::active_top_bar_target(runtime).is_some()
+                    || crate::menu::is_calendar_open(runtime)
+                    || crate::menu::is_notification_open(runtime))
+            {
                 crate::menu::close(runtime);
                 dirty = true;
             }
@@ -2277,6 +2284,7 @@ impl Bar {
         if !self.control_center_enabled {
             return;
         }
+        let _ = close_tray_overflow();
         if crate::control_center::is_open(runtime)
             && crate::control_center::active_page(runtime) == Some(page)
         {
@@ -2302,6 +2310,7 @@ impl Bar {
     fn perform(&mut self, runtime: &RuntimeContext, action: BarControlAction) {
         match action {
             BarControlAction::TopBarMenu(target) => {
+                let _ = close_tray_overflow();
                 if crate::menu::active_top_bar_target(runtime) == Some(target) {
                     crate::menu::close(runtime);
                 } else {
@@ -2310,21 +2319,44 @@ impl Bar {
                 self.present(runtime);
             }
             BarControlAction::Tray => {
+                crate::menu::close(runtime);
+                crate::control_center::close(runtime);
                 let anchor = self
                     .layout
                     .menu_anchor_rect(HitTarget::Tray)
                     .unwrap_or(self.layout.tray_slot);
-                let _ = toggle_tray_overflow(
+                if toggle_tray_overflow(
                     anchor.x + anchor.width / 2,
                     self.layout.bar.height,
                     self.screen.width,
-                );
+                ) == TrayOverflowOutcome::Unavailable
+                {
+                    signal_command_failure();
+                }
             }
             BarControlAction::ControlCenter(page) => {
                 self.toggle_control_center(runtime, page, false);
             }
-            BarControlAction::Search => open_spotlight_search(),
+            BarControlAction::Search => {
+                let _ = close_tray_overflow();
+                crate::menu::close(runtime);
+                crate::control_center::close(runtime);
+                open_spotlight_search();
+            }
+            BarControlAction::Notifications => {
+                let _ = close_tray_overflow();
+                if crate::menu::is_notification_open(runtime) {
+                    crate::menu::close(runtime);
+                } else {
+                    crate::menu::open_notifications(
+                        runtime,
+                        self.anchor_right(HitTarget::Notifications),
+                        self.layout.popup_anchor_y(self.screen.dpi),
+                    );
+                }
+            }
             BarControlAction::Clock => {
+                let _ = close_tray_overflow();
                 if crate::menu::is_calendar_open(runtime) {
                     crate::menu::close(runtime);
                 } else {
@@ -2382,7 +2414,11 @@ impl Bar {
         runtime.focus_active.set(self.notch.focus_active());
         let hovered = self
             .hovered
-            .or_else(|| crate::menu::active_top_bar_target(runtime));
+            .or_else(|| crate::menu::active_top_bar_target(runtime))
+            .or_else(|| {
+                crate::menu::is_notification_open(runtime).then_some(HitTarget::Notifications)
+            })
+            .or_else(|| crate::menu::is_calendar_open(runtime).then_some(HitTarget::Clock));
         let appearance = crate::theme_state::appearance(runtime);
         let media = self
             .notch

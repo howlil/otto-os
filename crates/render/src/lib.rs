@@ -21,7 +21,7 @@ mod window_controls;
 use std::cell::{Cell, RefCell};
 use std::f32::consts::PI;
 
-pub use control_center::ControlCenterRenderer;
+pub use control_center::{ControlCenterPaintState, ControlCenterRenderer};
 pub use dock::{DockRenderItem, DockRenderer};
 pub use genie::{GenieRenderer, build_fallback_card_snapshot};
 pub use menu::PopupMenuRenderer;
@@ -2165,28 +2165,24 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_clock_slot(
-        &self,
-        layout: &Layout,
-        status: SystemStatus,
-        fg: &ID2D1SolidColorBrush,
-    ) -> Result<()> {
+    fn draw_clock_slot(&self, layout: &Layout, status: SystemStatus, fg: &ID2D1SolidColorBrush) {
         let slot = layout.clock_slot;
-        let unit = layout.icon_size as f32;
         let pad_x = scale(6, self.dpi) as f32;
-        let bell_cx = slot.right() as f32 - pad_x - unit * 0.45;
-        let cy = slot.height as f32 * 0.5;
-
         let text_rect = D2D_RECT_F {
             left: slot.x as f32 + pad_x,
             top: 0.0,
-            right: bell_cx - unit * 0.45,
+            right: slot.right() as f32 - pad_x,
             bottom: slot.height as f32,
         };
         let text = status.clock.format();
         self.draw_text(&text, &self.text_leading, text_rect, fg);
-        self.draw_bell_icon(bell_cx, cy, unit * 0.42, fg)?;
-        Ok(())
+    }
+
+    fn draw_notification_slot(&self, layout: &Layout, fg: &ID2D1SolidColorBrush) -> Result<()> {
+        let slot = layout.notification_slot;
+        let cx = slot.x as f32 + slot.width as f32 * 0.5;
+        let cy = slot.height as f32 * 0.5;
+        self.draw_bell_icon(cx, cy, layout.icon_size as f32 * 0.42, fg)
     }
 
     fn draw_bell_icon(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) -> Result<()> {
@@ -3444,7 +3440,7 @@ mod resource_tests {
         use otto_core::{
             Appearance, AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind,
             ControlCenterMetrics, ControlCenterPage, ControlCenterPlacement, ControlCenterSnapshot,
-            ResolvedTheme, WifiNetwork, compute_control_center_layout,
+            ResolvedTheme, WifiNetwork,
         };
         let _serial = SerialResourceTest::begin();
         let mut snap = ControlCenterSnapshot::default();
@@ -3491,7 +3487,7 @@ mod resource_tests {
                 ControlCenterPage::OttoSettings,
             ] {
                 snap.page = page;
-                let layout = compute_control_center_layout(
+                let layout = otto_core::compute_control_center_layout_for_snapshot(
                     &ControlCenterMetrics::DEFAULT,
                     ControlCenterPlacement {
                         bounds,
@@ -3502,6 +3498,7 @@ mod resource_tests {
                         item_count: snap.subpanel_item_count(page),
                         scroll_offset: 0,
                     },
+                    &snap,
                 );
                 let focused = (page == ControlCenterPage::Main)
                     .then_some(otto_core::ControlCenterHitTarget::WifiToggle);
@@ -3509,8 +3506,11 @@ mod resource_tests {
                     .draw_to_surface(
                         &layout,
                         &snap,
-                        None,
-                        focused,
+                        super::ControlCenterPaintState {
+                            hovered: None,
+                            pressed: None,
+                            focused,
+                        },
                         &Appearance::glass(ResolvedTheme::Dark),
                     )
                     .expect("cc draw");
@@ -3724,7 +3724,7 @@ mod resource_tests {
     }
 
     #[test]
-    fn calendar_notification_menu_renders_across_dpi_without_resource_growth() {
+    fn calendar_and_notification_menus_render_across_dpi_without_resource_growth() {
         let _serial = SerialResourceTest::begin();
         let snapshot = otto_core::NotificationCenterSnapshot {
             access: otto_core::NotificationAccess::Allowed,
@@ -3747,7 +3747,10 @@ mod resource_tests {
                 },
             ],
         };
-        let rows = otto_core::build_calendar_notification_rows(2026, 4, Some(15), &snapshot);
+        let row_sets = [
+            otto_core::build_calendar_rows(2026, 4, Some(15)),
+            otto_core::build_notification_rows(&snapshot),
+        ];
         let metrics = otto_core::PopupMenuMetrics::default();
         let placement_at = |dpi| otto_core::PopupMenuPlacement {
             bounds: Rect {
@@ -3764,22 +3767,29 @@ mod resource_tests {
         let render_dpis = || {
             for &dpi in &[96, 144, 192] {
                 let menu = PopupMenuRenderer::new(dpi).expect("popup menu");
-                let layout =
-                    otto_core::compute_popup_menu_layout(&metrics, placement_at(dpi), &rows, &menu);
-                for round in 0..ROUNDS {
-                    let hovered = if round % 2 == 0 {
-                        rows.iter()
-                            .position(|row| matches!(row, otto_core::MenuRow::Notification { .. }))
-                    } else {
-                        None
-                    };
-                    menu.render_preview(
-                        &layout,
-                        &rows,
-                        hovered,
-                        otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
-                    )
-                    .expect("render calendar notification menu");
+                for rows in &row_sets {
+                    let layout = otto_core::compute_popup_menu_layout(
+                        &metrics,
+                        placement_at(dpi),
+                        rows,
+                        &menu,
+                    );
+                    for round in 0..ROUNDS {
+                        let hovered = if round % 2 == 0 {
+                            rows.iter().position(|row| {
+                                matches!(row, otto_core::MenuRow::Notification { .. })
+                            })
+                        } else {
+                            None
+                        };
+                        menu.render_preview(
+                            &layout,
+                            rows,
+                            hovered,
+                            otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
+                        )
+                        .expect("render calendar or notification menu");
+                    }
                 }
             }
         };
@@ -3787,7 +3797,7 @@ mod resource_tests {
         render_dpis();
         let baseline = GuiCounts::now();
         render_dpis();
-        baseline.assert_no_growth("calendar notification menu");
+        baseline.assert_no_growth("calendar and notification menus");
     }
 
     #[test]

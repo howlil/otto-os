@@ -160,27 +160,27 @@ impl SemanticColors {
 
     const fn glass_dark() -> Self {
         Self {
-            bar_background: Rgba::new(0.0, 0.0, 0.0, 0.28),
-            menu_fill: Rgba::new(0.125, 0.125, 0.149, 0.94),
-            menu_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.48),
-            menu_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.20),
+            bar_background: Rgba::new(0.0, 0.0, 0.0, 0.22),
+            menu_fill: Rgba::new(0.11, 0.11, 0.14, 0.68),
+            menu_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.44),
+            menu_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.24),
             menu_hover_fill: Rgba::new(0.0, 0.392, 0.882, 0.96),
-            menu_separator: Rgba::new(1.0, 1.0, 1.0, 0.14),
-            text_primary: Rgba::new(1.0, 1.0, 1.0, 0.95),
-            text_muted: Rgba::new(1.0, 1.0, 1.0, 0.52),
-            text_disabled: Rgba::new(1.0, 1.0, 1.0, 0.34),
-            dock_fill: Rgba::new(0.11, 0.11, 0.14, 0.68),
-            dock_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.22),
-            dock_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.42),
-            dock_divider: Rgba::new(1.0, 1.0, 1.0, 0.22),
+            menu_separator: Rgba::new(1.0, 1.0, 1.0, 0.10),
+            text_primary: Rgba::new(1.0, 1.0, 1.0, 0.96),
+            text_muted: Rgba::new(1.0, 1.0, 1.0, 0.64),
+            text_disabled: Rgba::new(1.0, 1.0, 1.0, 0.38),
+            dock_fill: Rgba::new(0.10, 0.10, 0.13, 0.46),
+            dock_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.24),
+            dock_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.40),
+            dock_divider: Rgba::new(1.0, 1.0, 1.0, 0.24),
             dock_dot: Rgba::new(1.0, 1.0, 1.0, 0.92),
-            hover_pill: Rgba::new(1.0, 1.0, 1.0, 0.16),
-            card_fill: Rgba::new(1.0, 1.0, 1.0, 0.08),
+            hover_pill: Rgba::new(1.0, 1.0, 1.0, 0.12),
+            card_fill: Rgba::new(1.0, 1.0, 1.0, 0.10),
             slider_track: Rgba::new(1.0, 1.0, 1.0, 0.16),
-            slider_fill: Rgba::new(1.0, 1.0, 1.0, 0.92),
+            slider_fill: Rgba::new(1.0, 1.0, 1.0, 0.94),
             toggle_active: Rgba::new(0.039, 0.518, 1.0, 1.0),
-            toggle_inactive: Rgba::new(1.0, 1.0, 1.0, 0.12),
-            specular_rim: Rgba::new(1.0, 1.0, 1.0, 0.22),
+            toggle_inactive: Rgba::new(1.0, 1.0, 1.0, 0.16),
+            specular_rim: Rgba::new(1.0, 1.0, 1.0, 0.28),
             notch_obsidian: Rgba::new(0.0, 0.0, 0.0, 1.0),
             on_accent: Rgba::new(1.0, 1.0, 1.0, 1.0),
         }
@@ -188,27 +188,27 @@ impl SemanticColors {
 
     const fn glass_light() -> Self {
         Self {
-            bar_background: Rgba::new(1.0, 1.0, 1.0, 0.38),
-            menu_fill: Rgba::new(0.96, 0.96, 0.98, 0.88),
-            menu_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.14),
-            menu_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.65),
+            bar_background: Rgba::new(1.0, 1.0, 1.0, 0.28),
+            menu_fill: Rgba::new(0.96, 0.97, 0.99, 0.66),
+            menu_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.12),
+            menu_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.78),
             menu_hover_fill: Rgba::new(0.0, 0.392, 0.882, 0.96),
             menu_separator: Rgba::new(0.0, 0.0, 0.0, 0.08),
-            text_primary: Rgba::new(0.08, 0.08, 0.10, 0.94),
-            text_muted: Rgba::new(0.20, 0.20, 0.24, 0.58),
-            text_disabled: Rgba::new(0.0, 0.0, 0.0, 0.26),
-            dock_fill: Rgba::new(0.98, 0.98, 1.0, 0.72),
-            dock_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.70),
-            dock_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.16),
+            text_primary: Rgba::new(0.05, 0.05, 0.07, 0.96),
+            text_muted: Rgba::new(0.14, 0.14, 0.18, 0.64),
+            text_disabled: Rgba::new(0.0, 0.0, 0.0, 0.34),
+            dock_fill: Rgba::new(0.97, 0.98, 1.0, 0.48),
+            dock_inner_border: Rgba::new(1.0, 1.0, 1.0, 0.76),
+            dock_outer_border: Rgba::new(0.0, 0.0, 0.0, 0.14),
             dock_divider: Rgba::new(0.0, 0.0, 0.0, 0.14),
             dock_dot: Rgba::new(0.10, 0.10, 0.12, 0.90),
-            hover_pill: Rgba::new(0.0, 0.0, 0.0, 0.08),
-            card_fill: Rgba::new(0.0, 0.0, 0.0, 0.05),
-            slider_track: Rgba::new(0.0, 0.0, 0.0, 0.10),
-            slider_fill: Rgba::new(0.039, 0.518, 1.0, 0.90),
+            hover_pill: Rgba::new(0.0, 0.0, 0.0, 0.07),
+            card_fill: Rgba::new(1.0, 1.0, 1.0, 0.34),
+            slider_track: Rgba::new(0.0, 0.0, 0.0, 0.09),
+            slider_fill: Rgba::new(0.039, 0.518, 1.0, 0.92),
             toggle_active: Rgba::new(0.039, 0.518, 1.0, 1.0),
-            toggle_inactive: Rgba::new(0.0, 0.0, 0.0, 0.08),
-            specular_rim: Rgba::new(1.0, 1.0, 1.0, 0.60),
+            toggle_inactive: Rgba::new(0.0, 0.0, 0.0, 0.10),
+            specular_rim: Rgba::new(1.0, 1.0, 1.0, 0.80),
             notch_obsidian: Rgba::new(0.0, 0.0, 0.0, 1.0),
             on_accent: Rgba::new(1.0, 1.0, 1.0, 1.0),
         }
@@ -219,14 +219,19 @@ impl SemanticColors {
         colors.bar_background = Rgba::new(0.11, 0.11, 0.13, 1.0);
         colors.menu_fill = Rgba::new(0.14, 0.14, 0.17, 1.0);
         colors.dock_fill = Rgba::new(0.13, 0.13, 0.16, 1.0);
+        colors.card_fill = Rgba::new(0.20, 0.21, 0.25, 1.0);
+        colors.menu_inner_border = Rgba::new(1.0, 1.0, 1.0, 0.12);
         colors
     }
 
     const fn opaque_light() -> Self {
         let mut colors = Self::glass_light();
         colors.bar_background = Rgba::new(0.94, 0.94, 0.96, 1.0);
-        colors.menu_fill = Rgba::new(0.97, 0.97, 0.99, 1.0);
+        colors.menu_fill = Rgba::new(0.95, 0.95, 0.97, 1.0);
         colors.dock_fill = Rgba::new(0.96, 0.96, 0.98, 1.0);
+        colors.card_fill = Rgba::new(1.0, 1.0, 1.0, 1.0);
+        colors.specular_rim = Rgba::new(0.0, 0.0, 0.0, 0.08);
+        colors.menu_inner_border = Rgba::new(1.0, 1.0, 1.0, 0.90);
         colors
     }
 
@@ -483,7 +488,10 @@ mod tests {
             assert!(colors.bar_background.a >= 0.999);
             assert!(colors.menu_fill.a >= 0.999);
             assert!(colors.dock_fill.a >= 0.999);
+            assert!(colors.card_fill.a >= 0.999);
         }
+        let light_opaque = appearance(ResolvedTheme::Light, false).colors();
+        assert!(light_opaque.card_fill.r > light_opaque.menu_fill.r);
         let colors = SemanticColors::resolve(&Appearance {
             contrast: Some(ContrastColors::WHITE_THEME),
             ..appearance(ResolvedTheme::Dark, true)

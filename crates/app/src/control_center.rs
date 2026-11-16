@@ -8,7 +8,7 @@ use otto_core::{
     ControlCenterMetrics, ControlCenterPage, ControlCenterPlacement, ControlCenterPort,
     ControlCenterSnapshot, OttoSettingKind, PluginSettingsState, SystemSettingsState,
     UPDATE_CHECKING_LABEL, build_control_center_accessible_tree, capture_interval_for,
-    capture_wanted, compute_control_center_layout, control_center_action,
+    capture_wanted, compute_control_center_layout_for_snapshot, control_center_action,
     control_center_focus_targets, decode_control_center_target, next_dock_icon_size, scale,
     scroll_offset_for_item, step_slider_percent, subpanel_opener_target,
 };
@@ -18,7 +18,7 @@ use otto_platform::{
     monitor_work_area_at, poll_menu_events, primary_screen, release_capture_if_owned,
     route_bar_keys, routes_keys_to, stop_routing_if_targets,
 };
-use otto_render::ControlCenterRenderer;
+use otto_render::{ControlCenterPaintState, ControlCenterRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -49,6 +49,7 @@ pub(crate) struct ControlCenterSurface {
     anchor_y: i32,
     scroll_offset: i32,
     hovered: Option<ControlCenterHitTarget>,
+    pressed: Option<ControlCenterHitTarget>,
     focus: ControlCenterFocus,
     dragging: Option<ControlCenterHitTarget>,
     visible: bool,
@@ -79,6 +80,7 @@ impl ControlCenterSurface {
             anchor_y: 0,
             scroll_offset: 0,
             hovered: None,
+            pressed: None,
             focus: ControlCenterFocus::default(),
             dragging: None,
             visible: false,
@@ -101,7 +103,6 @@ impl ControlCenterSurface {
         self.snapshot.status = self.port.read_system_status();
         self.snapshot.focus_active =
             runtime.focus_module_enabled.get() && runtime.focus_active.get();
-        self.snapshot.theme_mode = crate::theme_state::theme_mode(runtime);
         self.snapshot.media = if runtime.media_module_enabled.get() {
             self.port.read_now_playing()
         } else {
@@ -124,7 +125,7 @@ impl ControlCenterSurface {
             classic_logo: runtime.classic_logo_enabled.get(),
             dynamic_island: runtime.dynamic_island_enabled.get(),
             privacy_indicators: runtime.privacy_indicators_enabled.get(),
-            liquid_glass: runtime.glass_enabled.get(),
+            liquid_glass: runtime.liquid_glass_pref.get(),
             clipboard_history: runtime.clipboard_history_enabled.get(),
             drop_shelf: runtime.drop_shelf_enabled.get(),
             notch_hud: runtime.notch_hud_enabled.get(),
@@ -139,7 +140,7 @@ impl ControlCenterSurface {
     fn relayout(&mut self) {
         let page = self.snapshot.page;
         let bounds = monitor_work_area_at(self.anchor_right, self.anchor_y);
-        self.layout = compute_control_center_layout(
+        self.layout = compute_control_center_layout_for_snapshot(
             &self.metrics,
             ControlCenterPlacement {
                 bounds,
@@ -150,6 +151,7 @@ impl ControlCenterSurface {
                 item_count: self.snapshot.subpanel_item_count(page),
                 scroll_offset: self.scroll_offset,
             },
+            &self.snapshot,
         );
         self.scroll_offset = self.layout.scroll_offset;
         if self.focus.is_active() {
@@ -237,14 +239,18 @@ impl ControlCenterSurface {
             return;
         }
         if let Some(renderer) = self.renderer.as_mut() {
+            let paint_state = ControlCenterPaintState {
+                hovered: self.hovered,
+                pressed: self.pressed.filter(|target| Some(*target) == self.hovered),
+                focused: self.focus.current(),
+            };
             crate::host::log_present_error(
                 "control-center",
                 renderer.present(
                     self.hwnd,
                     &self.layout,
                     &self.snapshot,
-                    self.hovered,
-                    self.focus.current(),
+                    paint_state,
                     &appearance,
                 ),
             );
@@ -265,8 +271,10 @@ impl ControlCenterSurface {
         self.anchor_y = anchor_y;
         self.snapshot.page = page;
         self.snapshot.audio_switch_failed = false;
+        self.snapshot.last_error = None;
         self.scroll_offset = 0;
         self.hovered = None;
+        self.pressed = None;
         self.dragging = None;
         self.sync_snapshot(runtime);
         self.relayout();
@@ -297,6 +305,7 @@ impl ControlCenterSurface {
         let _ = self.leave_keyboard_focus();
         self.visible = false;
         self.hovered = None;
+        self.pressed = None;
         self.dragging = None;
         self.backdrop = None;
         let _ = release_capture_if_owned(self.hwnd);
@@ -332,6 +341,48 @@ impl ControlCenterSurface {
         if let Some(next_scroll) = scroll_offset_for_item(&self.layout, target) {
             self.scroll_offset = next_scroll;
             self.relayout();
+        }
+    }
+
+    fn begin_press(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
+        if self.begin_drag(runtime, x, y) {
+            return;
+        }
+        let Some(target) = self.layout.hit_test(x, y) else {
+            return;
+        };
+        if control_center_action(&self.snapshot, target).is_none() {
+            return;
+        }
+        let _ = self.leave_keyboard_focus();
+        self.pressed = Some(target);
+        self.hovered = Some(target);
+        if self.hwnd != 0 {
+            unsafe {
+                let _ = SetCapture(HWND(self.hwnd as *mut _));
+            }
+        }
+        self.present(runtime);
+    }
+
+    fn release_press(&mut self, runtime: &RuntimeContext, x: i32, y: i32) -> PostClickAction {
+        if self.dragging.is_some() {
+            self.end_drag();
+            return PostClickAction::None;
+        }
+        let pressed = self.pressed.take();
+        let _ = release_capture_if_owned(self.hwnd);
+        let current = self.layout.hit_test(x, y);
+        if pressed.is_none() || pressed == current {
+            let action = self.on_click(runtime, x, y);
+            if matches!(action, PostClickAction::None) && pressed.is_some() {
+                self.present(runtime);
+            }
+            action
+        } else {
+            self.hovered = current;
+            self.present(runtime);
+            PostClickAction::None
         }
     }
 
@@ -420,9 +471,12 @@ impl ControlCenterSurface {
         }
         let next = self.layout.hit_test(x, y);
         let cleared_focus = next.is_some() && self.leave_keyboard_focus();
+        let pressed_active_changed = self
+            .pressed
+            .is_some_and(|target| (self.hovered == Some(target)) != (next == Some(target)));
         let specular_moved =
             (x - self.last_specular_cursor.0).abs() + (y - self.last_specular_cursor.1).abs() >= 18;
-        if next != self.hovered || cleared_focus || specular_moved {
+        if next != self.hovered || cleared_focus || pressed_active_changed || specular_moved {
             self.hovered = next;
             self.last_specular_cursor = (x, y);
             self.present(runtime);
@@ -620,6 +674,12 @@ pub fn repaint(runtime: &RuntimeContext) {
     });
 }
 
+pub fn set_error(runtime: &RuntimeContext, error: Option<String>) {
+    with_cc(runtime, |surface| {
+        surface.snapshot.last_error = error;
+    });
+}
+
 pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_cc(runtime, |surface| {
         if !enabled {
@@ -702,28 +762,26 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
-            let mut end_drag = false;
+            let (x, y) = unpack_point(lparam);
+            let mut post = PostClickAction::None;
             with_cc(runtime, |surface| {
-                end_drag = surface.dragging.is_some();
-                surface.end_drag();
+                post = surface.release_press(runtime, x, y);
             });
-            if !end_drag {
-                let (x, y) = unpack_point(lparam);
-                let mut post = PostClickAction::None;
-                with_cc(runtime, |surface| post = surface.on_click(runtime, x, y));
-                apply_post_action(runtime, post);
-            }
+            apply_post_action(runtime, post);
             Some(LRESULT(0))
         }
         WM_CAPTURECHANGED => {
-            with_cc(runtime, |surface| surface.dragging = None);
+            with_cc(runtime, |surface| {
+                surface.dragging = None;
+                if surface.pressed.take().is_some() {
+                    surface.present(runtime);
+                }
+            });
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_point(lparam);
-            with_cc(runtime, |surface| {
-                let _ = surface.begin_drag(runtime, x, y);
-            });
+            with_cc(runtime, |surface| surface.begin_press(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_RBUTTONUP => Some(LRESULT(0)),
@@ -747,15 +805,34 @@ pub fn handle_message(
     }
 }
 
+const fn is_deferred_host_command(command: &ControlCenterCommand) -> bool {
+    match command {
+        ControlCenterCommand::ToggleSetting(kind) => {
+            !matches!(kind, OttoSettingKind::LaunchAtLogin)
+        }
+        ControlCenterCommand::CycleDockIconSize => true,
+        _ => false,
+    }
+}
+
 fn apply_post_action(runtime: &RuntimeContext, action: PostClickAction) {
     match action {
         PostClickAction::None => {}
         PostClickAction::Close => close(runtime),
         PostClickAction::Command(command, dismiss) => {
+            let skip_refresh = matches!(
+                command,
+                ControlCenterCommand::SetThemeMode(_)
+                    | ControlCenterCommand::CycleTheme
+                    | ControlCenterCommand::OpenPage(_)
+                    | ControlCenterCommand::Back
+                    | ControlCenterCommand::SelectOttoCategory(_)
+            ) || (is_deferred_host_command(&command)
+                && crate::host::is_host_active());
             execute_command(runtime, command);
             if dismiss {
                 close(runtime);
-            } else {
+            } else if !skip_refresh {
                 refresh_and_present(runtime);
             }
         }
@@ -860,8 +937,10 @@ fn navigate_open_page(runtime: &RuntimeContext, page: ControlCenterPage) {
     with_cc(runtime, |surface| {
         surface.snapshot.page = page;
         surface.snapshot.audio_switch_failed = false;
+        surface.snapshot.last_error = None;
         surface.scroll_offset = 0;
         surface.hovered = None;
+        surface.pressed = None;
         surface.sync_snapshot(runtime);
         surface.relayout();
         if surface.focus.is_active() {
@@ -870,6 +949,7 @@ fn navigate_open_page(runtime: &RuntimeContext, page: ControlCenterPage) {
             surface.ensure_focused_visible();
         }
         surface.place();
+        surface.sync_backdrop(runtime, true);
         surface.present(runtime);
     });
 }
@@ -878,8 +958,10 @@ fn navigate_back(runtime: &RuntimeContext) {
     with_cc(runtime, |surface| {
         let prev_page = surface.snapshot.page;
         surface.snapshot.page = ControlCenterPage::Main;
+        surface.snapshot.last_error = None;
         surface.scroll_offset = 0;
         surface.hovered = None;
+        surface.pressed = None;
         surface.sync_snapshot(runtime);
         surface.relayout();
         if surface.focus.is_active() {
@@ -892,6 +974,7 @@ fn navigate_back(runtime: &RuntimeContext) {
             surface.ensure_focused_visible();
         }
         surface.place();
+        surface.sync_backdrop(runtime, true);
         surface.present(runtime);
     });
 }
@@ -902,8 +985,10 @@ fn select_otto_category(runtime: &RuntimeContext, category: otto_core::OttoSetti
             surface.snapshot.otto_category = category;
             surface.scroll_offset = 0;
             surface.hovered = None;
+            surface.pressed = None;
             surface.relayout();
             surface.place();
+            surface.sync_backdrop(runtime, true);
             surface.present(runtime);
         }
     });
@@ -969,23 +1054,19 @@ fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
             );
         }
         OttoSettingKind::Dock => {
-            runtime
-                .pending_plugin_toggle
-                .set(Some((PluginId::Dock, !runtime.dock_enabled.get())));
+            runtime.queue_plugin_toggle(PluginId::Dock, !runtime.dock_enabled.get());
         }
         OttoSettingKind::WindowControls => {
-            runtime.pending_plugin_toggle.set(Some((
+            runtime.queue_plugin_toggle(
                 PluginId::WindowControls,
                 !runtime.window_controls_enabled.get(),
-            )));
+            );
         }
         OttoSettingKind::Genie => {
-            runtime
-                .pending_plugin_toggle
-                .set(Some((PluginId::Genie, !runtime.genie_enabled.get())));
+            runtime.queue_plugin_toggle(PluginId::Genie, !runtime.genie_enabled.get());
         }
         OttoSettingKind::LiquidGlass => {
-            toggle_flag(&runtime.glass_enabled, &runtime.pending_liquid_glass);
+            toggle_flag(&runtime.liquid_glass_pref, &runtime.pending_liquid_glass);
         }
         OttoSettingKind::PrivacyIndicators => {
             toggle_flag(
@@ -1028,7 +1109,12 @@ fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
         OttoSettingKind::LaunchAtLogin => {
             with_cc(runtime, |surface| {
                 let next = !surface.port.read_launch_at_login();
-                let _ = surface.port.set_launch_at_login(next);
+                if surface.port.set_launch_at_login(next) {
+                    surface.snapshot.last_error = None;
+                } else {
+                    surface.snapshot.last_error =
+                        Some(String::from("Could not update Launch at Login"));
+                }
             });
         }
         OttoSettingKind::Hotkeys => {
@@ -1046,6 +1132,7 @@ fn refresh_and_present(runtime: &RuntimeContext) {
             surface.sync_snapshot(runtime);
             surface.relayout();
             surface.place();
+            surface.sync_backdrop(runtime, true);
             surface.present(runtime);
         }
     });
@@ -1328,7 +1415,8 @@ mod tests {
     #[test]
     fn category_switching_and_new_module_toggles_queue_expected_runtime_updates() {
         let runtime = RuntimeContext::new(false);
-        runtime.glass_enabled.set(true);
+        runtime.liquid_glass_pref.set(true);
+        runtime.glass_enabled.set(false);
         let mut surface = ControlCenterSurface::new(0);
         surface.port = Box::new(MockControlCenterPort(Arc::new(Mutex::new(
             MockControlCenterState::default(),
@@ -1336,6 +1424,7 @@ mod tests {
         surface.snapshot.page = ControlCenterPage::OttoSettings;
         surface.visible = true;
         surface.sync_snapshot(&runtime);
+        assert!(surface.snapshot.settings.system.liquid_glass);
         surface.relayout();
         let all_height = surface.layout.window.height;
         *runtime.control_center.borrow_mut() = Some(surface);
@@ -1356,6 +1445,8 @@ mod tests {
         }
 
         toggle_setting(&runtime, OttoSettingKind::LiquidGlass);
+        toggle_setting(&runtime, OttoSettingKind::Dock);
+        toggle_setting(&runtime, OttoSettingKind::Genie);
         toggle_setting(&runtime, OttoSettingKind::PrivacyIndicators);
         toggle_setting(&runtime, OttoSettingKind::ClipboardHistory);
         toggle_setting(&runtime, OttoSettingKind::DropShelf);
@@ -1365,6 +1456,13 @@ mod tests {
         toggle_setting(&runtime, OttoSettingKind::DockHideTaskbar);
 
         assert_eq!(runtime.pending_liquid_glass.take(), Some(false));
+        assert_eq!(
+            runtime.take_plugin_toggles(),
+            vec![
+                (crate::host::PluginId::Dock, false),
+                (crate::host::PluginId::Genie, false)
+            ]
+        );
         assert_eq!(runtime.pending_privacy_indicators.take(), Some(false));
         assert_eq!(runtime.pending_clipboard_history.take(), Some(false));
         assert_eq!(runtime.pending_drop_shelf.take(), Some(false));
@@ -1385,6 +1483,40 @@ mod tests {
             assert!(!cc.snapshot.focus_active);
             assert!(!cc.snapshot.settings.system.media_module);
             assert!(!cc.snapshot.settings.system.focus_module);
+        }
+    }
+
+    #[test]
+    fn press_capture_cancels_on_slide_out_and_triggers_on_release_inside() {
+        let runtime = RuntimeContext::new(false);
+        let mut surface = ControlCenterSurface::new(0);
+        surface.port = Box::new(MockControlCenterPort(Arc::new(Mutex::new(
+            MockControlCenterState::default(),
+        ))));
+        surface.snapshot.page = ControlCenterPage::Main;
+        surface.visible = true;
+        surface.sync_snapshot(&runtime);
+        surface.relayout();
+
+        let battery_rect = surface.layout.battery_tile;
+        let gx = battery_rect.x + battery_rect.width / 2;
+        let gy = battery_rect.y + battery_rect.height / 2;
+
+        surface.begin_press(&runtime, gx, gy);
+        assert_eq!(surface.pressed, Some(ControlCenterHitTarget::BatteryTile));
+        assert!(matches!(
+            surface.release_press(&runtime, 0, 0),
+            PostClickAction::None
+        ));
+        assert_eq!(surface.pressed, None);
+
+        surface.begin_press(&runtime, gx, gy);
+        match surface.release_press(&runtime, gx, gy) {
+            PostClickAction::Command(
+                ControlCenterCommand::OpenSettings(ControlCenterAction::OpenPowerSettings),
+                true,
+            ) => {}
+            _ => panic!("expected power settings when released inside"),
         }
     }
 }

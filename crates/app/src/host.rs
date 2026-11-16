@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetMessageW, HCURSOR, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW,
-    TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSEXW, WNDPROC, WS_EX_LAYERED,
+    GetMessageW, HCURSOR, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_HIDE,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSEXW, WNDPROC, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -25,6 +25,17 @@ use otto_platform::{
 
 const CONFIG_FILE: &str = "plugins.txt";
 const SUPPORTED_CONFIG_VERSION: u32 = 1;
+const TOGGLEABLE_PLUGINS: [PluginId; 3] =
+    [PluginId::Dock, PluginId::WindowControls, PluginId::Genie];
+
+const fn toggleable_plugin_index(plugin: PluginId) -> Option<usize> {
+    match plugin {
+        PluginId::Dock => Some(0),
+        PluginId::WindowControls => Some(1),
+        PluginId::Genie => Some(2),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PluginId {
@@ -398,6 +409,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) window_controls_hwnd: Cell<isize>,
     pub(crate) theme_mode: Cell<ThemeMode>,
     pub(crate) system_appearance: Cell<SystemAppearance>,
+    pub(crate) blur_supported: Cell<bool>,
     pub(crate) glass_enabled: Cell<bool>,
     pub(crate) online_lyrics_enabled: Cell<bool>,
     pub(crate) pending_online_lyrics: Cell<Option<bool>>,
@@ -419,7 +431,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) media_module_enabled: Cell<bool>,
     pub(crate) focus_module_enabled: Cell<bool>,
     pub(crate) onboarding_seen: Cell<bool>,
-    pub(crate) pending_plugin_toggle: Cell<Option<(PluginId, bool)>>,
+    pub(crate) pending_plugin_toggles: [Cell<Option<bool>>; 3],
     pub(crate) pending_theme_mode: Cell<Option<ThemeMode>>,
     pub(crate) pending_capture_visible: Cell<Option<bool>>,
     pub(crate) pending_hotkeys_enabled: Cell<Option<bool>>,
@@ -452,6 +464,7 @@ impl RuntimeContext {
             window_controls_hwnd: Cell::new(0),
             theme_mode: Cell::new(ThemeMode::Auto),
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
+            blur_supported: Cell::new(false),
             glass_enabled: Cell::new(false),
             online_lyrics_enabled: Cell::new(online_lyrics_enabled),
             pending_online_lyrics: Cell::new(None),
@@ -473,7 +486,7 @@ impl RuntimeContext {
             media_module_enabled: Cell::new(true),
             focus_module_enabled: Cell::new(true),
             onboarding_seen: Cell::new(false),
-            pending_plugin_toggle: Cell::new(None),
+            pending_plugin_toggles: [const { Cell::new(None) }; 3],
             pending_theme_mode: Cell::new(None),
             pending_capture_visible: Cell::new(None),
             pending_hotkeys_enabled: Cell::new(None),
@@ -491,6 +504,22 @@ impl RuntimeContext {
             pending_modal_action: RefCell::new(None),
             pending_destroy_hwnds: RefCell::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn queue_plugin_toggle(&self, plugin: PluginId, enabled: bool) {
+        if let Some(index) = toggleable_plugin_index(plugin) {
+            self.pending_plugin_toggles[index].set(Some(enabled));
+        }
+    }
+
+    pub(crate) fn take_plugin_toggles(&self) -> Vec<(PluginId, bool)> {
+        let mut out = Vec::new();
+        for (index, plugin) in TOGGLEABLE_PLUGINS.into_iter().enumerate() {
+            if let Some(enabled) = self.pending_plugin_toggles[index].take() {
+                out.push((plugin, enabled));
+            }
+        }
+        out
     }
 
     pub(crate) fn queue_destroy_hwnd(&self, hwnd: isize) {
@@ -637,9 +666,11 @@ pub fn start(blur: bool) -> Result<()> {
         .set(otto_platform::read_system_appearance());
     host.runtime.dock_preferences.set(host.config.dock);
     host.runtime.apply_preferences(host.config.preferences);
-    host.runtime
-        .glass_enabled
-        .set(blur && host.config.preferences.liquid_glass);
+    host.runtime.blur_supported.set(blur);
+    host.runtime.glass_enabled.set(
+        blur && host.config.preferences.liquid_glass
+            && host.runtime.system_appearance.get().transparency,
+    );
     if !host.config.preferences.media_module {
         otto_platform::shutdown_media_task();
     }
@@ -1100,6 +1131,9 @@ impl Host {
             if self.instance.is_invalid() {
                 return;
             }
+            unsafe {
+                let _ = ShowWindow(surface, SW_HIDE);
+            }
             self.runtime.queue_destroy_hwnd(surface.0 as isize);
         }
     }
@@ -1350,10 +1384,18 @@ impl PendingPreferences {
     }
 }
 
+pub(crate) fn is_host_active() -> bool {
+    HOST.with(|cell| {
+        cell.try_borrow()
+            .ok()
+            .is_some_and(|guard| guard.as_ref().is_some_and(|host| !host.shutting_down))
+    })
+}
+
 struct PendingDispatch {
     online_lyrics: Option<bool>,
     dock: Option<DockPreferences>,
-    plugin_toggle: Option<(PluginId, bool)>,
+    plugin_toggles: Vec<(PluginId, bool)>,
     preferences: PendingPreferences,
     end_session: bool,
     modal: Option<bar::PreparedModalAction>,
@@ -1368,7 +1410,7 @@ fn dispatch_runtime_message(
         let result = action(&host.runtime);
         let online_lyrics = host.runtime.pending_online_lyrics.take();
         let dock = host.runtime.pending_dock_preferences.take();
-        let plugin_toggle = host.runtime.pending_plugin_toggle.take();
+        let plugin_toggles = host.runtime.take_plugin_toggles();
         let preferences = PendingPreferences {
             theme_mode: host.runtime.pending_theme_mode.take(),
             capture_visible: host.runtime.pending_capture_visible.take(),
@@ -1401,32 +1443,46 @@ fn dispatch_runtime_message(
             PendingDispatch {
                 online_lyrics,
                 dock,
-                plugin_toggle,
+                plugin_toggles,
                 preferences,
                 end_session,
                 modal,
             },
         ))
     })?;
-    if let Some((plugin, enabled)) = pending.plugin_toggle {
-        let _ = set_plugin_enabled(plugin, enabled);
+    let mut plugin_error = None;
+    let had_plugin_toggles = !pending.plugin_toggles.is_empty();
+    for (plugin, enabled) in pending.plugin_toggles {
+        if let Err(error) = set_plugin_enabled(plugin, enabled)
+            && plugin_error.is_none()
+        {
+            plugin_error = Some(error.message());
+        }
     }
-    if let Some(preferences) = pending.dock
-        && set_dock_preferences(preferences).is_ok()
-    {
-        with_host_read(|host| dock::apply_preferences(&host.runtime, preferences));
+    let mut dock_changed = false;
+    if let Some(preferences) = pending.dock {
+        if set_dock_preferences(preferences).is_ok() {
+            dock_changed = true;
+            with_host_read(|host| dock::apply_preferences(&host.runtime, preferences));
+        } else if plugin_error.is_none() {
+            plugin_error = Some(String::from("Could not save Dock preferences"));
+        }
     }
-    if let Some(enabled) = pending.online_lyrics
-        && set_online_lyrics_enabled(enabled).is_ok()
-    {
-        with_host_read(|host| bar::set_online_lyrics_enabled(&host.runtime, enabled));
+    let mut lyrics_changed = false;
+    if let Some(enabled) = pending.online_lyrics {
+        if set_online_lyrics_enabled(enabled).is_ok() {
+            lyrics_changed = true;
+            with_host_read(|host| bar::set_online_lyrics_enabled(&host.runtime, enabled));
+        } else if plugin_error.is_none() {
+            plugin_error = Some(String::from("Could not save Online Lyrics preference"));
+        }
     }
     let prefs_changed = apply_pending_preference_changes(&pending.preferences);
-    if pending.plugin_toggle.is_some()
-        || pending.dock.is_some()
-        || pending.online_lyrics.is_some()
-        || prefs_changed
-    {
+    let glass_changed = pending.preferences.liquid_glass.is_some();
+    if had_plugin_toggles || plugin_error.is_some() {
+        with_host_read(|host| control_center::set_error(&host.runtime, plugin_error));
+    }
+    if had_plugin_toggles || dock_changed || lyrics_changed || (prefs_changed && !glass_changed) {
         with_host_read(|host| control_center::repaint(&host.runtime));
     }
     if let Some(prepared) = pending.modal {
@@ -1493,11 +1549,8 @@ fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
         sync_pending_platform_modules(pending, &updated);
         with_host_read(|host| {
             if let Some(glass) = pending.liquid_glass {
-                host.runtime.glass_enabled.set(glass);
-                bar::set_glass_enabled(&host.runtime, glass);
-                dock::set_glass_enabled(&host.runtime, glass);
-                control_center::set_glass_enabled(&host.runtime, glass);
-                menu::set_glass_enabled(&host.runtime, glass);
+                host.runtime.liquid_glass_pref.set(glass);
+                crate::theme_state::sync_effective_glass(&host.runtime);
             }
             if pending.capture_visible.is_some() {
                 bar::set_capture_visible(&host.runtime, updated.capture_visible);
@@ -2063,5 +2116,22 @@ dock_icon_size=64
             )
         };
         assert!(posted_quit.as_bool());
+    }
+
+    #[test]
+    fn queued_plugin_toggles_preserve_multiple_plugins_without_clobbering() {
+        let runtime = RuntimeContext::new(false);
+        runtime.queue_plugin_toggle(PluginId::Dock, false);
+        runtime.queue_plugin_toggle(PluginId::Genie, false);
+        runtime.queue_plugin_toggle(PluginId::WindowControls, true);
+        assert_eq!(
+            runtime.take_plugin_toggles(),
+            vec![
+                (PluginId::Dock, false),
+                (PluginId::WindowControls, true),
+                (PluginId::Genie, false),
+            ]
+        );
+        assert!(runtime.take_plugin_toggles().is_empty());
     }
 }
