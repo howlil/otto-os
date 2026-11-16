@@ -46,7 +46,7 @@ motion:
 - CTA pembuka waitlist memakai kapsul obsidian dengan teks putih; jingga `--color-accent: #ff6a2b` dipakai untuk submit (`Daftar beta`, `Simpan profil`) dengan teks gelap `--color-ink: #0f1115` (`6.61:1`).
 - Tautan dan aksen teks di atas permukaan terang menggunakan `--color-accent-text: #b83b0a` (`> 6.3:1`).
 - Muted teks memakai `--color-muted: #686868` di atas canvas putih; pastikan kontras minimal WCAG 2.2 AA.
-- Logo menggunakan simbol geometris `Twin-T`; nama `Otto OS` mengikuti stack font sistem. Jangan mengimpor aset atau font merek dari website referensi.
+- Logo menggunakan simbol `Orbit O` (cincin dengan dua mata) dalam squircle gradien biru; nama `Otto OS` mengikuti stack font sistem. Jangan mengimpor aset atau font merek dari website referensi.
 
 ## Frontend structure
 

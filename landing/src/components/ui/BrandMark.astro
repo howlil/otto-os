@@ -7,17 +7,6 @@ const { size = 22 } = Astro.props;
 ---
 
 <span class="inline-flex items-center gap-2 text-ink">
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 128 128"
-    fill="currentColor"
-    aria-hidden="true"
-    class="shrink-0"
-  >
-    <path d="M40 12C46 12 50 16 50 22V78C50 87 54 91 61 91V111C41 111 30 100 30 80V22C30 16 34 12 40 12Z" />
-    <path transform="translate(128 0) scale(-1 1)" d="M40 12C46 12 50 16 50 22V78C50 87 54 91 61 91V111C41 111 30 100 30 80V22C30 16 34 12 40 12Z" />
-    <path d="M20 34H108C114 34 118 38 118 44S114 54 108 54H20C14 54 10 50 10 44S14 34 20 34Z" />
-  </svg>
+  <img src="/favicon.svg" width={size} height={size} alt="" aria-hidden="true" class="shrink-0" decoding="async" />
   <span class="text-base leading-none font-semibold tracking-[-0.02em]">Otto OS</span>
 </span>

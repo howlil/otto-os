@@ -1829,23 +1829,24 @@ impl Renderer {
             radiusX: radius,
             radiusY: radius,
         };
-        let pill_w = radius * 0.92;
-        let pill_h = (stroke * 1.1).max(2.0);
-        let pill_cy = cy - radius * 0.14;
-        let island = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: cx - pill_w * 0.5,
-                top: pill_cy - pill_h * 0.5,
-                right: cx + pill_w * 0.5,
-                bottom: pill_cy + pill_h * 0.5,
-            },
-            radiusX: pill_h * 0.5,
-            radiusY: pill_h * 0.5,
-        };
+        let eye_width = (radius * 0.27).max(stroke * 0.65);
+        let eye_height = radius * 0.62;
         unsafe {
             self.target
                 .DrawEllipse(&ring, brush, stroke, Some(&self.stroke_style));
-            self.target.FillRoundedRectangle(&island, brush);
+            for offset in [-radius * 0.35, radius * 0.35] {
+                let eye = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: cx + offset - eye_width * 0.5,
+                        top: cy - eye_height * 0.5,
+                        right: cx + offset + eye_width * 0.5,
+                        bottom: cy + eye_height * 0.5,
+                    },
+                    radiusX: eye_width * 0.5,
+                    radiusY: eye_width * 0.5,
+                };
+                self.target.FillRoundedRectangle(&eye, brush);
+            }
         }
     }
 

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs>
+<linearGradient id="blue" x1="130" y1="115" x2="870" y2="910" gradientUnits="userSpaceOnUse"><stop stop-color="#76CFFF"/><stop offset="0.39" stop-color="#2589F9"/><stop offset="0.77" stop-color="#075BEF"/><stop offset="1" stop-color="#1935DE"/></linearGradient>
+<linearGradient id="white" x1="310" y1="304" x2="780" y2="776" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset="0.54" stop-color="#F7FAFF"/><stop offset="1" stop-color="#DCE7FF"/></linearGradient>
+<linearGradient id="face" x1="360" y1="420" x2="730" y2="717" gradientUnits="userSpaceOnUse"><stop stop-color="#126EEB"/><stop offset="1" stop-color="#0441DE"/></linearGradient>
+<linearGradient id="shine" x1="260" y1="245" x2="750" y2="750"><stop stop-color="#FFFFFF" stop-opacity="0.48"/><stop offset="0.48" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+</defs><rect x="88" y="88" width="848" height="848" rx="226" fill="url(#blue)"/>
+<path fill="url(#white)" fill-rule="evenodd" d="M512 251C638 251 735 327 766 433C775 466 778 501 778 530C778 687 673 775 512 775C351 775 246 687 246 530C246 373 351 251 512 251ZM512 338C395 338 329 416 329 531C329 639 398 690 512 690C626 690 695 639 695 531C695 416 629 338 512 338Z"/>
+<rect x="446" y="246" width="132" height="45" rx="22.5" fill="#2C8FFC"/>
+<rect x="414" y="476" width="39" height="90" rx="19.5" fill="url(#white)"/><rect x="571" y="476" width="39" height="90" rx="19.5" fill="url(#white)"/></svg>
