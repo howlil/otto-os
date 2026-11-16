@@ -1,3 +1,5 @@
+#![allow(clippy::ref_as_ptr, clippy::inline_always)]
+
 use std::sync::Arc;
 
 use otto_core::{AccessibleNode, AccessibleRole, AccessibleTree, Rect};

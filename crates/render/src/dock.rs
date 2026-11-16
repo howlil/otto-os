@@ -233,6 +233,7 @@ impl DockRenderer {
         self.draw(layout, items, appearance)
     }
 
+    #[expect(clippy::too_many_lines)]
     fn draw(
         &self,
         layout: &DockLayout,

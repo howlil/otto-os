@@ -593,16 +593,16 @@ pub fn glass_color_lit(
 
     let (sample_x, sample_y, nz3, meniscus) = if u > 0.0 {
         let u4 = u * u * u * u;
-        let h = (1.0 - u4).max(0.002).powf(0.25);
-        let slope = ((u * u * u) / (h * h * h)).min(3.2);
+        let height = (1.0 - u4).max(0.002).powf(0.25);
+        let slope = ((u * u * u) / (height * height * height)).min(3.2);
         let gx = normal_x * slope * BEZEL_SLOPE_GAIN;
         let gy = normal_y * slope * BEZEL_SLOPE_GAIN;
         let inv_len = 1.0 / (gx * gx + gy * gy + 1.0).sqrt();
         let nx3 = gx * inv_len;
         let ny3 = gy * inv_len;
         let nz3 = inv_len;
-        let k = (1.0 - IOR_INV * IOR_INV * (1.0 - nz3 * nz3)).max(0.0);
-        let mu = IOR_INV * nz3 - k.sqrt();
+        let radicand = (1.0 - IOR_INV * IOR_INV * (1.0 - nz3 * nz3)).max(0.0);
+        let mu = IOR_INV * nz3 - radicand.sqrt();
         let tx = mu * nx3;
         let ty = mu * ny3;
         let tz = (-IOR_INV + mu * nz3).abs().max(0.25);

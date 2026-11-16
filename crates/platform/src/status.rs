@@ -102,7 +102,8 @@ pub fn read_system_status() -> SystemStatus {
 }
 
 const DND_CACHE_TTL: Duration = Duration::from_secs(2);
-static DND_CACHE: OnceLock<Mutex<Option<(Instant, Option<bool>)>>> = OnceLock::new();
+type DndCacheEntry = Option<(Instant, Option<bool>)>;
+static DND_CACHE: OnceLock<Mutex<DndCacheEntry>> = OnceLock::new();
 
 const fn quns_to_dnd(state: QUERY_USER_NOTIFICATION_STATE) -> Option<bool> {
     if state.0 == QUNS_QUIET_TIME.0 {

@@ -276,6 +276,7 @@ impl PopupMenuRenderer {
         Some(metrics.widthIncludingTrailingWhitespace.ceil() as i32 + 2)
     }
 
+    #[expect(clippy::too_many_lines)]
     fn draw_row(
         &self,
         layout: &PopupMenuLayout,
@@ -706,6 +707,7 @@ impl PopupMenuRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::similar_names)]
     fn draw_notification_contents(
         &self,
         card_rect: D2D_RECT_F,

@@ -1929,9 +1929,10 @@ pub fn read_downloads_active_progress() -> Option<f32> {
     use std::time::{Duration, Instant, SystemTime};
 
     const CACHE_TTL: Duration = Duration::from_secs(2);
-    const ACTIVE_WINDOW: Duration = Duration::from_secs(1800);
+    const ACTIVE_WINDOW: Duration = Duration::from_mins(30);
 
-    static CACHE: OnceLock<Mutex<Option<(Instant, Option<f32>)>>> = OnceLock::new();
+    type DownloadProgressCacheEntry = Option<(Instant, Option<f32>)>;
+    static CACHE: OnceLock<Mutex<DownloadProgressCacheEntry>> = OnceLock::new();
     let lock = CACHE.get_or_init(|| Mutex::new(None));
     let now = Instant::now();
     if let Ok(guard) = lock.lock()
