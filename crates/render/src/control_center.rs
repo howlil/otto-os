@@ -12,8 +12,8 @@ use super::{
 };
 use otto_core::{
     Appearance, BluetoothDevice, BluetoothDeviceKind, ControlCenterHitTarget, ControlCenterLayout,
-    ControlCenterPage, ControlCenterSnapshot, GlassShape, OttoSettingItem, OttoSettingsCategory,
-    Rect, RgbBuffer, ShapeTokens, WifiNetwork, focus_row_subtitle, power_mode_label,
+    ControlCenterPage, ControlCenterSnapshot, GlassShape, OttoSettingItem, OttoSettingsArea, Rect,
+    RgbBuffer, ShapeTokens, WifiNetwork, area_card_scene, focus_row_subtitle, power_mode_label,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
@@ -22,16 +22,18 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND,
     D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
     D2D1_ELLIPSE, D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1Geometry, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, IDWriteTextFormat,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    IDWriteTextFormat,
 };
 use windows::core::Result;
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
+
+mod settings_scene;
 
 const FOCUS_PURPLE: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.43,
@@ -40,11 +42,13 @@ const FOCUS_PURPLE: D2D1_COLOR_F = D2D1_COLOR_F {
     a: 1.0,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ControlCenterPaintState {
     pub hovered: Option<ControlCenterHitTarget>,
     pub pressed: Option<ControlCenterHitTarget>,
     pub focused: Option<ControlCenterHitTarget>,
+    pub morph_progress: Option<f32>,
+    pub scene_time: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -108,7 +112,6 @@ pub struct ControlCenterRenderer {
     subtitle_format: IDWriteTextFormat,
     value_format: IDWriteTextFormat,
     center_format: IDWriteTextFormat,
-    tab_format: IDWriteTextFormat,
     badge_format: IDWriteTextFormat,
     dpi: u32,
     cached_cover: RefCell<Option<CachedCover>>,
@@ -148,8 +151,8 @@ impl ControlCenterRenderer {
             )?;
             let subtitle_format = create_text_format(
                 &dwrite,
-                10.5 * scale_f,
-                DWRITE_FONT_WEIGHT_NORMAL,
+                11.0 * scale_f,
+                DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
             )?;
             let value_format = create_text_format(
@@ -164,15 +167,9 @@ impl ControlCenterRenderer {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
-            let tab_format = create_text_format(
-                &dwrite,
-                11.5 * scale_f,
-                DWRITE_FONT_WEIGHT_MEDIUM,
-                DWRITE_TEXT_ALIGNMENT_CENTER,
-            )?;
             let badge_format = create_text_format(
                 &dwrite,
-                9.5 * scale_f,
+                10.0 * scale_f,
                 DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
@@ -188,7 +185,6 @@ impl ControlCenterRenderer {
                 subtitle_format,
                 value_format,
                 center_format,
-                tab_format,
                 badge_format,
                 dpi,
                 cached_cover: RefCell::new(None),
@@ -199,10 +195,6 @@ impl ControlCenterRenderer {
 
     pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
         self.glass.set_backdrop(capture, origin);
-    }
-
-    pub fn set_pointer(&self, pointer: Option<(f32, f32)>) {
-        self.glass.set_pointer(pointer);
     }
 
     pub fn clear_backdrop(&self) {
@@ -258,20 +250,39 @@ impl ControlCenterRenderer {
             self.surface = DibSurface::new(w.max(sw), h.max(sh))?;
         }
         let appearance = self.glass.adaptive_appearance(appearance);
-        let palette = LiquidGlassPalette::for_appearance(&appearance);
+        let palette = LiquidGlassPalette::for_control_center(&appearance);
         self.brushes.update_theme(&palette);
+        let factor = 0.92 + 0.08 * state.morph_progress.unwrap_or(1.0).clamp(0.0, 1.0);
+        let transform = Matrix3x2 {
+            M11: factor,
+            M12: 0.0,
+            M21: 0.0,
+            M22: factor,
+            M31: w as f32 * (1.0 - factor),
+            M32: 0.0,
+        };
+        let identity = Matrix3x2::identity();
 
         let target = self.target.clone();
         draw_on(&target, &self.surface, (w, h), || {
-            self.draw_shell(w, h, layout.shell_radius as f32, &appearance, &palette)?;
-            match layout.page {
-                ControlCenterPage::Main => {
-                    self.draw_main_page(layout, snapshot, state, &palette)?;
-                }
-                _ => self.draw_subpanel_page(layout, snapshot, state, &palette)?,
+            unsafe {
+                self.target.SetTransform(&raw const transform);
             }
-            self.draw_focus_ring(layout, state.focused);
-            Ok(())
+            let result = (|| {
+                self.draw_shell(w, h, layout.shell_radius as f32, &appearance, &palette)?;
+                match layout.page {
+                    ControlCenterPage::Main => {
+                        self.draw_main_page(layout, snapshot, state, &palette)?;
+                    }
+                    _ => self.draw_subpanel_page(layout, snapshot, state, &palette)?,
+                }
+                self.draw_focus_ring(layout, state.focused);
+                Ok(())
+            })();
+            unsafe {
+                self.target.SetTransform(&raw const identity);
+            }
+            result
         })
     }
 
@@ -332,6 +343,71 @@ impl ControlCenterRenderer {
         self.surface.read_pixels()
     }
 
+    fn squircle_path(&self, rect: D2D_RECT_F, radius: f32) -> Option<ID2D1PathGeometry> {
+        (radius >= scale(10, self.dpi) as f32)
+            .then(|| super::build_squircle_path(&self.factory, rect, radius).ok())
+            .flatten()
+    }
+
+    fn fill_shape(
+        &self,
+        rect: D2D_RECT_F,
+        radius: f32,
+        geom: Option<&ID2D1PathGeometry>,
+        brush: &ID2D1Brush,
+    ) {
+        if let Some(geom) = geom {
+            unsafe {
+                self.target.FillGeometry(geom, brush, None);
+            }
+            return;
+        }
+        let rounded = D2D1_ROUNDED_RECT {
+            rect,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&rounded, brush);
+        }
+    }
+
+    fn draw_shape(
+        &self,
+        rect: D2D_RECT_F,
+        radius: f32,
+        geom: Option<&ID2D1PathGeometry>,
+        brush: &ID2D1Brush,
+        stroke_width: f32,
+    ) {
+        if let Some(geom) = geom {
+            unsafe {
+                self.target.DrawGeometry(geom, brush, stroke_width, None);
+            }
+            return;
+        }
+        let rounded = D2D1_ROUNDED_RECT {
+            rect,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        unsafe {
+            self.target
+                .DrawRoundedRectangle(&rounded, brush, stroke_width, None);
+        }
+    }
+
+    fn draw_squircle_or_rounded(
+        &self,
+        rect: D2D_RECT_F,
+        radius: f32,
+        brush: &ID2D1Brush,
+        stroke_width: f32,
+    ) {
+        let geom = self.squircle_path(rect, radius);
+        self.draw_shape(rect, radius, geom.as_ref(), brush, stroke_width);
+    }
+
     fn draw_shell(
         &self,
         width: i32,
@@ -364,23 +440,13 @@ impl ControlCenterRenderer {
         let outer = self.brushes.color_brush(palette.menu_outer_border);
         let rim = &self.brushes.specular_rim;
 
-        let outer_rect = D2D1_ROUNDED_RECT {
-            rect: d2d_rect_size(width, height),
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let inner_rect = D2D1_ROUNDED_RECT {
-            rect: d2d_rect_inset(width, height, 0.75),
-            radiusX: (radius - 0.75).max(1.0),
-            radiusY: (radius - 0.75).max(1.0),
-        };
-        unsafe {
-            self.target.FillRoundedRectangle(&outer_rect, &fill);
-            self.target
-                .DrawRoundedRectangle(&inner_rect, rim, 1.0, None);
-            self.target
-                .DrawRoundedRectangle(&outer_rect, &outer, 1.0, None);
-        }
+        let outer_rect = d2d_rect_size(width, height);
+        let outer_geom = self.squircle_path(outer_rect, radius);
+        let inner_rect = d2d_rect_inset(width, height, 0.75);
+        let inner_radius = (radius - 0.75).max(1.0);
+        self.fill_shape(outer_rect, radius, outer_geom.as_ref(), &fill);
+        self.draw_squircle_or_rounded(inner_rect, inner_radius, rim, 1.0);
+        self.draw_shape(outer_rect, radius, outer_geom.as_ref(), &outer, 1.0);
         Ok(())
     }
 
@@ -393,21 +459,16 @@ impl ControlCenterRenderer {
         palette: &LiquidGlassPalette,
     ) {
         let d2d_r = rect_to_d2d(rect);
-        let r = D2D1_ROUNDED_RECT {
-            rect: d2d_r,
-            radiusX: radius,
-            radiusY: radius,
-        };
+        let outer_geom = self.squircle_path(d2d_r, radius);
         let fill = self.brushes.color_brush(palette.card_fill);
-        unsafe {
-            self.target.FillRoundedRectangle(&r, &fill);
-        }
-        if palette.is_translucent && !palette.is_high_contrast {
+        self.fill_shape(d2d_r, radius, outer_geom.as_ref(), &fill);
+        let sheen_alpha = palette.control_center_card_sheen_alpha();
+        if sheen_alpha > 0.0 {
             let sheen_top = D2D1_COLOR_F {
                 r: 1.0,
                 g: 1.0,
                 b: 1.0,
-                a: if palette.is_dark { 0.08 } else { 0.24 },
+                a: sheen_alpha,
             };
             let sheen_clear = D2D1_COLOR_F {
                 r: 1.0,
@@ -422,68 +483,66 @@ impl ControlCenterRenderer {
                 sheen_top,
                 sheen_clear,
             ) {
-                unsafe {
-                    self.target.FillRoundedRectangle(&r, &sheen);
-                }
+                self.fill_shape(d2d_r, radius, outer_geom.as_ref(), &sheen);
             }
         }
         self.draw_interaction_overlay(rect, radius, hovered, pressed, palette);
-        unsafe {
-            if palette.is_high_contrast {
-                self.target
-                    .DrawRoundedRectangle(&r, &self.brushes.specular_rim, 0.9, None);
-            } else {
-                let inner_r = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: d2d_r.left + 0.5,
-                        top: d2d_r.top + 0.5,
-                        right: d2d_r.right - 0.5,
-                        bottom: d2d_r.bottom - 0.5,
-                    },
-                    radiusX: (radius - 0.5).max(1.0),
-                    radiusY: (radius - 0.5).max(1.0),
+        if palette.is_high_contrast {
+            self.draw_shape(
+                d2d_r,
+                radius,
+                outer_geom.as_ref(),
+                &self.brushes.specular_rim,
+                0.9,
+            );
+        } else {
+            let inner_d2d = D2D_RECT_F {
+                left: d2d_r.left + 0.5,
+                top: d2d_r.top + 0.5,
+                right: d2d_r.right - 0.5,
+                bottom: d2d_r.bottom - 0.5,
+            };
+            let inner_radius = (radius - 0.5).max(1.0);
+            if palette.is_translucent {
+                let top_lip = D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: if palette.is_dark { 0.16 } else { 0.90 },
                 };
-                if palette.is_translucent {
-                    let top_lip = D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: if palette.is_dark { 0.40 } else { 0.90 },
-                    };
-                    let bottom_lip = D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: if palette.is_dark { 0.12 } else { 0.36 },
-                    };
-                    if let Ok(rim) = crate::glow::linear_gradient(
-                        &self.target,
-                        Vector2::new(d2d_r.left, d2d_r.top),
-                        Vector2::new(d2d_r.right, d2d_r.bottom),
-                        top_lip,
-                        bottom_lip,
-                    ) {
-                        self.target.DrawRoundedRectangle(&inner_r, &rim, 0.9, None);
-                    } else {
-                        self.target.DrawRoundedRectangle(
-                            &inner_r,
-                            &self.brushes.specular_rim,
-                            0.9,
-                            None,
-                        );
-                    }
+                let bottom_lip = D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: if palette.is_dark { 0.05 } else { 0.36 },
+                };
+                if let Ok(rim) = crate::glow::linear_gradient(
+                    &self.target,
+                    Vector2::new(d2d_r.left, d2d_r.top),
+                    Vector2::new(d2d_r.right, d2d_r.bottom),
+                    top_lip,
+                    bottom_lip,
+                ) {
+                    self.draw_squircle_or_rounded(inner_d2d, inner_radius, &rim, 0.9);
                 } else {
-                    self.target.DrawRoundedRectangle(
-                        &inner_r,
+                    self.draw_squircle_or_rounded(
+                        inner_d2d,
+                        inner_radius,
                         &self.brushes.specular_rim,
                         0.9,
-                        None,
                     );
                 }
-                if !palette.is_dark {
-                    let edge = self.brushes.color_brush(palette.menu_outer_border);
-                    self.target.DrawRoundedRectangle(&r, &edge, 0.75, None);
-                }
+            } else {
+                self.draw_squircle_or_rounded(
+                    inner_d2d,
+                    inner_radius,
+                    &self.brushes.specular_rim,
+                    0.9,
+                );
+            }
+            if !palette.is_dark {
+                let edge = self.brushes.color_brush(palette.menu_outer_border);
+                self.draw_shape(d2d_r, radius, outer_geom.as_ref(), &edge, 0.75);
             }
         }
     }
@@ -499,10 +558,12 @@ impl ControlCenterRenderer {
         if !hovered && !pressed {
             return;
         }
-        let pill = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(rect),
-            radiusX: radius,
-            radiusY: radius,
+        let d2d_r = rect_to_d2d(rect);
+        let is_pill_or_circle = radius + 0.5 >= rect.width.min(rect.height) as f32 * 0.5;
+        let geom = if is_pill_or_circle {
+            None
+        } else {
+            self.squircle_path(d2d_r, radius)
         };
         if pressed {
             let press_color = if palette.is_dark {
@@ -521,13 +582,9 @@ impl ControlCenterRenderer {
                 }
             };
             let brush = self.brushes.color_brush(press_color);
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, &brush);
-            }
+            self.fill_shape(d2d_r, radius, geom.as_ref(), &brush);
         } else {
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, &self.brushes.hover);
-            }
+            self.fill_shape(d2d_r, radius, geom.as_ref(), &self.brushes.hover);
         }
     }
 
@@ -801,7 +858,9 @@ impl ControlCenterRenderer {
         let cx = tile.x as f32 + pad + circle_d * 0.5;
         let cy = tile.y as f32 + pad + circle_d * 0.5;
         let rad = circle_d * 0.5;
-        let active = snapshot.settings.system.focus_module && snapshot.focus_active;
+        let focus_available =
+            snapshot.settings.plugins.notch && snapshot.settings.system.focus_module;
+        let active = focus_available && snapshot.focus_active;
         let bg = self.brushes.color_brush(if active {
             FOCUS_PURPLE
         } else {
@@ -876,7 +935,7 @@ impl ControlCenterRenderer {
             right: tile.right() as f32 - pad,
             bottom: tile.bottom() as f32 - scale(5, self.dpi) as f32,
         };
-        let sub = focus_row_subtitle(snapshot.settings.system.focus_module, snapshot.focus_active);
+        let sub = focus_row_subtitle(focus_available, snapshot.focus_active);
         self.draw_text(
             "Focus",
             &self.body_format,
@@ -1461,7 +1520,11 @@ impl ControlCenterRenderer {
                 );
             }
             ControlCenterPage::OttoSettings => {
-                self.draw_category_tabs(layout, snapshot, state, palette);
+                if let Some(area) = layout.area {
+                    self.draw_area_hero(layout, snapshot, state, area);
+                } else {
+                    self.draw_area_cards(layout, snapshot, state, palette);
+                }
                 if !layout.error_banner.is_empty()
                     && let Some(err) = snapshot.last_error.as_deref()
                 {
@@ -1648,7 +1711,9 @@ impl ControlCenterRenderer {
             ControlCenterPage::Bluetooth => "Bluetooth",
             ControlCenterPage::Sound => "Sound",
             ControlCenterPage::Display => "Display",
-            ControlCenterPage::OttoSettings => "Otto Modules & Settings",
+            ControlCenterPage::OttoSettings => {
+                layout.area.map_or("Otto Settings", OttoSettingsArea::label)
+            }
             ControlCenterPage::Main => "",
         };
         let title_r = D2D_RECT_F {
@@ -1691,96 +1756,132 @@ impl ControlCenterRenderer {
         }
     }
 
-    fn draw_category_tabs(
+    fn draw_area_cards(
         &self,
         layout: &ControlCenterLayout,
         snapshot: &ControlCenterSnapshot,
         state: ControlCenterPaintState,
         palette: &LiquidGlassPalette,
     ) {
-        let track = Rect {
-            x: layout.category_tabs[0].x,
-            y: layout.category_tabs[0].y,
-            width: layout.category_tabs[3].right() - layout.category_tabs[0].x,
-            height: layout.category_tabs[0].height,
+        let radius = layout.card_radius as f32;
+        let text_pad = scale(10, self.dpi) as f32;
+        for (area, card) in OttoSettingsArea::ALL.into_iter().zip(layout.area_cards) {
+            if card.is_empty() {
+                continue;
+            }
+            let target = ControlCenterHitTarget::OttoAreaCard(area);
+            let hovered = state.hovered == Some(target) || state.focused == Some(target);
+            let pressed = state.pressed == Some(target);
+            self.draw_card(card, radius, hovered, pressed, palette);
+            let scene = area_card_scene(card);
+            let time = if hovered && state.scene_time > 0.0 {
+                state.scene_time
+            } else {
+                settings_scene::static_time(area)
+            };
+            self.draw_area_scene(area, scene, card, radius, time, &snapshot.settings);
+            let text_top = scene.bottom() as f32;
+            let status = snapshot.settings.area_status(area);
+            let status_w = scale(64, self.dpi) as f32;
+            self.draw_text(
+                area.label(),
+                &self.body_format,
+                D2D_RECT_F {
+                    left: card.x as f32 + text_pad,
+                    top: text_top + scale(3, self.dpi) as f32,
+                    right: card.right() as f32 - text_pad - status_w,
+                    bottom: text_top + scale(21, self.dpi) as f32,
+                },
+                &self.brushes.text_primary,
+            );
+            self.draw_text(
+                area.blurb(),
+                &self.subtitle_format,
+                D2D_RECT_F {
+                    left: card.x as f32 + text_pad,
+                    top: text_top + scale(19, self.dpi) as f32,
+                    right: card.right() as f32 - text_pad,
+                    bottom: card.bottom() as f32 - scale(2, self.dpi) as f32,
+                },
+                &self.brushes.text_muted,
+            );
+            self.draw_text(
+                &status,
+                &self.value_format,
+                D2D_RECT_F {
+                    left: card.right() as f32 - text_pad - status_w,
+                    top: text_top + scale(3, self.dpi) as f32,
+                    right: card.right() as f32 - text_pad,
+                    bottom: text_top + scale(21, self.dpi) as f32,
+                },
+                &self.brushes.text_muted,
+            );
+        }
+    }
+
+    fn draw_area_hero(
+        &self,
+        layout: &ControlCenterLayout,
+        snapshot: &ControlCenterSnapshot,
+        state: ControlCenterPaintState,
+        area: OttoSettingsArea,
+    ) {
+        let time = if state.scene_time > 0.0 {
+            state.scene_time
+        } else {
+            settings_scene::static_time(area)
         };
-        let r = track.height as f32 * 0.5;
-        let track_bg = self.brushes.color_brush(palette.slider_track);
+        self.draw_area_scene(
+            area,
+            layout.hero,
+            layout.hero,
+            layout.card_radius as f32,
+            time,
+            &snapshot.settings,
+        );
+    }
+
+    fn draw_menu_bar_chip(
+        &self,
+        rect: Rect,
+        item: OttoSettingItem,
+        snapshot: &ControlCenterSnapshot,
+        hovered: bool,
+        pressed: bool,
+        palette: &LiquidGlassPalette,
+    ) {
+        let active = match item {
+            OttoSettingItem::Toggle(kind) => snapshot.settings.is_enabled(kind),
+            _ => false,
+        };
+        let radius = rect.height as f32 * 0.5;
+        let fill = self.brushes.color_brush(if active {
+            palette.toggle_active
+        } else {
+            palette.toggle_inactive
+        });
         unsafe {
             self.target.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
-                    rect: rect_to_d2d(track),
-                    radiusX: r,
-                    radiusY: r,
+                    rect: rect_to_d2d(rect),
+                    radiusX: radius,
+                    radiusY: radius,
                 },
-                &track_bg,
+                &fill,
             );
         }
-        let thumb_inset = scale(2, self.dpi) as f32;
-        for (category, rect) in OttoSettingsCategory::ALL
-            .into_iter()
-            .zip(layout.category_tabs)
-        {
-            if rect.is_empty() {
-                continue;
-            }
-            let target = ControlCenterHitTarget::OttoCategoryTab(category);
-            let selected = snapshot.otto_category == category;
-            let is_hover = state.hovered == Some(target);
-            let is_pressed = state.pressed == Some(target);
-            let pill_r = (r - thumb_inset).max(2.0);
-            if selected {
-                let thumb = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: rect.x as f32 + thumb_inset,
-                        top: rect.y as f32 + thumb_inset,
-                        right: rect.right() as f32 - thumb_inset,
-                        bottom: rect.bottom() as f32 - thumb_inset,
-                    },
-                    radiusX: pill_r,
-                    radiusY: pill_r,
-                };
-                let thumb_color = if palette.is_high_contrast {
-                    palette.toggle_active
-                } else if palette.is_dark {
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.24,
-                    }
-                } else {
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 0.96,
-                    }
-                };
-                let bg = self.brushes.color_brush(thumb_color);
-                unsafe {
-                    self.target.FillRoundedRectangle(&thumb, &bg);
-                    if !palette.is_dark && !palette.is_high_contrast {
-                        let rim = self.brushes.color_brush(palette.menu_outer_border);
-                        self.target.DrawRoundedRectangle(&thumb, &rim, 0.75, None);
-                    }
-                }
-            } else if is_hover || is_pressed {
-                self.draw_interaction_overlay(rect, pill_r, is_hover, is_pressed, palette);
-            }
-            let fg = if selected {
-                if palette.is_high_contrast {
-                    &self.brushes.on_accent
-                } else {
-                    &self.brushes.text_primary
-                }
-            } else if is_hover {
-                &self.brushes.text_primary
-            } else {
-                &self.brushes.text_muted
-            };
-            self.draw_text(category.label(), &self.tab_format, rect_to_d2d(rect), fg);
-        }
+        self.draw_interaction_overlay(rect, radius, hovered, pressed, palette);
+        let ink = if active {
+            &self.brushes.on_accent
+        } else {
+            &self.brushes.text_muted
+        };
+        self.draw_text(
+            item.chip_label(),
+            &self.center_format,
+            rect_to_d2d(rect),
+            ink,
+        );
     }
 
     fn draw_error_banner(&self, rect: Rect, message: &str) {
@@ -1853,8 +1954,10 @@ impl ControlCenterRenderer {
             self.draw_empty_list_state(layout.page, vp, snapshot);
             return;
         }
-        let otto_items = (layout.page == ControlCenterPage::OttoSettings)
-            .then(|| snapshot.settings.visible_items(snapshot.otto_category));
+        let otto_items = snapshot
+            .otto_area
+            .filter(|_| layout.page == ControlCenterPage::OttoSettings)
+            .map(|area| snapshot.settings.visible_items(area));
         for group in &layout.groups {
             self.draw_list_group(
                 layout,
@@ -1912,6 +2015,28 @@ impl ControlCenterRenderer {
         }
     }
 
+    fn list_group_clip_geometry(
+        &self,
+        group_d2d: D2D_RECT_F,
+        group_radius: f32,
+    ) -> Option<ID2D1Geometry> {
+        self.squircle_path(group_d2d, group_radius)
+            .map(Into::into)
+            .or_else(|| {
+                unsafe {
+                    self.factory
+                        .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                            rect: group_d2d,
+                            radiusX: group_radius,
+                            radiusY: group_radius,
+                        })
+                }
+                .ok()
+                .map(Into::into)
+            })
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn draw_list_group(
         &self,
         layout: &ControlCenterLayout,
@@ -1947,23 +2072,16 @@ impl ControlCenterRenderer {
         }
         self.draw_card(group.container, group_radius, false, false, palette);
 
-        let clip_geo = unsafe {
-            self.factory
-                .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
-                    rect: rect_to_d2d(group.container),
-                    radiusX: group_radius,
-                    radiusY: group_radius,
-                })
-        }
-        .ok();
+        let group_d2d = rect_to_d2d(group.container);
+        let clip_geo = self.list_group_clip_geometry(group_d2d, group_radius);
         let clip_layer = clip_geo
             .as_ref()
             .and_then(|_| unsafe { self.target.CreateLayer(None) }.ok());
         let mut active_mask = None;
         if let (Some(geo), Some(layer)) = (clip_geo, clip_layer.as_ref()) {
             let params = D2D1_LAYER_PARAMETERS {
-                contentBounds: rect_to_d2d(group.container),
-                geometricMask: std::mem::ManuallyDrop::new(Some(geo.into())),
+                contentBounds: group_d2d,
+                geometricMask: std::mem::ManuallyDrop::new(Some(geo)),
                 maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                 maskTransform: windows_numerics::Matrix3x2::identity(),
                 opacity: 1.0,
@@ -1984,6 +2102,21 @@ impl ControlCenterRenderer {
             if rect.bottom() < vp.y || rect.y > vp.bottom() {
                 continue;
             }
+            let chip_item = otto_items
+                .and_then(|items| items.get(index).copied())
+                .filter(|item| item.is_chip());
+            if let Some(item) = chip_item {
+                let target = ControlCenterHitTarget::SubPanelItem(index);
+                self.draw_menu_bar_chip(
+                    rect,
+                    item,
+                    snapshot,
+                    state.hovered == Some(target) || state.focused == Some(target),
+                    state.pressed == Some(target),
+                    palette,
+                );
+                continue;
+            }
             if offset > 0 {
                 let sep = self.brushes.color_brush(palette.menu_separator);
                 unsafe {
@@ -1996,12 +2129,9 @@ impl ControlCenterRenderer {
                     );
                 }
             }
-            let item_available = otto_items
-                .and_then(|items| items.get(index).copied())
-                .is_none_or(|item| snapshot.settings.is_item_available(item));
             let target = ControlCenterHitTarget::SubPanelItem(index);
-            let is_hover = item_available && state.hovered == Some(target);
-            let is_pressed = item_available && state.pressed == Some(target);
+            let is_hover = state.hovered == Some(target);
+            let is_pressed = state.pressed == Some(target);
             self.draw_interaction_overlay(rect, 0.0, is_hover, is_pressed, palette);
             self.draw_subpanel_row(
                 layout.page,
@@ -2228,7 +2358,6 @@ impl ControlCenterRenderer {
         palette: &LiquidGlassPalette,
     ) {
         let pad = scale(12, self.dpi) as f32;
-        let available = snapshot.settings.is_item_available(item);
         let control_left = match item {
             OttoSettingItem::Toggle(kind) => {
                 let toggle_w = scale(38, self.dpi);
@@ -2243,11 +2372,8 @@ impl ControlCenterRenderer {
                     toggle_rect,
                     ControlVisualState {
                         active: snapshot.settings.is_enabled(kind),
-                        enabled: available,
-                        pointer: PointerState::from_flags(
-                            hovered && available,
-                            pressed && available,
-                        ),
+                        enabled: true,
+                        pointer: PointerState::from_flags(hovered, pressed),
                     },
                     palette,
                 );
@@ -2256,24 +2382,20 @@ impl ControlCenterRenderer {
             OttoSettingItem::DockIconSize => self.draw_icon_size_chip(
                 rect,
                 snapshot.settings.dock_size_label(),
-                available,
+                hovered,
+                pressed,
+                palette,
+            ),
+            OttoSettingItem::MenuBarHide => self.draw_icon_size_chip(
+                rect,
+                snapshot.settings.menu_bar.hide_mode.label(),
                 hovered,
                 pressed,
                 palette,
             ),
         };
 
-        let mut right_bound = control_left - scale(8, self.dpi) as f32;
-        if let Some(badge_text) = snapshot.settings.dependency_badge(item) {
-            right_bound = self.draw_dependency_badge(
-                rect,
-                badge_text,
-                rect.x as f32 + pad + scale(72, self.dpi) as f32,
-                right_bound,
-                palette,
-            );
-        }
-
+        let right_bound = control_left - scale(8, self.dpi) as f32;
         let text_left = rect.x as f32 + pad;
         let text_right = right_bound.max(text_left + 1.0);
         let title_r = D2D_RECT_F {
@@ -2288,22 +2410,17 @@ impl ControlCenterRenderer {
             right: text_right,
             bottom: rect.bottom() as f32 - scale(4, self.dpi) as f32,
         };
-        let title_brush = if available {
-            &self.brushes.text_primary
-        } else {
-            &self.brushes.text_disabled
-        };
-        let subtitle_brush = if available {
-            &self.brushes.text_muted
-        } else {
-            &self.brushes.text_disabled
-        };
-        self.draw_text(item.label(), &self.body_format, title_r, title_brush);
+        self.draw_text(
+            item.label(),
+            &self.body_format,
+            title_r,
+            &self.brushes.text_primary,
+        );
         self.draw_text(
             snapshot.settings.item_subtitle(item),
             &self.subtitle_format,
             subtitle_r,
-            subtitle_brush,
+            &self.brushes.text_muted,
         );
     }
 
@@ -2311,12 +2428,11 @@ impl ControlCenterRenderer {
         &self,
         rect: Rect,
         label: &str,
-        available: bool,
         hovered: bool,
         pressed: bool,
         palette: &LiquidGlassPalette,
     ) -> f32 {
-        let chip_w = scale(64, self.dpi);
+        let chip_w = scale(if label.chars().count() > 7 { 84 } else { 64 }, self.dpi);
         let chip_h = scale(22, self.dpi);
         let chip_rect = Rect {
             x: rect.right() - scale(12, self.dpi) - chip_w,
@@ -2330,68 +2446,18 @@ impl ControlCenterRenderer {
             radiusX: chip_r,
             radiusY: chip_r,
         };
-        let chip_bg = self.brushes.color_brush(if available {
-            palette.toggle_inactive
-        } else {
-            palette.slider_track
-        });
+        let chip_bg = self.brushes.color_brush(palette.toggle_inactive);
         unsafe {
             self.target.FillRoundedRectangle(&rr, &chip_bg);
         }
-        if available {
-            self.draw_interaction_overlay(chip_rect, chip_r, hovered, pressed, palette);
-        }
-        let val_brush = if available {
-            &self.brushes.text_primary
-        } else {
-            &self.brushes.text_disabled
-        };
+        self.draw_interaction_overlay(chip_rect, chip_r, hovered, pressed, palette);
         self.draw_text(
             label,
             &self.center_format,
             rect_to_d2d(chip_rect),
-            val_brush,
+            &self.brushes.text_primary,
         );
         chip_rect.x as f32
-    }
-
-    fn draw_dependency_badge(
-        &self,
-        rect: Rect,
-        badge_text: &str,
-        min_left: f32,
-        right_bound: f32,
-        palette: &LiquidGlassPalette,
-    ) -> f32 {
-        let badge_w = scale(82, self.dpi) as f32;
-        let badge_h = scale(18, self.dpi) as f32;
-        let badge_left = right_bound - badge_w;
-        if badge_left <= min_left {
-            return right_bound;
-        }
-        let badge_top = rect.y as f32 + (rect.height as f32 - badge_h) * 0.5;
-        let badge_rect = D2D_RECT_F {
-            left: badge_left,
-            top: badge_top,
-            right: right_bound,
-            bottom: badge_top + badge_h,
-        };
-        let badge_rr = D2D1_ROUNDED_RECT {
-            rect: badge_rect,
-            radiusX: badge_h * 0.5,
-            radiusY: badge_h * 0.5,
-        };
-        let badge_bg = self.brushes.color_brush(palette.slider_track);
-        unsafe {
-            self.target.FillRoundedRectangle(&badge_rr, &badge_bg);
-        }
-        self.draw_text(
-            badge_text,
-            &self.badge_format,
-            badge_rect,
-            &self.brushes.text_disabled,
-        );
-        badge_left - scale(6, self.dpi) as f32
     }
 
     fn draw_footer_button(

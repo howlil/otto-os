@@ -59,6 +59,16 @@ impl NotchPort for WindowsNotchPort {
                     super::signal_command_failure();
                 }
             }
+            NotchAction::NotificationOpen(id) => {
+                if !super::notifications::dismiss_notification(id) {
+                    super::signal_command_failure();
+                }
+            }
+            NotchAction::NotificationDismiss(id) => {
+                if !super::notifications::remove_notification(id) {
+                    super::signal_command_failure();
+                }
+            }
         }
     }
 }

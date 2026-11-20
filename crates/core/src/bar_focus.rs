@@ -2,7 +2,7 @@ use crate::layout::{HitTarget, Layout};
 use crate::media::NotchExpandedTab;
 use crate::pomodoro::FocusSubMode;
 
-const KEYBOARD_CANDIDATES: [HitTarget; 14] = [
+const KEYBOARD_CANDIDATES: [HitTarget; 16] = [
     HitTarget::Start,
     HitTarget::AppMenu,
     HitTarget::FileMenu,
@@ -12,7 +12,9 @@ const KEYBOARD_CANDIDATES: [HitTarget; 14] = [
     HitTarget::HelpMenu,
     HitTarget::MenuOverflow,
     HitTarget::Tray,
-    HitTarget::QuickSettings,
+    HitTarget::StatusWifi,
+    HitTarget::StatusVolume,
+    HitTarget::StatusBattery,
     HitTarget::Search,
     HitTarget::ControlCenter,
     HitTarget::Notifications,
@@ -37,6 +39,9 @@ impl Layout {
 
     #[must_use]
     pub fn keyboard_targets_with_media(&self, media_present: bool) -> Vec<HitTarget> {
+        if let Some(card) = &self.notification {
+            return card.keyboard_targets();
+        }
         let mut bar_items: Vec<(i32, HitTarget)> = KEYBOARD_CANDIDATES
             .into_iter()
             .filter(|target| !self.is_hidden(*target))
@@ -452,6 +457,10 @@ mod tests {
         let layout = compute_layout_for_app(&Metrics::MACBOOK_PRO_14, 1920, 96, "Finder");
         let targets = layout.keyboard_targets();
         assert_eq!(targets.first(), Some(&HitTarget::Start));
+        assert!(targets.contains(&HitTarget::StatusWifi));
+        assert!(targets.contains(&HitTarget::StatusVolume));
+        assert!(targets.contains(&HitTarget::StatusBattery));
+        assert!(!targets.contains(&HitTarget::QuickSettings));
         assert!(targets.contains(&HitTarget::Notifications));
         assert!(targets.contains(&HitTarget::Clock));
         assert!(!targets.contains(&HitTarget::Notch));
@@ -470,7 +479,22 @@ mod tests {
         for hidden in &layout.hidden_targets {
             assert!(!targets.contains(hidden));
         }
+        if layout.is_hidden(HitTarget::QuickSettings) {
+            assert!(!targets.contains(&HitTarget::StatusWifi));
+            assert!(!targets.contains(&HitTarget::StatusVolume));
+            assert!(!targets.contains(&HitTarget::StatusBattery));
+        }
         assert!(targets.contains(&HitTarget::MenuOverflow));
+    }
+
+    #[test]
+    fn hidden_status_group_hides_each_status_icon_from_keyboard_focus() {
+        let mut layout = compute_layout_for_app(&Metrics::MACBOOK_PRO_14, 1920, 96, "Finder");
+        layout.hidden_targets.push(HitTarget::QuickSettings);
+        let targets = layout.keyboard_targets();
+        assert!(!targets.contains(&HitTarget::StatusWifi));
+        assert!(!targets.contains(&HitTarget::StatusVolume));
+        assert!(!targets.contains(&HitTarget::StatusBattery));
     }
 
     const TARGETS: [HitTarget; 4] = [

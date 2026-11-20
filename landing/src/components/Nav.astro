@@ -1,5 +1,4 @@
 ---
-import { ArrowUpRight } from "lucide-astro";
 import BrandMark from "./ui/BrandMark.astro";
 
 interface Props {
@@ -25,27 +24,18 @@ const links = [
       <BrandMark size={21} />
     </a>
 
-    <div class="flex items-center gap-6 sm:gap-9">
-      <ul class="hidden items-center gap-7 whitespace-nowrap sm:flex">
-        {links.map((link) => (
-          <li>
-            <a
-              href={link.href}
-              class="rounded-md py-2 text-[13px] font-medium text-ink-soft/85 transition-colors duration-150 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-            >
-              {link.label}
-            </a>
-          </li>
-        ))}
-      </ul>
-      <a
-        href={isSubpage ? "/#daftar" : "#daftar"}
-        data-waitlist-trigger={isSubpage ? undefined : ""}
-        class="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-full bg-ink px-5 text-[13px] font-medium text-white whitespace-nowrap transition-colors duration-150 hover:bg-[#343434] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-      >
-        Join Beta <ArrowUpRight size={14} strokeWidth={1.7} />
-      </a>
-    </div>
+    <ul class="flex flex-wrap items-center justify-end gap-x-2 whitespace-nowrap sm:gap-x-7">
+      {links.map((link) => (
+        <li>
+          <a
+            href={link.href}
+            class="inline-flex min-h-11 items-center rounded-md px-1 text-[13px] font-medium text-ink-soft/85 transition-colors duration-150 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+          >
+            {link.label}
+          </a>
+        </li>
+      ))}
+    </ul>
   </nav>
 </header>
 
@@ -54,16 +44,17 @@ const links = [
     position: relative;
     z-index: 50;
     width: 100%;
-    background: #fdfdfd;
+    background: var(--color-sky-low);
   }
 
   .site-header-inner {
     display: flex;
+    flex-wrap: wrap;
     width: min(1100px, calc(100% - 40px));
     min-height: 76px;
     align-items: center;
     justify-content: space-between;
-    gap: 24px;
+    gap: 8px 16px;
     margin-inline: auto;
   }
 

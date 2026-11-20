@@ -81,6 +81,34 @@ impl LiquidGlassPalette {
             is_translucent: variant == MaterialVariant::Glass,
         }
     }
+
+    #[must_use]
+    pub fn for_control_center(appearance: &Appearance) -> Self {
+        let mut palette = Self::for_appearance(appearance);
+        if palette.is_translucent && !palette.is_high_contrast {
+            if palette.is_dark {
+                palette.card_fill = D2D1_COLOR_F {
+                    r: 0.07,
+                    g: 0.08,
+                    b: 0.11,
+                    a: 0.34,
+                };
+                palette.text_muted.a = 0.84;
+            } else {
+                palette.card_fill = palette.menu_fill;
+                palette.text_muted.a = 0.72;
+            }
+        }
+        palette
+    }
+
+    pub(crate) const fn control_center_card_sheen_alpha(&self) -> f32 {
+        if self.is_translucent && !self.is_high_contrast {
+            if self.is_dark { 0.03 } else { 0.24 }
+        } else {
+            0.0
+        }
+    }
 }
 
 fn brush_key(color: D2D1_COLOR_F) -> u32 {
@@ -294,11 +322,15 @@ impl BrushPalette {
 #[cfg(test)]
 mod tests {
     use super::{LiquidGlassPalette, brush_key};
-    use otto_core::{Appearance, ContrastColors, ResolvedTheme};
+    use otto_core::{Appearance, ContrastColors, GlassParams, ResolvedTheme, Rgba};
     use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
     const fn color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
         D2D1_COLOR_F { r, g, b, a }
+    }
+
+    fn rgba(color: D2D1_COLOR_F) -> Rgba {
+        Rgba::new(color.r, color.g, color.b, color.a)
     }
 
     #[test]
@@ -330,5 +362,64 @@ mod tests {
         });
         assert!(contrast.is_high_contrast);
         assert!((contrast.text_primary.r - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn control_center_text_meets_wcag_aa_on_glass_cards_across_adaptive_midtones() {
+        for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+            let appearance = Appearance::glass(theme);
+            let palette = LiquidGlassPalette::for_control_center(&appearance);
+            let glass = GlassParams::for_theme(theme);
+            let levels: &[f32] = match theme {
+                ResolvedTheme::Dark => &[0.0, 0.25, 0.44, 0.5, 0.56],
+                ResolvedTheme::Light => &[0.44, 0.5, 0.56, 0.75, 1.0],
+            };
+
+            for &level in levels {
+                let graded = glass.grade([level; 3], 1.0);
+                let backdrop = Rgba::new(graded[0], graded[1], graded[2], 1.0);
+                let shell = Rgba::new(1.0, 1.0, 1.0, glass.sheen_alpha).blend_over(backdrop);
+                let card = rgba(palette.card_fill).blend_over(shell);
+
+                for sheen in [0.0, palette.control_center_card_sheen_alpha()] {
+                    let background = Rgba::new(1.0, 1.0, 1.0, sheen).blend_over(card);
+                    for (name, text) in [
+                        ("primary", rgba(palette.text_primary)),
+                        ("muted", rgba(palette.text_muted)),
+                    ] {
+                        let ratio = text.contrast_ratio(background);
+                        assert!(
+                            ratio >= 4.5,
+                            "{theme:?} backdrop {level} sheen {sheen} {name}: {ratio:.2}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn control_center_palette_preserves_opaque_and_high_contrast_fallbacks() {
+        let appearances = [
+            Appearance {
+                transparency: false,
+                ..Appearance::glass(ResolvedTheme::Dark)
+            },
+            Appearance {
+                contrast: Some(ContrastColors::BLACK_THEME),
+                ..Appearance::glass(ResolvedTheme::Light)
+            },
+        ];
+
+        for appearance in appearances {
+            let base = LiquidGlassPalette::for_appearance(&appearance);
+            let control_center = LiquidGlassPalette::for_control_center(&appearance);
+            assert!((control_center.card_fill.r - base.card_fill.r).abs() < f32::EPSILON);
+            assert!((control_center.card_fill.g - base.card_fill.g).abs() < f32::EPSILON);
+            assert!((control_center.card_fill.b - base.card_fill.b).abs() < f32::EPSILON);
+            assert!((control_center.card_fill.a - base.card_fill.a).abs() < f32::EPSILON);
+            assert!((control_center.text_muted.a - base.text_muted.a).abs() < f32::EPSILON);
+            assert!(control_center.control_center_card_sheen_alpha().abs() < f32::EPSILON);
+        }
     }
 }

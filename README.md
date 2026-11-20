@@ -81,13 +81,18 @@ Supported CLI flags:
 - `--quit`: cleanly close an active Otto OS instance and restore shell state before upgrades or uninstall.
 - `--restore-shell`: restore any saved taskbar and work-area recovery state.
 
-Global keyboard shortcuts (when hotkeys are enabled):
+Global keyboard shortcuts:
 
-- `Ctrl+Alt+N`: toggle expanded Notch panel.
-- `Ctrl+Alt+P`: toggle Pomodoro focus timer.
+- `Ctrl+Alt+,`: toggle Otto Settings (always active, even with Top Bar or Global Hotkeys disabled).
+- `Ctrl+Alt+B` / `Ctrl+Alt+D`: toggle the Top Bar or Dock from anywhere (always active).
+- `Ctrl+Alt+C`: toggle Control Center.
+- `Ctrl+Alt+Space`: toggle Spotlight Search.
+- `Ctrl+Alt+N` / `Ctrl+Alt+P` / `Ctrl+Alt+Q`: toggle expanded Notch, Pomodoro timer, or Quick Capture (when Global Hotkeys are enabled).
 - `Ctrl+F2`: focus the top bar for keyboard navigation.
 
-### Build the per-user installer (v1.0 Public Beta)
+Otto Settings is also accessible from the Windows System Tray icon (left-click opens Otto Settings, right-click opens the quick menu), the Dock right-click menu, or right-clicking the idle Notch when the Top Bar is disabled.
+
+### Build the per-user installer
 
 Build a per-user Windows `.exe` installer (Inno Setup 6, no UAC elevation required; invokes `--quit` cleanly on upgrade/uninstall):
 
@@ -97,16 +102,16 @@ Build a per-user Windows `.exe` installer (Inno Setup 6, no UAC elevation requir
 
 WinGet manifest templates (`howlil.OttoOS`) live under `packaging/winget/` and automated CI/Release workflows live under `.github/workflows/`.
 
-### Build an MSIX package (v1.1 Microsoft Store lane)
+### Build an MSIX package (Microsoft Store lane)
 
-The repository includes a reproducible Windows SDK packaging lane. Store identity, publisher, version, certificate, and Store PNG brand assets under `packaging/msix/Assets` are deferred to v1.1 and supplied at build time rather than committed to source control:
+The repository includes a reproducible Windows SDK packaging lane. Store identity, publisher, version, certificate, and Store PNG brand assets under `packaging/msix/Assets` are supplied at build time rather than committed to source control:
 
 ```powershell
 .\packaging\msix\build.ps1 `
   -IdentityName 'your-store-identity' `
   -Publisher 'CN=Your Publisher' `
   -PublisherDisplayName 'Your Publisher' `
-  -Version '0.1.0.0' `
+  -Version '1.0.0.0' `
   -CertificatePath 'C:\path\to\publisher.pfx' `
   -CertificatePassword (Read-Host 'PFX password' -AsSecureString)
 ```
@@ -157,11 +162,11 @@ onboarding_seen=false
 
 Rolling local diagnostic logs (zero telemetry, excluding clipboard contents) are written to `%LOCALAPPDATA%\otto-os\logs\`.
 
-The popup menu and top bar remain required host surfaces. Optional plugins can be disabled without removing the required host path. Control Center is accessed from the two-toggle icon between Search and Clock in the top bar.
+The popup menu and Spotlight remain required host surfaces. The Top Bar, Notch, Dock, Window Controls, Genie, and Control Center can be toggled independently while keeping Otto Settings reachable via the Windows System Tray icon and `Ctrl+Alt+,`.
 
 ## Project status
 
-Otto OS is preparing for v1.0 Public Beta. Core models, native adapters, rendering, runtime orchestration, per-user installer packaging, WinGet templates, and unit suites are in place; interactive desktop E2E validation, Store MSIX assets (`v1.1`), and remaining idle CPU reductions remain tracked in [`.agents/engineering.md`](.agents/engineering.md).
+Otto OS `v1.0.0` is released for Windows 11 22H2+ (x64) via GitHub Releases (per-user installer, portable ZIP, SHA-256 checksums, and WinGet manifests). Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md), and architecture contracts live in [`.agents/engineering.md`](.agents/engineering.md).
 
 ## Contributing
 

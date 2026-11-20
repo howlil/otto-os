@@ -9,12 +9,15 @@ mod glow;
 mod lyrics;
 mod media;
 mod menu;
+mod notification;
 mod palette;
 mod pomodoro;
 mod privacy;
 mod shelf;
+mod spotlight;
 mod stack;
 mod surface;
+mod tasks;
 mod theme;
 mod window_controls;
 
@@ -24,7 +27,8 @@ use std::f32::consts::PI;
 pub use control_center::{ControlCenterPaintState, ControlCenterRenderer};
 pub use dock::{DockRenderItem, DockRenderer};
 pub use genie::{GenieRenderer, build_fallback_card_snapshot};
-pub use menu::PopupMenuRenderer;
+pub use menu::{MenuHover, PopupMenuRenderer};
+pub use spotlight::{SpotlightPaintEntry, SpotlightPaintState, SpotlightRenderer};
 pub use stack::DownloadsStackRenderer;
 pub use theme::{BrushPalette, LiquidGlassPalette};
 pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
@@ -32,31 +36,34 @@ pub use window_controls::{TrafficLightRenderer, WindowControlsRenderer};
 use otto_core::{
     Appearance, BrandIcon, ClipboardState, CompactSlotKind, HitTarget, HudGlyph, HudTone, HudValue,
     Layout, LyricsView, MediaScene, NotchHudState, PomodoroScene, PrivacyState, Rect, ShapeTokens,
-    ShelfState, SystemStatus, cover_accent, present_hud, scale,
+    ShelfState, SystemStatus, TasksState, cover_accent, present_hud, scale,
 };
 use surface::{DibSurface, create_dc_render_target, draw_with_recovery, fnv1a_hash};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory,
-    ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1GeometrySink, ID2D1PathGeometry,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2, D2D1_LINE_JOIN_ROUND,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_SWEEP_DIRECTION, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1GeometrySink,
+    ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
-    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
-    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+    IDWriteTextFormat, IDWriteTypography,
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
@@ -76,6 +83,7 @@ const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
 const DISABLED_CONTROL_ALPHA: f32 = 0.35;
 const PANEL_CONTENT_RISE_PT: i32 = 8;
 const NOTCH_TAB_SLIDE_PT: i32 = 24;
+pub(crate) const GLYPH_STROKE_SCALE: f32 = 0.18;
 const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 1.0,
     g: 1.0,
@@ -172,16 +180,48 @@ pub struct Renderer {
     cached_panel_notch: RefCell<Option<CachedNotchGeometry>>,
     cached_cover_art: RefCell<Option<CachedCoverArt>>,
     cached_shelf_bitmaps: RefCell<Vec<shelf::CachedShelfBitmap>>,
+    last_bar_frame: RefCell<Option<bar::BarFrameKey>>,
+    last_bar_target: Cell<Option<(isize, (i32, i32))>>,
     glass: glass::GlassPainter,
     brand_icon: Cell<BrandIcon>,
+    bar_background: Cell<bool>,
+    bar_chrome_hidden: Cell<bool>,
+}
+
+const SQUIRCLE_CACHE_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SquircleCacheKey {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    radius: u32,
+}
+
+impl SquircleCacheKey {
+    const fn new(rect: D2D_RECT_F, radius: f32) -> Self {
+        Self {
+            left: rect.left.to_bits(),
+            top: rect.top.to_bits(),
+            right: rect.right.to_bits(),
+            bottom: rect.bottom.to_bits(),
+            radius: radius.to_bits(),
+        }
+    }
 }
 
 thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory>> = const { RefCell::new(None) };
     static DWRITE_FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
+    static TABULAR_TYPOGRAPHY: RefCell<Option<IDWriteTypography>> = const { RefCell::new(None) };
+    static SQUIRCLE_CACHE: RefCell<Vec<(SquircleCacheKey, ID2D1PathGeometry)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn release_shared_factories() {
+    glass_gpu::release_shared_gpu();
+    let _ = SQUIRCLE_CACHE.try_with(|cell| cell.borrow_mut().clear());
+    let _ = TABULAR_TYPOGRAPHY.try_with(|cell| cell.borrow_mut().take());
     let _ = D2D_FACTORY.try_with(|cell| cell.borrow_mut().take());
     let _ = DWRITE_FACTORY.try_with(|cell| cell.borrow_mut().take());
 }
@@ -208,6 +248,28 @@ pub(crate) fn shared_dwrite_factory() -> Result<IDWriteFactory> {
             let factory: IDWriteFactory =
                 unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
             *guard = Some(factory);
+        }
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))
+    })
+}
+
+pub(crate) fn shared_tabular_typography() -> Result<IDWriteTypography> {
+    TABULAR_TYPOGRAPHY.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            let dwrite = shared_dwrite_factory()?;
+            let typography = unsafe {
+                let typography: IDWriteTypography = dwrite.CreateTypography()?;
+                typography.AddFontFeature(DWRITE_FONT_FEATURE {
+                    nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                    parameter: 1,
+                })?;
+                typography
+            };
+            *guard = Some(typography);
         }
         guard
             .as_ref()
@@ -446,14 +508,31 @@ impl Renderer {
                 cached_panel_notch,
                 cached_cover_art: RefCell::new(None),
                 cached_shelf_bitmaps: RefCell::default(),
+                last_bar_frame: RefCell::new(None),
+                last_bar_target: Cell::new(None),
                 glass: glass::GlassPainter::default(),
                 brand_icon: Cell::new(BrandIcon::Otto),
+                bar_background: Cell::new(true),
+                bar_chrome_hidden: Cell::new(false),
             })
+        }
+    }
+
+    pub fn set_bar_background(&self, shown: bool) {
+        if self.bar_background.replace(shown) != shown {
+            self.last_bar_frame.borrow_mut().take();
+        }
+    }
+
+    pub fn set_bar_chrome_hidden(&self, hidden: bool) {
+        if self.bar_chrome_hidden.replace(hidden) != hidden {
+            self.last_bar_frame.borrow_mut().take();
         }
     }
 
     pub fn set_brand_icon(&self, brand_icon: BrandIcon) {
         self.brand_icon.set(brand_icon);
+        self.last_bar_frame.borrow_mut().take();
     }
 
     fn recreate_target(&mut self) -> Result<()> {
@@ -464,6 +543,8 @@ impl Renderer {
         self.glass.invalidate_gpu();
         self.cached_cover_art.borrow_mut().take();
         self.cached_shelf_bitmaps.borrow_mut().clear();
+        self.last_bar_frame.borrow_mut().take();
+        self.last_bar_target.set(None);
         Ok(())
     }
 
@@ -483,26 +564,46 @@ impl Renderer {
         anim_phase: f32,
         appearance: Appearance,
         privacy: &PrivacyState,
+        call: Option<&otto_core::CallScene>,
     ) -> Result<()> {
+        if let Some(fields) =
+            self.bar_frame_fields(layout, status, hovered, focused, hud, appearance)
+            && self.last_bar_target.get() == Some((hwnd, origin))
+            && self
+                .last_bar_frame
+                .borrow()
+                .as_ref()
+                .is_some_and(|cached| cached.matches(&fields, app_name))
+        {
+            return Ok(());
+        }
         draw_with_recovery(
             self,
             |renderer| {
                 renderer.draw_bar(
                     layout, status, app_name, hovered, focused, hud, pomodoro, media, anim_phase,
-                    appearance, privacy,
+                    appearance, privacy, call,
                 )
             },
             Self::recreate_target,
         )?;
-        self.bar_surface.present(hwnd, origin)
+        if let Err(err) = self.bar_surface.present(hwnd, origin) {
+            self.last_bar_frame.borrow_mut().take();
+            self.last_bar_target.set(None);
+            return Err(err);
+        }
+        self.last_bar_target.set(Some((hwnd, origin)));
+        Ok(())
     }
 
     pub fn set_bar_backdrop(&self, capture: otto_core::RgbBuffer, origin: (i32, i32)) {
         self.glass.set_backdrop(capture, origin);
+        self.last_bar_frame.borrow_mut().take();
     }
 
     pub fn clear_bar_backdrop(&self) {
         self.glass.clear_backdrop();
+        self.last_bar_frame.borrow_mut().take();
     }
 
     #[must_use]
@@ -523,7 +624,9 @@ impl Renderer {
         lyrics: LyricsView<'_>,
         shelf_state: &ShelfState,
         clipboard_state: &ClipboardState,
+        tasks_state: &TasksState,
         privacy: &PrivacyState,
+        notification: Option<&otto_core::NotificationPresentation>,
     ) -> Result<()> {
         draw_with_recovery(
             self,
@@ -538,7 +641,9 @@ impl Renderer {
                     lyrics,
                     shelf_state,
                     clipboard_state,
+                    tasks_state,
                     privacy,
+                    notification,
                 )
             },
             Self::recreate_target,
@@ -555,6 +660,7 @@ impl Renderer {
         layout: &Layout,
         pomodoro: &PomodoroScene,
         media: Option<&MediaScene>,
+        call: Option<&otto_core::CallScene>,
         anim_phase: f32,
     ) -> Result<()> {
         let primary = layout.compact_primary.unwrap_or_else(|| {
@@ -580,6 +686,7 @@ impl Renderer {
                 CompactSlotKind::Media => {
                     self.draw_compact_pomodoro(layout, pomodoro, 1.0 - blend)?;
                 }
+                CompactSlotKind::Call => {}
             }
             self.set_content_offset((1.0 - blend) * slide, 0.0);
         }
@@ -591,11 +698,65 @@ impl Renderer {
                 }
                 Ok(())
             }
+            CompactSlotKind::Call => match call {
+                Some(scene) => self.draw_compact_call(layout, scene, anim_phase, 1.0),
+                None => Ok(()),
+            },
         };
         if blend < 0.995 {
             self.set_content_offset(0.0, 0.0);
         }
         result
+    }
+
+    fn draw_metaball_bridge(&self, layout: &Layout, cy: f32, r: f32) -> Result<()> {
+        if layout.notch.y <= 0 || layout.notch_secondary.right() <= layout.notch.right() {
+            return Ok(());
+        }
+        let max_gap = scale(10, self.dpi) as f32;
+        let gap = (layout.notch_secondary.x - layout.notch.right()) as f32;
+        if gap >= max_gap {
+            return Ok(());
+        }
+        let bridge_inset = (r * 0.35).min(scale(4, self.dpi) as f32).max(1.0);
+        let left_x = layout.notch.right() as f32 - bridge_inset;
+        let right_x = layout.notch_secondary.x as f32 + bridge_inset;
+        if right_x <= left_x + 0.5 {
+            return Ok(());
+        }
+        let blend = (1.0 - gap.max(0.0) / max_gap.max(1.0)).clamp(0.0, 1.0);
+        let dx = (r - bridge_inset).max(0.0);
+        let circle_half_h = (r * r - dx * dx).max(1.0).sqrt();
+        let notch_half_limit = (cy - layout.notch.y as f32 - 1.5)
+            .min(layout.notch.bottom() as f32 - cy - 1.5)
+            .max(1.0);
+        let edge_half_h = circle_half_h.min(notch_half_limit);
+        let waist_half_h = edge_half_h * (0.15 + 0.60 * blend);
+        let mid_x = (left_x + right_x) * 0.5;
+        unsafe {
+            let geom = self.factory.CreatePathGeometry()?;
+            let sink = geom.Open()?;
+            sink.BeginFigure(
+                Vector2::new(left_x, cy - edge_half_h),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(mid_x, cy - waist_half_h),
+                point2: Vector2::new(mid_x, cy - waist_half_h),
+                point3: Vector2::new(right_x, cy - edge_half_h),
+            });
+            sink.AddLine(Vector2::new(right_x, cy + edge_half_h));
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(mid_x, cy + waist_half_h),
+                point2: Vector2::new(mid_x, cy + waist_half_h),
+                point3: Vector2::new(left_x, cy + edge_half_h),
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target
+                .FillGeometry(&geom, &self.brushes.notch_obsidian, None);
+        }
+        Ok(())
     }
 
     fn draw_secondary_notch_frame(
@@ -609,6 +770,7 @@ impl Renderer {
         let r = rect.width.min(rect.height) as f32 * 0.5;
         let cx = rect.x as f32 + rect.width as f32 * 0.5;
         let cy = rect.y as f32 + rect.height as f32 * 0.5;
+        let _ = self.draw_metaball_bridge(layout, cy, r);
         let ellipse = D2D1_ELLIPSE {
             point: Vector2::new(cx, cy),
             radiusX: r,
@@ -651,7 +813,7 @@ impl Renderer {
     ) -> Result<()> {
         let primary = layout.compact_primary.unwrap_or(CompactSlotKind::Focus);
         let secondary = layout.compact_secondary.unwrap_or(match primary {
-            CompactSlotKind::Focus => CompactSlotKind::Media,
+            CompactSlotKind::Focus | CompactSlotKind::Call => CompactSlotKind::Media,
             CompactSlotKind::Media => CompactSlotKind::Focus,
         });
         let blend = layout.compact_swap_blend.clamp(0.0, 1.0);
@@ -666,6 +828,7 @@ impl Renderer {
                 }
                 Ok(())
             }
+            CompactSlotKind::Call => Ok(()),
         }
     }
 
@@ -825,13 +988,82 @@ impl Renderer {
     }
 
     fn draw_rounded_box(&self, box_rect: Rect, radius: f32, brush: &ID2D1SolidColorBrush) {
+        let rect = rect_to_d2d(box_rect);
+        if radius >= 6.0
+            && let Ok(geom) = build_squircle_path(&self.factory, rect, radius)
+        {
+            unsafe {
+                self.target.FillGeometry(&geom, brush, None);
+            }
+            return;
+        }
         let pill = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(box_rect),
+            rect,
             radiusX: radius,
             radiusY: radius,
         };
         unsafe {
             self.target.FillRoundedRectangle(&pill, brush);
+        }
+    }
+
+    pub(crate) fn draw_directional_rim(
+        &self,
+        geom: &ID2D1PathGeometry,
+        top_y: f32,
+        bottom_y: f32,
+        top_alpha: f32,
+        mid_alpha: f32,
+        bottom_alpha: f32,
+    ) {
+        let stops = [
+            D2D1_GRADIENT_STOP {
+                position: 0.0,
+                color: D2D1_COLOR_F {
+                    a: top_alpha,
+                    ..FOREGROUND
+                },
+            },
+            D2D1_GRADIENT_STOP {
+                position: 0.5,
+                color: D2D1_COLOR_F {
+                    a: mid_alpha,
+                    ..FOREGROUND
+                },
+            },
+            D2D1_GRADIENT_STOP {
+                position: 1.0,
+                color: D2D1_COLOR_F {
+                    a: bottom_alpha,
+                    ..FOREGROUND
+                },
+            },
+        ];
+        let end_y = bottom_y.max(top_y + 1.0);
+        let brush: Option<ID2D1LinearGradientBrush> = unsafe {
+            self.target
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                .and_then(|collection| {
+                    self.target.CreateLinearGradientBrush(
+                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: Vector2::new(0.0, top_y),
+                            endPoint: Vector2::new(0.0, end_y),
+                        },
+                        None,
+                        &collection,
+                    )
+                })
+                .ok()
+        };
+        unsafe {
+            if let Some(gradient) = brush {
+                self.target
+                    .DrawGeometry(geom, &gradient, 1.0, &self.stroke_style);
+            } else {
+                let fallback = self.brushes.alpha_brush(FOREGROUND, mid_alpha);
+                self.target
+                    .DrawGeometry(geom, &fallback, 1.0, &self.stroke_style);
+            }
         }
     }
 
@@ -991,7 +1223,7 @@ impl Renderer {
     }
 
     fn draw_music_note_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (r * 0.22).max(1.5);
+        let stroke = (r * GLYPH_STROKE_SCALE).max(1.5);
         let head_radius_x = r * 0.38;
         let head_radius_y = r * 0.28;
         let gap = r * 0.75;
@@ -1322,7 +1554,7 @@ impl Renderer {
             fg,
         )?;
 
-        let bat_x = speaker_x + unit * 1.05;
+        let bat_x = speaker_x + unit * 1.38;
         let bat_w = unit * 1.40;
         let bat_h = unit * 0.72;
         let bat_top = cy - bat_h * 0.5;
@@ -1700,7 +1932,7 @@ impl Renderer {
         }
 
         match presentation.value {
-            HudValue::Percent(percent) => self.draw_text(
+            HudValue::Percent(percent) => self.draw_tabular_text(
                 &format!("{percent}%"),
                 &self.text_hud_value,
                 rect_to_d2d(geometry.value),
@@ -2178,7 +2410,7 @@ impl Renderer {
             bottom: slot.height as f32,
         };
         let text = status.clock.format();
-        self.draw_text(&text, &self.text_leading, text_rect, fg);
+        self.draw_tabular_text(&text, &self.text_leading, text_rect, fg);
     }
 
     fn draw_notification_slot(&self, layout: &Layout, fg: &ID2D1SolidColorBrush) -> Result<()> {
@@ -2241,6 +2473,16 @@ impl Renderer {
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
+    }
+
+    pub(crate) fn draw_tabular_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        draw_dwrite_tabular_text(&self.target, text, format, rect, brush);
     }
 
     fn notch_geometry_rect(
@@ -2310,6 +2552,205 @@ fn notch_arc_segment(x: f32, y: f32, radius: f32, sweep: D2D1_SWEEP_DIRECTION) -
     }
 }
 
+struct SquircleCorner {
+    reach: f32,
+    smoothing: f32,
+    arc_start: (f32, f32),
+    arc_end: (f32, f32),
+    edge_ctrl_1: f32,
+    edge_ctrl_2: f32,
+    arc_ctrl_1: (f32, f32),
+    arc_ctrl_2: (f32, f32),
+}
+
+impl SquircleCorner {
+    fn new(radius: f32, width: f32, height: f32) -> Self {
+        let max_reach = 1.528_665 * radius;
+        let reach_x = max_reach.min(width * 0.5);
+        let reach_y = max_reach.min(height * 0.5);
+        let smooth_x = ((reach_x / radius - 1.0) / 0.528_665).clamp(0.0, 1.0);
+        let smooth_y = ((reach_y / radius - 1.0) / 0.528_665).clamp(0.0, 1.0);
+        let smoothing = smooth_x.min(smooth_y);
+        if smoothing <= 1.0e-4 {
+            let kappa = (4.0 / 3.0) * (PI * 0.125).tan();
+            let handle = radius * (1.0 - kappa);
+            return Self {
+                reach: radius,
+                smoothing: 0.0,
+                arc_start: (0.0, radius),
+                arc_end: (radius, 0.0),
+                edge_ctrl_1: radius,
+                edge_ctrl_2: radius,
+                arc_ctrl_1: (0.0, handle),
+                arc_ctrl_2: (handle, 0.0),
+            };
+        }
+        let reach = radius * (1.0 + 0.528_665 * smoothing);
+        let alpha = (PI * 0.125) * smoothing;
+        let sin_a = alpha.sin();
+        let cos_a = alpha.cos();
+        let tan_half = (alpha * 0.5).tan();
+        let cos_half = (alpha * 0.5).cos();
+        let arc_start = (radius * (1.0 - cos_a), radius * (1.0 - sin_a));
+        let arc_end = (arc_start.1, arc_start.0);
+        let edge_ctrl_2 = radius * (1.0 - tan_half);
+        let edge_ctrl_1 = edge_ctrl_2 + 0.75 * radius * tan_half / (cos_half * cos_half);
+        let arc_handle = (4.0 / 3.0) * (PI * 0.125 - alpha * 0.5).tan() * radius;
+        let arc_ctrl_1 = (
+            arc_start.0 + arc_handle * sin_a,
+            arc_start.1 - arc_handle * cos_a,
+        );
+        let arc_ctrl_2 = (
+            arc_end.0 - arc_handle * cos_a,
+            arc_end.1 + arc_handle * sin_a,
+        );
+        Self {
+            reach,
+            smoothing,
+            arc_start,
+            arc_end,
+            edge_ctrl_1,
+            edge_ctrl_2,
+            arc_ctrl_1,
+            arc_ctrl_2,
+        }
+    }
+
+    unsafe fn emit_v_to_u(&self, sink: &ID2D1GeometrySink, map: impl Fn(f32, f32) -> Vector2) {
+        unsafe {
+            if self.smoothing <= 1.0e-4 {
+                sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                    point1: map(self.arc_ctrl_1.0, self.arc_ctrl_1.1),
+                    point2: map(self.arc_ctrl_2.0, self.arc_ctrl_2.1),
+                    point3: map(self.reach, 0.0),
+                });
+                return;
+            }
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(0.0, self.edge_ctrl_1),
+                point2: map(0.0, self.edge_ctrl_2),
+                point3: map(self.arc_start.0, self.arc_start.1),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(self.arc_ctrl_1.0, self.arc_ctrl_1.1),
+                point2: map(self.arc_ctrl_2.0, self.arc_ctrl_2.1),
+                point3: map(self.arc_end.0, self.arc_end.1),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(self.edge_ctrl_2, 0.0),
+                point2: map(self.edge_ctrl_1, 0.0),
+                point3: map(self.reach, 0.0),
+            });
+        }
+    }
+
+    unsafe fn emit_u_to_v(&self, sink: &ID2D1GeometrySink, map: impl Fn(f32, f32) -> Vector2) {
+        unsafe {
+            if self.smoothing <= 1.0e-4 {
+                sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                    point1: map(self.arc_ctrl_2.0, self.arc_ctrl_2.1),
+                    point2: map(self.arc_ctrl_1.0, self.arc_ctrl_1.1),
+                    point3: map(0.0, self.reach),
+                });
+                return;
+            }
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(self.edge_ctrl_1, 0.0),
+                point2: map(self.edge_ctrl_2, 0.0),
+                point3: map(self.arc_end.0, self.arc_end.1),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(self.arc_ctrl_2.0, self.arc_ctrl_2.1),
+                point2: map(self.arc_ctrl_1.0, self.arc_ctrl_1.1),
+                point3: map(self.arc_start.0, self.arc_start.1),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: map(0.0, self.edge_ctrl_2),
+                point2: map(0.0, self.edge_ctrl_1),
+                point3: map(0.0, self.reach),
+            });
+        }
+    }
+}
+
+pub(crate) unsafe fn write_squircle_figure(
+    sink: &ID2D1GeometrySink,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    cr: f32,
+) {
+    let width = (right - left).max(0.0);
+    let height = (bottom - top).max(0.0);
+    let radius = cr.clamp(0.0, width.min(height) * 0.5);
+    unsafe {
+        if radius <= 0.5 {
+            sink.BeginFigure(Vector2::new(left, top), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(Vector2::new(right, top));
+            sink.AddLine(Vector2::new(right, bottom));
+            sink.AddLine(Vector2::new(left, bottom));
+            return;
+        }
+        let corner = SquircleCorner::new(radius, width, height);
+        let reach = corner.reach;
+        sink.BeginFigure(Vector2::new(left + reach, top), D2D1_FIGURE_BEGIN_FILLED);
+        if width > reach * 2.0 + 0.001 {
+            sink.AddLine(Vector2::new(right - reach, top));
+        }
+        corner.emit_u_to_v(sink, |u, v| Vector2::new(right - u, top + v));
+        if height > reach * 2.0 + 0.001 {
+            sink.AddLine(Vector2::new(right, bottom - reach));
+        }
+        corner.emit_v_to_u(sink, |u, v| Vector2::new(right - u, bottom - v));
+        if width > reach * 2.0 + 0.001 {
+            sink.AddLine(Vector2::new(left + reach, bottom));
+        }
+        corner.emit_u_to_v(sink, |u, v| Vector2::new(left + u, bottom - v));
+        if height > reach * 2.0 + 0.001 {
+            sink.AddLine(Vector2::new(left, top + reach));
+        }
+        corner.emit_v_to_u(sink, |u, v| Vector2::new(left + u, top + v));
+    }
+}
+
+pub(crate) fn build_squircle_path(
+    factory: &ID2D1Factory,
+    rect: D2D_RECT_F,
+    radius: f32,
+) -> Result<ID2D1PathGeometry> {
+    let key = SquircleCacheKey::new(rect, radius);
+    if let Ok(Some(cached)) = SQUIRCLE_CACHE.try_with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
+            if pos + 1 != cache.len() {
+                let entry = cache.remove(pos);
+                cache.push(entry);
+            }
+            return cache.last().map(|(_, geom)| geom.clone());
+        }
+        None
+    }) {
+        return Ok(cached);
+    }
+    let geometry = unsafe {
+        let geometry = factory.CreatePathGeometry()?;
+        let sink = geometry.Open()?;
+        write_squircle_figure(&sink, rect.left, rect.top, rect.right, rect.bottom, radius);
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        geometry
+    };
+    let _ = SQUIRCLE_CACHE.try_with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.len() >= SQUIRCLE_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push((key, geometry.clone()));
+    });
+    Ok(geometry)
+}
+
 unsafe fn write_floating_notch_figure(
     sink: &ID2D1GeometrySink,
     left: f32,
@@ -2319,42 +2760,7 @@ unsafe fn write_floating_notch_figure(
     cr: f32,
 ) {
     unsafe {
-        if cr > 0.5 {
-            sink.BeginFigure(Vector2::new(left + cr, top), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(Vector2::new(right - cr, top));
-            sink.AddArc(&notch_arc_segment(
-                right,
-                top + cr,
-                cr,
-                D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            ));
-            sink.AddLine(Vector2::new(right, bottom - cr));
-            sink.AddArc(&notch_arc_segment(
-                right - cr,
-                bottom,
-                cr,
-                D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            ));
-            sink.AddLine(Vector2::new(left + cr, bottom));
-            sink.AddArc(&notch_arc_segment(
-                left,
-                bottom - cr,
-                cr,
-                D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            ));
-            sink.AddLine(Vector2::new(left, top + cr));
-            sink.AddArc(&notch_arc_segment(
-                left + cr,
-                top,
-                cr,
-                D2D1_SWEEP_DIRECTION_CLOCKWISE,
-            ));
-        } else {
-            sink.BeginFigure(Vector2::new(left, top), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(Vector2::new(right, top));
-            sink.AddLine(Vector2::new(right, bottom));
-            sink.AddLine(Vector2::new(left, bottom));
-        }
+        write_squircle_figure(sink, left, top, right, bottom, cr);
     }
 }
 
@@ -2524,6 +2930,100 @@ pub(crate) fn draw_crescent_moon(
         target.FillGeometry(&geometry, brush, None);
     }
     Ok(())
+}
+
+pub(crate) fn draw_crescent_moon_outline(
+    factory: &ID2D1Factory,
+    target: &ID2D1DCRenderTarget,
+    center: Vector2,
+    g: f32,
+    stroke: f32,
+    stroke_style: &ID2D1StrokeStyle,
+    brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
+    let top = Vector2::new(center.X + g * 0.7, center.Y - g * 0.714);
+    let bottom = Vector2::new(center.X + g * 0.7, center.Y + g * 0.714);
+    unsafe {
+        let geometry = factory.CreatePathGeometry()?;
+        let sink = geometry.Open()?;
+        sink.BeginFigure(top, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: bottom,
+            size: D2D_SIZE_F {
+                width: g,
+                height: g,
+            },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_LARGE,
+        });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.BeginFigure(bottom, D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: top,
+            size: D2D_SIZE_F {
+                width: g * 0.85,
+                height: g * 0.85,
+            },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_LARGE,
+        });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close()?;
+        target.DrawGeometry(&geometry, brush, stroke, Some(stroke_style));
+    }
+    Ok(())
+}
+
+fn try_draw_dwrite_tabular_layout(
+    target: &ID2D1DCRenderTarget,
+    wide: &[u16],
+    format: &IDWriteTextFormat,
+    rect: D2D_RECT_F,
+    brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
+    let dwrite = shared_dwrite_factory()?;
+    let typography = shared_tabular_typography()?;
+    let max_width = (rect.right - rect.left).max(0.0);
+    let max_height = (rect.bottom - rect.top).max(0.0);
+    unsafe {
+        let layout = dwrite.CreateTextLayout(wide, format, max_width, max_height)?;
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: u32::try_from(wide.len()).unwrap_or(u32::MAX),
+        };
+        layout.SetTypography(&typography, range)?;
+        target.DrawTextLayout(
+            Vector2::new(rect.left, rect.top),
+            &layout,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn draw_dwrite_tabular_text(
+    target: &ID2D1DCRenderTarget,
+    text: &str,
+    format: &IDWriteTextFormat,
+    rect: D2D_RECT_F,
+    brush: &ID2D1SolidColorBrush,
+) {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    if try_draw_dwrite_tabular_layout(target, &wide, format, rect, brush).is_err() {
+        unsafe {
+            target.DrawText(
+                &wide,
+                format,
+                &rect,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
 }
 
 pub(crate) unsafe fn create_text_format(
@@ -2866,7 +3366,9 @@ mod resource_tests {
                     lyrics,
                     state,
                     &clipboard,
+                    &otto_core::TasksState::default(),
                     &privacy,
+                    None,
                 )
                 .expect("shelf draw");
         };
@@ -3054,6 +3556,7 @@ mod resource_tests {
                         0.45,
                         appearance,
                         privacy,
+                        None,
                     )
                     .expect("batch 1-2 bar draw");
             }
@@ -3113,7 +3616,9 @@ mod resource_tests {
                     idle_lyrics,
                     &empty_shelf,
                     &empty_clipboard,
+                    &otto_core::TasksState::default(),
                     privacy,
+                    None,
                 )
                 .expect("focus submode draw");
         }
@@ -3148,7 +3653,9 @@ mod resource_tests {
                 idle_lyrics,
                 &empty_shelf,
                 &empty_clipboard,
+                &otto_core::TasksState::default(),
                 privacy,
+                None,
             )
             .expect("pomodoro alert draw");
     }
@@ -3211,7 +3718,9 @@ mod resource_tests {
                     idle_lyrics,
                     shelf_state,
                     &empty_clipboard,
+                    &otto_core::TasksState::default(),
                     privacy,
+                    None,
                 )
                 .expect("shelf tab draw");
         }
@@ -3299,9 +3808,149 @@ mod resource_tests {
                     idle_lyrics,
                     &empty_shelf,
                     clipboard_state,
+                    &otto_core::TasksState::default(),
                     privacy,
+                    None,
                 )
                 .expect("clipboard tab draw");
+        }
+    }
+
+    fn exercise_tasks_tab(
+        renderer: &Renderer,
+        metrics: &otto_core::Metrics,
+        dpi: u32,
+        pomodoro: &otto_core::PomodoroScene,
+        privacy: &otto_core::PrivacyState,
+    ) {
+        let empty_shelf = otto_core::ShelfState::default();
+        let empty_clipboard = otto_core::ClipboardState::default();
+        let idle_lyrics = otto_core::LyricsView {
+            sheet: None,
+            status: otto_core::LyricsStatus::Idle,
+            animated: false,
+        };
+        let empty = otto_core::TasksState::default();
+        let mut populated = otto_core::TasksState::default();
+        for index in 0..6 {
+            let outcome = populated.add(&format!("render task {index} with a fairly long title"));
+            if let otto_core::TaskAddOutcome::Added(id) = outcome {
+                if index == 1 {
+                    populated.toggle_done(id);
+                }
+                if index == 2 {
+                    populated.toggle_active(id);
+                }
+            }
+        }
+        for (tasks_state, hover) in [
+            (&empty, Some(otto_core::HitTarget::TasksAdd)),
+            (&populated, Some(otto_core::HitTarget::TaskItem(0))),
+            (&populated, Some(otto_core::HitTarget::TaskCheck(1))),
+            (&populated, Some(otto_core::HitTarget::TaskRemove(2))),
+        ] {
+            let layout = otto_core::compute_layout_with_notch(
+                metrics,
+                1920,
+                dpi,
+                "Finder",
+                otto_core::NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    active_tab: otto_core::NotchExpandedTab::Tasks,
+                    previous_tab: otto_core::NotchExpandedTab::Tasks,
+                    tasks: tasks_state.layout_input(),
+                    ..otto_core::NotchLayoutInput::default()
+                },
+            );
+            renderer
+                .draw_panel(
+                    &layout,
+                    hover,
+                    Some(otto_core::HitTarget::NotchTabTasks),
+                    pomodoro,
+                    None,
+                    0.0,
+                    idle_lyrics,
+                    &empty_shelf,
+                    &empty_clipboard,
+                    tasks_state,
+                    privacy,
+                    None,
+                )
+                .expect("tasks tab draw");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exercise_batch_4_notifications(
+        renderer: &Renderer,
+        metrics: &otto_core::Metrics,
+        dpi: u32,
+        pomodoro: &otto_core::PomodoroScene,
+        privacy: &otto_core::PrivacyState,
+    ) {
+        let empty_shelf = otto_core::ShelfState::default();
+        let empty_clipboard = otto_core::ClipboardState::default();
+        let idle_lyrics = otto_core::LyricsView {
+            sheet: None,
+            status: otto_core::LyricsStatus::Idle,
+            animated: false,
+        };
+        for (kind, stage, ringing) in [
+            (
+                otto_core::NotificationKind::Message,
+                otto_core::NotificationStage::Banner,
+                false,
+            ),
+            (
+                otto_core::NotificationKind::VideoCall,
+                otto_core::NotificationStage::Ringing,
+                true,
+            ),
+        ] {
+            let notification = otto_core::NotchNotification {
+                id: 1,
+                app_id: String::from("Teams.App"),
+                app_name: String::from("Teams"),
+                kind,
+                title: String::from("Ayu Lestari"),
+                body: String::from("Are we still meeting at three? I have the slides ready."),
+                badge: otto_core::notification_badge("Teams"),
+                count: 2,
+            };
+            let content = otto_core::present_notification(&notification, stage);
+            let layout = otto_core::compute_layout_with_notch(
+                metrics,
+                1920,
+                dpi,
+                "Finder",
+                otto_core::NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    notification: Some(otto_core::NotificationLayoutInput { ringing }),
+                    ..otto_core::NotchLayoutInput::default()
+                },
+            );
+            let hovered = if ringing {
+                otto_core::HitTarget::NotificationAccept
+            } else {
+                otto_core::HitTarget::NotificationClose
+            };
+            renderer
+                .draw_panel(
+                    &layout,
+                    Some(hovered),
+                    Some(otto_core::HitTarget::NotificationCard),
+                    pomodoro,
+                    None,
+                    0.5,
+                    idle_lyrics,
+                    &empty_shelf,
+                    &empty_clipboard,
+                    &otto_core::TasksState::default(),
+                    privacy,
+                    Some(&content),
+                )
+                .expect("notification card draw");
         }
     }
 
@@ -3318,6 +3967,7 @@ mod resource_tests {
         exercise_batch_1_focus_and_alert(renderer, metrics, dpi, pomodoro, media, privacy);
         exercise_batch_2_shelf(renderer, metrics, dpi, pomodoro, media, privacy);
         exercise_batch_3_clipboard(renderer, metrics, dpi, pomodoro, media, privacy);
+        exercise_batch_4_notifications(renderer, metrics, dpi, pomodoro, privacy);
         let privacy_layout = otto_core::PrivacyLayoutState {
             compact_dots: true,
             panel_mic_control: true,
@@ -3361,7 +4011,9 @@ mod resource_tests {
                     lyrics,
                     &empty_shelf,
                     &empty_clipboard,
+                    &otto_core::TasksState::default(),
                     privacy,
+                    None,
                 )
                 .expect("media tab draw");
         }
@@ -3412,6 +4064,7 @@ mod resource_tests {
         let privacy = otto_core::PrivacyState {
             mic: otto_core::MicState::Active { muted: false },
             camera_active: true,
+            location_active: false,
             app_name: Some(String::from("meet.exe")),
         };
         exercise_batch_1_2_bars_for_dpi(&renderer, &metrics, dpi, &pomodoro, &media, &privacy);
@@ -3424,6 +4077,49 @@ mod resource_tests {
             &lyrics_sheet,
             &privacy,
         );
+    }
+
+    fn exercise_tasks_for_dpi(dpi: u32) {
+        let metrics = otto_core::Metrics::default();
+        let layout = otto_core::compute_layout_with_notch(
+            &metrics,
+            1920,
+            dpi,
+            "Finder",
+            otto_core::NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: otto_core::NotchExpandedTab::Tasks,
+                ..otto_core::NotchLayoutInput::default()
+            },
+        );
+        let renderer = Renderer::new(
+            1920,
+            layout.bar.height,
+            layout.panel_window.width,
+            layout.panel_window.height,
+            dpi,
+            0.0,
+        )
+        .expect("renderer");
+        let pomodoro = otto_core::PomodoroScene::steady(
+            otto_core::PomodoroState::new(),
+            otto_core::ClockTime::default(),
+        );
+        let privacy = otto_core::PrivacyState::default();
+        exercise_tasks_tab(&renderer, &metrics, dpi, &pomodoro, &privacy);
+    }
+
+    #[test]
+    fn the_tasks_tab_renders_cleanly_across_dpis_without_leaking() {
+        let _serial = SerialResourceTest::begin();
+        exercise_tasks_for_dpi(96);
+        let baseline = GuiCounts::now();
+        for dpi in [96u32, 144, 192] {
+            exercise_tasks_for_dpi(dpi);
+        }
+        baseline.assert_no_growth("tasks tab multi-dpi offscreen render");
+        release_shared_factories();
+        baseline.assert_no_growth("tasks tab factory release");
     }
 
     #[test]
@@ -3440,6 +4136,7 @@ mod resource_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn control_center_renders_main_and_subpanels_across_dpis_without_leaking() {
         use otto_core::{
             Appearance, AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind,
@@ -3450,6 +4147,20 @@ mod resource_tests {
         let mut snap = ControlCenterSnapshot::default();
         snap.status.brightness = Some(72);
         snap.status.volume = 64;
+        snap.settings.plugins.dock = true;
+        snap.settings.plugins.top_bar = true;
+        snap.settings.plugins.genie = true;
+        snap.settings.plugins.window_controls = true;
+        snap.settings.dock.hide_taskbar = true;
+        snap.settings.dock.reserve_space = true;
+        snap.settings.dock.autohide = true;
+        snap.settings.system.media_module = true;
+        snap.settings.system.focus_module = true;
+        snap.settings.system.clipboard_history = true;
+        snap.settings.system.drop_shelf = true;
+        snap.settings.system.notch_hud = true;
+        snap.settings.system.privacy_indicators = true;
+        snap.settings.online_lyrics = true;
         snap.wifi.supported = true;
         snap.wifi.enabled = true;
         snap.wifi.connected_ssid = Some(String::from("Studio-5G"));
@@ -3482,15 +4193,25 @@ mod resource_tests {
         };
         let mut exercise = |dpi: u32| {
             let mut renderer = super::ControlCenterRenderer::new(dpi).expect("cc renderer");
-            for page in [
+            let mut views: Vec<(ControlCenterPage, Option<otto_core::OttoSettingsArea>)> = [
                 ControlCenterPage::Main,
                 ControlCenterPage::Wifi,
                 ControlCenterPage::Bluetooth,
                 ControlCenterPage::Sound,
                 ControlCenterPage::Display,
                 ControlCenterPage::OttoSettings,
-            ] {
+            ]
+            .into_iter()
+            .map(|page| (page, None))
+            .collect();
+            views.extend(
+                otto_core::OttoSettingsArea::ALL
+                    .into_iter()
+                    .map(|area| (ControlCenterPage::OttoSettings, Some(area))),
+            );
+            for (page, area) in views {
                 snap.page = page;
+                snap.otto_area = area;
                 let layout = otto_core::compute_control_center_layout_for_snapshot(
                     &ControlCenterMetrics::DEFAULT,
                     ControlCenterPlacement {
@@ -3514,6 +4235,8 @@ mod resource_tests {
                             hovered: None,
                             pressed: None,
                             focused,
+                            morph_progress: None,
+                            scene_time: 2.3,
                         },
                         &Appearance::glass(ResolvedTheme::Dark),
                     )
@@ -3691,6 +4414,7 @@ mod resource_tests {
                 0.0,
                 otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
                 &privacy,
+                None,
             )
             .expect("draw bar");
         };
@@ -3720,7 +4444,7 @@ mod resource_tests {
                 .recreate_target()
                 .expect("control center recreate");
             dock.recreate_target().expect("dock recreate");
-            assert!(dock.has_icon("app"));
+            assert!(!dock.has_icon("app"));
             menu.recreate_target().expect("menu recreate");
             controls.recreate_target().expect("controls recreate");
         }
@@ -3789,7 +4513,10 @@ mod resource_tests {
                         menu.render_preview(
                             &layout,
                             rows,
-                            hovered,
+                            crate::MenuHover {
+                                row: hovered,
+                                calendar: None,
+                            },
                             otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
                         )
                         .expect("render calendar or notification menu");
@@ -3911,5 +4638,400 @@ mod resource_tests {
         let baseline = GuiCounts::now();
         render_once();
         baseline.assert_no_growth("dock badges and downloads stack");
+    }
+
+    #[test]
+    fn squircle_corner_blends_cleanly_between_circular_pill_and_g2_spline() {
+        let pill = super::SquircleCorner::new(18.0, 200.0, 36.0);
+        assert!(pill.smoothing.abs() < f32::EPSILON);
+        assert!((pill.reach - 18.0).abs() < 1.0e-4);
+        assert!((pill.arc_ctrl_1.1 - 18.0 * (1.0 - 0.552_284_8)).abs() < 1.0e-3);
+
+        let full = super::SquircleCorner::new(16.0, 120.0, 80.0);
+        assert!((full.smoothing - 1.0).abs() < 1.0e-5);
+        assert!((full.reach - 1.528_665 * 16.0).abs() < 1.0e-3);
+        assert!((full.arc_start.0 - 0.076_12 * 16.0).abs() < 1.0e-2);
+        assert!((full.arc_start.1 - 0.617_32 * 16.0).abs() < 1.0e-2);
+        assert!((full.edge_ctrl_2 - 0.801_09 * 16.0).abs() < 1.0e-2);
+
+        for (w, h, r) in [
+            (200.0_f32, 24.0_f32, 12.0_f32),
+            (24.0, 200.0, 12.0),
+            (40.0, 40.0, 14.0),
+            (120.0, 44.0, 16.0),
+            (12.0, 12.0, 20.0),
+        ] {
+            let clamped = r.clamp(0.0, w.min(h) * 0.5);
+            let corner = super::SquircleCorner::new(clamped, w, h);
+            assert!(corner.reach <= w * 0.5 + 1.0e-4);
+            assert!(corner.reach <= h * 0.5 + 1.0e-4);
+            assert!(corner.reach >= corner.edge_ctrl_1 - 1.0e-4);
+            assert!(corner.edge_ctrl_1 >= corner.edge_ctrl_2 - 1.0e-4);
+            assert!(corner.edge_ctrl_2 >= corner.arc_start.1 - 1.0e-4);
+            assert!(corner.arc_start.1 >= corner.arc_ctrl_1.1 - 1.0e-4);
+            assert!(corner.arc_ctrl_1.1 >= corner.arc_ctrl_2.1 - 1.0e-4);
+            assert!(corner.arc_ctrl_2.1 >= corner.arc_end.1 - 1.0e-4);
+            assert!(corner.arc_end.1 >= 0.0);
+            assert!((corner.arc_start.0 - corner.arc_end.1).abs() < 1.0e-4);
+            assert!((corner.arc_ctrl_1.0 - corner.arc_ctrl_2.1).abs() < 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn floating_notch_squircle_tabular_rim_and_metaball_do_not_leak() {
+        let _serial = SerialResourceTest::begin();
+        let metrics = otto_core::Metrics::default();
+        let mut layout = otto_core::compute_layout_with_notch(
+            &metrics,
+            1920,
+            144,
+            "Finder",
+            otto_core::NotchLayoutInput {
+                compact_expansion: 1.0,
+                secondary_expansion: 0.45,
+                media_present: true,
+                ..otto_core::NotchLayoutInput::default()
+            },
+        );
+        layout.notch.y = 8;
+        layout.notch.height = 42;
+        layout.notch_corner_radius = 18;
+        layout.notch_ear_radius = 0;
+        layout.notch_secondary = Rect {
+            x: layout.notch.right() + 4,
+            y: layout.notch.y,
+            width: 42,
+            height: 42,
+        };
+        let renderer = Renderer::new(
+            1920,
+            layout.bar.height.max(64),
+            layout.panel_window.width,
+            layout.panel_window.height,
+            144,
+            0.0,
+        )
+        .expect("renderer");
+        let pomodoro = otto_core::PomodoroScene::steady(
+            otto_core::PomodoroState::new(),
+            otto_core::ClockTime::default(),
+        );
+        let privacy = otto_core::PrivacyState::default();
+        let status = otto_core::SystemStatus::default();
+        let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
+
+        let exercise = || {
+            for _ in 0..20 {
+                renderer
+                    .draw_bar(
+                        &layout,
+                        status,
+                        "Finder",
+                        Some(otto_core::HitTarget::NotchSecondary),
+                        None,
+                        None,
+                        &pomodoro,
+                        None,
+                        0.3,
+                        appearance,
+                        &privacy,
+                        None,
+                    )
+                    .expect("floating bar draw");
+                let rect = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+                    left: 8.0,
+                    top: 8.0,
+                    right: 120.0,
+                    bottom: 48.0,
+                };
+                drop(
+                    super::build_squircle_path(&renderer.factory, rect, 12.0)
+                        .expect("squircle path"),
+                );
+            }
+        };
+
+        exercise();
+        let baseline = GuiCounts::now();
+        exercise();
+        baseline.assert_no_growth("floating notch squircle tabular rim and metaball");
+    }
+
+    #[test]
+    fn shared_tabular_typography_reuses_instance_and_releases_cleanly() {
+        let _serial = SerialResourceTest::begin();
+        let first = super::shared_tabular_typography().expect("first typography");
+        let second = super::shared_tabular_typography().expect("second typography");
+        assert_eq!(first.as_raw(), second.as_raw());
+        release_shared_factories();
+        assert!(super::TABULAR_TYPOGRAPHY.with(|cell| cell.borrow().is_none()));
+        let _rebuilt = super::shared_tabular_typography().expect("rebuilt typography");
+    }
+
+    #[test]
+    fn squircle_cache_reuses_geometry_and_caps_at_64_entries() {
+        let _serial = SerialResourceTest::begin();
+        let factory = shared_d2d_factory().expect("d2d factory");
+        let rect = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+            left: 4.0,
+            top: 4.0,
+            right: 84.0,
+            bottom: 44.0,
+        };
+        let first = super::build_squircle_path(&factory, rect, 12.0).expect("first squircle");
+        let second = super::build_squircle_path(&factory, rect, 12.0).expect("cached squircle");
+        assert_eq!(first.as_raw(), second.as_raw());
+
+        for i in 0..70 {
+            let r = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+                left: i as f32,
+                top: 0.0,
+                right: i as f32 + 40.0,
+                bottom: 40.0,
+            };
+            let _ = super::build_squircle_path(&factory, r, 10.0).expect("squircle");
+        }
+        let len = super::SQUIRCLE_CACHE.with(|cell| cell.borrow().len());
+        assert_eq!(len, super::SQUIRCLE_CACHE_CAPACITY);
+
+        release_shared_factories();
+        let cleared_len = super::SQUIRCLE_CACHE.with(|cell| cell.borrow().len());
+        assert_eq!(cleared_len, 0);
+    }
+
+    fn draw_test_bar(
+        renderer: &Renderer,
+        layout: &otto_core::Layout,
+        hud: Option<otto_core::NotchHudState>,
+    ) -> windows::core::Result<()> {
+        let pomodoro = otto_core::PomodoroScene::steady(
+            otto_core::PomodoroState::new(),
+            otto_core::ClockTime::default(),
+        );
+        let privacy = otto_core::PrivacyState::default();
+        let status = otto_core::SystemStatus::default();
+        let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
+        renderer.draw_bar(
+            layout, status, "Finder", None, None, hud, &pomodoro, None, 0.0, appearance, &privacy,
+            None,
+        )
+    }
+
+    #[test]
+    fn compact_call_activity_draws_for_voice_video_and_muted_calls() {
+        let _serial = SerialResourceTest::begin();
+        let metrics = otto_core::Metrics::default();
+        let layout = otto_core::compute_layout_with_notch(
+            &metrics,
+            1920,
+            96,
+            "Finder",
+            otto_core::NotchLayoutInput {
+                compact_expansion: 1.0,
+                compact_primary: Some(otto_core::CompactSlotKind::Call),
+                ..otto_core::NotchLayoutInput::default()
+            },
+        );
+        let renderer = Renderer::new(
+            layout.bar.width,
+            layout.bar.height,
+            layout.panel_window.width,
+            layout.panel_window.height,
+            96,
+            0.25,
+        )
+        .expect("renderer");
+        let pomodoro = otto_core::PomodoroScene::steady(
+            otto_core::PomodoroState::new(),
+            otto_core::ClockTime::default(),
+        );
+        let privacy = otto_core::PrivacyState::default();
+        let status = otto_core::SystemStatus::default();
+        let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
+        for (video, muted) in [(false, false), (true, false), (false, true)] {
+            let scene = otto_core::CallScene {
+                video,
+                muted,
+                elapsed: String::from("12:34"),
+            };
+            renderer
+                .draw_bar(
+                    &layout,
+                    status,
+                    "Finder",
+                    None,
+                    None,
+                    None,
+                    &pomodoro,
+                    None,
+                    0.4,
+                    appearance,
+                    &privacy,
+                    Some(&scene),
+                )
+                .expect("call compact draw");
+        }
+    }
+
+    #[test]
+    fn bar_frame_key_memoizes_when_panel_open_and_skips_present() {
+        let _serial = SerialResourceTest::begin();
+        let metrics = otto_core::Metrics::default();
+        let open_layout = otto_core::compute_layout_with_notch(
+            &metrics,
+            1920,
+            96,
+            "Finder",
+            otto_core::NotchLayoutInput {
+                panel_expansion: 1.0,
+                ..otto_core::NotchLayoutInput::default()
+            },
+        );
+        let mut renderer = Renderer::new(
+            open_layout.bar.width,
+            open_layout.bar.height,
+            open_layout.panel_window.width,
+            open_layout.panel_window.height,
+            96,
+            0.25,
+        )
+        .expect("renderer");
+        let pomodoro = otto_core::PomodoroScene::steady(
+            otto_core::PomodoroState::new(),
+            otto_core::ClockTime::default(),
+        );
+        let privacy = otto_core::PrivacyState::default();
+        let status = otto_core::SystemStatus::default();
+        let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
+
+        assert!(renderer.last_bar_frame.borrow().is_none());
+        draw_test_bar(&renderer, &open_layout, None).expect("open draw_bar");
+        assert!(renderer.last_bar_frame.borrow().is_some());
+
+        let panel_hover_fields = renderer
+            .bar_frame_fields(
+                &open_layout,
+                status,
+                Some(otto_core::HitTarget::PomodoroPlayPause),
+                Some(otto_core::HitTarget::PomodoroReset),
+                None,
+                appearance,
+            )
+            .expect("panel hover key");
+        assert!(
+            renderer
+                .last_bar_frame
+                .borrow()
+                .as_ref()
+                .is_some_and(|cached| cached.matches(&panel_hover_fields, "Finder"))
+        );
+
+        renderer.last_bar_target.set(Some((0, (0, 0))));
+        renderer
+            .present(
+                0,
+                (0, 0),
+                &open_layout,
+                status,
+                "Finder",
+                Some(otto_core::HitTarget::PomodoroPlayPause),
+                Some(otto_core::HitTarget::PomodoroReset),
+                None,
+                &pomodoro,
+                None,
+                0.5,
+                appearance,
+                &privacy,
+                None,
+            )
+            .expect("memoized present skips UpdateLayeredWindow");
+
+        let bar_hover_fields = renderer
+            .bar_frame_fields(
+                &open_layout,
+                status,
+                Some(otto_core::HitTarget::Start),
+                None,
+                None,
+                appearance,
+            )
+            .expect("bar hover key");
+        assert!(
+            !renderer
+                .last_bar_frame
+                .borrow()
+                .as_ref()
+                .is_some_and(|cached| cached.matches(&bar_hover_fields, "Finder"))
+        );
+        assert!(
+            !renderer
+                .last_bar_frame
+                .borrow()
+                .as_ref()
+                .is_some_and(|cached| cached.matches(&panel_hover_fields, "Safari"))
+        );
+    }
+
+    #[test]
+    fn bar_frame_key_invalidates_on_backdrop_brand_recreate_closed_and_hud() {
+        let _serial = SerialResourceTest::begin();
+        let metrics = otto_core::Metrics::default();
+        let open_layout = otto_core::compute_layout_with_notch(
+            &metrics,
+            1920,
+            96,
+            "Finder",
+            otto_core::NotchLayoutInput {
+                panel_expansion: 1.0,
+                ..otto_core::NotchLayoutInput::default()
+            },
+        );
+        let closed_layout = otto_core::compute_layout(&metrics, 1920, 96);
+        let mut renderer = Renderer::new(
+            open_layout.bar.width,
+            open_layout.bar.height,
+            open_layout.panel_window.width,
+            open_layout.panel_window.height,
+            96,
+            0.25,
+        )
+        .expect("renderer");
+        let draw_open = |r: &Renderer| {
+            draw_test_bar(r, &open_layout, None).expect("draw open bar");
+            assert!(r.last_bar_frame.borrow().is_some());
+        };
+
+        draw_open(&renderer);
+        renderer.set_brand_icon(otto_core::BrandIcon::ClassicApple);
+        assert!(renderer.last_bar_frame.borrow().is_none());
+
+        draw_open(&renderer);
+        renderer.clear_bar_backdrop();
+        assert!(renderer.last_bar_frame.borrow().is_none());
+
+        draw_open(&renderer);
+        renderer.set_bar_backdrop(otto_core::RgbBuffer::filled(2, 2, [0.1, 0.2, 0.3]), (0, 0));
+        assert!(renderer.last_bar_frame.borrow().is_none());
+
+        draw_open(&renderer);
+        renderer.recreate_target().expect("recreate_target");
+        assert!(renderer.last_bar_frame.borrow().is_none());
+
+        draw_open(&renderer);
+        draw_test_bar(&renderer, &closed_layout, None).expect("closed bar resets key");
+        assert!(renderer.last_bar_frame.borrow().is_none());
+
+        draw_open(&renderer);
+        let active_hud = otto_core::NotchHudState {
+            kind: otto_core::NotchHudKind::Volume {
+                percent: 50,
+                muted: false,
+            },
+            expansion: 1.0,
+            content_alpha: 1.0,
+            level: 0.5,
+        };
+        draw_test_bar(&renderer, &open_layout, Some(active_hud)).expect("active hud resets key");
+        assert!(renderer.last_bar_frame.borrow().is_none());
     }
 }

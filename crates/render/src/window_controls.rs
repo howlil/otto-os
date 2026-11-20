@@ -400,13 +400,22 @@ impl WindowControlsRenderer {
                                 self.draw_minimize_glyph(&self.glyph_brush, cx, cy, glyph_scale);
                             }
                             WindowControlAction::ToggleMaximize => {
-                                self.draw_zoom_glyph(
-                                    &self.glyph_brush,
-                                    cx,
-                                    cy,
-                                    maximized,
-                                    glyph_scale,
-                                )?;
+                                if state.alt_zoom_glyph {
+                                    self.draw_plus_zoom_glyph(
+                                        &self.glyph_brush,
+                                        cx,
+                                        cy,
+                                        glyph_scale,
+                                    );
+                                } else {
+                                    self.draw_zoom_glyph(
+                                        &self.glyph_brush,
+                                        cx,
+                                        cy,
+                                        maximized,
+                                        glyph_scale,
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -596,6 +605,27 @@ impl WindowControlsRenderer {
         }
     }
 
+    unsafe fn draw_plus_zoom_glyph(
+        &self,
+        brush: &ID2D1SolidColorBrush,
+        cx: f32,
+        cy: f32,
+        scale: f32,
+    ) {
+        let half = 2.3 * scale;
+        let stroke_width = 1.25 * scale;
+        let h0 = Vector2::new(cx - half, cy);
+        let h1 = Vector2::new(cx + half, cy);
+        let v0 = Vector2::new(cx, cy - half);
+        let v1 = Vector2::new(cx, cy + half);
+        unsafe {
+            self.target
+                .DrawLine(h0, h1, brush, stroke_width, Some(&self.stroke_style));
+            self.target
+                .DrawLine(v0, v1, brush, stroke_width, Some(&self.stroke_style));
+        }
+    }
+
     unsafe fn draw_zoom_glyph(
         &self,
         brush: &ID2D1SolidColorBrush,
@@ -690,6 +720,7 @@ mod tests {
             close: true,
             minimize: true,
             zoom: true,
+            alt_zoom_glyph: false,
         };
         renderer
             .draw(&layout, inactive, false, false, None, Some(&cover), None)
@@ -748,6 +779,7 @@ mod tests {
             close: true,
             minimize: true,
             zoom: true,
+            alt_zoom_glyph: false,
         };
         let inactive = WindowControlsState {
             active: false,
@@ -801,5 +833,59 @@ mod tests {
         drop(renderer);
         crate::release_shared_factories();
         assert!(pressed[close_idx + 2] < unpressed[close_idx + 2]);
+    }
+
+    #[test]
+    fn alt_zoom_glyph_draws_centered_plus_on_green_button() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let caption = NativeCaption::new(STYLE, 500, 100, 30, true, 96).unwrap();
+        let layout = compute_cover_layout(caption, &WindowControlsMetrics::default()).unwrap();
+        let renderer = WindowControlsRenderer::new(layout.width, layout.height).unwrap();
+        let stride = (layout.width * 4) as usize;
+        let cover = CoverStyle {
+            rows: vec![[0x20, 0x20, 0x20]; 30],
+            top_right_radius: caption.corner_radius(),
+            top_border_inset: true,
+            right_border_inset: true,
+            feather_width: 0.0,
+            is_dark: true,
+        };
+        let state = WindowControlsState {
+            active: true,
+            close: true,
+            minimize: true,
+            zoom: true,
+            alt_zoom_glyph: false,
+        };
+        renderer
+            .draw(&layout, state, false, true, None, Some(&cover), None)
+            .unwrap();
+        let standard_pixels = renderer.surface.read_pixels();
+        renderer
+            .draw(
+                &layout,
+                state.with_alt_zoom_glyph(true),
+                false,
+                true,
+                None,
+                Some(&cover),
+                None,
+            )
+            .unwrap();
+        let alt_pixels = renderer.surface.read_pixels();
+        drop(renderer);
+        crate::release_shared_factories();
+
+        let zoom_x = layout.centers_x[1].round() as usize;
+        let cy = layout.center_y.round() as usize;
+        let center_idx = cy * stride + zoom_x * 4;
+        assert!(
+            standard_pixels[center_idx + 1] > 170,
+            "standard zoom glyph leaves green center open"
+        );
+        assert!(
+            alt_pixels[center_idx + 1] < 90,
+            "alt plus glyph paints dark stroke at green button center"
+        );
     }
 }

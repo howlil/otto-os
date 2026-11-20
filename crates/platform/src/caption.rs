@@ -16,11 +16,11 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, ReleaseCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_HWNDNEXT, GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindow,
-    GetWindowLongW, HTCAPTION, HTRIGHT, HTTOP, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
-    WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_SYSMENU,
+    GetWindowLongW, GetWindowRect, HTCAPTION, HTRIGHT, HTTOP, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowPos, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_SYSMENU,
 };
 use windows::core::BOOL;
 
@@ -41,6 +41,29 @@ pub(crate) fn dwm_rect(window: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<RE
     }
     .ok()?;
     Some(rect)
+}
+
+fn window_screen_rect(window: HWND) -> Option<RECT> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(window, &mut rect) }.ok()?;
+    Some(rect)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenCaptionBounds {
+    frame_right: i32,
+    top: i32,
+    height: i32,
+    measured_width: i32,
+}
+
+fn screen_caption_bounds(frame: RECT, window: RECT, buttons: RECT) -> ScreenCaptionBounds {
+    ScreenCaptionBounds {
+        frame_right: frame.right,
+        top: (window.top + buttons.top).max(frame.top),
+        height: buttons.bottom - buttons.top,
+        measured_width: buttons.right - buttons.left,
+    }
 }
 
 pub(crate) fn caption_style(style: u32) -> NativeCaptionStyle {
@@ -92,24 +115,25 @@ fn caption_dpi(window: HWND) -> u32 {
 pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
     let style = caption_style(unsafe { GetWindowLongW(window, GWL_STYLE) } as u32);
     let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+    let window_rect = window_screen_rect(window)?;
     let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)?;
-    let height = buttons.bottom - buttons.top;
-    if buttons.right <= buttons.left || height <= 0 {
+    let bounds = screen_caption_bounds(frame, window_rect, buttons);
+    if bounds.measured_width <= 0 || bounds.height <= 0 {
         return None;
     }
     let maximized = unsafe { IsZoomed(window) }.as_bool();
     let rounded_top_right = has_rounded_top_right(window, maximized);
     NativeCaption::new(
         style,
-        frame.right,
-        frame.top + buttons.top,
-        height,
+        bounds.frame_right,
+        bounds.top,
+        bounds.height,
         rounded_top_right,
         caption_dpi(window),
     )
     .map(|caption| {
         caption
-            .measured(buttons.right - buttons.left)
+            .measured(bounds.measured_width)
             .with_top_border_inset(top_border_inset_for(rounded_top_right, buttons.top))
     })
 }
@@ -465,12 +489,63 @@ fn rgb_from_colorref(pixel: u32) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        caption_style, drag_threshold_exceeded, pad_skipped_top_rows, rgb_from_colorref,
-        top_border_inset_for,
+        ScreenCaptionBounds, caption_style, drag_threshold_exceeded, pad_skipped_top_rows,
+        rgb_from_colorref, screen_caption_bounds, top_border_inset_for,
     };
+    use windows::Win32::Foundation::RECT;
     use windows::Win32::UI::WindowsAndMessaging::{
         WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     };
+
+    #[test]
+    #[ignore = "reads every open window on the live desktop"]
+    fn every_open_windows_caption_starts_inside_its_visible_frame() {
+        use std::sync::Mutex;
+
+        use windows::Win32::Foundation::{HWND, LPARAM};
+        use windows::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, IsWindowVisible, IsZoomed};
+        use windows::core::BOOL;
+
+        use super::{DWMWA_EXTENDED_FRAME_BOUNDS, dwm_rect, native_caption_of};
+
+        static SEEN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+        unsafe extern "system" fn visit(hwnd: HWND, _: LPARAM) -> BOOL {
+            if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                SEEN.lock().unwrap().push(hwnd.0 as isize);
+            }
+            BOOL(1)
+        }
+
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        SEEN.lock().unwrap().clear();
+        let _ = unsafe { EnumWindows(Some(visit), LPARAM(0)) };
+        let windows = SEEN.lock().unwrap().clone();
+        let mut checked = 0;
+        for raw in windows {
+            let hwnd = HWND(raw as *mut _);
+            let Some(caption) = native_caption_of(hwnd) else {
+                continue;
+            };
+            let Some(frame) = dwm_rect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS) else {
+                continue;
+            };
+            println!(
+                "zoomed={} caption.top={} frame.top={} height={}",
+                unsafe { IsZoomed(hwnd) }.as_bool(),
+                caption.top,
+                frame.top,
+                caption.height
+            );
+            assert!(caption.top >= frame.top, "{} < {}", caption.top, frame.top);
+            checked += 1;
+        }
+        unsafe { SetThreadDpiAwarenessContext(previous) };
+        assert!(checked > 0);
+    }
 
     #[test]
     fn a_standard_overlapped_window_style_has_every_caption_button() {
@@ -509,6 +584,115 @@ mod tests {
         assert!(top_border_inset_for(true, -1));
         assert!(!top_border_inset_for(true, 2));
         assert!(!top_border_inset_for(false, 0));
+    }
+
+    #[test]
+    fn caption_button_bounds_translate_from_window_to_screen_coordinates() {
+        let frame = RECT {
+            left: 0,
+            top: 108,
+            right: 900,
+            bottom: 700,
+        };
+        let window = RECT {
+            left: 0,
+            top: 100,
+            right: 914,
+            bottom: 714,
+        };
+        let buttons = RECT {
+            left: 770,
+            top: 12,
+            right: 914,
+            bottom: 48,
+        };
+        let bounds = screen_caption_bounds(frame, window, buttons);
+        assert_eq!(
+            bounds,
+            ScreenCaptionBounds {
+                frame_right: 900,
+                top: 112,
+                height: 36,
+                measured_width: 144,
+            }
+        );
+    }
+
+    #[test]
+    fn caption_never_starts_above_the_visible_frame() {
+        let frame = RECT {
+            left: 0,
+            top: 108,
+            right: 900,
+            bottom: 700,
+        };
+        let window = RECT {
+            left: 0,
+            top: 100,
+            right: 914,
+            bottom: 714,
+        };
+        let buttons = RECT {
+            left: 770,
+            top: 6,
+            right: 914,
+            bottom: 42,
+        };
+        assert_eq!(screen_caption_bounds(frame, window, buttons).top, 108);
+    }
+
+    #[test]
+    fn maximized_window_caption_starts_at_the_visible_frame_not_the_hidden_border() {
+        let frame = RECT {
+            left: 0,
+            top: 60,
+            right: 2240,
+            bottom: 1301,
+        };
+        let window = RECT {
+            left: -11,
+            top: 49,
+            right: 2251,
+            bottom: 1312,
+        };
+        let buttons = RECT {
+            left: 2030,
+            top: 0,
+            right: 2250,
+            bottom: 44,
+        };
+        assert_eq!(
+            screen_caption_bounds(frame, window, buttons),
+            ScreenCaptionBounds {
+                frame_right: 2240,
+                top: 60,
+                height: 44,
+                measured_width: 220,
+            }
+        );
+    }
+
+    #[test]
+    fn restored_window_with_flush_frame_keeps_the_window_top() {
+        let frame = RECT {
+            left: 509,
+            top: 300,
+            right: 1191,
+            bottom: 711,
+        };
+        let window = RECT {
+            left: 500,
+            top: 300,
+            right: 1200,
+            bottom: 720,
+        };
+        let buttons = RECT {
+            left: 470,
+            top: 0,
+            right: 690,
+            bottom: 44,
+        };
+        assert_eq!(screen_caption_bounds(frame, window, buttons).top, 300);
     }
 
     #[test]

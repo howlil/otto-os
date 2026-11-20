@@ -30,7 +30,7 @@ use windows::Win32::UI::Shell::{
     FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_PATHMUSTEXIST, FileOpenDialog, HDROP,
     IFileOpenDialog, ILFree, IShellItemImageFactory, SHCreateItemFromParsingName,
     SHOpenFolderAndSelectItems, SHParseDisplayName, SIGDN_FILESYSPATH, SIIGBF_BIGGERSIZEOK,
-    SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
+    SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::WM_APP;
 use windows::core::{PCWSTR, PWSTR, w};
@@ -207,6 +207,28 @@ pub fn pick_shelf_files() -> Vec<String> {
 #[must_use]
 pub fn inspect_shelf_file(path: &str, max_px: u32) -> (bool, Option<ShelfThumbnail>) {
     extract_shell_thumbnail(path, max_px, true)
+}
+
+pub(crate) fn extract_shell_icon(path: &str, max_px: u32) -> Option<ShelfThumbnail> {
+    let _com = ComGuard::single_threaded();
+    let wide = to_wide_nul(path);
+    let factory = unsafe {
+        SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(PCWSTR(wide.as_ptr()), None)
+    }
+    .ok()?;
+    let target_px = i32::try_from(max_px.clamp(16, SHELF_THUMBNAIL_MAX_PX)).ok()?;
+    let bitmap = unsafe {
+        factory.GetImage(
+            SIZE {
+                cx: target_px,
+                cy: target_px,
+            },
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+        )
+    }
+    .ok()?;
+    let owned = OwnedHBitmap(bitmap);
+    hbitmap_to_thumbnail(owned.0)
 }
 
 #[must_use]

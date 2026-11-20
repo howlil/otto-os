@@ -2,17 +2,19 @@ use std::f32::consts::TAU;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
-    ClipboardPayload, ClipboardState, ClockTime, CompactContent, CompactSlotKind, FocusSubMode,
-    HitTarget, IslandInputs, LYRIC_DRIFT_TOLERANCE_MS, LyricsStatus, LyricsView, MediaCommand,
-    MediaPeek, MediaPeekFrame, MediaScene, MotionMetrics, MotionPreference, NotchAction,
-    NotchExpandedTab, NotchHudKind, NotchHudState, NotchLayoutInput, NowPlaying,
-    POMODORO_PRESETS_MINUTES, POSITION_DRIFT_TOLERANCE_MS, PendingSeek, PomodoroClock,
-    PomodoroPeek, PomodoroPeekFrame, PomodoroScene, PomodoroState, PomodoroStatus, PomodoroSurface,
-    PomodoroTick, PrivacyLayoutState, PrivacyState, QuickTimerState, SHELF_HOVER_LEAVE_MS,
-    SeekReadback, ShelfLayoutInput, ShelfPayload, ShelfState, ShelfThumbnail, StopwatchClock,
-    StopwatchState, TIMER_PRESETS_MINUTES, TrackKey, animate_value, hud_content_alpha,
-    is_openable_shelf_url, is_valid_shelf_file_path, island_targets, reconcile_seek,
-    seek_target_ms, warning_threshold_crossed,
+    CallScene, CallTracker, ClipboardPayload, ClipboardState, ClockTime, CompactContent,
+    CompactSlotKind, FocusSubMode, HitTarget, IslandInputs, LYRIC_DRIFT_TOLERANCE_MS, LyricsStatus,
+    LyricsView, MediaCommand, MediaPeek, MediaPeekFrame, MediaScene, MotionMetrics,
+    MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind, NotchHudState, NotchLayoutInput,
+    NotificationLayoutInput, NotificationPresentation, NotificationQueue, NotificationStage,
+    NotificationSummary, NowPlaying, POMODORO_PRESETS_MINUTES, POSITION_DRIFT_TOLERANCE_MS,
+    PendingSeek, PomodoroClock, PomodoroPeek, PomodoroPeekFrame, PomodoroScene, PomodoroState,
+    PomodoroStatus, PomodoroSurface, PomodoroTick, PrivacyLayoutState, PrivacyState,
+    QuickTimerState, SHELF_HOVER_LEAVE_MS, SeekReadback, ShelfLayoutInput, ShelfPayload,
+    ShelfState, ShelfThumbnail, StopwatchClock, StopwatchState, TIMER_PRESETS_MINUTES,
+    TaskAddOutcome, TasksState, TrackKey, animate_value, hud_content_alpha, is_openable_shelf_url,
+    is_valid_shelf_file_path, island_targets, reconcile_seek, seek_target_ms, step_spring,
+    warning_threshold_crossed,
 };
 
 const ALERT_HOLD_MS: u64 = 10_000;
@@ -63,6 +65,8 @@ pub(crate) enum NotchEffect {
     Platform(NotchAction),
     PickShelfFiles,
     CopyClipboard(ClipboardPayload),
+    SaveTasks,
+    OpenQuickCapture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,17 +95,27 @@ pub(crate) struct NotchController {
     shelf: ShelfState,
     clipboard: ClipboardState,
     clipboard_copied_until: Option<Instant>,
+    tasks: TasksState,
     shelf_drag_leave_until: Option<Instant>,
     opened_by_shelf_drag: bool,
     modal_picker_open: bool,
     drag_out_active: bool,
     compact_expansion: f32,
+    compact_velocity: f32,
     secondary_expansion: f32,
+    secondary_velocity: f32,
     compact_swap_blend: f32,
     panel_expansion: f32,
+    panel_velocity: f32,
+    press_active: bool,
+    press_progress: f32,
+    press_velocity: f32,
     hover_since: Option<Instant>,
     panel_trigger: PanelTrigger,
     alert_until: Option<Instant>,
+    notifications: NotificationQueue,
+    call: CallTracker,
+    call_shown: bool,
     clock: PomodoroClock,
     timer_clock: PomodoroClock,
     stopwatch_clock: StopwatchClock,
@@ -139,6 +153,7 @@ pub(crate) struct NotchController {
     focus_enabled: bool,
     shelf_enabled: bool,
     clipboard_enabled: bool,
+    tasks_enabled: bool,
     media_enabled: bool,
     privacy_enabled: bool,
     hud_enabled: bool,
@@ -166,17 +181,27 @@ impl NotchController {
             shelf: ShelfState::default(),
             clipboard: ClipboardState::default(),
             clipboard_copied_until: None,
+            tasks: TasksState::default(),
             shelf_drag_leave_until: None,
             opened_by_shelf_drag: false,
             modal_picker_open: false,
             drag_out_active: false,
             compact_expansion: 0.0,
+            compact_velocity: 0.0,
             secondary_expansion: 0.0,
+            secondary_velocity: 0.0,
             compact_swap_blend: 1.0,
             panel_expansion: 0.0,
+            panel_velocity: 0.0,
+            press_active: false,
+            press_progress: 0.0,
+            press_velocity: 0.0,
             hover_since: None,
             panel_trigger: PanelTrigger::Closed,
             alert_until: None,
+            notifications: NotificationQueue::default(),
+            call: CallTracker::default(),
+            call_shown: false,
             clock: PomodoroClock::default(),
             timer_clock: PomodoroClock::default(),
             stopwatch_clock: StopwatchClock::default(),
@@ -214,6 +239,7 @@ impl NotchController {
             focus_enabled: true,
             shelf_enabled: true,
             clipboard_enabled: true,
+            tasks_enabled: false,
             media_enabled: true,
             privacy_enabled: true,
             hud_enabled: true,
@@ -235,6 +261,18 @@ impl NotchController {
         self.clipboard_enabled
     }
 
+    pub(crate) const fn tasks_state(&self) -> &TasksState {
+        &self.tasks
+    }
+
+    pub(crate) fn replace_tasks(&mut self, tasks: TasksState) {
+        self.tasks = tasks;
+    }
+
+    pub(crate) fn add_task(&mut self, text: &str) -> bool {
+        matches!(self.tasks.add(text), TaskAddOutcome::Added(_))
+    }
+
     pub(crate) const fn media_enabled(&self) -> bool {
         self.media_enabled
     }
@@ -252,6 +290,7 @@ impl NotchController {
             NotchExpandedTab::Pomodoro => self.focus_enabled,
             NotchExpandedTab::Shelf => self.shelf_enabled,
             NotchExpandedTab::Clipboard => self.clipboard_enabled,
+            NotchExpandedTab::Tasks => self.tasks_enabled,
             NotchExpandedTab::Media => self.media_enabled && self.media.is_some(),
         }
     }
@@ -260,6 +299,7 @@ impl NotchController {
         self.focus_enabled
             || self.shelf_enabled
             || self.clipboard_enabled
+            || self.tasks_enabled
             || (self.media_enabled && self.media.is_some())
     }
 
@@ -268,6 +308,7 @@ impl NotchController {
             NotchExpandedTab::Pomodoro,
             NotchExpandedTab::Shelf,
             NotchExpandedTab::Clipboard,
+            NotchExpandedTab::Tasks,
             NotchExpandedTab::Media,
         ]
         .into_iter()
@@ -285,6 +326,7 @@ impl NotchController {
         } else {
             self.panel_trigger = PanelTrigger::Closed;
             self.panel_expansion = 0.0;
+            self.panel_velocity = 0.0;
             self.hover_since = None;
         }
     }
@@ -293,10 +335,12 @@ impl NotchController {
         if self.last_primary_slot == Some(slot) {
             self.last_primary_slot = None;
             self.compact_expansion = 0.0;
+            self.compact_velocity = 0.0;
         }
         if self.last_secondary_slot == Some(slot) {
             self.last_secondary_slot = None;
             self.secondary_expansion = 0.0;
+            self.secondary_velocity = 0.0;
         }
     }
 
@@ -349,6 +393,16 @@ impl NotchController {
             return;
         }
         self.clipboard_enabled = enabled;
+        if !enabled {
+            self.ensure_valid_tab();
+        }
+    }
+
+    pub(crate) fn set_tasks_enabled(&mut self, enabled: bool) {
+        if self.tasks_enabled == enabled {
+            return;
+        }
+        self.tasks_enabled = enabled;
         if !enabled {
             self.ensure_valid_tab();
         }
@@ -414,6 +468,7 @@ impl NotchController {
             otto_core::IslandMode::Expanded
                 | otto_core::IslandMode::Alert
                 | otto_core::IslandMode::Hud
+                | otto_core::IslandMode::Notification(_)
         ) || (compact_media && self.media_peek.is_some());
         if holds_width {
             return false;
@@ -457,6 +512,32 @@ impl NotchController {
 
     pub(crate) fn set_presented(&mut self, presented: bool) {
         self.presented = presented;
+    }
+
+    pub(crate) fn collapse_immediately(&mut self) {
+        self.hud_kind = None;
+        self.hud_until = None;
+        self.hud_expansion = 0.0;
+        self.hud_level = 0.0;
+        self.compact_expansion = 0.0;
+        self.compact_velocity = 0.0;
+        self.secondary_expansion = 0.0;
+        self.secondary_velocity = 0.0;
+        self.panel_expansion = 0.0;
+        self.panel_velocity = 0.0;
+        self.press_active = false;
+        self.press_progress = 0.0;
+        self.press_velocity = 0.0;
+        self.hover_since = None;
+        self.panel_trigger = PanelTrigger::Closed;
+        self.opened_by_shelf_drag = false;
+        self.modal_picker_open = false;
+        self.drag_out_active = false;
+        self.shelf_drag_leave_until = None;
+        self.shelf.drag_hover = false;
+        self.seek_drag = None;
+        self.hover_blocked = false;
+        self.presented = false;
     }
 
     fn is_mode_compact_active(&self, mode: FocusSubMode) -> bool {
@@ -533,7 +614,9 @@ impl NotchController {
                 && (self.panel_trigger.is_open()
                     || (self.shelf_enabled && self.is_shelf_hold_open())),
             hud: self.hud_enabled && self.hud_until.is_some_and(|until| now < until),
+            notification: self.notification_stage(now),
             focus_active: self.has_compact_focus(),
+            call_active: self.call.is_active(self.millis(now)),
             media: self
                 .media
                 .as_ref()
@@ -582,7 +665,7 @@ impl NotchController {
             return;
         };
         let target = match primary.kind() {
-            CompactSlotKind::Focus => NotchExpandedTab::Pomodoro,
+            CompactSlotKind::Focus | CompactSlotKind::Call => NotchExpandedTab::Pomodoro,
             CompactSlotKind::Media => NotchExpandedTab::Media,
         };
         if self.is_tab_enabled(target) {
@@ -631,6 +714,58 @@ impl NotchController {
         }
     }
 
+    fn notification_stage(&self, now: Instant) -> Option<NotificationStage> {
+        let (notification, stage) = self.notifications.current(self.millis(now))?;
+        if !notification.kind.is_call() && self.has_compact_focus() {
+            return None;
+        }
+        Some(match stage {
+            NotificationStage::Ringing => NotificationStage::Ringing,
+            NotificationStage::Peek | NotificationStage::Banner => NotificationStage::Banner,
+        })
+    }
+
+    pub(crate) fn sync_notifications(&mut self, now: Instant, hovered: bool) -> bool {
+        self.notifications.tick(self.millis(now), hovered)
+    }
+
+    pub(crate) fn ingest_notifications(
+        &mut self,
+        items: &[NotificationSummary],
+        now: Instant,
+    ) -> bool {
+        self.notifications.ingest(items, self.millis(now), true)
+    }
+
+    pub(crate) fn notification_presentation(
+        &self,
+        now: Instant,
+    ) -> Option<NotificationPresentation> {
+        let stage = self.notification_stage(now)?;
+        let (notification, _) = self.notifications.current(self.millis(now))?;
+        Some(otto_core::present_notification(notification, stage))
+    }
+
+    fn handle_notification_click(&mut self, target: HitTarget) -> NotchUpdate {
+        let open = matches!(
+            target,
+            HitTarget::NotificationCard | HitTarget::NotificationAccept
+        );
+        let now_ms = self.millis(self.last_anim_instant);
+        let Some(id) = self.notifications.dismiss_current(now_ms) else {
+            return NotchUpdate::default();
+        };
+        let action = if open {
+            NotchAction::NotificationOpen(id)
+        } else {
+            NotchAction::NotificationDismiss(id)
+        };
+        NotchUpdate {
+            changed: true,
+            effect: Some(NotchEffect::Platform(action)),
+        }
+    }
+
     fn millis(&self, moment: Instant) -> u64 {
         u64::try_from(moment.saturating_duration_since(self.epoch).as_millis()).unwrap_or(u64::MAX)
     }
@@ -640,8 +775,14 @@ impl NotchController {
         if self.step_scene_at(now, self.motion) {
             changed = true;
         }
+        let call_shown = self.call.is_active(self.millis(now));
+        if call_shown != self.call_shown {
+            self.call_shown = call_shown;
+            changed = true;
+        }
         NotchUpdate {
             changed: changed
+                || call_shown
                 || self.shows_live_media_progress()
                 || self.shows_live_lyrics()
                 || self.scene_frame_active(),
@@ -748,6 +889,14 @@ impl NotchController {
             .next_wakeup_ms(&self.stopwatch, now_ms, self.is_stopwatch_visible())
             .map(|at| self.epoch + Duration::from_millis(at));
         let alert = self.alert_until.filter(|_| self.has_alert());
+        let call = self
+            .call
+            .next_wake_ms(now_ms)
+            .map(|at| self.epoch + Duration::from_millis(at));
+        let notification = self
+            .notifications
+            .next_wake_ms(now_ms)
+            .map(|at| self.epoch + Duration::from_millis(at));
         let media = self.media_repaint_in(unix_now_ms()).map(|wait| now + wait);
         let metrics = MotionMetrics::default();
         let frame = self
@@ -763,6 +912,8 @@ impl NotchController {
             timer,
             stopwatch,
             alert,
+            call,
+            notification,
             self.hud_until,
             media,
             frame,
@@ -797,20 +948,24 @@ impl NotchController {
             });
         NotchLayoutInput {
             hud_expansion: self.hud_expansion,
-            compact_expansion: self.compact_expansion,
-            secondary_expansion: self.secondary_expansion,
+            compact_expansion: self.compact_expansion.clamp(0.0, 1.0),
+            secondary_expansion: self.secondary_expansion.clamp(0.0, 1.0),
             compact_swap_blend: self.compact_swap_blend,
-            panel_expansion: self.panel_expansion,
+            panel_expansion: self.panel_expansion.clamp(0.0, 1.0),
+            press_progress: self.press_progress.clamp(0.0, 1.0),
             compact_primary,
             compact_secondary,
             focus_mode: self.focus_mode,
             pomodoro_surface: self.active_surface(),
             active_tab: self.notch_tab,
             previous_tab: self.previous_tab,
+            top_bar_enabled: true,
+            notch_enabled: true,
             control_center_enabled,
             focus_enabled: self.focus_enabled,
             shelf_enabled: self.shelf_enabled,
             clipboard_enabled: self.clipboard_enabled,
+            tasks_enabled: self.tasks_enabled,
             media_present: self.media_enabled && self.media.is_some(),
             media_live: self
                 .media
@@ -836,6 +991,13 @@ impl NotchController {
                 has_items: !self.shelf.items.is_empty(),
             },
             clipboard: self.clipboard.layout_input(),
+            hidden_items: otto_core::BarItemSet::default(),
+            notification: self
+                .notification_stage(self.last_anim_instant)
+                .map(|stage| NotificationLayoutInput {
+                    ringing: stage == NotificationStage::Ringing,
+                }),
+            tasks: self.tasks.layout_input(),
         }
     }
 
@@ -1017,7 +1179,13 @@ impl NotchController {
             return false;
         }
         self.privacy = resolved;
+        self.call.update(&self.privacy, self.millis(Instant::now()));
         true
+    }
+
+    pub(crate) fn call_scene(&self, now: Instant) -> Option<CallScene> {
+        self.call
+            .scene(self.privacy.mic.is_muted(), self.millis(now))
     }
 
     pub(crate) fn focus_active(&self) -> bool {
@@ -1232,7 +1400,8 @@ impl NotchController {
             && (countdown_running
                 || self.peek.is_some()
                 || self.media_peek.is_some()
-                || panel_live_media)
+                || panel_live_media
+                || self.call_shown)
     }
 
     pub(crate) fn media(&self) -> Option<&NowPlaying> {
@@ -1389,6 +1558,7 @@ impl NotchController {
                 NotchExpandedTab::Pomodoro,
                 NotchExpandedTab::Shelf,
                 NotchExpandedTab::Clipboard,
+                NotchExpandedTab::Tasks,
             ]
             .into_iter()
             .find(|&tab| self.is_tab_enabled(tab))
@@ -1399,6 +1569,7 @@ impl NotchController {
             } else {
                 self.panel_trigger = PanelTrigger::Closed;
                 self.panel_expansion = 0.0;
+                self.panel_velocity = 0.0;
                 self.hover_since = None;
             }
         }
@@ -1559,10 +1730,20 @@ impl NotchController {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn set_notch_pressed(&mut self, pressed: bool) -> bool {
+        if self.press_active == pressed {
+            return false;
+        }
+        self.press_active = pressed;
+        true
+    }
+
     pub(crate) fn handle_pointer_leave(&mut self, cursor_inside_notch: bool) -> bool {
         if cursor_inside_notch || self.is_shelf_hold_open() {
             return false;
         }
+        let press_cleared = std::mem::take(&mut self.press_active);
         self.hover_since = None;
         self.hover_blocked = false;
         if matches!(
@@ -1572,7 +1753,7 @@ impl NotchController {
             self.panel_trigger = PanelTrigger::Closed;
             return true;
         }
-        false
+        press_cleared
     }
 
     pub(crate) fn handle_seek_step(&mut self, delta_ms: i64, now_unix_ms: i64) -> NotchUpdate {
@@ -1607,6 +1788,7 @@ impl NotchController {
     }
 
     pub(crate) fn handle_click(&mut self, target: HitTarget) -> NotchUpdate {
+        self.press_active = false;
         match target {
             HitTarget::FocusMode(mode) => self.handle_focus_mode_click(mode),
             HitTarget::PomodoroPlayPause
@@ -1618,6 +1800,7 @@ impl NotchController {
             HitTarget::NotchTabPomodoro
             | HitTarget::NotchTabShelf
             | HitTarget::NotchTabClipboard
+            | HitTarget::NotchTabTasks
             | HitTarget::NotchTabMedia => self.handle_tab_click(target),
             HitTarget::ShelfAdd
             | HitTarget::ShelfClear
@@ -1630,12 +1813,22 @@ impl NotchController {
             | HitTarget::ClipboardPager
             | HitTarget::ClipboardItem(_)
             | HitTarget::ClipboardRemoveItem(_) => self.handle_clipboard_click(target),
+            HitTarget::TasksAdd
+            | HitTarget::TasksClearDone
+            | HitTarget::TasksPager
+            | HitTarget::TaskItem(_)
+            | HitTarget::TaskCheck(_)
+            | HitTarget::TaskRemove(_) => self.handle_tasks_click(target),
             HitTarget::PrivacyIndicator => self.handle_privacy_indicator_click(),
             HitTarget::PrivacyMicMute => self.handle_privacy_mic_click(),
             HitTarget::MediaPlayPause | HitTarget::MediaPrevious | HitTarget::MediaNext => {
                 self.handle_media_click(target)
             }
             HitTarget::MediaLyricsToggle => self.toggle_lyrics(),
+            HitTarget::NotificationCard
+            | HitTarget::NotificationClose
+            | HitTarget::NotificationAccept
+            | HitTarget::NotificationDecline => self.handle_notification_click(target),
             HitTarget::Notch => self.handle_notch_click(),
             HitTarget::NotchSecondary => self.handle_secondary_notch_click(),
             _ => NotchUpdate::default(),
@@ -1742,6 +1935,37 @@ impl NotchController {
                     changed,
                     effect: None,
                 }
+            }
+            _ => NotchUpdate::default(),
+        }
+    }
+
+    fn handle_tasks_click(&mut self, target: HitTarget) -> NotchUpdate {
+        let saved = |changed: bool| NotchUpdate {
+            changed,
+            effect: changed.then_some(NotchEffect::SaveTasks),
+        };
+        match target {
+            HitTarget::TasksAdd => NotchUpdate {
+                changed: false,
+                effect: Some(NotchEffect::OpenQuickCapture),
+            },
+            HitTarget::TasksClearDone => saved(self.tasks.clear_done()),
+            HitTarget::TasksPager => NotchUpdate {
+                changed: self.tasks.step_page(1),
+                effect: None,
+            },
+            HitTarget::TaskItem(slot) => {
+                let id = self.tasks.visible_item_at(slot).map(|item| item.id);
+                saved(id.is_some_and(|id| self.tasks.toggle_active(id)))
+            }
+            HitTarget::TaskCheck(slot) => {
+                let id = self.tasks.visible_item_at(slot).map(|item| item.id);
+                saved(id.is_some_and(|id| self.tasks.toggle_done(id)))
+            }
+            HitTarget::TaskRemove(slot) => {
+                let id = self.tasks.visible_item_at(slot).map(|item| item.id);
+                saved(id.is_some_and(|id| self.tasks.remove(id)))
             }
             _ => NotchUpdate::default(),
         }
@@ -1929,6 +2153,7 @@ impl NotchController {
             HitTarget::NotchTabPomodoro => NotchExpandedTab::Pomodoro,
             HitTarget::NotchTabShelf => NotchExpandedTab::Shelf,
             HitTarget::NotchTabClipboard => NotchExpandedTab::Clipboard,
+            HitTarget::NotchTabTasks => NotchExpandedTab::Tasks,
             HitTarget::NotchTabMedia => NotchExpandedTab::Media,
             _ => return NotchUpdate::default(),
         };
@@ -1992,6 +2217,19 @@ impl NotchController {
         }
     }
 
+    pub(crate) fn collapse_from_external_focus_change(&mut self) -> bool {
+        if self.is_shelf_hold_open() || self.has_alert() {
+            return false;
+        }
+        if self.panel_trigger != PanelTrigger::Closed {
+            self.panel_trigger = PanelTrigger::Closed;
+            self.hover_since = None;
+            self.hover_blocked = false;
+            return true;
+        }
+        false
+    }
+
     fn handle_notch_click(&mut self) -> NotchUpdate {
         if self.has_alert() {
             self.dismiss_active_alert();
@@ -2052,6 +2290,7 @@ impl NotchController {
                     | HitTarget::PomodoroSkip
                     | HitTarget::NotchTabShelf
                     | HitTarget::NotchTabClipboard
+                    | HitTarget::NotchTabTasks
                     | HitTarget::ShelfAdd
                     | HitTarget::ShelfClear
                     | HitTarget::ShelfPager
@@ -2063,6 +2302,12 @@ impl NotchController {
                     | HitTarget::ClipboardPager
                     | HitTarget::ClipboardItem(_)
                     | HitTarget::ClipboardRemoveItem(_)
+                    | HitTarget::TasksAdd
+                    | HitTarget::TasksClearDone
+                    | HitTarget::TasksPager
+                    | HitTarget::TaskItem(_)
+                    | HitTarget::TaskCheck(_)
+                    | HitTarget::TaskRemove(_)
                     | HitTarget::PrivacyMicMute
             )
         {
@@ -2082,6 +2327,7 @@ impl NotchController {
             },
             NotchExpandedTab::Shelf => self.shelf.step_page(-step),
             NotchExpandedTab::Clipboard => self.clipboard.step_page((-step) as isize),
+            NotchExpandedTab::Tasks => self.tasks.step_page((-step) as isize),
             NotchExpandedTab::Media => false,
         };
         NotchUpdate {
@@ -2152,6 +2398,12 @@ impl NotchController {
         if self.step_scene_at(now, motion) {
             changed = true;
         }
+        if self
+            .notifications
+            .tick(self.millis(now), cursor_inside_notch)
+        {
+            changed = true;
+        }
         self.step_hover_tracking(now, cursor_inside_notch, panel_visible);
 
         let hud_active = self.hud_until.is_some_and(|until| now < until);
@@ -2175,12 +2427,43 @@ impl NotchController {
             changed = true;
         }
 
-        for (value, target, rate) in [
-            (&mut self.compact_expansion, targets.compact, 16.0),
-            (&mut self.secondary_expansion, targets.secondary, 18.0),
-            (&mut self.panel_expansion, targets.panel, 20.0),
+        let metrics = MotionMetrics::default();
+        let press_target = if self.press_active && self.panel_expansion < 0.25 {
+            1.0
+        } else {
+            0.0
+        };
+        for (value, velocity, target, response, damping) in [
+            (
+                &mut self.compact_expansion,
+                &mut self.compact_velocity,
+                targets.compact,
+                metrics.island_compact_response,
+                metrics.island_compact_damping,
+            ),
+            (
+                &mut self.secondary_expansion,
+                &mut self.secondary_velocity,
+                targets.secondary,
+                metrics.island_secondary_response,
+                metrics.island_secondary_damping,
+            ),
+            (
+                &mut self.panel_expansion,
+                &mut self.panel_velocity,
+                targets.panel,
+                metrics.island_expand_response,
+                metrics.island_expand_damping,
+            ),
+            (
+                &mut self.press_progress,
+                &mut self.press_velocity,
+                press_target,
+                metrics.island_press_response,
+                metrics.island_press_damping,
+            ),
         ] {
-            if Self::step_expansion(value, target, rate, dt, motion) {
+            if step_spring(value, velocity, target, response, damping, dt, motion) {
                 changed = true;
             }
         }
@@ -2251,29 +2534,6 @@ impl NotchController {
             changed = true;
         }
         changed
-    }
-
-    fn step_expansion(
-        value: &mut f32,
-        target: f32,
-        rate: f32,
-        dt: f32,
-        motion: MotionPreference,
-    ) -> bool {
-        let next = animate_value(*value, target, rate, dt, motion);
-        let resolved = if next <= 0.008 && target < 0.5 {
-            0.0
-        } else if next >= 0.995 && target > 0.5 {
-            1.0
-        } else {
-            next
-        };
-        if (resolved - *value).abs() > 0.0005 {
-            *value = resolved;
-            true
-        } else {
-            false
-        }
     }
 
     fn lyrics_is_live(&self) -> bool {
@@ -2402,6 +2662,7 @@ impl NotchController {
             }
             if self.panel_trigger == PanelTrigger::Closed
                 && self.has_openable_panel()
+                && self.notification_stage(now).is_none()
                 && let Some(since) = self.hover_since
                 && now.duration_since(since) >= Duration::from_millis(HOVER_DEBOUNCE_MS)
             {
@@ -2447,7 +2708,8 @@ mod tests {
     };
     use otto_core::{
         ClockTime, FocusSubMode, HitTarget, IslandMode, MediaCommand, MotionPreference,
-        NotchAction, NotchExpandedTab, NotchHudKind, NowPlaying, PomodoroStatus, PomodoroSurface,
+        NotchAction, NotchExpandedTab, NotchHudKind, NotificationStage, NotificationSummary,
+        NowPlaying, PomodoroStatus, PomodoroSurface,
     };
     use std::time::{Duration, Instant};
 
@@ -3859,6 +4121,7 @@ mod tests {
         assert!(notch.sync_privacy_state(otto_core::PrivacyState {
             mic: otto_core::MicState::Active { muted: false },
             camera_active: false,
+            location_active: false,
             app_name: Some(String::from("Zoom")),
         }));
         let layout = notch.layout_input(true);
@@ -3880,6 +4143,7 @@ mod tests {
         assert!(notch.sync_privacy_state(otto_core::PrivacyState {
             mic: otto_core::MicState::Idle { muted: false },
             camera_active: true,
+            location_active: false,
             app_name: Some(String::from("Camera")),
         }));
         assert!(notch.layout_input(true).privacy.compact_dots);
@@ -3893,6 +4157,7 @@ mod tests {
         assert!(media_notch.sync_privacy_state(otto_core::PrivacyState {
             mic: otto_core::MicState::Active { muted: false },
             camera_active: false,
+            location_active: false,
             app_name: Some(String::from("Meet")),
         }));
         let media_update = media_notch.handle_click(HitTarget::PrivacyIndicator);
@@ -4305,5 +4570,342 @@ mod tests {
         assert!(!notch.has_openable_panel());
         assert!(!notch.handle_hotkey(NotchHotkey::ToggleNotch).changed);
         assert!(!notch.handle_click(HitTarget::Notch).changed);
+    }
+
+    #[test]
+    fn collapse_from_external_focus_change_collapses_pinned_and_hovered_unless_shelf_or_alert_active()
+     {
+        let mut pinned = idle_notch();
+        let _ = pinned.handle_hotkey(NotchHotkey::ToggleNotch);
+        let now = settle(&mut pinned, Instant::now());
+        assert_eq!(pinned.island_mode(now), IslandMode::Expanded);
+        assert!(pinned.collapse_from_external_focus_change());
+        assert!(!pinned.collapse_from_external_focus_change());
+        let now = settle(&mut pinned, now);
+        assert_eq!(pinned.island_mode(now), IslandMode::Collapsed);
+
+        let mut hovered = idle_notch();
+        hovered.handle_pointer_move(true);
+        let mut t = Instant::now();
+        for _ in 0..40 {
+            t += Duration::from_millis(8);
+            let _ = hovered.advance(t, true, true, MotionPreference::Full);
+        }
+        assert_eq!(hovered.island_mode(t), IslandMode::Expanded);
+        assert!(hovered.collapse_from_external_focus_change());
+        t = settle(&mut hovered, t);
+        assert_eq!(hovered.island_mode(t), IslandMode::Collapsed);
+
+        let mut shelf_held = idle_notch();
+        let _ = shelf_held.handle_hotkey(NotchHotkey::ToggleNotch);
+        assert!(shelf_held.begin_shelf_modal_picker());
+        assert!(!shelf_held.collapse_from_external_focus_change());
+
+        let mut alerted = visible_running_notch();
+        let _ = alerted.handle_hotkey(NotchHotkey::ToggleNotch);
+        run_until_alert(&mut alerted);
+        assert!(alerted.has_alert());
+        assert!(!alerted.collapse_from_external_focus_change());
+    }
+
+    #[test]
+    fn notch_panel_spring_preserves_momentum_on_mid_flight_reversal() {
+        let mut notch = idle_notch();
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        let mut now = Instant::now();
+        for _ in 0..8 {
+            now += Duration::from_millis(12);
+            let _ = notch.advance(now, false, false, MotionPreference::Full);
+        }
+        let mid_expansion = notch.panel_expansion;
+        let mid_velocity = notch.panel_velocity;
+        assert!(mid_expansion > 0.0);
+        assert!(mid_velocity > 0.0);
+
+        let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+        now += Duration::from_millis(4);
+        let _ = notch.advance(now, false, false, MotionPreference::Full);
+        assert!(notch.panel_expansion > mid_expansion);
+        assert!(notch.panel_velocity < mid_velocity);
+
+        now = settle(&mut notch, now);
+        assert!(notch.panel_expansion.abs() < f32::EPSILON);
+        assert!(notch.panel_velocity.abs() < f32::EPSILON);
+        let _ = now;
+    }
+
+    #[test]
+    fn set_notch_pressed_drives_tactile_compression_and_releases() {
+        let mut notch = idle_notch();
+        assert!(notch.set_notch_pressed(true));
+        assert!(!notch.set_notch_pressed(true));
+
+        let mut now = Instant::now();
+        for _ in 0..12 {
+            now += Duration::from_millis(16);
+            let _ = notch.advance(now, true, false, MotionPreference::Full);
+        }
+        assert!(notch.layout_input(true).press_progress > 0.5);
+
+        assert!(notch.handle_pointer_leave(false));
+        assert!(!notch.press_active);
+        now = settle(&mut notch, now);
+        assert!(notch.layout_input(true).press_progress.abs() < f32::EPSILON);
+
+        assert!(notch.set_notch_pressed(true));
+        for _ in 0..8 {
+            now += Duration::from_millis(16);
+            let _ = notch.advance(now, true, false, MotionPreference::Full);
+        }
+        assert!(notch.layout_input(true).press_progress > 0.3);
+
+        let _ = notch.handle_click(HitTarget::Notch);
+        assert!(!notch.press_active);
+        let _ = settle(&mut notch, now);
+        assert!(notch.layout_input(true).press_progress.abs() < f32::EPSILON);
+    }
+
+    fn toast(id: u32, app: &str, title: &str, body: &str) -> NotificationSummary {
+        NotificationSummary {
+            id,
+            app_id: format!("{app}.App"),
+            app_name: String::from(app),
+            title: String::from(title),
+            body: String::from(body),
+            timestamp_label: String::from("now"),
+        }
+    }
+
+    fn notch_with_baseline() -> (NotchController, Instant) {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        assert!(!notch.ingest_notifications(&[], start));
+        (notch, start)
+    }
+
+    #[test]
+    fn a_message_toast_opens_the_banner_and_a_call_toast_rings() {
+        let (mut notch, start) = notch_with_baseline();
+        let now = start + Duration::from_millis(100);
+        assert!(notch.ingest_notifications(&[toast(1, "Mail", "Ayu", "Lunch?")], now));
+        assert_eq!(
+            notch.island_mode(now),
+            otto_core::IslandMode::Notification(NotificationStage::Banner)
+        );
+        let banner = notch.layout_input(true).notification.expect("banner");
+        assert!(!banner.ringing);
+        let both = [
+            toast(1, "Mail", "Ayu", "Lunch?"),
+            toast(2, "Zoom", "Budi", "is calling you"),
+        ];
+        assert!(notch.ingest_notifications(&both, now));
+        assert_eq!(
+            notch.island_mode(now),
+            otto_core::IslandMode::Notification(NotificationStage::Ringing)
+        );
+    }
+
+    #[test]
+    fn clicking_the_card_opens_the_source_and_clicking_dismiss_only_removes_it() {
+        let (mut notch, start) = notch_with_baseline();
+        let now = start + Duration::from_millis(100);
+        notch.ingest_notifications(&[toast(7, "Mail", "Ayu", "Lunch?")], now);
+        let update = notch.handle_click(HitTarget::NotificationCard);
+        assert!(matches!(
+            update.effect,
+            Some(NotchEffect::Platform(NotchAction::NotificationOpen(7)))
+        ));
+        assert_eq!(notch.island_mode(now), otto_core::IslandMode::Collapsed);
+        notch.ingest_notifications(
+            &[
+                toast(7, "Mail", "Ayu", "Lunch?"),
+                toast(8, "Mail", "Budi", "Hi"),
+            ],
+            now + Duration::from_secs(10),
+        );
+        let update = notch.handle_click(HitTarget::NotificationClose);
+        assert!(matches!(
+            update.effect,
+            Some(NotchEffect::Platform(NotchAction::NotificationDismiss(8)))
+        ));
+    }
+
+    #[test]
+    fn a_focus_session_holds_back_message_banners_but_not_ringing_calls() {
+        let (mut notch, start) = notch_with_baseline();
+        let _ = notch.handle_hotkey(NotchHotkey::TogglePomodoro);
+        let now = start + Duration::from_millis(100);
+        notch.ingest_notifications(&[toast(1, "Mail", "Ayu", "Lunch?")], now);
+        assert!(notch.layout_input(true).notification.is_none());
+        let both = [
+            toast(1, "Mail", "Ayu", "Lunch?"),
+            toast(2, "Zoom", "Budi", "is calling you"),
+        ];
+        notch.ingest_notifications(&both, now);
+        assert!(
+            notch
+                .layout_input(true)
+                .notification
+                .is_some_and(|card| card.ringing)
+        );
+    }
+
+    #[test]
+    fn hovering_the_banner_does_not_swap_it_for_the_full_panel() {
+        let (mut notch, start) = notch_with_baseline();
+        let now = start + Duration::from_millis(100);
+        notch.ingest_notifications(&[toast(1, "Mail", "Ayu", "Lunch?")], now);
+        notch.hover_since = Some(now);
+        let later = now + Duration::from_millis(400);
+        let _ = notch.advance(later, true, true, MotionPreference::Full);
+        assert_eq!(
+            notch.island_mode(later),
+            otto_core::IslandMode::Notification(NotificationStage::Banner)
+        );
+    }
+
+    fn on_a_call(app: &str, video: bool, muted: bool) -> otto_core::PrivacyState {
+        otto_core::PrivacyState {
+            mic: otto_core::MicState::Active { muted },
+            camera_active: video,
+            location_active: false,
+            app_name: Some(String::from(app)),
+        }
+    }
+
+    #[test]
+    fn a_call_in_the_browser_takes_the_notch_after_the_debounce() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        assert!(notch.sync_privacy_state(on_a_call("chrome", false, false)));
+        assert!(!matches!(
+            notch.island_mode(start + Duration::from_millis(500)),
+            IslandMode::Compact(otto_core::CompactContent::Call)
+        ));
+        let later = start + Duration::from_secs(5);
+        assert_eq!(
+            notch.island_mode(later),
+            IslandMode::Compact(otto_core::CompactContent::Call)
+        );
+        let scene = notch.call_scene(later).expect("scene");
+        assert!(!scene.video && !scene.muted);
+        notch.last_anim_instant = later;
+        assert_eq!(
+            notch.layout_input(true).compact_primary,
+            Some(otto_core::CompactSlotKind::Call)
+        );
+    }
+
+    #[test]
+    fn muting_marks_the_call_scene_and_ending_the_call_clears_it() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        notch.sync_privacy_state(on_a_call("Zoom", true, false));
+        let later = start + Duration::from_secs(5);
+        assert!(notch.call_scene(later).is_some_and(|scene| scene.video));
+        notch.sync_privacy_state(on_a_call("Zoom", true, true));
+        assert!(notch.call_scene(later).is_some_and(|scene| scene.muted));
+        notch.sync_privacy_state(otto_core::PrivacyState::default());
+        assert!(notch.call_scene(later).is_none());
+    }
+
+    #[test]
+    fn a_non_call_mic_user_never_takes_the_notch() {
+        let mut notch = idle_notch();
+        let start = notch.epoch;
+        notch.sync_privacy_state(on_a_call("AudioRecorder", false, false));
+        assert!(notch.call_scene(start + Duration::from_secs(30)).is_none());
+    }
+
+    fn notch_with_tasks(texts: &[&str]) -> NotchController {
+        let mut notch = NotchController::new(None, NotchExpandedTab::Pomodoro);
+        notch.set_tasks_enabled(true);
+        for text in texts.iter().rev() {
+            assert!(notch.add_task(text));
+        }
+        notch
+    }
+
+    #[test]
+    fn the_tasks_tab_is_off_until_enabled_and_falls_back_when_disabled() {
+        let mut notch = NotchController::new(None, NotchExpandedTab::Pomodoro);
+        assert!(!notch.is_tab_enabled(NotchExpandedTab::Tasks));
+        assert!(!notch.layout_input(true).tasks_enabled);
+        notch.set_tasks_enabled(true);
+        assert!(notch.is_tab_enabled(NotchExpandedTab::Tasks));
+        assert!(notch.layout_input(true).tasks_enabled);
+        let update = notch.handle_click(HitTarget::NotchTabTasks);
+        assert!(update.changed);
+        assert_eq!(notch.active_tab(), NotchExpandedTab::Tasks);
+        notch.set_tasks_enabled(false);
+        assert_ne!(notch.active_tab(), NotchExpandedTab::Tasks);
+        assert!(!notch.layout_input(true).tasks_enabled);
+    }
+
+    #[test]
+    fn task_clicks_mutate_the_list_and_request_a_save() {
+        let mut notch = notch_with_tasks(&["first", "second"]);
+        let layout = notch.layout_input(true).tasks;
+        assert_eq!(layout.visible_count, 2);
+        assert!(layout.has_items && !layout.has_done);
+
+        let check = notch.handle_click(HitTarget::TaskCheck(0));
+        assert!(check.changed);
+        assert_eq!(check.effect, Some(NotchEffect::SaveTasks));
+        assert!(notch.tasks_state().items[0].done);
+        assert!(notch.layout_input(true).tasks.has_done);
+
+        let focus = notch.handle_click(HitTarget::TaskItem(1));
+        assert!(focus.changed);
+        assert_eq!(focus.effect, Some(NotchEffect::SaveTasks));
+        assert_eq!(
+            notch
+                .tasks_state()
+                .active_task()
+                .map(|task| task.text.as_str()),
+            Some("second")
+        );
+
+        let done_row_focus = notch.handle_click(HitTarget::TaskItem(0));
+        assert_eq!(done_row_focus, NotchUpdate::default());
+
+        let cleared = notch.handle_click(HitTarget::TasksClearDone);
+        assert_eq!(cleared.effect, Some(NotchEffect::SaveTasks));
+        assert_eq!(notch.tasks_state().items.len(), 1);
+        assert_eq!(
+            notch.handle_click(HitTarget::TasksClearDone),
+            NotchUpdate::default()
+        );
+
+        let removed = notch.handle_click(HitTarget::TaskRemove(0));
+        assert_eq!(removed.effect, Some(NotchEffect::SaveTasks));
+        assert!(notch.tasks_state().items.is_empty());
+        assert_eq!(
+            notch.handle_click(HitTarget::TaskRemove(0)),
+            NotchUpdate::default()
+        );
+    }
+
+    #[test]
+    fn add_opens_capture_and_blank_text_is_rejected() {
+        let mut notch = notch_with_tasks(&[]);
+        let update = notch.handle_click(HitTarget::TasksAdd);
+        assert!(!update.changed);
+        assert_eq!(update.effect, Some(NotchEffect::OpenQuickCapture));
+        assert!(!notch.add_task("   	 "));
+        assert!(notch.add_task("  write release notes  "));
+        assert_eq!(notch.tasks_state().items[0].text, "write release notes");
+    }
+
+    #[test]
+    fn the_pager_steps_through_pages_without_saving() {
+        let texts: Vec<String> = (0..6).map(|index| format!("task {index}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut notch = notch_with_tasks(&refs);
+        assert!(notch.layout_input(true).tasks.has_pager);
+        let update = notch.handle_click(HitTarget::TasksPager);
+        assert!(update.changed);
+        assert_eq!(update.effect, None);
+        assert_eq!(notch.layout_input(true).tasks.visible_count, 2);
     }
 }

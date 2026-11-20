@@ -12,6 +12,7 @@ const MAX_LEDGER_ENTRIES: usize = 256;
 pub(crate) enum Concealment {
     Hidden,
     TransitionsDisabled,
+    RoundedCorners,
 }
 
 impl Concealment {
@@ -19,6 +20,7 @@ impl Concealment {
         match self {
             Self::Hidden => "h",
             Self::TransitionsDisabled => "t",
+            Self::RoundedCorners => "r",
         }
     }
 
@@ -26,6 +28,7 @@ impl Concealment {
         match tag {
             "h" => Some(Self::Hidden),
             "t" => Some(Self::TransitionsDisabled),
+            "r" => Some(Self::RoundedCorners),
             _ => None,
         }
     }
@@ -142,6 +145,25 @@ pub(crate) fn forget(hwnd: isize, kind: Concealment) {
     }
 }
 
+pub(crate) fn retain_kind(kind: Concealment, keep: impl Fn(WindowIdentity) -> bool) {
+    let mut ledger = lock_ledger();
+    let before = ledger.len();
+    ledger.retain(|entry| entry.kind != kind || keep(entry.identity));
+    if ledger.len() != before {
+        persist(&ledger);
+    }
+}
+
+pub(crate) fn take_kind(kind: Concealment) -> Vec<LedgerEntry> {
+    let mut ledger = lock_ledger();
+    let (taken, kept): (Vec<_>, Vec<_>) = ledger.drain(..).partition(|entry| entry.kind == kind);
+    *ledger = kept;
+    if !taken.is_empty() {
+        persist(&ledger);
+    }
+    taken
+}
+
 pub(crate) fn recorded(kind: Concealment) -> Vec<WindowIdentity> {
     lock_ledger()
         .iter()
@@ -193,8 +215,24 @@ mod tests {
         let entries = vec![
             entry(100, Concealment::Hidden),
             entry(200, Concealment::TransitionsDisabled),
+            entry(300, Concealment::RoundedCorners),
         ];
         assert_eq!(parse_ledger(&format_ledger(&entries)), entries);
+    }
+
+    #[test]
+    fn the_same_window_can_hold_several_concealments_at_once() {
+        let mut entries = Vec::new();
+        assert!(upsert(&mut entries, entry(100, Concealment::Hidden)));
+        assert!(upsert(
+            &mut entries,
+            entry(100, Concealment::RoundedCorners)
+        ));
+        assert!(upsert(
+            &mut entries,
+            entry(100, Concealment::RoundedCorners)
+        ));
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

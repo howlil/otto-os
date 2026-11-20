@@ -25,12 +25,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_NOCLOSE, EnumChildWindows, EnumWindows, GCL_STYLE, GW_OWNER, GWL_EXSTYLE, GWL_STYLE,
     GetClassLongPtrW, GetMenuState, GetSystemMenu, GetWindow, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic,
-    IsWindow, IsWindowVisible, IsZoomed, MF_BYCOMMAND, MF_DISABLED, MF_GRAYED, PostMessageW,
-    SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOWNA,
-    SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW, SetWindowPos,
-    ShowWindow, WM_CLOSE, WM_SYSCOMMAND, WS_CAPTION, WS_DISABLED, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_TOP, IsHungAppWindow,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, MF_BYCOMMAND, MF_DISABLED, MF_GRAYED,
+    PostMessageW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SMTO_ABORTIFHUNG, SW_HIDE,
+    SW_SHOWNA, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageTimeoutW, SetWindowPos, ShowWindow, WM_CLOSE, WM_SYSCOMMAND, WS_CAPTION,
+    WS_DISABLED, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_THICKFRAME,
 };
 use windows::core::{BOOL, PWSTR};
 
@@ -190,7 +191,7 @@ fn cached_process_facts(cache: &mut ProcessCache, process_id: u32) -> Option<Pro
         .clone()
 }
 
-fn owner_ids(hwnd: HWND) -> (u32, u32) {
+pub(crate) fn owner_ids(hwnd: HWND) -> (u32, u32) {
     let mut process_id = 0u32;
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process_id)) };
     (process_id, thread_id)
@@ -744,8 +745,33 @@ pub fn show_application(app: &AppInfo, own_process_id: u32) -> CommandOutcome {
     for window in &live {
         unhide(window);
     }
-    if let Some(first) = live.first() {
-        focus_window_hwnd(first.identity.hwnd);
+    let target = live
+        .iter()
+        .find(|window| window.is_primary() && window.presence == WindowPresence::Visible)
+        .or_else(|| live.iter().find(|window| window.is_primary()))
+        .or_else(|| live.first());
+    if let Some(target) = target {
+        for window in live.iter().rev() {
+            if window.is_primary()
+                && window.presence == WindowPresence::Visible
+                && window.identity.hwnd != target.identity.hwnd
+            {
+                let hwnd = HWND(window.identity.hwnd as *mut c_void);
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_SHOWNA);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+        }
+        focus_window_hwnd(target.identity.hwnd);
     }
     summarize(live.iter().map(|_| CommandOutcome::Completed))
 }
@@ -772,7 +798,7 @@ fn post_close(hwnd: HWND) -> CommandOutcome {
     post_outcome(unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) })
 }
 
-fn identity_is_live(identity: WindowIdentity) -> bool {
+pub(crate) fn identity_is_live(identity: WindowIdentity) -> bool {
     let hwnd = HWND(identity.hwnd as *mut c_void);
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return false;
@@ -826,6 +852,11 @@ pub fn restore_hidden_windows() -> usize {
             }
             Concealment::TransitionsDisabled => {
                 if crate::dock::set_dwm_transition_policy(hwnd, true) {
+                    restored += 1;
+                }
+            }
+            Concealment::RoundedCorners => {
+                if crate::window_corners::reset(identity.hwnd) {
                     restored += 1;
                 }
             }
@@ -1027,6 +1058,48 @@ mod fixture_tests {
         assert!(crate::dock::set_window_transitions_enabled(hwnd, true));
         assert!(hidden_windows::recorded(Concealment::TransitionsDisabled).is_empty());
         assert!(!fixture.data_dir.join("hidden_windows.txt").exists());
+    }
+
+    #[test]
+    #[ignore = "native fixture: opens two real windows on the desktop"]
+    fn rounding_forces_default_windows_only_and_every_restore_path_resets_them() {
+        use crate::window_corners::{
+            preference, restore_rounded_corners, round_window_corners, set_preference,
+        };
+        use windows::Win32::Graphics::Dwm::{DWMWCP_DEFAULT, DWMWCP_DONOTROUND, DWMWCP_ROUND};
+
+        let fixture = Fixture::launch();
+        fixture.wait_for("two fixture windows", |f| f.windows().len() == 2);
+        let first = fixture.window("A").expect("window A").identity;
+        let second = fixture.window("B").expect("window B").identity;
+        assert_eq!(preference(first.hwnd), Some(DWMWCP_DEFAULT));
+
+        assert!(round_window_corners(first.hwnd));
+        assert_eq!(preference(first.hwnd), Some(DWMWCP_ROUND));
+        assert_eq!(
+            hidden_windows::recorded(Concealment::RoundedCorners),
+            vec![first]
+        );
+        assert!(fixture.data_dir.join("hidden_windows.txt").exists());
+
+        assert!(set_preference(second.hwnd, DWMWCP_DONOTROUND));
+        assert!(!round_window_corners(second.hwnd));
+        assert_eq!(preference(second.hwnd), Some(DWMWCP_DONOTROUND));
+        assert_eq!(
+            hidden_windows::recorded(Concealment::RoundedCorners).len(),
+            1
+        );
+
+        assert_eq!(restore_rounded_corners(), 1);
+        assert_eq!(preference(first.hwnd), Some(DWMWCP_DEFAULT));
+        assert_eq!(preference(second.hwnd), Some(DWMWCP_DONOTROUND));
+        assert!(hidden_windows::recorded(Concealment::RoundedCorners).is_empty());
+        assert!(!fixture.data_dir.join("hidden_windows.txt").exists());
+
+        assert!(round_window_corners(first.hwnd));
+        assert_eq!(preference(first.hwnd), Some(DWMWCP_ROUND));
+        assert_eq!(restore_hidden_windows(), 1);
+        assert_eq!(preference(first.hwnd), Some(DWMWCP_DEFAULT));
     }
 
     #[test]

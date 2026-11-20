@@ -1,6 +1,6 @@
 use otto_core::{
-    Appearance, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout, PixelLimits,
-    ShelfThumbnail, scale,
+    Appearance, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout, GlassShape,
+    PixelLimits, Rect, RgbBuffer, ShelfThumbnail, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
@@ -19,6 +19,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::core::Result;
 use windows_numerics::Vector2;
 
+use crate::glass::GlassPainter;
 use crate::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery, upload_bgra_bitmap,
 };
@@ -70,6 +71,7 @@ pub struct DownloadsStackRenderer {
     footer_format: IDWriteTextFormat,
     surface: DibSurface,
     dpi: u32,
+    glass: GlassPainter,
     raw_thumbnails: Vec<Option<ShelfThumbnail>>,
     bitmaps: Vec<Option<ID2D1Bitmap>>,
 }
@@ -122,10 +124,24 @@ impl DownloadsStackRenderer {
                 footer_format,
                 surface,
                 dpi,
+                glass: GlassPainter::default(),
                 raw_thumbnails: Vec::new(),
                 bitmaps: Vec::new(),
             })
         }
+    }
+
+    pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
+        self.glass.set_backdrop(capture, origin);
+    }
+
+    pub fn clear_backdrop(&self) {
+        self.glass.clear_backdrop();
+    }
+
+    #[must_use]
+    pub fn has_backdrop(&self) -> bool {
+        self.glass.has_backdrop()
     }
 
     pub fn set_thumbnails(&mut self, thumbs: &[Option<ShelfThumbnail>]) -> Result<()> {
@@ -164,6 +180,7 @@ impl DownloadsStackRenderer {
         let brushes = BrushPalette::new(&target)?;
         self.target = target;
         self.brushes = brushes;
+        self.glass.invalidate_gpu();
         self.upload_all_thumbnails()
     }
 
@@ -210,13 +227,14 @@ impl DownloadsStackRenderer {
         active_hit: DownloadsStackHit,
         appearance: Appearance,
     ) -> Result<()> {
+        let appearance = self.glass.adaptive_appearance(&appearance);
         let palette = LiquidGlassPalette::for_appearance(&appearance);
         draw_on(&self.target, &self.surface, (width, height), || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
             self.brushes.update_theme(&palette);
 
-            self.draw_shell(width as f32, height as f32, layout.corner_radius, &palette);
+            self.draw_shell(width, height, layout.corner_radius, &appearance, &palette)?;
             self.draw_text(
                 &self.header_format,
                 "Downloads",
@@ -279,35 +297,59 @@ impl DownloadsStackRenderer {
         })
     }
 
-    fn draw_shell(&self, width: f32, height: f32, radius: f32, palette: &LiquidGlassPalette) {
-        let outer = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: 0.5,
-                top: 0.5,
-                right: width - 0.5,
-                bottom: height - 0.5,
+    fn draw_shell(
+        &self,
+        width: i32,
+        height: i32,
+        radius: f32,
+        appearance: &Appearance,
+        palette: &LiquidGlassPalette,
+    ) -> Result<()> {
+        let shell_shape = GlassShape::from_rect(
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
             },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let inner = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: 1.5,
-                top: 1.5,
-                right: width - 1.5,
-                bottom: height - 1.5,
-            },
-            radiusX: (radius - 1.0).max(1.0),
-            radiusY: (radius - 1.0).max(1.0),
-        };
-        unsafe {
-            let fill = &self.brushes.color_brush(palette.menu_fill);
-            let border = &self.brushes.color_brush(palette.menu_outer_border);
-            self.target.FillRoundedRectangle(&outer, fill);
-            self.target.DrawRoundedRectangle(&outer, border, 1.0, None);
-            self.target
-                .DrawRoundedRectangle(&inner, &self.brushes.specular_rim, 1.0, None);
+            radius,
+        );
+        let glass_drawn = self
+            .glass
+            .draw(&self.target, appearance, self.dpi, shell_shape, true)?;
+        if !glass_drawn {
+            let width = width as f32;
+            let height = height as f32;
+            let outer = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: 0.5,
+                    top: 0.5,
+                    right: width - 0.5,
+                    bottom: height - 0.5,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let inner = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: 1.5,
+                    top: 1.5,
+                    right: width - 1.5,
+                    bottom: height - 1.5,
+                },
+                radiusX: (radius - 1.0).max(1.0),
+                radiusY: (radius - 1.0).max(1.0),
+            };
+            unsafe {
+                let fill = &self.brushes.color_brush(palette.menu_fill);
+                let border = &self.brushes.color_brush(palette.menu_outer_border);
+                self.target.FillRoundedRectangle(&outer, fill);
+                self.target.DrawRoundedRectangle(&outer, border, 1.0, None);
+                self.target
+                    .DrawRoundedRectangle(&inner, &self.brushes.specular_rim, 1.0, None);
+            }
         }
+        Ok(())
     }
 
     fn draw_tile(

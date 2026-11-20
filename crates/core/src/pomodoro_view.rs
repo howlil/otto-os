@@ -288,25 +288,35 @@ fn session_label(state: &PomodoroState, surface: PomodoroSurface) -> String {
     }
 }
 
+fn cycle_progress(state: &PomodoroState) -> [f32; 4] {
+    let elapsed = 1.0 - state.progress();
+    let completed = usize::from(
+        state
+            .completed_focus_sessions
+            .min(POMODORO_SESSIONS_PER_CYCLE),
+    );
+    let current = usize::from(
+        state
+            .completed_focus_sessions
+            .min(POMODORO_SESSIONS_PER_CYCLE - 1),
+    );
+    let mut segments = [0.0; 4];
+    for (index, fill) in segments.iter_mut().enumerate() {
+        *fill = if index < completed {
+            1.0
+        } else if state.phase == PomodoroPhase::Focus && index == current {
+            elapsed
+        } else {
+            0.0
+        }
+    }
+    segments
+}
+
 fn progress(state: &PomodoroState) -> PomodoroProgress {
     let elapsed = 1.0 - state.progress();
     match state.phase {
-        PomodoroPhase::Focus => {
-            let current = usize::from(
-                state
-                    .completed_focus_sessions
-                    .min(POMODORO_SESSIONS_PER_CYCLE - 1),
-            );
-            let mut segments = [0.0; 4];
-            for (index, fill) in segments.iter_mut().enumerate() {
-                *fill = match index.cmp(&current) {
-                    std::cmp::Ordering::Less => 1.0,
-                    std::cmp::Ordering::Equal => elapsed,
-                    std::cmp::Ordering::Greater => 0.0,
-                };
-            }
-            PomodoroProgress::Segments(segments)
-        }
+        PomodoroPhase::Focus => PomodoroProgress::Segments(cycle_progress(state)),
         PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => PomodoroProgress::Bar(elapsed),
     }
 }
@@ -397,6 +407,11 @@ impl PomodoroScene {
     #[must_use]
     pub fn compact_view(&self) -> PomodoroView {
         self.view_for_mode(self.compact_mode)
+    }
+
+    #[must_use]
+    pub fn compact_cycle_progress(&self) -> Option<[f32; 4]> {
+        (self.compact_mode == FocusSubMode::Pomodoro).then(|| cycle_progress(&self.state))
     }
 
     #[must_use]

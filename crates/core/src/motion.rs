@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MotionPreference {
@@ -32,6 +32,8 @@ pub struct MotionMetrics {
     pub bounce_duration_seconds: f32,
     pub notch_tab_morph_rate: f32,
     pub notch_lyrics_morph_rate: f32,
+    pub control_center_morph_rate: f32,
+    pub spotlight_morph_rate: f32,
     pub hud_expand_rate: f32,
     pub hud_meter_rate: f32,
     pub hud_content_start: f32,
@@ -45,6 +47,14 @@ pub struct MotionMetrics {
     pub pomodoro_last_minute_pulse_seconds: f32,
     pub pomodoro_tone_rate: f32,
     pub animation_tick_ms: u32,
+    pub island_expand_response: f32,
+    pub island_expand_damping: f32,
+    pub island_compact_response: f32,
+    pub island_compact_damping: f32,
+    pub island_secondary_response: f32,
+    pub island_secondary_damping: f32,
+    pub island_press_response: f32,
+    pub island_press_damping: f32,
 }
 
 impl MotionMetrics {
@@ -75,6 +85,8 @@ impl MotionMetrics {
         bounce_duration_seconds: 0.44,
         notch_tab_morph_rate: 22.0,
         notch_lyrics_morph_rate: 18.0,
+        control_center_morph_rate: 22.0,
+        spotlight_morph_rate: 22.0,
         hud_expand_rate: 18.0,
         hud_meter_rate: 22.0,
         hud_content_start: 0.30,
@@ -88,12 +100,89 @@ impl MotionMetrics {
         pomodoro_last_minute_pulse_seconds: 1.0,
         pomodoro_tone_rate: 14.0,
         animation_tick_ms: 16,
+        island_expand_response: 0.30,
+        island_expand_damping: 0.84,
+        island_compact_response: 0.26,
+        island_compact_damping: 0.86,
+        island_secondary_response: 0.32,
+        island_secondary_damping: 0.78,
+        island_press_response: 0.12,
+        island_press_damping: 0.92,
     };
 }
 
 impl Default for MotionMetrics {
     fn default() -> Self {
         Self::MACOS_LIKE
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SpringState {
+    pub value: f32,
+    pub velocity: f32,
+}
+
+impl SpringState {
+    pub fn step(
+        &mut self,
+        target: f32,
+        response_seconds: f32,
+        damping_ratio: f32,
+        dt: f32,
+        preference: MotionPreference,
+    ) -> bool {
+        step_spring(
+            &mut self.value,
+            &mut self.velocity,
+            target,
+            response_seconds,
+            damping_ratio,
+            dt,
+            preference,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn step_spring(
+    value: &mut f32,
+    velocity: &mut f32,
+    target: f32,
+    response_seconds: f32,
+    damping_ratio: f32,
+    dt: f32,
+    preference: MotionPreference,
+) -> bool {
+    if !preference.allows_motion() || response_seconds <= 0.001 {
+        let changed = (*value - target).abs() > f32::EPSILON || velocity.abs() > f32::EPSILON;
+        *value = target;
+        *velocity = 0.0;
+        return changed;
+    }
+    let prev_value = *value;
+    let prev_velocity = *velocity;
+    let dt = dt.clamp(0.001, 0.050);
+    let substeps = ((dt / 0.002).ceil() as usize).clamp(1, 64);
+    let h = dt / substeps as f32;
+    let omega_n = TAU / response_seconds.max(0.01);
+    let omega_sq = omega_n * omega_n;
+    let two_zeta_omega = 2.0 * damping_ratio * omega_n;
+    let mut x = *value;
+    let mut v = *velocity;
+    for _ in 0..substeps {
+        let accel = omega_sq * (target - x) - two_zeta_omega * v;
+        v += accel * h;
+        x += v * h;
+    }
+    if (x - target).abs() <= 0.002 && v.abs() <= 0.015 {
+        *value = target;
+        *velocity = 0.0;
+        (prev_value - target).abs() > f32::EPSILON || prev_velocity.abs() > f32::EPSILON
+    } else {
+        *value = x;
+        *velocity = v;
+        true
     }
 }
 
@@ -205,5 +294,55 @@ mod tests {
             advance_genie_progress(0.4, 0.008, 0.52, MotionPreference::Reduced),
             1.0,
         );
+    }
+
+    #[test]
+    fn under_damped_spring_overshoots_target_when_damping_below_one() {
+        let mut spring = SpringState::default();
+        let mut max_value = 0.0_f32;
+        for _ in 0..40 {
+            let _ = spring.step(1.0, 0.30, 0.65, 0.016, MotionPreference::Full);
+            max_value = max_value.max(spring.value);
+        }
+        assert!(max_value > 1.0);
+    }
+
+    #[test]
+    fn spring_preserves_momentum_on_mid_flight_target_reversal() {
+        let mut spring = SpringState::default();
+        for _ in 0..5 {
+            assert!(spring.step(1.0, 0.30, 0.84, 0.016, MotionPreference::Full));
+        }
+        let velocity_before = spring.velocity;
+        let value_before = spring.value;
+        assert!(velocity_before > 0.0);
+        assert!(spring.step(0.0, 0.30, 0.84, 0.004, MotionPreference::Full));
+        assert!(spring.value > value_before);
+        assert!(spring.velocity < velocity_before);
+    }
+
+    #[test]
+    fn spring_settles_to_exact_target_under_600ms_and_reports_settled() {
+        let mut spring = SpringState::default();
+        let mut elapsed = 0.0_f32;
+        while elapsed < 0.60 {
+            let _ = spring.step(1.0, 0.30, 0.84, 0.016, MotionPreference::Full);
+            elapsed += 0.016;
+        }
+        assert_close(spring.value, 1.0);
+        assert_close(spring.velocity, 0.0);
+        assert!(!spring.step(1.0, 0.30, 0.84, 0.016, MotionPreference::Full));
+    }
+
+    #[test]
+    fn reduced_motion_spring_snaps_immediately_with_zero_velocity() {
+        let mut spring = SpringState {
+            value: 0.25,
+            velocity: 3.5,
+        };
+        assert!(spring.step(1.0, 0.30, 0.84, 0.016, MotionPreference::Reduced));
+        assert_close(spring.value, 1.0);
+        assert_close(spring.velocity, 0.0);
+        assert!(!spring.step(1.0, 0.30, 0.84, 0.016, MotionPreference::Reduced));
     }
 }

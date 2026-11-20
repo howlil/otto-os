@@ -11,10 +11,11 @@
   --color-surface: #ffffff;
   --color-surface-subtle: #f7f7f7;
 
-  --color-accent: #ff6a2b;
-  --color-accent-hover: #e9571c;
-  --color-accent-text: #b83b0a;
-  --color-accent-soft: #ffe3d6;
+  --color-accent: #075bef;
+  --color-accent-hover: #0441de;
+  --color-accent-text: #0441de;
+  --color-accent-soft: #e8f1ff;
+  --color-focus-activity: #ff6a2b;
 
   --color-positive: #15803d;
   --color-warning-ink: #92400e;

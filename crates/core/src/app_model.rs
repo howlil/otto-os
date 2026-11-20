@@ -423,11 +423,10 @@ pub fn decide_activation(app: &AppInfo) -> Activation {
     if visible.is_empty() {
         return Activation::Restore(first.identity);
     }
-    let focused = visible
-        .iter()
-        .position(|window| window.active)
-        .map_or(0, |active| (active + 1) % visible.len());
-    Activation::Focus(visible[focused].identity)
+    if let Some(active) = visible.iter().position(|window| window.active) {
+        return Activation::Focus(visible[(active + 1) % visible.len()].identity);
+    }
+    Activation::Focus(visible[0].identity)
 }
 
 #[cfg(test)]
@@ -748,6 +747,45 @@ mod tests {
         assert_eq!(
             decide_activation(&only_parked),
             Activation::Restore(parked_active.identity)
+        );
+    }
+
+    #[test]
+    fn decide_activation_focuses_first_visible_window_when_inactive_and_cycles_when_active() {
+        let mut first = window(1, 10, "editor.exe");
+        let mut second = window(2, 10, "editor.exe");
+        let third = window(3, 10, "editor.exe");
+        let inactive = app(vec![first.clone(), second.clone(), third.clone()]);
+        assert_eq!(
+            decide_activation(&inactive),
+            Activation::Focus(first.identity)
+        );
+
+        first.active = true;
+        let active_first = app(vec![first.clone(), second.clone(), third.clone()]);
+        assert_eq!(
+            decide_activation(&active_first),
+            Activation::Focus(second.identity)
+        );
+
+        first.active = false;
+        second.active = true;
+        let active_second = app(vec![first.clone(), second, third.clone()]);
+        assert_eq!(
+            decide_activation(&active_second),
+            Activation::Focus(third.identity)
+        );
+
+        let mut third_active = third;
+        third_active.active = true;
+        let active_third = app(vec![
+            first.clone(),
+            window(2, 10, "editor.exe"),
+            third_active,
+        ]);
+        assert_eq!(
+            decide_activation(&active_third),
+            Activation::Focus(first.identity)
         );
     }
 

@@ -2,6 +2,7 @@ use crate::bar_focus::BarKey;
 use crate::dock::{DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL, DockPreferences};
 use crate::layout::{Rect, scale};
 use crate::media::{MediaCommand, NowPlaying};
+use crate::menu_bar::{BarHideMode, BarItem, MenuBarPreferences};
 use crate::ports::ControlCenterAction;
 use crate::status::{PowerMode, SystemStatus};
 use crate::theme::ThemeMode;
@@ -73,61 +74,107 @@ pub struct AudioOutputDevice {
     pub is_default: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OttoSettingsCategory {
-    #[default]
-    All,
-    Modules,
-    NotchAndDock,
+pub const AREA_COUNT: usize = 6;
+pub const AREA_CARD_COLUMNS: usize = 2;
+const CHIP_COLUMNS: usize = 3;
+const HERO_HEIGHT_PERCENT: i32 = 30;
+const SCENE_HEIGHT_PERCENT: i32 = 42;
+const AREA_CARD_TEXT_HEIGHT: i32 = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OttoSettingsArea {
+    Dock,
+    MenuBar,
+    Notch,
+    NotchTools,
+    Appearance,
     System,
 }
 
-impl OttoSettingsCategory {
-    pub const ALL: [Self; 4] = [Self::All, Self::Modules, Self::NotchAndDock, Self::System];
+impl OttoSettingsArea {
+    pub const ALL: [Self; AREA_COUNT] = [
+        Self::Dock,
+        Self::MenuBar,
+        Self::Notch,
+        Self::NotchTools,
+        Self::Appearance,
+        Self::System,
+    ];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Modules => "Modules",
-            Self::NotchAndDock => "Notch & Dock",
+            Self::Dock => "Dock",
+            Self::MenuBar => "Menu Bar",
+            Self::Notch => "Notch",
+            Self::NotchTools => "Notch Tools",
+            Self::Appearance => "Appearance",
             Self::System => "System",
+        }
+    }
+
+    #[must_use]
+    pub const fn blurb(self) -> &'static str {
+        match self {
+            Self::Dock => "Apps and shortcuts",
+            Self::MenuBar => "What shows, and when",
+            Self::Notch => "Island, HUD, privacy",
+            Self::NotchTools => "Music, focus, clips",
+            Self::Appearance => "Windows and logo",
+            Self::System => "Startup and keys",
         }
     }
 
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
-            Self::All => 0,
-            Self::Modules => 1,
-            Self::NotchAndDock => 2,
-            Self::System => 3,
+            Self::Dock => 0,
+            Self::MenuBar => 1,
+            Self::Notch => 2,
+            Self::NotchTools => 3,
+            Self::Appearance => 4,
+            Self::System => 5,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OttoSettingGroup {
-    CorePlugins,
-    NotchModules,
-    DockAndBar,
-    SystemAndGlass,
+pub enum OttoSettingSection {
+    Main,
+    Behavior,
+    ShowOnDock,
+    WindowsTaskbar,
+    Visibility,
+    ShowInBar,
+    Live,
+    Pockets,
 }
 
-impl OttoSettingGroup {
+impl OttoSettingSection {
     #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
-            Self::CorePlugins => "Core Plugins",
-            Self::NotchModules => "Notch Modules",
-            Self::DockAndBar => "Dock & Menu Bar",
-            Self::SystemAndGlass => "System & Glass",
+            Self::Main => "",
+            Self::Behavior => "Behavior",
+            Self::ShowOnDock => "Show on Dock",
+            Self::WindowsTaskbar => "Windows Taskbar",
+            Self::Visibility => "Visibility",
+            Self::ShowInBar => "Show in the Bar",
+            Self::Live => "Live",
+            Self::Pockets => "Pockets",
         }
+    }
+
+    #[must_use]
+    pub const fn is_chips(self) -> bool {
+        matches!(self, Self::ShowInBar)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OttoSettingKind {
+    TopBar,
+    Notch,
     Dock,
     WindowControls,
     Genie,
@@ -139,20 +186,32 @@ pub enum OttoSettingKind {
     DynamicIsland,
     MediaModule,
     FocusModule,
+    QuickCapture,
     OnlineLyrics,
     ClassicLogo,
     DockHideTaskbar,
     DockShowDownloads,
     DockShowTrash,
     DockAutohide,
+    DockReserveSpace,
     DockMagnification,
     Hotkeys,
     LaunchAtLogin,
     CaptureVisible,
+    BackgroundCleanup,
+    MenuBarBackground,
+    MenuBarKeepNotch,
+    MenuBarTray,
+    MenuBarStatus,
+    MenuBarSearch,
+    MenuBarNotifications,
+    MenuBarClock,
 }
 
 impl OttoSettingKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 33] = [
+        Self::TopBar,
+        Self::Notch,
         Self::Dock,
         Self::WindowControls,
         Self::Genie,
@@ -164,71 +223,102 @@ impl OttoSettingKind {
         Self::DynamicIsland,
         Self::MediaModule,
         Self::FocusModule,
+        Self::QuickCapture,
         Self::OnlineLyrics,
         Self::ClassicLogo,
         Self::DockHideTaskbar,
         Self::DockShowDownloads,
         Self::DockShowTrash,
         Self::DockAutohide,
+        Self::DockReserveSpace,
         Self::DockMagnification,
         Self::Hotkeys,
         Self::LaunchAtLogin,
         Self::CaptureVisible,
+        Self::BackgroundCleanup,
+        Self::MenuBarBackground,
+        Self::MenuBarKeepNotch,
+        Self::MenuBarTray,
+        Self::MenuBarStatus,
+        Self::MenuBarSearch,
+        Self::MenuBarNotifications,
+        Self::MenuBarClock,
     ];
 
     #[must_use]
-    pub const fn category(self) -> OttoSettingsCategory {
+    pub const fn area(self) -> OttoSettingsArea {
         match self {
             Self::Dock
-            | Self::WindowControls
-            | Self::Genie
-            | Self::DynamicIsland
-            | Self::PrivacyIndicators
-            | Self::ClipboardHistory
-            | Self::DropShelf
-            | Self::NotchHud
-            | Self::MediaModule
-            | Self::FocusModule
-            | Self::OnlineLyrics => OttoSettingsCategory::Modules,
-            Self::ClassicLogo
             | Self::DockHideTaskbar
             | Self::DockShowDownloads
             | Self::DockShowTrash
             | Self::DockAutohide
-            | Self::DockMagnification => OttoSettingsCategory::NotchAndDock,
-            Self::LiquidGlass | Self::Hotkeys | Self::LaunchAtLogin | Self::CaptureVisible => {
-                OttoSettingsCategory::System
+            | Self::DockReserveSpace
+            | Self::DockMagnification => OttoSettingsArea::Dock,
+            Self::TopBar
+            | Self::MenuBarBackground
+            | Self::MenuBarKeepNotch
+            | Self::MenuBarTray
+            | Self::MenuBarStatus
+            | Self::MenuBarSearch
+            | Self::MenuBarNotifications
+            | Self::MenuBarClock => OttoSettingsArea::MenuBar,
+            Self::Notch | Self::DynamicIsland | Self::NotchHud | Self::PrivacyIndicators => {
+                OttoSettingsArea::Notch
             }
+            Self::MediaModule
+            | Self::OnlineLyrics
+            | Self::FocusModule
+            | Self::ClipboardHistory
+            | Self::QuickCapture
+            | Self::DropShelf => OttoSettingsArea::NotchTools,
+            Self::WindowControls | Self::Genie | Self::ClassicLogo | Self::LiquidGlass => {
+                OttoSettingsArea::Appearance
+            }
+            Self::Hotkeys
+            | Self::LaunchAtLogin
+            | Self::CaptureVisible
+            | Self::BackgroundCleanup => OttoSettingsArea::System,
         }
     }
 
     #[must_use]
-    pub const fn group(self) -> OttoSettingGroup {
+    pub const fn section(self) -> OttoSettingSection {
         match self {
-            Self::Dock | Self::WindowControls | Self::Genie => OttoSettingGroup::CorePlugins,
-            Self::DynamicIsland
-            | Self::PrivacyIndicators
-            | Self::ClipboardHistory
-            | Self::DropShelf
-            | Self::NotchHud
-            | Self::MediaModule
-            | Self::FocusModule
-            | Self::OnlineLyrics => OttoSettingGroup::NotchModules,
-            Self::ClassicLogo
-            | Self::DockHideTaskbar
-            | Self::DockShowDownloads
-            | Self::DockShowTrash
-            | Self::DockAutohide
-            | Self::DockMagnification => OttoSettingGroup::DockAndBar,
-            Self::LiquidGlass | Self::Hotkeys | Self::LaunchAtLogin | Self::CaptureVisible => {
-                OttoSettingGroup::SystemAndGlass
+            Self::DockAutohide | Self::DockMagnification => OttoSettingSection::Behavior,
+            Self::DockShowDownloads | Self::DockShowTrash => OttoSettingSection::ShowOnDock,
+            Self::DockHideTaskbar | Self::DockReserveSpace => OttoSettingSection::WindowsTaskbar,
+            Self::MenuBarBackground | Self::MenuBarKeepNotch => OttoSettingSection::Visibility,
+            Self::MenuBarTray
+            | Self::MenuBarStatus
+            | Self::MenuBarSearch
+            | Self::MenuBarNotifications
+            | Self::MenuBarClock => OttoSettingSection::ShowInBar,
+            Self::MediaModule | Self::OnlineLyrics | Self::FocusModule => OttoSettingSection::Live,
+            Self::ClipboardHistory | Self::QuickCapture | Self::DropShelf => {
+                OttoSettingSection::Pockets
             }
+            _ => OttoSettingSection::Main,
+        }
+    }
+
+    #[must_use]
+    pub const fn chip_label(self) -> &'static str {
+        match self {
+            Self::MenuBarTray => "Tray",
+            Self::MenuBarStatus => "Status",
+            Self::MenuBarSearch => "Search",
+            Self::MenuBarNotifications => "Alerts",
+            Self::MenuBarClock => "Clock",
+            _ => self.label(),
         }
     }
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::TopBar => "Top Bar",
+            Self::Notch => "Notch",
             Self::Dock => "Otto Dock",
             Self::WindowControls => "Traffic Lights",
             Self::Genie => "Genie Minimize",
@@ -240,22 +330,34 @@ impl OttoSettingKind {
             Self::DynamicIsland => "Dynamic Island",
             Self::MediaModule => "Now Playing Media",
             Self::FocusModule => "Focus & Pomodoro",
+            Self::QuickCapture => "Quick Capture",
             Self::OnlineLyrics => "Online Lyrics",
             Self::ClassicLogo => "Classic Brand Logo",
             Self::DockHideTaskbar => "Hide Windows Taskbar",
             Self::DockShowDownloads => "Downloads Stack",
             Self::DockShowTrash => "Trash Bin",
             Self::DockAutohide => "Auto-Hide Dock",
+            Self::DockReserveSpace => "Reserve Screen Space",
             Self::DockMagnification => "Dock Magnification",
             Self::Hotkeys => "Global Hotkeys",
             Self::LaunchAtLogin => "Launch at Login",
             Self::CaptureVisible => "Visible in Captures",
+            Self::BackgroundCleanup => "Background Cleanup",
+            Self::MenuBarBackground => "Menu Bar Background",
+            Self::MenuBarKeepNotch => "Notch Stays Visible",
+            Self::MenuBarTray => BarItem::Tray.label(),
+            Self::MenuBarStatus => BarItem::Status.label(),
+            Self::MenuBarSearch => BarItem::Search.label(),
+            Self::MenuBarNotifications => BarItem::Notifications.label(),
+            Self::MenuBarClock => BarItem::Clock.label(),
         }
     }
 
     #[must_use]
     pub const fn subtitle(self) -> &'static str {
         match self {
+            Self::TopBar => "Menu bar strip & status icons (Ctrl+Alt+B)",
+            Self::Notch => "Top notch, Dynamic Island & live activities",
             Self::Dock => "App switcher, running dots & Dock",
             Self::WindowControls => "macOS-style window titlebar buttons",
             Self::Genie => "Smooth warp minimize animation",
@@ -267,16 +369,26 @@ impl OttoSettingKind {
             Self::DynamicIsland => "Floating pill instead of attached notch",
             Self::MediaModule => "System media watcher & playback bar",
             Self::FocusModule => "Pomodoro, timer & stopwatch tab",
+            Self::QuickCapture => "Tasks tab & Ctrl+Alt+Q capture",
             Self::OnlineLyrics => "Fetch synced & plain lyrics online",
             Self::ClassicLogo => "Classic emblem in left menu bar",
             Self::DockHideTaskbar => "Auto-hide taskbar while Dock runs",
             Self::DockShowDownloads => "Show Downloads folder stack",
             Self::DockShowTrash => "Show Recycle Bin item on Dock",
-            Self::DockAutohide => "Hide Dock when windows overlap",
+            Self::DockAutohide => "Hide Dock when a window covers it",
+            Self::DockReserveSpace => "Windows stop above the Dock like a taskbar",
             Self::DockMagnification => "Zoom Dock icons under pointer",
             Self::Hotkeys => "Shortcuts for Bar, Notch & Focus",
             Self::LaunchAtLogin => "Start Otto OS automatically at sign-in",
             Self::CaptureVisible => "Show overlays in screenshots",
+            Self::BackgroundCleanup => "Throttle idle apps hogging CPU",
+            Self::MenuBarBackground => "Glass behind the menu bar",
+            Self::MenuBarKeepNotch => "Keep the notch when the bar hides",
+            Self::MenuBarTray => BarItem::Tray.subtitle(),
+            Self::MenuBarStatus => BarItem::Status.subtitle(),
+            Self::MenuBarSearch => BarItem::Search.subtitle(),
+            Self::MenuBarNotifications => BarItem::Notifications.subtitle(),
+            Self::MenuBarClock => BarItem::Clock.subtitle(),
         }
     }
 
@@ -284,7 +396,9 @@ impl OttoSettingKind {
     pub const fn is_core_module(self) -> bool {
         matches!(
             self,
-            Self::Dock
+            Self::TopBar
+                | Self::Notch
+                | Self::Dock
                 | Self::WindowControls
                 | Self::Genie
                 | Self::PrivacyIndicators
@@ -301,46 +415,75 @@ impl OttoSettingKind {
 pub enum OttoSettingItem {
     Toggle(OttoSettingKind),
     DockIconSize,
+    MenuBarHide,
 }
 
 impl OttoSettingItem {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 34] = [
         Self::Toggle(OttoSettingKind::Dock),
-        Self::Toggle(OttoSettingKind::WindowControls),
-        Self::Toggle(OttoSettingKind::Genie),
-        Self::Toggle(OttoSettingKind::DynamicIsland),
-        Self::Toggle(OttoSettingKind::PrivacyIndicators),
-        Self::Toggle(OttoSettingKind::ClipboardHistory),
-        Self::Toggle(OttoSettingKind::DropShelf),
-        Self::Toggle(OttoSettingKind::NotchHud),
-        Self::Toggle(OttoSettingKind::MediaModule),
-        Self::Toggle(OttoSettingKind::FocusModule),
-        Self::Toggle(OttoSettingKind::OnlineLyrics),
-        Self::Toggle(OttoSettingKind::DockHideTaskbar),
+        Self::DockIconSize,
+        Self::Toggle(OttoSettingKind::DockMagnification),
+        Self::Toggle(OttoSettingKind::DockAutohide),
         Self::Toggle(OttoSettingKind::DockShowDownloads),
         Self::Toggle(OttoSettingKind::DockShowTrash),
-        Self::Toggle(OttoSettingKind::DockAutohide),
-        Self::Toggle(OttoSettingKind::DockMagnification),
-        Self::DockIconSize,
+        Self::Toggle(OttoSettingKind::DockHideTaskbar),
+        Self::Toggle(OttoSettingKind::DockReserveSpace),
+        Self::Toggle(OttoSettingKind::TopBar),
+        Self::MenuBarHide,
+        Self::Toggle(OttoSettingKind::MenuBarKeepNotch),
+        Self::Toggle(OttoSettingKind::MenuBarBackground),
+        Self::Toggle(OttoSettingKind::MenuBarTray),
+        Self::Toggle(OttoSettingKind::MenuBarStatus),
+        Self::Toggle(OttoSettingKind::MenuBarSearch),
+        Self::Toggle(OttoSettingKind::MenuBarNotifications),
+        Self::Toggle(OttoSettingKind::MenuBarClock),
+        Self::Toggle(OttoSettingKind::Notch),
+        Self::Toggle(OttoSettingKind::DynamicIsland),
+        Self::Toggle(OttoSettingKind::NotchHud),
+        Self::Toggle(OttoSettingKind::PrivacyIndicators),
+        Self::Toggle(OttoSettingKind::MediaModule),
+        Self::Toggle(OttoSettingKind::OnlineLyrics),
+        Self::Toggle(OttoSettingKind::FocusModule),
+        Self::Toggle(OttoSettingKind::QuickCapture),
+        Self::Toggle(OttoSettingKind::ClipboardHistory),
+        Self::Toggle(OttoSettingKind::DropShelf),
+        Self::Toggle(OttoSettingKind::WindowControls),
+        Self::Toggle(OttoSettingKind::Genie),
         Self::Toggle(OttoSettingKind::ClassicLogo),
         Self::Toggle(OttoSettingKind::LaunchAtLogin),
         Self::Toggle(OttoSettingKind::Hotkeys),
         Self::Toggle(OttoSettingKind::CaptureVisible),
+        Self::Toggle(OttoSettingKind::BackgroundCleanup),
     ];
 
     #[must_use]
-    pub const fn category(self) -> OttoSettingsCategory {
+    pub const fn area(self) -> OttoSettingsArea {
         match self {
-            Self::Toggle(kind) => kind.category(),
-            Self::DockIconSize => OttoSettingsCategory::NotchAndDock,
+            Self::Toggle(kind) => kind.area(),
+            Self::DockIconSize => OttoSettingsArea::Dock,
+            Self::MenuBarHide => OttoSettingsArea::MenuBar,
         }
     }
 
     #[must_use]
-    pub const fn group(self) -> OttoSettingGroup {
+    pub const fn section(self) -> OttoSettingSection {
         match self {
-            Self::Toggle(kind) => kind.group(),
-            Self::DockIconSize => OttoSettingGroup::DockAndBar,
+            Self::Toggle(kind) => kind.section(),
+            Self::DockIconSize => OttoSettingSection::Behavior,
+            Self::MenuBarHide => OttoSettingSection::Visibility,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_chip(self) -> bool {
+        self.section().is_chips()
+    }
+
+    #[must_use]
+    pub const fn chip_label(self) -> &'static str {
+        match self {
+            Self::Toggle(kind) => kind.chip_label(),
+            _ => self.label(),
         }
     }
 
@@ -349,12 +492,16 @@ impl OttoSettingItem {
         match self {
             Self::Toggle(kind) => kind.label(),
             Self::DockIconSize => "Dock Icon Size",
+            Self::MenuBarHide => "Auto-Hide Menu Bar",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PluginSettingsState {
+    pub top_bar: bool,
+    pub notch: bool,
     pub dock: bool,
     pub window_controls: bool,
     pub genie: bool,
@@ -375,6 +522,8 @@ pub struct SystemSettingsState {
     pub notch_hud: bool,
     pub media_module: bool,
     pub focus_module: bool,
+    pub background_cleanup: bool,
+    pub quick_capture: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -383,12 +532,15 @@ pub struct OttoSettingsSnapshot {
     pub dock: DockPreferences,
     pub online_lyrics: bool,
     pub system: SystemSettingsState,
+    pub menu_bar: MenuBarPreferences,
 }
 
 impl OttoSettingsSnapshot {
     #[must_use]
     pub const fn is_enabled(&self, kind: OttoSettingKind) -> bool {
         match kind {
+            OttoSettingKind::TopBar => self.plugins.top_bar,
+            OttoSettingKind::Notch => self.plugins.notch,
             OttoSettingKind::Dock => self.plugins.dock,
             OttoSettingKind::WindowControls => self.plugins.window_controls,
             OttoSettingKind::Genie => self.plugins.genie,
@@ -400,16 +552,28 @@ impl OttoSettingsSnapshot {
             OttoSettingKind::DynamicIsland => self.system.dynamic_island,
             OttoSettingKind::MediaModule => self.system.media_module,
             OttoSettingKind::FocusModule => self.system.focus_module,
+            OttoSettingKind::QuickCapture => self.system.quick_capture,
             OttoSettingKind::OnlineLyrics => self.online_lyrics,
             OttoSettingKind::ClassicLogo => self.system.classic_logo,
             OttoSettingKind::DockHideTaskbar => self.dock.hide_taskbar,
             OttoSettingKind::DockShowDownloads => self.dock.show_downloads,
             OttoSettingKind::DockShowTrash => self.dock.show_trash,
             OttoSettingKind::DockAutohide => self.dock.autohide,
+            OttoSettingKind::DockReserveSpace => self.dock.reserve_space,
             OttoSettingKind::DockMagnification => self.dock.magnification,
             OttoSettingKind::Hotkeys => self.system.hotkeys_enabled,
             OttoSettingKind::LaunchAtLogin => self.system.launch_at_login,
             OttoSettingKind::CaptureVisible => self.system.capture_visible,
+            OttoSettingKind::BackgroundCleanup => self.system.background_cleanup,
+            OttoSettingKind::MenuBarBackground => self.menu_bar.show_background,
+            OttoSettingKind::MenuBarKeepNotch => self.menu_bar.keep_notch,
+            OttoSettingKind::MenuBarTray => !self.menu_bar.hidden_items.contains(BarItem::Tray),
+            OttoSettingKind::MenuBarStatus => !self.menu_bar.hidden_items.contains(BarItem::Status),
+            OttoSettingKind::MenuBarSearch => !self.menu_bar.hidden_items.contains(BarItem::Search),
+            OttoSettingKind::MenuBarNotifications => {
+                !self.menu_bar.hidden_items.contains(BarItem::Notifications)
+            }
+            OttoSettingKind::MenuBarClock => !self.menu_bar.hidden_items.contains(BarItem::Clock),
         }
     }
 
@@ -424,44 +588,72 @@ impl OttoSettingsSnapshot {
                 | OttoSettingKind::DockMagnification,
             )
             | OttoSettingItem::DockIconSize => self.plugins.dock,
+            OttoSettingItem::Toggle(OttoSettingKind::DockReserveSpace) => {
+                self.plugins.dock && self.dock.hide_taskbar
+            }
             OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics) => self.system.media_module,
+            OttoSettingItem::Toggle(OttoSettingKind::MenuBarKeepNotch) => {
+                self.plugins.top_bar
+                    && self.plugins.notch
+                    && !matches!(self.menu_bar.hide_mode, BarHideMode::Never)
+            }
+            OttoSettingItem::Toggle(
+                OttoSettingKind::MenuBarBackground
+                | OttoSettingKind::MenuBarTray
+                | OttoSettingKind::MenuBarStatus
+                | OttoSettingKind::MenuBarSearch
+                | OttoSettingKind::MenuBarNotifications
+                | OttoSettingKind::MenuBarClock,
+            )
+            | OttoSettingItem::MenuBarHide => self.plugins.top_bar,
+            OttoSettingItem::Toggle(
+                OttoSettingKind::DynamicIsland
+                | OttoSettingKind::NotchHud
+                | OttoSettingKind::PrivacyIndicators,
+            ) => self.plugins.notch,
             OttoSettingItem::Toggle(_) => true,
         }
     }
 
     #[must_use]
-    pub const fn dependency_badge(&self, item: OttoSettingItem) -> Option<&'static str> {
-        if self.is_item_available(item) {
-            return None;
-        }
-        Some(match item {
-            OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics) => "Requires Media",
-            _ => "Requires Dock",
-        })
-    }
-
-    #[must_use]
     pub const fn item_subtitle(&self, item: OttoSettingItem) -> &'static str {
-        if !self.is_item_available(item) {
-            return match item {
-                OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics) => {
-                    "Enable Now Playing to fetch lyrics"
-                }
-                _ => "Enable Otto Dock to configure",
-            };
-        }
         match item {
             OttoSettingItem::Toggle(kind) => kind.subtitle(),
             OttoSettingItem::DockIconSize => "Base size for Dock icons",
+            OttoSettingItem::MenuBarHide => "Hide the bar until the pointer reaches the top",
         }
     }
 
     #[must_use]
-    pub fn visible_items(&self, category: OttoSettingsCategory) -> Vec<OttoSettingItem> {
+    pub fn visible_items(&self, area: OttoSettingsArea) -> Vec<OttoSettingItem> {
         OttoSettingItem::ALL
             .into_iter()
-            .filter(|item| category == OttoSettingsCategory::All || item.category() == category)
+            .filter(|item| item.area() == area && self.is_item_available(*item))
             .collect()
+    }
+
+    #[must_use]
+    pub fn area_status(&self, area: OttoSettingsArea) -> String {
+        let master_off = match area {
+            OttoSettingsArea::Dock => !self.plugins.dock,
+            OttoSettingsArea::MenuBar => !self.plugins.top_bar,
+            OttoSettingsArea::Notch | OttoSettingsArea::NotchTools => !self.plugins.notch,
+            _ => false,
+        };
+        if master_off {
+            return String::from("Off");
+        }
+        let (on, total) = OttoSettingItem::ALL
+            .into_iter()
+            .filter(|item| item.area() == area)
+            .filter_map(|item| match item {
+                OttoSettingItem::Toggle(kind) => Some(self.is_enabled(kind)),
+                _ => None,
+            })
+            .fold((0usize, 0usize), |(on, total), enabled| {
+                (on + usize::from(enabled), total + 1)
+            });
+        format!("{on} of {total} on")
     }
 
     #[must_use]
@@ -498,6 +690,7 @@ impl OttoSettingsSnapshot {
 pub struct SubPanelGroupSpec {
     pub title: &'static str,
     pub count: usize,
+    pub chips: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,7 +705,7 @@ pub struct SubPanelGroupLayout {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ControlCenterSnapshot {
     pub page: ControlCenterPage,
-    pub otto_category: OttoSettingsCategory,
+    pub otto_area: Option<OttoSettingsArea>,
     pub status: SystemStatus,
     pub focus_active: bool,
     pub media: Option<NowPlaying>,
@@ -533,9 +726,9 @@ impl ControlCenterSnapshot {
             ControlCenterPage::Wifi => self.wifi.networks.len(),
             ControlCenterPage::Bluetooth => self.bluetooth.devices.len(),
             ControlCenterPage::Sound => self.audio_outputs.len(),
-            ControlCenterPage::OttoSettings => {
-                self.settings.visible_items(self.otto_category).len()
-            }
+            ControlCenterPage::OttoSettings => self
+                .otto_area
+                .map_or(0, |area| self.settings.visible_items(area).len()),
         }
     }
 
@@ -549,16 +742,22 @@ impl ControlCenterSnapshot {
             }
             ControlCenterPage::Sound => non_empty_group("Output Devices", self.audio_outputs.len()),
             ControlCenterPage::OttoSettings => {
-                let items = self.settings.visible_items(self.otto_category);
+                let items = self
+                    .otto_area
+                    .map_or_else(Vec::new, |area| self.settings.visible_items(area));
                 let mut groups: Vec<SubPanelGroupSpec> = Vec::new();
                 for item in items {
-                    let title = item.group().title();
+                    let section = item.section();
                     if let Some(last) = groups.last_mut()
-                        && last.title == title
+                        && last.title == section.title()
                     {
                         last.count += 1;
                     } else {
-                        groups.push(SubPanelGroupSpec { title, count: 1 });
+                        groups.push(SubPanelGroupSpec {
+                            title: section.title(),
+                            count: 1,
+                            chips: section.is_chips(),
+                        });
                     }
                 }
                 groups
@@ -571,7 +770,11 @@ fn non_empty_group(title: &'static str, count: usize) -> Vec<SubPanelGroupSpec> 
     if count == 0 {
         Vec::new()
     } else {
-        vec![SubPanelGroupSpec { title, count }]
+        vec![SubPanelGroupSpec {
+            title,
+            count,
+            chips: false,
+        }]
     }
 }
 
@@ -588,7 +791,6 @@ pub struct ControlCenterMetrics {
     pub bottom_row_height: i32,
     pub header_height: i32,
     pub slider_card_height: i32,
-    pub category_bar_height: i32,
     pub row_height: i32,
     pub row_gap: i32,
     pub footer_height: i32,
@@ -603,7 +805,7 @@ impl ControlCenterMetrics {
         width: 376,
         padding: 12,
         gap: 8,
-        shell_radius: 22,
+        shell_radius: 26,
         card_radius: 14,
         connectivity_height: 144,
         display_card_height: 64,
@@ -611,7 +813,6 @@ impl ControlCenterMetrics {
         bottom_row_height: 128,
         header_height: 40,
         slider_card_height: 64,
-        category_bar_height: 32,
         row_height: 44,
         row_gap: 0,
         footer_height: 36,
@@ -660,7 +861,7 @@ pub enum ControlCenterHitTarget {
     OttoSettingsTile,
     BackButton,
     HeaderToggle,
-    OttoCategoryTab(OttoSettingsCategory),
+    OttoAreaCard(OttoSettingsArea),
     SubPanelItem(usize),
     FooterPrimary,
     FooterSecondary,
@@ -697,7 +898,9 @@ pub struct ControlCenterLayout {
     pub back_button: Rect,
     pub header_rect: Rect,
     pub header_toggle: Rect,
-    pub category_tabs: [Rect; 4],
+    pub area: Option<OttoSettingsArea>,
+    pub area_cards: [Rect; AREA_COUNT],
+    pub hero: Rect,
     pub error_banner: Rect,
     pub list_viewport: Rect,
     pub groups: Vec<SubPanelGroupLayout>,
@@ -713,7 +916,7 @@ pub struct ControlCenterLayout {
 pub enum ControlCenterCommand {
     OpenPage(ControlCenterPage),
     Back,
-    SelectOttoCategory(OttoSettingsCategory),
+    OpenOttoArea(OttoSettingsArea),
     ToggleWifi,
     ConnectWifi(String),
     ToggleBluetooth,
@@ -729,6 +932,7 @@ pub enum ControlCenterCommand {
     OpenNotchMedia,
     ToggleSetting(OttoSettingKind),
     CycleDockIconSize,
+    CycleMenuBarHide,
     OpenSettings(ControlCenterAction),
     OpenLogsFolder,
     CheckForUpdates,
@@ -879,7 +1083,7 @@ pub fn compute_control_center_layout(
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,
 ) -> ControlCenterLayout {
-    compute_control_center_layout_with(metrics, placement, &[], false)
+    compute_control_center_layout_with(metrics, placement, None, &[], false)
 }
 
 #[must_use]
@@ -891,12 +1095,13 @@ pub fn compute_control_center_layout_for_snapshot(
     let groups = snapshot.subpanel_groups();
     let has_error =
         placement.page == ControlCenterPage::OttoSettings && snapshot.last_error.is_some();
-    compute_control_center_layout_with(metrics, placement, &groups, has_error)
+    compute_control_center_layout_with(metrics, placement, snapshot.otto_area, &groups, has_error)
 }
 
 fn compute_control_center_layout_with(
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,
+    area: Option<OttoSettingsArea>,
     groups: &[SubPanelGroupSpec],
     has_error: bool,
 ) -> ControlCenterLayout {
@@ -908,6 +1113,7 @@ fn compute_control_center_layout_with(
 
     let mut layout = ControlCenterLayout {
         page: placement.page,
+        area: area.filter(|_| placement.page == ControlCenterPage::OttoSettings),
         shell_radius: scale(metrics.shell_radius, dpi),
         card_radius: scale(metrics.card_radius, dpi),
         row_height: scale(metrics.row_height, dpi),
@@ -1193,6 +1399,11 @@ fn layout_subpanel_page(
     inner_w: i32,
 ) -> i32 {
     let mut y = layout_subpanel_header(layout, metrics, placement.page, dpi, pad, gap, inner_w);
+    if placement.page == ControlCenterPage::OttoSettings {
+        return layout_otto_settings_page(
+            layout, metrics, placement, groups, has_error, dpi, pad, gap, inner_w, y,
+        );
+    }
     match placement.page {
         ControlCenterPage::Sound => {
             y = layout_subpanel_sound(layout, metrics, dpi, pad, gap, inner_w, y);
@@ -1200,20 +1411,10 @@ fn layout_subpanel_page(
         ControlCenterPage::Display => {
             y = layout_subpanel_display(layout, metrics, dpi, pad, gap, inner_w, y);
         }
-        ControlCenterPage::OttoSettings => {
-            y = layout_subpanel_categories(layout, metrics, dpi, pad, gap, inner_w, y);
-            if has_error {
-                let banner_h = scale(metrics.error_banner_height, dpi);
-                layout.error_banner = Rect {
-                    x: pad,
-                    y,
-                    width: inner_w,
-                    height: banner_h,
-                };
-                y += banner_h + scale(6, dpi);
-            }
-        }
-        ControlCenterPage::Main | ControlCenterPage::Wifi | ControlCenterPage::Bluetooth => {}
+        ControlCenterPage::Main
+        | ControlCenterPage::Wifi
+        | ControlCenterPage::Bluetooth
+        | ControlCenterPage::OttoSettings => {}
     }
 
     let footer_h = scale(metrics.footer_height, dpi);
@@ -1342,34 +1543,131 @@ fn layout_subpanel_display(
     y + slider_card_h + gap
 }
 
-fn layout_subpanel_categories(
+#[allow(clippy::too_many_arguments)]
+fn layout_otto_settings_page(
     layout: &mut ControlCenterLayout,
     metrics: &ControlCenterMetrics,
+    placement: ControlCenterPlacement,
+    groups: &[SubPanelGroupSpec],
+    has_error: bool,
     dpi: u32,
     pad: i32,
     gap: i32,
     inner_w: i32,
     y: i32,
 ) -> i32 {
-    let chip_h = scale(metrics.category_bar_height, dpi);
-    let weights = [20i32, 24, 34, 22];
-    let mut cx = pad;
-    let tab_count = layout.category_tabs.len();
-    for (index, rect) in layout.category_tabs.iter_mut().enumerate() {
-        let w = if index + 1 == tab_count {
-            (pad + inner_w - cx).max(1)
+    let footer_h = scale(metrics.footer_height, dpi);
+    if layout.area.is_none() {
+        let y = layout_area_cards(layout, dpi, pad, gap, inner_w, y);
+        layout_subpanel_footer(
+            layout,
+            ControlCenterPage::OttoSettings,
+            pad,
+            gap,
+            inner_w,
+            y,
+            footer_h,
+        );
+        return y + footer_h + pad;
+    }
+    let hero_h = inner_w * HERO_HEIGHT_PERCENT / 100;
+    layout.hero = Rect {
+        x: pad,
+        y,
+        width: inner_w,
+        height: hero_h,
+    };
+    let mut y = y + hero_h + gap;
+    if has_error {
+        let banner_h = scale(metrics.error_banner_height, dpi);
+        layout.error_banner = Rect {
+            x: pad,
+            y,
+            width: inner_w,
+            height: banner_h,
+        };
+        y += banner_h + scale(6, dpi);
+    }
+    let end = layout_subpanel_list(
+        layout, metrics, placement, groups, dpi, pad, gap, inner_w, y, 0,
+    );
+    end - gap + pad
+}
+
+fn layout_area_cards(
+    layout: &mut ControlCenterLayout,
+    dpi: u32,
+    pad: i32,
+    gap: i32,
+    inner_w: i32,
+    y: i32,
+) -> i32 {
+    let card_w = (inner_w - gap) / AREA_CARD_COLUMNS as i32;
+    let card_h = area_card_scene_height(card_w) + scale(AREA_CARD_TEXT_HEIGHT, dpi);
+    for (index, rect) in layout.area_cards.iter_mut().enumerate() {
+        let column = (index % AREA_CARD_COLUMNS) as i32;
+        let row = (index / AREA_CARD_COLUMNS) as i32;
+        let x = pad + column * (card_w + gap);
+        let width = if column == AREA_CARD_COLUMNS as i32 - 1 {
+            pad + inner_w - x
         } else {
-            ((inner_w * weights[index] + 50) / 100).max(1)
+            card_w
         };
         *rect = Rect {
-            x: cx,
-            y,
-            width: w,
-            height: chip_h,
+            x,
+            y: y + row * (card_h + gap),
+            width,
+            height: card_h,
         };
-        cx += w;
     }
-    y + chip_h + gap
+    let rows = AREA_COUNT.div_ceil(AREA_CARD_COLUMNS) as i32;
+    y + rows * card_h + (rows - 1) * gap + gap
+}
+
+const fn area_card_scene_height(card_width: i32) -> i32 {
+    card_width * SCENE_HEIGHT_PERCENT / 100
+}
+
+#[must_use]
+pub const fn area_card_scene(card: Rect) -> Rect {
+    Rect {
+        x: card.x,
+        y: card.y,
+        width: card.width,
+        height: area_card_scene_height(card.width),
+    }
+}
+
+const fn chips_rows(count: usize) -> i32 {
+    count.div_ceil(CHIP_COLUMNS) as i32
+}
+
+const fn chip_metrics(row_h: i32) -> (i32, i32, i32) {
+    (row_h * 3 / 4, row_h / 8, row_h / 4)
+}
+
+fn group_content_height(group: &SubPanelGroupSpec, row_h: i32) -> i32 {
+    if !group.chips {
+        return i32::try_from(group.count).unwrap_or(64) * row_h;
+    }
+    let (chip_h, chip_gap, inset) = chip_metrics(row_h);
+    let rows = chips_rows(group.count);
+    rows * chip_h + (rows - 1).max(0) * chip_gap + inset * 2
+}
+
+fn chip_rect(container: Rect, row_h: i32, offset: usize) -> Rect {
+    let (chip_h, chip_gap, inset) = chip_metrics(row_h);
+    let columns = CHIP_COLUMNS as i32;
+    let inner_w = container.width - inset * 2;
+    let chip_w = (inner_w - (columns - 1) * chip_gap) / columns;
+    let column = (offset % CHIP_COLUMNS) as i32;
+    let row = (offset / CHIP_COLUMNS) as i32;
+    Rect {
+        x: container.x + inset + column * (chip_w + chip_gap),
+        y: container.y + inset + row * (chip_h + chip_gap),
+        width: chip_w,
+        height: chip_h,
+    }
 }
 
 fn compute_subpanel_list_total_height(
@@ -1390,12 +1688,12 @@ fn compute_subpanel_list_total_height(
         if !group.title.is_empty() {
             total_h += group_hdr_h;
         }
-        total_h += i32::try_from(group.count).unwrap_or(64) * row_h;
+        total_h += group_content_height(group, row_h);
     }
     total_h
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn layout_subpanel_list(
     layout: &mut ControlCenterLayout,
     metrics: &ControlCenterMetrics,
@@ -1416,6 +1714,7 @@ fn layout_subpanel_list(
     let fallback = [SubPanelGroupSpec {
         title: "",
         count: placement.item_count,
+        chips: false,
     }];
     let specs: &[SubPanelGroupSpec] = if groups.is_empty() && placement.item_count > 0 {
         &fallback
@@ -1469,10 +1768,20 @@ fn layout_subpanel_list(
         };
         let start_index = layout.items.len();
         let container_y = cursor_y;
-        let group_h = i32::try_from(group.count).unwrap_or(0) * row_h;
-        for _ in 0..group.count {
+        let group_h = group_content_height(group, row_h);
+        let container = Rect {
+            x: pad,
+            y: container_y,
+            width: content_w,
+            height: group_h,
+        };
+        for offset in 0..group.count {
             if layout.items.len() >= placement.item_count {
                 break;
+            }
+            if group.chips {
+                layout.items.push(chip_rect(container, row_h, offset));
+                continue;
             }
             layout.items.push(Rect {
                 x: pad,
@@ -1482,17 +1791,15 @@ fn layout_subpanel_list(
             });
             cursor_y += row_h;
         }
+        if group.chips {
+            cursor_y += group_h;
+        }
         let actual_count = layout.items.len() - start_index;
         if actual_count > 0 {
             layout.groups.push(SubPanelGroupLayout {
                 title: group.title,
                 header,
-                container: Rect {
-                    x: pad,
-                    y: container_y,
-                    width: content_w,
-                    height: group_h,
-                },
+                container,
                 start_index,
                 count: actual_count,
             });
@@ -1572,10 +1879,10 @@ impl ControlCenterLayout {
             }
         }
         if self.page == ControlCenterPage::OttoSettings {
-            for (index, rect) in self.category_tabs.iter().enumerate() {
+            for (index, rect) in self.area_cards.iter().enumerate() {
                 if rect.contains(x, y) {
-                    return Some(ControlCenterHitTarget::OttoCategoryTab(
-                        OttoSettingsCategory::ALL[index],
+                    return Some(ControlCenterHitTarget::OttoAreaCard(
+                        OttoSettingsArea::ALL[index],
                     ));
                 }
             }
@@ -1689,7 +1996,7 @@ impl ControlCenterLayout {
             ControlCenterHitTarget::OttoSettingsTile => self.otto_settings_tile,
             ControlCenterHitTarget::BackButton => self.back_button,
             ControlCenterHitTarget::HeaderToggle => self.header_toggle,
-            ControlCenterHitTarget::OttoCategoryTab(cat) => self.category_tabs[cat.index()],
+            ControlCenterHitTarget::OttoAreaCard(area) => self.area_cards[area.index()],
             ControlCenterHitTarget::SubPanelItem(index) => {
                 let item = *self.items.get(index)?;
                 return self.list_viewport.intersection(&item);
@@ -1727,7 +2034,7 @@ pub fn control_center_action(
                 stay(ControlCenterCommand::OpenPage(ControlCenterPage::Bluetooth))
             }
             ControlCenterHitTarget::FocusToggle => {
-                if snapshot.settings.system.focus_module {
+                if snapshot.settings.plugins.notch && snapshot.settings.system.focus_module {
                     stay(ControlCenterCommand::ToggleFocus)
                 } else {
                     stay(ControlCenterCommand::OpenPage(
@@ -1752,7 +2059,7 @@ pub fn control_center_action(
             }
             ControlCenterHitTarget::SoundMuteToggle => stay(ControlCenterCommand::ToggleMute),
             ControlCenterHitTarget::MediaBody => {
-                if snapshot.settings.system.media_module {
+                if snapshot.settings.plugins.notch && snapshot.settings.system.media_module {
                     dismiss(ControlCenterCommand::OpenNotchMedia)
                 } else {
                     stay(ControlCenterCommand::OpenPage(
@@ -1788,8 +2095,8 @@ pub fn control_center_action(
                 }
                 _ => return None,
             },
-            ControlCenterHitTarget::OttoCategoryTab(cat) => {
-                stay(ControlCenterCommand::SelectOttoCategory(cat))
+            ControlCenterHitTarget::OttoAreaCard(area) => {
+                stay(ControlCenterCommand::OpenOttoArea(area))
             }
             ControlCenterHitTarget::SubPanelItem(index) => {
                 return subpanel_item_action(snapshot, index);
@@ -1998,9 +2305,9 @@ fn subpanel_focus_targets(
             }
         }
         ControlCenterPage::OttoSettings => {
-            for (index, cat) in OttoSettingsCategory::ALL.into_iter().enumerate() {
-                if !layout.category_tabs[index].is_empty() {
-                    out.push(ControlCenterHitTarget::OttoCategoryTab(cat));
+            for (index, area) in OttoSettingsArea::ALL.into_iter().enumerate() {
+                if !layout.area_cards[index].is_empty() {
+                    out.push(ControlCenterHitTarget::OttoAreaCard(area));
                 }
             }
         }
@@ -2043,11 +2350,8 @@ fn subpanel_item_action(
             )))
         }
         ControlCenterPage::OttoSettings => {
-            let items = snapshot.settings.visible_items(snapshot.otto_category);
+            let items = snapshot.settings.visible_items(snapshot.otto_area?);
             let item = *items.get(index)?;
-            if !snapshot.settings.is_item_available(item) {
-                return None;
-            }
             match item {
                 OttoSettingItem::Toggle(kind) => {
                     Some(stay(ControlCenterCommand::ToggleSetting(kind)))
@@ -2055,6 +2359,7 @@ fn subpanel_item_action(
                 OttoSettingItem::DockIconSize => {
                     Some(stay(ControlCenterCommand::CycleDockIconSize))
                 }
+                OttoSettingItem::MenuBarHide => Some(stay(ControlCenterCommand::CycleMenuBarHide)),
             }
         }
         ControlCenterPage::Main | ControlCenterPage::Display => None,
@@ -2311,6 +2616,17 @@ mod tests {
         }
     }
 
+    fn dock_area_snapshot() -> ControlCenterSnapshot {
+        let mut snap = ControlCenterSnapshot {
+            page: ControlCenterPage::OttoSettings,
+            otto_area: Some(OttoSettingsArea::Dock),
+            ..ControlCenterSnapshot::default()
+        };
+        snap.settings.plugins.dock = true;
+        snap.settings.dock.hide_taskbar = true;
+        snap
+    }
+
     fn main_layout(dpi: u32) -> ControlCenterLayout {
         compute_control_center_layout(
             &ControlCenterMetrics::DEFAULT,
@@ -2428,7 +2744,9 @@ mod tests {
 
     #[test]
     fn scrollable_subpanel_clips_items_to_viewport_and_clamps_scroll() {
-        let layout = compute_control_center_layout(
+        let snap = dock_area_snapshot();
+        let count = snap.subpanel_item_count(ControlCenterPage::OttoSettings);
+        let layout = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
             ControlCenterPlacement {
                 bounds: bounds(),
@@ -2436,24 +2754,16 @@ mod tests {
                 anchor_right: 1750,
                 anchor_y: 36,
                 page: ControlCenterPage::OttoSettings,
-                item_count: OttoSettingsSnapshot::row_count(),
-                scroll_offset: 999,
+                item_count: count,
+                scroll_offset: 9999,
             },
+            &snap,
         );
+        assert_eq!(count, 8);
         assert!(layout.max_scroll > 0);
         assert_eq!(layout.scroll_offset, layout.max_scroll);
-        assert_eq!(
-            layout.hit_test(layout.footer_primary.x + 12, layout.footer_primary.y + 12),
-            Some(ControlCenterHitTarget::FooterPrimary)
-        );
-        assert_eq!(
-            layout.hit_test(
-                layout.footer_secondary.x + 12,
-                layout.footer_secondary.y + 12
-            ),
-            Some(ControlCenterHitTarget::FooterSecondary)
-        );
-        let last_idx = OttoSettingsSnapshot::row_count() - 1;
+        assert!(layout.footer_primary.is_empty() && layout.footer_secondary.is_empty());
+        let last_idx = count - 1;
         let last = layout.items[last_idx];
         assert!(last.bottom() <= layout.list_viewport.bottom());
         assert_eq!(
@@ -2480,6 +2790,7 @@ mod tests {
             })
         );
         snap.settings.system.media_module = true;
+        snap.settings.plugins.notch = true;
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::MediaPlayPause).map(|o| o.dismiss),
             Some(false)
@@ -2487,6 +2798,14 @@ mod tests {
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::MediaBody).map(|o| o.dismiss),
             Some(true)
+        );
+        snap.settings.plugins.notch = false;
+        assert_eq!(
+            control_center_action(&snap, ControlCenterHitTarget::MediaBody),
+            Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::OpenPage(ControlCenterPage::OttoSettings),
+                dismiss: false,
+            })
         );
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::FooterPrimary).map(|o| o.dismiss),
@@ -2720,41 +3039,37 @@ mod tests {
 
     #[test]
     fn focus_scroll_reveals_offscreen_subpanel_items_and_steps_slider_safely() {
-        let mut layout = compute_control_center_layout(
+        let snap = dock_area_snapshot();
+        let place = |scroll_offset| ControlCenterPlacement {
+            bounds: bounds(),
+            dpi: 96,
+            anchor_right: 1700,
+            anchor_y: 34,
+            page: ControlCenterPage::OttoSettings,
+            item_count: 8,
+            scroll_offset,
+        };
+        let mut layout = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
-            ControlCenterPlacement {
-                bounds: bounds(),
-                dpi: 96,
-                anchor_right: 1700,
-                anchor_y: 34,
-                page: ControlCenterPage::OttoSettings,
-                item_count: 11,
-                scroll_offset: 0,
-            },
+            place(0),
+            &snap,
         );
         assert_eq!(
             super::scroll_offset_for_item(&layout, ControlCenterHitTarget::SubPanelItem(0)),
             None
         );
         let scroll_down =
-            super::scroll_offset_for_item(&layout, ControlCenterHitTarget::SubPanelItem(10))
+            super::scroll_offset_for_item(&layout, ControlCenterHitTarget::SubPanelItem(7))
                 .expect("bottom item should scroll into view");
         assert!(scroll_down > 0 && scroll_down <= layout.max_scroll);
 
-        layout = compute_control_center_layout(
+        layout = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
-            ControlCenterPlacement {
-                bounds: bounds(),
-                dpi: 96,
-                anchor_right: 1700,
-                anchor_y: 34,
-                page: ControlCenterPage::OttoSettings,
-                item_count: 11,
-                scroll_offset: scroll_down,
-            },
+            place(scroll_down),
+            &snap,
         );
         assert_eq!(
-            super::scroll_offset_for_item(&layout, ControlCenterHitTarget::SubPanelItem(10)),
+            super::scroll_offset_for_item(&layout, ControlCenterHitTarget::SubPanelItem(7)),
             None
         );
         assert_eq!(
@@ -2775,54 +3090,74 @@ mod tests {
     }
 
     #[test]
-    fn otto_settings_categories_and_dependency_gates_work_deterministically() {
+    fn reserve_space_needs_the_dock_and_a_hidden_windows_taskbar() {
+        let reserve = OttoSettingItem::Toggle(OttoSettingKind::DockReserveSpace);
+        let mut settings = OttoSettingsSnapshot::default();
+        assert!(!settings.is_item_available(reserve));
+        settings.plugins.dock = true;
+        settings.dock.hide_taskbar = false;
+        assert!(!settings.is_item_available(reserve));
+        assert!(
+            !settings
+                .visible_items(OttoSettingsArea::Dock)
+                .contains(&reserve)
+        );
+        settings.dock.hide_taskbar = true;
+        assert!(settings.is_item_available(reserve));
+        settings.dock.reserve_space = true;
+        assert!(settings.is_enabled(OttoSettingKind::DockReserveSpace));
+    }
+
+    #[test]
+    fn every_setting_belongs_to_exactly_one_area_and_dependents_stay_hidden() {
+        let total: usize = OttoSettingsArea::ALL
+            .into_iter()
+            .map(|area| {
+                OttoSettingItem::ALL
+                    .into_iter()
+                    .filter(|item| item.area() == area)
+                    .count()
+            })
+            .sum();
+        assert_eq!(total, OttoSettingItem::ALL.len());
+
         let mut snap = ControlCenterSnapshot {
             page: ControlCenterPage::OttoSettings,
-            otto_category: OttoSettingsCategory::NotchAndDock,
+            otto_area: Some(OttoSettingsArea::Dock),
             ..ControlCenterSnapshot::default()
         };
-        let dock_bar_items = snap
-            .settings
-            .visible_items(OttoSettingsCategory::NotchAndDock);
-        assert_eq!(dock_bar_items.len(), 7);
-        assert_eq!(dock_bar_items[5], OttoSettingItem::DockIconSize);
         assert_eq!(
-            dock_bar_items[6],
-            OttoSettingItem::Toggle(OttoSettingKind::ClassicLogo)
+            snap.settings.visible_items(OttoSettingsArea::Dock),
+            vec![OttoSettingItem::Toggle(OttoSettingKind::Dock)]
         );
         assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(0)),
+            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(1)),
             None
         );
 
         snap.settings.plugins.dock = true;
+        snap.settings.dock.hide_taskbar = false;
+        let dock_items = snap.settings.visible_items(OttoSettingsArea::Dock);
+        assert_eq!(dock_items.len(), 7);
+        assert_eq!(dock_items[1], OttoSettingItem::DockIconSize);
         assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(0)),
-            Some(ControlCenterClickOutcome {
-                command: ControlCenterCommand::ToggleSetting(OttoSettingKind::DockHideTaskbar),
-                dismiss: false,
-            })
-        );
-        assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(5)),
+            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(1)),
             Some(ControlCenterClickOutcome {
                 command: ControlCenterCommand::CycleDockIconSize,
                 dismiss: false,
             })
         );
 
-        snap.otto_category = OttoSettingsCategory::Modules;
-        let module_items = snap.settings.visible_items(OttoSettingsCategory::Modules);
-        assert_eq!(module_items.len(), 11);
-        let lyrics_idx = module_items
-            .iter()
-            .position(|item| *item == OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics))
-            .expect("lyrics item");
-        assert_eq!(
-            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(lyrics_idx)),
-            None
-        );
+        snap.otto_area = Some(OttoSettingsArea::NotchTools);
+        let tools = snap.settings.visible_items(OttoSettingsArea::NotchTools);
+        let lyrics = OttoSettingItem::Toggle(OttoSettingKind::OnlineLyrics);
+        assert!(!tools.contains(&lyrics));
         snap.settings.system.media_module = true;
+        let tools = snap.settings.visible_items(OttoSettingsArea::NotchTools);
+        let lyrics_idx = tools
+            .iter()
+            .position(|item| *item == lyrics)
+            .expect("lyrics item");
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(lyrics_idx)),
             Some(ControlCenterClickOutcome {
@@ -2830,40 +3165,142 @@ mod tests {
                 dismiss: false,
             })
         );
-
-        snap.otto_category = OttoSettingsCategory::All;
+        assert_eq!(snap.settings.active_module_count(), (2, 11));
         assert_eq!(
-            snap.subpanel_item_count(ControlCenterPage::OttoSettings),
-            21
+            snap.settings.visible_items(OttoSettingsArea::Notch),
+            vec![OttoSettingItem::Toggle(OttoSettingKind::Notch)]
         );
-        assert_eq!(snap.settings.active_module_count(), (2, 9));
+        snap.settings.plugins.notch = true;
+        assert_eq!(
+            snap.settings.visible_items(OttoSettingsArea::Notch).len(),
+            4
+        );
+        assert_eq!(snap.settings.active_module_count(), (3, 11));
+    }
 
-        snap.last_error = Some(String::from("Disable dependent plugin first"));
-        let settings_layout = compute_control_center_layout_for_snapshot(
+    #[test]
+    fn area_status_reads_off_for_a_disabled_master_and_counts_toggles_otherwise() {
+        let mut settings = OttoSettingsSnapshot::default();
+        assert_eq!(settings.area_status(OttoSettingsArea::Dock), "Off");
+        assert_eq!(settings.area_status(OttoSettingsArea::MenuBar), "Off");
+        assert_eq!(settings.area_status(OttoSettingsArea::Notch), "Off");
+        assert_eq!(settings.area_status(OttoSettingsArea::NotchTools), "Off");
+        settings.plugins.notch = true;
+        assert_eq!(settings.area_status(OttoSettingsArea::Notch), "1 of 4 on");
+        settings.plugins.dock = true;
+        settings.dock.hide_taskbar = false;
+        settings.dock.show_downloads = false;
+        settings.dock.show_trash = false;
+        settings.dock.autohide = false;
+        settings.dock.reserve_space = false;
+        settings.dock.magnification = true;
+        assert_eq!(settings.area_status(OttoSettingsArea::Dock), "2 of 7 on");
+        settings.plugins.top_bar = true;
+        settings.menu_bar.show_background = true;
+        settings.menu_bar.keep_notch = false;
+        assert_eq!(settings.area_status(OttoSettingsArea::MenuBar), "7 of 8 on");
+    }
+
+    #[test]
+    fn the_overview_lists_six_cards_and_an_area_page_lists_its_own_groups() {
+        let placement = |item_count| ControlCenterPlacement {
+            bounds: bounds(),
+            dpi: 96,
+            anchor_right: 1700,
+            anchor_y: 34,
+            page: ControlCenterPage::OttoSettings,
+            item_count,
+            scroll_offset: 0,
+        };
+        let mut snap = ControlCenterSnapshot {
+            page: ControlCenterPage::OttoSettings,
+            ..ControlCenterSnapshot::default()
+        };
+        let overview = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
-            ControlCenterPlacement {
-                bounds: bounds(),
-                dpi: 96,
-                anchor_right: 1700,
-                anchor_y: 34,
-                page: ControlCenterPage::OttoSettings,
-                item_count: 21,
-                scroll_offset: 0,
-            },
+            placement(0),
             &snap,
         );
-        assert_eq!(settings_layout.groups.len(), 4);
-        assert!(!settings_layout.error_banner.is_empty());
-        assert!(settings_layout.error_banner.bottom() <= settings_layout.list_viewport.y);
-        let covered: usize = settings_layout.groups.iter().map(|group| group.count).sum();
-        assert_eq!(covered, 21);
-        let tab = settings_layout.category_tabs[2];
+        assert!(overview.items.is_empty());
+        assert!(overview.area_cards.iter().all(|card| !card.is_empty()));
+        assert!(!overview.footer_primary.is_empty());
+        let card = overview.area_cards[OttoSettingsArea::Notch.index()];
         assert_eq!(
-            settings_layout.hit_test(tab.x + 8, tab.y + 8),
-            Some(ControlCenterHitTarget::OttoCategoryTab(
-                OttoSettingsCategory::NotchAndDock
+            overview.hit_test(card.x + 8, card.y + 8),
+            Some(ControlCenterHitTarget::OttoAreaCard(
+                OttoSettingsArea::Notch
             ))
         );
+        assert_eq!(
+            control_center_action(
+                &snap,
+                ControlCenterHitTarget::OttoAreaCard(OttoSettingsArea::Notch)
+            ),
+            Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::OpenOttoArea(OttoSettingsArea::Notch),
+                dismiss: false,
+            })
+        );
+        let targets = control_center_focus_targets(&overview, &snap);
+        assert_eq!(targets[0], ControlCenterHitTarget::BackButton);
+        assert!(targets.contains(&ControlCenterHitTarget::OttoAreaCard(
+            OttoSettingsArea::System
+        )));
+
+        snap.otto_area = Some(OttoSettingsArea::MenuBar);
+        snap.settings.plugins.top_bar = true;
+        snap.settings.plugins.notch = true;
+        snap.last_error = Some(String::from("Disable dependent plugin first"));
+        let count = snap.subpanel_item_count(ControlCenterPage::OttoSettings);
+        let detail = compute_control_center_layout_for_snapshot(
+            &ControlCenterMetrics::DEFAULT,
+            placement(count),
+            &snap,
+        );
+        assert_eq!(count, 9);
+        assert!(detail.area_cards.iter().all(Rect::is_empty));
+        assert!(detail.footer_primary.is_empty());
+        assert!(!detail.hero.is_empty());
+        assert!(detail.hero.bottom() <= detail.error_banner.y);
+        assert!(detail.error_banner.bottom() <= detail.list_viewport.y);
+        let titles: Vec<_> = detail.groups.iter().map(|group| group.title).collect();
+        assert_eq!(titles, ["", "Visibility", "Show in the Bar"]);
+        let chips = detail.groups[2];
+        assert_eq!(chips.count, 5);
+        let first = detail.items[chips.start_index];
+        let last = detail.items[chips.start_index + 4];
+        assert!(chips.container.contains(first.x, first.y));
+        assert!(first.width < chips.container.width / 2);
+        assert!(last.y > first.y);
+        assert!(detail.window.bottom() >= chips.container.bottom());
+    }
+
+    #[test]
+    fn menu_bar_settings_cycle_the_hide_mode_and_toggle_items_by_visibility() {
+        let mut snap = ControlCenterSnapshot {
+            page: ControlCenterPage::OttoSettings,
+            otto_area: Some(OttoSettingsArea::MenuBar),
+            ..ControlCenterSnapshot::default()
+        };
+        snap.settings.plugins.top_bar = true;
+        let items = snap.settings.visible_items(OttoSettingsArea::MenuBar);
+        let hide = items
+            .iter()
+            .position(|item| *item == OttoSettingItem::MenuBarHide)
+            .expect("hide item");
+        assert_eq!(
+            control_center_action(&snap, ControlCenterHitTarget::SubPanelItem(hide)),
+            Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::CycleMenuBarHide,
+                dismiss: false,
+            })
+        );
+        assert!(snap.settings.is_enabled(OttoSettingKind::MenuBarClock));
+        assert!(snap.settings.is_enabled(OttoSettingKind::MenuBarBackground));
+        snap.settings.menu_bar.hidden_items =
+            snap.settings.menu_bar.hidden_items.toggled(BarItem::Clock);
+        assert!(!snap.settings.is_enabled(OttoSettingKind::MenuBarClock));
+        assert!(snap.settings.is_enabled(OttoSettingKind::MenuBarTray));
     }
 
     #[test]
@@ -2885,6 +3322,14 @@ mod tests {
         assert_eq!(
             control_center_action(&snap, ControlCenterHitTarget::FocusToggle),
             Some(ControlCenterClickOutcome {
+                command: ControlCenterCommand::OpenPage(ControlCenterPage::OttoSettings),
+                dismiss: false,
+            })
+        );
+        snap.settings.plugins.notch = true;
+        assert_eq!(
+            control_center_action(&snap, ControlCenterHitTarget::FocusToggle),
+            Some(ControlCenterClickOutcome {
                 command: ControlCenterCommand::ToggleFocus,
                 dismiss: false,
             })
@@ -2895,5 +3340,16 @@ mod tests {
             layout.focus_settings.y + layout.focus_settings.height / 2
         ));
         assert!(layout.focus_settings.width >= 20);
+    }
+
+    #[test]
+    fn control_center_shell_and_cards_are_concentric() {
+        let metrics = ControlCenterMetrics::DEFAULT;
+        assert_eq!(metrics.shell_radius, metrics.card_radius + metrics.padding);
+        let layout = main_layout(96);
+        assert_eq!(layout.shell_radius, 26);
+        assert_eq!(layout.card_radius, 14);
+        assert_eq!(layout.connectivity_card.x, 12);
+        assert_eq!(layout.connectivity_card.y, 12);
     }
 }

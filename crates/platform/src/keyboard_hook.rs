@@ -292,6 +292,7 @@ fn should_wake_status_with(virtual_key: u32, mods: WakeModifiers) -> bool {
     };
     match vk {
         x if x == VK_CAPITAL.0 || x == VK_NUMLOCK.0 || x == VK_KANA.0 => true,
+        0x70..=0x7B | 0xAD..=0xB3 => true,
         x if x == VK_SPACE.0 => mods.win,
         x if x == VK_SHIFT.0 || x == VK_LSHIFT.0 || x == VK_RSHIFT.0 => mods.alt_or_ctrl,
         x if x == VK_MENU.0 || x == VK_LMENU.0 || x == VK_RMENU.0 => mods.shift,
@@ -386,8 +387,9 @@ mod tests {
     };
     use otto_core::BarKey;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_A, VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NUMLOCK, VK_RETURN,
-        VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+        VK_A, VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_HOME, VK_LEFT, VK_NUMLOCK,
+        VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+        VK_VOLUME_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN};
 
@@ -547,6 +549,9 @@ mod tests {
         let none = WakeModifiers::default();
         assert!(should_wake_status_with(u32::from(VK_CAPITAL.0), none));
         assert!(should_wake_status_with(u32::from(VK_NUMLOCK.0), none));
+        assert!(should_wake_status_with(u32::from(VK_F1.0), none));
+        assert!(should_wake_status_with(u32::from(VK_F2.0), none));
+        assert!(should_wake_status_with(u32::from(VK_VOLUME_UP.0), none));
         assert!(!should_wake_status_with(u32::from(VK_SPACE.0), none));
         assert!(should_wake_status_with(
             u32::from(VK_SPACE.0),

@@ -1,10 +1,17 @@
-use otto_core::{ControlCenterPage, HitTarget, SystemStatus, WindowInfo, is_top_bar_menu_target};
+use otto_core::{
+    ControlCenterAction, ControlCenterPage, HitTarget, SystemStatus, WindowInfo,
+    is_top_bar_menu_target,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BarControlAction {
     TopBarMenu(HitTarget),
     Tray,
-    ControlCenter(ControlCenterPage),
+    ControlCenter {
+        page: ControlCenterPage,
+        trigger: HitTarget,
+    },
+    OpenSettings(ControlCenterAction),
     Search,
     Notifications,
     Clock,
@@ -78,13 +85,23 @@ impl BarControlsController {
         }
         match target {
             HitTarget::Tray => Some(BarControlAction::Tray),
-            HitTarget::ControlCenter | HitTarget::StatusBattery | HitTarget::QuickSettings => {
-                Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+            HitTarget::ControlCenter | HitTarget::QuickSettings => {
+                Some(BarControlAction::ControlCenter {
+                    page: ControlCenterPage::Main,
+                    trigger: target,
+                })
             }
-            HitTarget::StatusWifi => Some(BarControlAction::ControlCenter(ControlCenterPage::Wifi)),
-            HitTarget::StatusVolume => {
-                Some(BarControlAction::ControlCenter(ControlCenterPage::Sound))
-            }
+            HitTarget::StatusWifi => Some(BarControlAction::ControlCenter {
+                page: ControlCenterPage::Wifi,
+                trigger: target,
+            }),
+            HitTarget::StatusVolume => Some(BarControlAction::ControlCenter {
+                page: ControlCenterPage::Sound,
+                trigger: target,
+            }),
+            HitTarget::StatusBattery => Some(BarControlAction::OpenSettings(
+                ControlCenterAction::OpenPowerSettings,
+            )),
             HitTarget::Search => Some(BarControlAction::Search),
             HitTarget::Notifications => Some(BarControlAction::Notifications),
             HitTarget::Clock => Some(BarControlAction::Clock),
@@ -98,10 +115,7 @@ impl BarControlsController {
         notch_expanded: bool,
     ) -> Option<BarControlAction> {
         match target {
-            HitTarget::QuickSettings
-            | HitTarget::StatusWifi
-            | HitTarget::StatusVolume
-            | HitTarget::StatusBattery => Some(BarControlAction::AdjustVolume(delta)),
+            HitTarget::StatusVolume => Some(BarControlAction::AdjustVolume(delta)),
             HitTarget::ControlCenter => Some(BarControlAction::StepBrightness(delta)),
             HitTarget::Notch if !notch_expanded => Some(BarControlAction::StepBrightness(delta)),
             _ => None,
@@ -113,8 +127,8 @@ impl BarControlsController {
 mod tests {
     use super::{BarControlAction, BarControlsController};
     use otto_core::{
-        AppIdentity, ControlCenterPage, HitTarget, SystemStatus, WindowIdentity, WindowInfo,
-        WindowPresence, WindowRole, WindowTraits,
+        AppIdentity, ControlCenterAction, ControlCenterPage, HitTarget, SystemStatus,
+        WindowIdentity, WindowInfo, WindowPresence, WindowRole, WindowTraits,
     };
 
     fn window(hwnd: isize) -> WindowInfo {
@@ -181,19 +195,30 @@ mod tests {
         );
         assert_eq!(
             BarControlsController::click_action(HitTarget::ControlCenter),
-            Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+            Some(BarControlAction::ControlCenter {
+                page: ControlCenterPage::Main,
+                trigger: HitTarget::ControlCenter,
+            })
         );
         assert_eq!(
             BarControlsController::click_action(HitTarget::StatusWifi),
-            Some(BarControlAction::ControlCenter(ControlCenterPage::Wifi))
+            Some(BarControlAction::ControlCenter {
+                page: ControlCenterPage::Wifi,
+                trigger: HitTarget::StatusWifi,
+            })
         );
         assert_eq!(
             BarControlsController::click_action(HitTarget::StatusVolume),
-            Some(BarControlAction::ControlCenter(ControlCenterPage::Sound))
+            Some(BarControlAction::ControlCenter {
+                page: ControlCenterPage::Sound,
+                trigger: HitTarget::StatusVolume,
+            })
         );
         assert_eq!(
             BarControlsController::click_action(HitTarget::StatusBattery),
-            Some(BarControlAction::ControlCenter(ControlCenterPage::Main))
+            Some(BarControlAction::OpenSettings(
+                ControlCenterAction::OpenPowerSettings,
+            ))
         );
         assert_eq!(BarControlsController::click_action(HitTarget::Notch), None);
     }
@@ -202,11 +227,19 @@ mod tests {
     fn wheel_actions_keep_notch_brightness_separate_from_expanded_pomodoro() {
         assert_eq!(
             BarControlsController::wheel_action(HitTarget::QuickSettings, 120, false),
-            Some(BarControlAction::AdjustVolume(120))
+            None
+        );
+        assert_eq!(
+            BarControlsController::wheel_action(HitTarget::StatusWifi, 120, false),
+            None
         );
         assert_eq!(
             BarControlsController::wheel_action(HitTarget::StatusVolume, 120, false),
             Some(BarControlAction::AdjustVolume(120))
+        );
+        assert_eq!(
+            BarControlsController::wheel_action(HitTarget::StatusBattery, 120, false),
+            None
         );
         assert_eq!(
             BarControlsController::wheel_action(HitTarget::ControlCenter, 120, false),

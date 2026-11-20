@@ -8,15 +8,16 @@ use std::thread;
 use std::time::Duration;
 
 use otto_core::{
-    CMD_APP_ACTIVATE, CMD_APP_HIDE, CMD_APP_HIDE_OTHERS, CMD_APP_QUIT, CMD_APP_SHOW_ALL,
-    CMD_CAL_SETTINGS, CMD_CC_BLUETOOTH, CMD_CC_CALENDAR, CMD_CC_DISPLAY, CMD_CC_FOCUS,
-    CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE, CMD_CC_SOUND, CMD_CC_WIFI,
-    CMD_EDIT_COPY, CMD_EDIT_CUT, CMD_EDIT_FIND, CMD_EDIT_PASTE, CMD_EDIT_REDO, CMD_EDIT_SELECT_ALL,
-    CMD_EDIT_UNDO, CMD_FILE_NEW, CMD_FILE_NEW_FOLDER, CMD_FILE_NEW_TAB, CMD_FILE_OPEN,
-    CMD_FILE_SAVE, CMD_FILE_SAVE_AS, CMD_HELP_F1, CMD_LOCK, CMD_QUIT, CMD_RESTART, CMD_SETTINGS,
-    CMD_SHOW_DESKTOP, CMD_SHUTDOWN, CMD_SLEEP, CMD_START, CMD_TASK_VIEW, CMD_TASKMGR,
-    CMD_TILE_LEFT, CMD_TILE_RIGHT, CMD_VIEW_ACTUAL_SIZE, CMD_VIEW_AS_DETAILS, CMD_VIEW_AS_ICONS,
-    CMD_VIEW_AS_LIST, CMD_VIEW_FULLSCREEN, CMD_VIEW_ZOOM_IN, CMD_VIEW_ZOOM_OUT, CMD_WIN_CLOSE,
+    CMD_APP_ACTIVATE, CMD_APP_HIDE, CMD_APP_HIDE_OTHERS, CMD_APP_QUIT, CMD_APP_SETTINGS,
+    CMD_APP_SHOW_ALL, CMD_CAL_SETTINGS, CMD_CC_BLUETOOTH, CMD_CC_CALENDAR, CMD_CC_DISPLAY,
+    CMD_CC_FOCUS, CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE, CMD_CC_SOUND,
+    CMD_CC_WIFI, CMD_DOCK_WINDOW_BASE, CMD_EDIT_COPY, CMD_EDIT_CUT, CMD_EDIT_FIND, CMD_EDIT_PASTE,
+    CMD_EDIT_REDO, CMD_EDIT_SELECT_ALL, CMD_EDIT_UNDO, CMD_FILE_NEW, CMD_FILE_NEW_FOLDER,
+    CMD_FILE_NEW_TAB, CMD_FILE_OPEN, CMD_FILE_SAVE, CMD_FILE_SAVE_AS, CMD_HELP_F1, CMD_LOCK,
+    CMD_QUIT, CMD_RESTART, CMD_SETTINGS, CMD_SHOW_DESKTOP, CMD_SHUTDOWN, CMD_SLEEP, CMD_START,
+    CMD_TASK_VIEW, CMD_TASKMGR, CMD_TILE_LEFT, CMD_TILE_RIGHT, CMD_VIEW_ACTUAL_SIZE,
+    CMD_VIEW_AS_DETAILS, CMD_VIEW_AS_ICONS, CMD_VIEW_AS_LIST, CMD_VIEW_FULLSCREEN,
+    CMD_VIEW_ZOOM_IN, CMD_VIEW_ZOOM_OUT, CMD_WIN_BRING_ALL_TO_FRONT, CMD_WIN_CLOSE,
     CMD_WIN_MAXIMIZE, CMD_WIN_MINIMIZE, CommandOutcome, WindowCommand, WindowIdentity,
     WindowMenuState,
 };
@@ -29,8 +30,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, SendInput,
     UnregisterHotKey, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_F1, VK_F2, VK_LBUTTON, VK_LCONTROL,
-    VK_LEFT, VK_LSHIFT, VK_LWIN, VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN, VK_RIGHT,
-    VK_SHIFT, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_UP,
+    VK_LEFT, VK_LSHIFT, VK_LWIN, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PLUS, VK_RBUTTON, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_UP,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -54,12 +55,19 @@ pub const HOTKEY_TOGGLE_NOTCH: i32 = 1;
 pub const HOTKEY_TOGGLE_POMODORO: i32 = 2;
 pub const HOTKEY_FOCUS_BAR: i32 = 3;
 pub const HOTKEY_CONTROL_CENTER: i32 = 4;
+pub const HOTKEY_SPOTLIGHT: i32 = 5;
+pub const HOTKEY_TOGGLE_TOP_BAR: i32 = 6;
+pub const HOTKEY_TOGGLE_DOCK: i32 = 7;
+pub const HOTKEY_QUICK_CAPTURE: i32 = 8;
+pub const HOTKEY_OTTO_SETTINGS: i32 = 9;
 
-fn notch_hotkey_bindings() -> [(
+type HotkeyBinding = (
     i32,
     windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS,
     u32,
-); 4] {
+);
+
+fn notch_hotkey_bindings() -> [HotkeyBinding; 5] {
     let safe_chord = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
     [
         (HOTKEY_TOGGLE_NOTCH, safe_chord, u32::from(b'N')),
@@ -70,7 +78,32 @@ fn notch_hotkey_bindings() -> [(
             u32::from(VK_F2.0),
         ),
         (HOTKEY_CONTROL_CENTER, safe_chord, u32::from(b'C')),
+        (HOTKEY_SPOTLIGHT, safe_chord, u32::from(VK_SPACE.0)),
     ]
+}
+
+fn capture_hotkey_bindings() -> [HotkeyBinding; 1] {
+    [(
+        HOTKEY_QUICK_CAPTURE,
+        MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+        u32::from(b'Q'),
+    )]
+}
+
+fn shell_hotkey_bindings() -> [HotkeyBinding; 2] {
+    let chord = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
+    [
+        (HOTKEY_TOGGLE_TOP_BAR, chord, u32::from(b'B')),
+        (HOTKEY_TOGGLE_DOCK, chord, u32::from(b'D')),
+    ]
+}
+
+fn settings_hotkey_bindings() -> [HotkeyBinding; 1] {
+    [(
+        HOTKEY_OTTO_SETTINGS,
+        MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+        u32::from(VK_OEM_COMMA.0),
+    )]
 }
 
 const fn vk_char(ch: u8) -> VIRTUAL_KEY {
@@ -157,25 +190,60 @@ pub fn trim_working_set() {
     }
 }
 
-pub fn register_notch_hotkeys(hwnd: isize) {
+fn register_hotkeys(hwnd: isize, bindings: &[HotkeyBinding]) -> bool {
     let handle = HWND(hwnd as *mut c_void);
-    for (id, modifiers, vk) in notch_hotkey_bindings() {
+    let mut all_registered = true;
+    for &(id, modifiers, vk) in bindings {
         if let Err(error) = unsafe { RegisterHotKey(Some(handle), id, modifiers, vk) } {
+            all_registered = false;
             crate::diagnostics::log_error(
                 "hotkeys",
                 &format!("failed to register hotkey id {id} ({modifiers:?}, vk={vk:#x}): {error}"),
             );
         }
     }
+    all_registered
+}
+
+fn unregister_hotkeys(hwnd: isize, bindings: &[HotkeyBinding]) {
+    let handle = HWND(hwnd as *mut c_void);
+    for &(id, _, _) in bindings {
+        let _ = unsafe { UnregisterHotKey(Some(handle), id) };
+    }
+}
+
+pub fn register_capture_hotkey(hwnd: isize) {
+    register_hotkeys(hwnd, &capture_hotkey_bindings());
+}
+
+pub fn unregister_capture_hotkey(hwnd: isize) {
+    unregister_hotkeys(hwnd, &capture_hotkey_bindings());
+}
+
+pub fn register_notch_hotkeys(hwnd: isize) {
+    register_hotkeys(hwnd, &notch_hotkey_bindings());
 }
 
 pub fn unregister_notch_hotkeys(hwnd: isize) {
-    let handle = HWND(hwnd as *mut c_void);
-    unsafe {
-        for (id, _, _) in notch_hotkey_bindings() {
-            let _ = UnregisterHotKey(Some(handle), id);
-        }
-    }
+    unregister_hotkeys(hwnd, &notch_hotkey_bindings());
+}
+
+#[must_use]
+pub fn register_shell_hotkeys(hwnd: isize) -> bool {
+    register_hotkeys(hwnd, &shell_hotkey_bindings())
+}
+
+pub fn unregister_shell_hotkeys(hwnd: isize) {
+    unregister_hotkeys(hwnd, &shell_hotkey_bindings());
+}
+
+#[must_use]
+pub fn register_settings_hotkey(hwnd: isize) -> bool {
+    register_hotkeys(hwnd, &settings_hotkey_bindings())
+}
+
+pub fn unregister_settings_hotkey(hwnd: isize) {
+    unregister_hotkeys(hwnd, &settings_hotkey_bindings());
 }
 
 pub fn play_pomodoro_chime() {
@@ -513,6 +581,7 @@ fn shortcut_for(cmd: usize) -> Option<Vec<VIRTUAL_KEY>> {
     let control = |key: VIRTUAL_KEY| vec![VK_LCONTROL, key];
     let control_shift = |key: VIRTUAL_KEY| vec![VK_LCONTROL, VK_LSHIFT, key];
     Some(match cmd {
+        CMD_APP_SETTINGS => control(VK_OEM_COMMA),
         CMD_FILE_NEW => control(vk_char(b'N')),
         CMD_FILE_NEW_TAB => control(vk_char(b'T')),
         CMD_FILE_NEW_FOLDER => control_shift(vk_char(b'N')),
@@ -597,6 +666,26 @@ pub fn execute_top_bar_command(
     };
     let outcome = if cmd == CMD_APP_ACTIVATE {
         execute_window_command(target, WindowCommand::Focus, own_process_id)
+    } else if cmd == CMD_WIN_BRING_ALL_TO_FRONT {
+        application_of(target, own_process_id).map_or(CommandOutcome::TargetGone, |context| {
+            show_application(&context.app, own_process_id)
+        })
+    } else if (CMD_DOCK_WINDOW_BASE..CMD_DOCK_WINDOW_BASE + 64).contains(&cmd) {
+        application_of(target, own_process_id)
+            .and_then(|context| {
+                context
+                    .app
+                    .primary_windows()
+                    .nth(cmd - CMD_DOCK_WINDOW_BASE)
+                    .map(|window| {
+                        execute_window_command(
+                            window.identity,
+                            WindowCommand::Focus,
+                            own_process_id,
+                        )
+                    })
+            })
+            .unwrap_or(CommandOutcome::TargetGone)
     } else if let Some(outcome) = execute_application_command(cmd, target, own_process_id) {
         outcome
     } else if let Some(command) = window_command_for(cmd) {
@@ -696,14 +785,18 @@ const fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
-        execute_top_bar_command, notch_hotkey_bindings, shortcut_for, window_command_for,
+        HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_OTTO_SETTINGS, HOTKEY_QUICK_CAPTURE,
+        HOTKEY_SPOTLIGHT, HOTKEY_TOGGLE_DOCK, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
+        HOTKEY_TOGGLE_TOP_BAR, VK_OEM_COMMA, VK_SPACE, capture_hotkey_bindings,
+        execute_top_bar_command, notch_hotkey_bindings, settings_hotkey_bindings,
+        shell_hotkey_bindings, shortcut_for, window_command_for,
     };
     use otto_core::{
-        APPLICATION_MENUS, AppMenuState, CMD_APP_HIDE, CMD_APP_QUIT, CMD_EDIT_PASTE,
-        CMD_FILE_NEW_FOLDER, CMD_FILE_NEW_TAB, CMD_SHOW_DESKTOP, CMD_TASK_VIEW,
-        CMD_VIEW_ACTUAL_SIZE, CMD_VIEW_AS_ICONS, CMD_VIEW_FULLSCREEN, CMD_WIN_CLOSE, Capability,
-        CommandOutcome, MenuContext, MenuRow, WindowCommand, WindowIdentity, WindowMenuState,
+        APPLICATION_MENUS, AppMenuState, CMD_APP_HIDE, CMD_APP_QUIT, CMD_APP_SETTINGS,
+        CMD_DOCK_WINDOW_BASE, CMD_EDIT_PASTE, CMD_FILE_NEW_FOLDER, CMD_FILE_NEW_TAB,
+        CMD_SHOW_DESKTOP, CMD_TASK_VIEW, CMD_VIEW_ACTUAL_SIZE, CMD_VIEW_AS_ICONS,
+        CMD_VIEW_FULLSCREEN, CMD_WIN_BRING_ALL_TO_FRONT, CMD_WIN_CLOSE, Capability, CommandOutcome,
+        MenuContext, MenuRow, WindowCommand, WindowIdentity, WindowMenuEntry, WindowMenuState,
         build_top_bar_menu_rows,
     };
 
@@ -726,6 +819,10 @@ mod tests {
 
     #[test]
     fn every_enabled_application_menu_row_has_an_executor() {
+        let entries = [WindowMenuEntry {
+            title: String::from("Main"),
+            active: true,
+        }];
         for file_manager in [false, true] {
             let context = MenuContext {
                 app_name: "App",
@@ -733,6 +830,7 @@ mod tests {
                 tabbed: true,
                 window: Some(AVAILABLE_WINDOW),
                 app: AVAILABLE_APP,
+                app_windows: &entries,
             };
             for target in APPLICATION_MENUS {
                 for row in build_top_bar_menu_rows(target, &context) {
@@ -744,11 +842,16 @@ mod tests {
                     };
                     let routed = window_command_for(id).is_some()
                         || shortcut_for(id).is_some()
-                        || matches!(id, CMD_TASK_VIEW | CMD_SHOW_DESKTOP);
+                        || matches!(
+                            id,
+                            CMD_TASK_VIEW | CMD_SHOW_DESKTOP | CMD_WIN_BRING_ALL_TO_FRONT
+                        )
+                        || (CMD_DOCK_WINDOW_BASE..CMD_DOCK_WINDOW_BASE + 64).contains(&id);
                     assert!(routed, "{target:?} row {id} has no executor");
                 }
             }
         }
+        assert!(shortcut_for(CMD_APP_SETTINGS).is_some());
     }
 
     #[test]
@@ -782,7 +885,15 @@ mod tests {
             generation: 1,
         };
         let own = std::process::id();
-        for cmd in [CMD_EDIT_PASTE, CMD_WIN_CLOSE, CMD_APP_QUIT, CMD_APP_HIDE] {
+        for cmd in [
+            CMD_EDIT_PASTE,
+            CMD_APP_SETTINGS,
+            CMD_WIN_CLOSE,
+            CMD_WIN_BRING_ALL_TO_FRONT,
+            CMD_DOCK_WINDOW_BASE,
+            CMD_APP_QUIT,
+            CMD_APP_HIDE,
+        ] {
             let result = execute_top_bar_command(cmd, Some(gone), own);
             assert_eq!(result.outcome, CommandOutcome::TargetGone, "command {cmd}");
             assert!(!result.quit_requested);
@@ -802,9 +913,37 @@ mod tests {
                 HOTKEY_TOGGLE_POMODORO,
                 HOTKEY_FOCUS_BAR,
                 HOTKEY_CONTROL_CENTER,
+                HOTKEY_SPOTLIGHT,
             ]
         );
         assert_eq!(bindings[3].2, u32::from(b'C'));
+        assert_eq!(bindings[4].2, u32::from(VK_SPACE.0));
+    }
+
+    #[test]
+    fn shell_and_settings_hotkeys_do_not_collide_with_other_hotkeys() {
+        let shell = shell_hotkey_bindings();
+        assert_eq!(shell[0].0, HOTKEY_TOGGLE_TOP_BAR);
+        assert_eq!(shell[0].2, u32::from(b'B'));
+        assert_eq!(shell[1].0, HOTKEY_TOGGLE_DOCK);
+        assert_eq!(shell[1].2, u32::from(b'D'));
+        let settings = settings_hotkey_bindings();
+        assert_eq!(settings[0].0, HOTKEY_OTTO_SETTINGS);
+        assert_eq!(settings[0].2, u32::from(VK_OEM_COMMA.0));
+        let capture = capture_hotkey_bindings();
+        assert_eq!(capture[0].0, HOTKEY_QUICK_CAPTURE);
+        let all: Vec<_> = notch_hotkey_bindings()
+            .into_iter()
+            .chain(shell)
+            .chain(settings)
+            .chain(capture)
+            .collect();
+        for (index, (id, modifiers, vk)) in all.iter().enumerate() {
+            for (other_id, other_modifiers, other_vk) in &all[index + 1..] {
+                assert_ne!(id, other_id);
+                assert!(modifiers != other_modifiers || vk != other_vk);
+            }
+        }
     }
 
     #[test]

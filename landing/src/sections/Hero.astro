@@ -1,10 +1,9 @@
 ---
-import { ArrowUpRight } from "lucide-astro";
+import BetaDownload from "../components/BetaDownload.astro";
 import HeroVisual from "../components/HeroVisual.astro";
-import WaitlistDialog from "../components/WaitlistDialog.astro";
 ---
 
-<section class="bg-[#fdfdfd]">
+<section class="bg-sky-low">
   <div class="mx-auto flex w-full max-w-[1140px] flex-col items-center px-4 pt-11 pb-12 text-center sm:px-6 sm:pt-14 sm:pb-16">
     <h1 class="max-w-[780px] text-balance text-[clamp(2.6rem,6vw,3.9rem)] leading-[1.07] font-medium tracking-[-0.043em] text-ink">
       Windows 11, terasa lebih personal.
@@ -15,39 +14,10 @@ import WaitlistDialog from "../components/WaitlistDialog.astro";
       Dibangun native dengan Rust untuk Windows 11.
     </p>
 
-    <div id="daftar" class="mt-7 flex w-full scroll-mt-24 flex-col items-center">
-      <a
-        href="#daftar"
-        data-waitlist-trigger
-        class="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-ink px-6 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#343434] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
-      >
-        Join Beta <ArrowUpRight size={16} strokeWidth={1.8} />
-      </a>
-      <noscript>
-        <form method="post" action="/api/waitlist" class="mt-4 flex w-full max-w-sm flex-col gap-2">
-          <label for="otto-fallback-email" class="text-left text-xs font-medium text-ink-soft">Email untuk undangan beta</label>
-          <input
-            id="otto-fallback-email"
-            name="email"
-            type="email"
-            autoComplete="email"
-            maxLength={254}
-            placeholder="nama@email.com"
-            required
-            class="h-11 w-full rounded-full border border-line-strong bg-white px-4 text-sm text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-          />
-          <input name="website" type="text" tabIndex={-1} autoComplete="off" class="sr-only" aria-hidden="true" />
-          <button type="submit" class="h-11 rounded-full bg-accent px-5 text-sm font-semibold text-ink">
-            Daftar lewat email
-          </button>
-        </form>
-      </noscript>
-    </div>
+    <BetaDownload />
 
     <div class="mt-12 w-full sm:mt-14">
       <HeroVisual />
     </div>
   </div>
-
-  <WaitlistDialog />
 </section>

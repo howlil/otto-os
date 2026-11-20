@@ -1,4 +1,4 @@
-use crate::app_model::{WindowCommand, WindowInfo, WindowPresence};
+use crate::app_model::{AppInfo, WindowCommand, WindowIdentity, WindowInfo, WindowPresence};
 use crate::layout::{Rect, scale};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +211,7 @@ pub struct WindowControlsState {
     pub close: bool,
     pub minimize: bool,
     pub zoom: bool,
+    pub alt_zoom_glyph: bool,
 }
 
 impl WindowControlsState {
@@ -224,7 +225,14 @@ impl WindowControlsState {
                 || window
                     .capability(WindowCommand::ToggleFullScreen)
                     .is_available(),
+            alt_zoom_glyph: false,
         }
+    }
+
+    #[must_use]
+    pub const fn with_alt_zoom_glyph(mut self, alt: bool) -> Self {
+        self.alt_zoom_glyph = alt;
+        self
     }
 
     #[must_use]
@@ -253,6 +261,44 @@ pub const fn accepts_window_controls(window: &WindowInfo) -> bool {
         && !window.traits.elevated
         && !window.full_screen
         && matches!(window.presence, WindowPresence::Visible)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandScope {
+    Window,
+    Application,
+}
+
+#[must_use]
+pub const fn window_control_scope(action: WindowControlAction, alt: bool) -> CommandScope {
+    match action {
+        WindowControlAction::Close | WindowControlAction::Minimize if alt => {
+            CommandScope::Application
+        }
+        _ => CommandScope::Window,
+    }
+}
+
+#[must_use]
+pub fn application_command_targets(
+    app: &AppInfo,
+    clicked: WindowIdentity,
+    command: WindowCommand,
+) -> Vec<WindowIdentity> {
+    let clicked_window = app
+        .windows
+        .iter()
+        .find(|window| window.identity.is_same_window(&clicked));
+    let siblings = app
+        .primary_windows()
+        .filter(|window| !window.identity.is_same_window(&clicked));
+    clicked_window
+        .into_iter()
+        .chain(siblings)
+        .filter(|window| window.presence != WindowPresence::Hidden)
+        .filter(|window| window.capability(command).is_available())
+        .map(|window| window.identity)
+        .collect()
 }
 
 #[must_use]
@@ -794,6 +840,78 @@ mod tests {
         }
     }
 
+    fn sibling(hwnd: isize) -> WindowInfo {
+        let mut sibling = window(WindowTraits::STANDARD);
+        sibling.identity.hwnd = hwnd;
+        sibling
+    }
+
+    fn application(windows: Vec<WindowInfo>) -> AppInfo {
+        crate::app_model::group_windows(windows).remove(0)
+    }
+
+    #[test]
+    fn alt_widens_only_close_and_minimize_to_the_whole_application() {
+        use WindowControlAction::{Close, Minimize, ToggleMaximize};
+        assert_eq!(window_control_scope(Close, true), CommandScope::Application);
+        assert_eq!(
+            window_control_scope(Minimize, true),
+            CommandScope::Application
+        );
+        assert_eq!(window_control_scope(Close, false), CommandScope::Window);
+        assert_eq!(window_control_scope(Minimize, false), CommandScope::Window);
+        assert_eq!(
+            window_control_scope(ToggleMaximize, true),
+            CommandScope::Window
+        );
+    }
+
+    #[test]
+    fn application_targets_start_with_the_clicked_window_and_skip_unavailable_ones() {
+        let clicked = sibling(1);
+        let mut minimized = sibling(2);
+        minimized.presence = WindowPresence::Minimized;
+        let mut hidden = sibling(3);
+        hidden.presence = WindowPresence::Hidden;
+        let mut dialog = sibling(4);
+        dialog.role = WindowRole::OwnedDialog;
+        let mut fixed = sibling(5);
+        fixed.traits.closable = false;
+        let plain = sibling(6);
+        let app = application(vec![
+            plain.clone(),
+            minimized.clone(),
+            hidden,
+            dialog,
+            fixed.clone(),
+            clicked.clone(),
+        ]);
+
+        let minimize = application_command_targets(&app, clicked.identity, WindowCommand::Minimize);
+        assert_eq!(
+            minimize,
+            vec![clicked.identity, plain.identity, fixed.identity]
+        );
+
+        let close = application_command_targets(&app, clicked.identity, WindowCommand::Close);
+        assert_eq!(
+            close,
+            vec![clicked.identity, plain.identity, minimized.identity]
+        );
+    }
+
+    #[test]
+    fn application_targets_keep_a_clicked_dialog_but_not_other_dialogs() {
+        let mut clicked = sibling(1);
+        clicked.role = WindowRole::OwnedDialog;
+        let mut other_dialog = sibling(2);
+        other_dialog.role = WindowRole::OwnedDialog;
+        let main = sibling(3);
+        let app = application(vec![other_dialog, main.clone(), clicked.clone()]);
+        let targets = application_command_targets(&app, clicked.identity, WindowCommand::Close);
+        assert_eq!(targets, vec![clicked.identity, main.identity]);
+    }
+
     #[test]
     fn controls_cover_every_visible_captioned_window_even_when_its_actions_are_unavailable() {
         assert!(accepts_window_controls(&window(WindowTraits::STANDARD)));
@@ -1219,5 +1337,18 @@ mod tests {
         assert!(!window_controls_visible_under_bar(8, 30, Some(38)));
         assert!(!window_controls_visible_under_bar(0, 30, Some(38)));
         assert!(window_controls_visible_under_bar(0, 30, None));
+    }
+
+    #[test]
+    fn alt_zoom_glyph_defaults_to_false_and_toggles_via_builder() {
+        let state = WindowControlsState::of(&window(WindowTraits::STANDARD));
+        assert!(!state.alt_zoom_glyph);
+        assert!(state.with_alt_zoom_glyph(true).alt_zoom_glyph);
+        assert!(
+            !state
+                .with_alt_zoom_glyph(true)
+                .with_alt_zoom_glyph(false)
+                .alt_zoom_glyph
+        );
     }
 }

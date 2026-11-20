@@ -82,6 +82,7 @@ pub fn capture_wanted(appearance: &Appearance, glass_enabled: bool) -> bool {
 pub struct CaptureGate {
     region: Option<CaptureRegion>,
     last_request_ms: Option<u64>,
+    accepted_region: Option<CaptureRegion>,
     accepted_signature: Option<u64>,
 }
 
@@ -91,6 +92,7 @@ impl CaptureGate {
         Self {
             region: None,
             last_request_ms: None,
+            accepted_region: None,
             accepted_signature: None,
         }
     }
@@ -125,15 +127,19 @@ impl CaptureGate {
     }
 
     pub fn accepts(&mut self, origin: (i32, i32), width: u32, height: u32, signature: u64) -> bool {
-        let Some(region) = self.region else {
+        if self.region.is_none() || width == 0 || height == 0 {
             return false;
+        }
+        let incoming = CaptureRegion {
+            x: origin.0,
+            y: origin.1,
+            width,
+            height,
         };
-        if region.origin() != origin || region.width != width || region.height != height {
+        if self.accepted_region == Some(incoming) && self.accepted_signature == Some(signature) {
             return false;
         }
-        if self.accepted_signature == Some(signature) {
-            return false;
-        }
+        self.accepted_region = Some(incoming);
         self.accepted_signature = Some(signature);
         true
     }
@@ -286,25 +292,31 @@ mod tests {
     }
 
     #[test]
-    fn frames_are_accepted_once_per_signature_and_only_for_the_current_region() {
+    fn frames_are_accepted_once_per_region_and_signature_even_when_in_flight() {
         let mut gate = CaptureGate::new();
         assert!(!gate.accepts((0, 700), 400, 80, 1));
         gate.should_request(region(0), 0, 400, false);
+        assert!(!gate.accepts((0, 700), 0, 80, 1));
+        assert!(!gate.accepts((0, 700), 400, 0, 1));
         assert!(gate.accepts((0, 700), 400, 80, 1));
         assert!(!gate.accepts((0, 700), 400, 80, 1));
         assert!(gate.accepts((0, 700), 400, 80, 2));
-        assert!(!gate.accepts((5, 700), 400, 80, 3));
-        assert!(!gate.accepts((0, 700), 399, 80, 3));
-        assert!(!gate.accepts((0, 700), 400, 81, 3));
+        assert!(!gate.accepts((0, 700), 400, 80, 2));
+        assert!(gate.accepts((5, 700), 400, 80, 2));
+        assert!(!gate.accepts((5, 700), 400, 80, 2));
+        assert!(gate.accepts((0, 700), 399, 80, 2));
+        assert!(gate.accepts((0, 700), 400, 81, 2));
     }
 
     #[test]
-    fn reset_forgets_the_region_and_the_accepted_signature() {
+    fn reset_forgets_the_region_and_the_accepted_frame() {
         let mut gate = CaptureGate::new();
         gate.should_request(region(0), 0, 400, false);
         assert!(gate.accepts((0, 700), 400, 80, 9));
+        assert!(!gate.accepts((0, 700), 400, 80, 9));
         gate.reset();
         assert!(!gate.is_active());
+        assert!(!gate.accepts((0, 700), 400, 80, 9));
         assert!(gate.should_request(region(0), 1, 400, false));
         assert!(gate.accepts((0, 700), 400, 80, 9));
     }

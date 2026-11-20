@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "otto-core"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "otto-os"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "otto-core",
  "otto-platform",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "otto-platform"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "otto-core",
  "windows",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "otto-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "otto-core",
  "windows",

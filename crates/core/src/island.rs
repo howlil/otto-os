@@ -1,16 +1,19 @@
 use crate::media::TrackKey;
+use crate::notch_notification::NotificationStage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompactSlotKind {
     #[default]
     Focus,
     Media,
+    Call,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactContent {
     Focus,
     Media(TrackKey),
+    Call,
 }
 
 impl CompactContent {
@@ -19,6 +22,7 @@ impl CompactContent {
         match self {
             Self::Focus => CompactSlotKind::Focus,
             Self::Media(_) => CompactSlotKind::Media,
+            Self::Call => CompactSlotKind::Call,
         }
     }
 }
@@ -30,6 +34,7 @@ pub enum IslandMode {
     Hud,
     Expanded,
     Alert,
+    Notification(NotificationStage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -38,7 +43,9 @@ pub struct IslandInputs {
     pub alert: bool,
     pub panel_requested: bool,
     pub hud: bool,
+    pub notification: Option<NotificationStage>,
     pub focus_active: bool,
+    pub call_active: bool,
     pub media: Option<TrackKey>,
     pub media_paused_hold: Option<TrackKey>,
     pub media_primary: bool,
@@ -57,6 +64,10 @@ pub struct IslandTargets {
 impl IslandInputs {
     #[must_use]
     pub fn compact_content(&self) -> Option<CompactContent> {
+        self.active_call().or_else(|| self.regular_primary())
+    }
+
+    fn regular_primary(&self) -> Option<CompactContent> {
         let focus = self.active_focus();
         let media = self.active_media();
         if self.media_primary {
@@ -66,8 +77,17 @@ impl IslandInputs {
         }
     }
 
+    fn active_call(&self) -> Option<CompactContent> {
+        self.call_active
+            .then_some(CompactContent::Call)
+            .filter(|content| self.is_not_dismissed(content))
+    }
+
     #[must_use]
     pub fn secondary_compact_content(&self) -> Option<CompactContent> {
+        if self.active_call().is_some() {
+            return self.regular_primary();
+        }
         let focus = self.active_focus()?;
         let media = self.active_media()?;
         if self.media_primary {
@@ -101,8 +121,12 @@ impl IslandInputs {
 pub fn resolve_island(inputs: &IslandInputs) -> IslandMode {
     if inputs.alert {
         IslandMode::Alert
+    } else if inputs.notification == Some(NotificationStage::Ringing) {
+        IslandMode::Notification(NotificationStage::Ringing)
     } else if inputs.panel_requested {
         IslandMode::Expanded
+    } else if let Some(stage) = inputs.notification {
+        IslandMode::Notification(stage)
     } else if inputs.hud {
         IslandMode::Hud
     } else if let Some(content) = inputs.compact_content() {
@@ -117,7 +141,10 @@ pub fn island_targets(inputs: &IslandInputs) -> IslandTargets {
     let mode = resolve_island(inputs);
     let flag = |on: bool| if on { 1.0 } else { 0.0 };
     IslandTargets {
-        panel: flag(matches!(mode, IslandMode::Expanded | IslandMode::Alert)),
+        panel: flag(matches!(
+            mode,
+            IslandMode::Expanded | IslandMode::Alert | IslandMode::Notification(_)
+        )),
         hud: flag(mode == IslandMode::Hud),
         compact: flag(inputs.compact_content().is_some()),
         secondary: flag(
@@ -130,6 +157,7 @@ pub fn island_targets(inputs: &IslandInputs) -> IslandTargets {
 mod tests {
     use super::{CompactContent, IslandInputs, IslandMode, island_targets, resolve_island};
     use crate::media::TrackKey;
+    use crate::notch_notification::NotificationStage;
 
     fn track(title: &str) -> TrackKey {
         TrackKey {
@@ -144,7 +172,9 @@ mod tests {
             alert: true,
             panel_requested: true,
             hud: true,
+            notification: None,
             focus_active: true,
+            call_active: false,
             media: Some(track("Song")),
             media_paused_hold: None,
             media_primary: false,
@@ -326,5 +356,81 @@ mod tests {
         inputs.hud = false;
         inputs.panel_requested = true;
         assert!(island_targets(&inputs).secondary.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_ringing_call_beats_the_open_panel_but_a_message_banner_does_not() {
+        let mut inputs = IslandInputs {
+            panel_requested: true,
+            hud: true,
+            notification: Some(NotificationStage::Banner),
+            ..IslandInputs::default()
+        };
+        assert_eq!(resolve_island(&inputs), IslandMode::Expanded);
+        inputs.notification = Some(NotificationStage::Ringing);
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Notification(NotificationStage::Ringing)
+        );
+        inputs.alert = true;
+        assert_eq!(resolve_island(&inputs), IslandMode::Alert);
+    }
+
+    #[test]
+    fn a_message_banner_beats_hud_and_compact_and_opens_the_panel_channel() {
+        let inputs = IslandInputs {
+            hud: true,
+            focus_active: true,
+            notification: Some(NotificationStage::Banner),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Notification(NotificationStage::Banner)
+        );
+        let targets = island_targets(&inputs);
+        assert!((targets.panel - 1.0).abs() < f32::EPSILON);
+        assert!(targets.hud.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_call_takes_the_main_notch_and_pushes_focus_or_media_to_the_circle() {
+        let mut inputs = IslandInputs {
+            call_active: true,
+            focus_active: true,
+            media: Some(track("Song")),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Compact(CompactContent::Call)
+        );
+        assert_eq!(
+            inputs.secondary_compact_content(),
+            Some(CompactContent::Focus)
+        );
+        inputs.media_primary = true;
+        assert_eq!(
+            inputs.secondary_compact_content(),
+            Some(CompactContent::Media(track("Song")))
+        );
+        inputs.focus_active = false;
+        inputs.media = None;
+        assert_eq!(inputs.secondary_compact_content(), None);
+        assert!((island_targets(&inputs).compact - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_dismissed_call_falls_back_to_the_regular_compact_content() {
+        let inputs = IslandInputs {
+            call_active: true,
+            focus_active: true,
+            dismissed: Some(CompactContent::Call),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Compact(CompactContent::Focus)
+        );
     }
 }

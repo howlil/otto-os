@@ -14,20 +14,41 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build Windows Installer & Release
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve release metadata
+      - name: Resolve release metadata and check version parity
         id: meta
         shell: pwsh
         run: |
           $tag = if ('${{ github.event.inputs.tag }}') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
           $version = $tag.TrimStart('v')
           $numericVersion = ($version -replace '-.*$', '')
+          $cargoToml = Get-Content -LiteralPath 'Cargo.toml' -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw 'Could not read workspace version from Cargo.toml'
+          }
+          $cargoVersion = $Matches[1]
+          if ($cargoVersion -ne $version) {
+            throw "Version mismatch: tag '$tag' expects Cargo.toml version '$version', found '$cargoVersion'"
+          }
+          $manifest = Get-Content -LiteralPath 'crates\app\otto-os.manifest' -Raw
+          if ($manifest -notmatch 'version="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"') {
+            throw 'Could not read assembly version from crates\app\otto-os.manifest'
+          }
+          $expectedManifestVersion = "$numericVersion.0"
+          if ($Matches[1] -ne $expectedManifestVersion) {
+            throw "Manifest version mismatch: expected '$expectedManifestVersion', found '$($Matches[1])'"
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "numeric_version=$numericVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -38,11 +59,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify formatting, clippy, and core/render/app tests
+      - name: Verify formatting, clippy, and tests
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
+          cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1
 
       - name: Build release binary
         run: cargo build --release -p otto-os
@@ -131,6 +153,18 @@ jobs:
           }
           Set-Content -LiteralPath (Join-Path $outDir 'SHA256SUMS.txt') -Value ($checksumLines -join "`n")
 
+          $changelog = Get-Content -LiteralPath 'CHANGELOG.md' -Raw
+          $escaped = [regex]::Escape($version)
+          $sectionMatch = [regex]::Match(
+            $changelog,
+            "(?ms)^## \[$escaped\][^\r\n]*\r?\n(.*?)(?=^## \[|^\[[^\]]+\]:|\z)"
+          )
+          if (-not $sectionMatch.Success -or [string]::IsNullOrWhiteSpace($sectionMatch.Groups[1].Value)) {
+            throw "CHANGELOG.md is missing a non-empty section for [$version]"
+          }
+          $notesBody = $sectionMatch.Groups[1].Value.Trim()
+          Set-Content -LiteralPath (Join-Path $outDir 'RELEASE_NOTES.md') -Value $notesBody
+
       - name: Clean up temporary certificate
         if: always() && steps.cert.outputs.enabled == 'true'
         shell: pwsh
@@ -140,8 +174,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
+          name: Otto OS ${{ steps.meta.outputs.tag }}
           prerelease: ${{ contains(steps.meta.outputs.tag, '-') || startsWith(steps.meta.outputs.tag, 'v0.') }}
-          generate_release_notes: true
+          body_path: artifacts/release/RELEASE_NOTES.md
           files: |
             artifacts/release/*.exe
             artifacts/release/*.zip

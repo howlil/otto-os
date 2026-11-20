@@ -9,6 +9,7 @@ mod genie;
 mod host;
 mod menu;
 mod notch;
+mod spotlight;
 mod theme_state;
 mod window_controls;
 

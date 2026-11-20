@@ -2,11 +2,13 @@ use crate::clipboard::{CLIPBOARD_PAGE_SIZE, ClipboardLayoutInput};
 use crate::hud::{HudGeometry, compute_hud_geometry};
 use crate::island::CompactSlotKind;
 use crate::media::NotchExpandedTab;
+use crate::menu_bar::{BarItem, BarItemSet};
 use crate::pomodoro::FocusSubMode;
 use crate::pomodoro_view::PomodoroSurface;
 use crate::preferences::NotchStyle;
 use crate::privacy::PRIVACY_COMPACT_EXTRA_POINTS;
 use crate::shelf::SHELF_PAGE_SIZE;
+use crate::tasks::{TASKS_PAGE_SIZE, TasksLayoutInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
@@ -100,6 +102,7 @@ pub enum HitTarget {
     NotchTabPomodoro,
     NotchTabShelf,
     NotchTabClipboard,
+    NotchTabTasks,
     NotchTabMedia,
     ShelfAdd,
     ShelfClear,
@@ -112,6 +115,12 @@ pub enum HitTarget {
     ClipboardPager,
     ClipboardItem(u8),
     ClipboardRemoveItem(u8),
+    TasksAdd,
+    TasksClearDone,
+    TasksPager,
+    TaskItem(u8),
+    TaskCheck(u8),
+    TaskRemove(u8),
     PrivacyIndicator,
     PrivacyMicMute,
     MediaPlayPause,
@@ -128,6 +137,31 @@ pub enum HitTarget {
     ControlCenter,
     Notifications,
     Clock,
+    NotificationCard,
+    NotificationClose,
+    NotificationAccept,
+    NotificationDecline,
+}
+
+pub const NOTIFICATION_BANNER_HEIGHT_POINTS: i32 = 88;
+pub const NOTIFICATION_RING_HEIGHT_POINTS: i32 = 96;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationLayoutInput {
+    pub ringing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NotificationLayout {
+    pub ringing: bool,
+    pub card: Rect,
+    pub badge: Rect,
+    pub meta: Rect,
+    pub title: Rect,
+    pub subtitle: Rect,
+    pub close: Rect,
+    pub accept: Rect,
+    pub decline: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -160,18 +194,25 @@ pub struct NotchLayoutInput {
     pub focus_mode: FocusSubMode,
     pub active_tab: NotchExpandedTab,
     pub previous_tab: NotchExpandedTab,
+    pub top_bar_enabled: bool,
+    pub notch_enabled: bool,
     pub control_center_enabled: bool,
     pub focus_enabled: bool,
     pub shelf_enabled: bool,
     pub clipboard_enabled: bool,
+    pub tasks_enabled: bool,
     pub media_present: bool,
     pub lyrics_progress: f32,
     pub tab_blend: f32,
     pub compact_title_points: i32,
     pub media_live: bool,
+    pub press_progress: f32,
     pub privacy: PrivacyLayoutState,
     pub shelf: ShelfLayoutInput,
     pub clipboard: ClipboardLayoutInput,
+    pub hidden_items: BarItemSet,
+    pub notification: Option<NotificationLayoutInput>,
+    pub tasks: TasksLayoutInput,
 }
 
 impl Default for NotchLayoutInput {
@@ -188,18 +229,25 @@ impl Default for NotchLayoutInput {
             focus_mode: FocusSubMode::Pomodoro,
             active_tab: NotchExpandedTab::Pomodoro,
             previous_tab: NotchExpandedTab::Pomodoro,
+            top_bar_enabled: true,
+            notch_enabled: true,
             control_center_enabled: true,
             focus_enabled: true,
             shelf_enabled: true,
             clipboard_enabled: true,
+            tasks_enabled: true,
             media_present: true,
             lyrics_progress: 0.0,
             tab_blend: 1.0,
             compact_title_points: 0,
             media_live: false,
+            press_progress: 0.0,
             privacy: PrivacyLayoutState::default(),
             shelf: ShelfLayoutInput::default(),
             clipboard: ClipboardLayoutInput::default(),
+            hidden_items: BarItemSet::default(),
+            notification: None,
+            tasks: TasksLayoutInput::default(),
         }
     }
 }
@@ -210,9 +258,11 @@ pub struct Metrics {
     pub notch_top_inset: i32,
     pub notch_width: i32,
     pub notch_compact_width: i32,
+    pub notch_focus_compact_width: i32,
     pub notch_hud_width: i32,
     pub notch_expanded_width: i32,
     pub notch_height: i32,
+    pub notch_compact_height: i32,
     pub notch_expanded_height: i32,
     pub notch_lyrics_height: i32,
     pub notch_corner_radius: i32,
@@ -252,9 +302,11 @@ impl Metrics {
         notch_top_inset: 0,
         notch_width: 200,
         notch_compact_width: 292,
+        notch_focus_compact_width: 200,
         notch_hud_width: 356,
         notch_expanded_width: 380,
         notch_height: 32,
+        notch_compact_height: 32,
         notch_expanded_height: 144,
         notch_lyrics_height: 254,
         notch_corner_radius: 10,
@@ -266,11 +318,11 @@ impl Metrics {
         start_slot_width: 34,
         app_slot_min_width: 52,
         app_slot_max_width: 132,
-        file_slot_width: 36,
-        edit_slot_width: 36,
-        view_slot_width: 42,
-        window_slot_width: 60,
-        help_slot_width: 42,
+        file_slot_width: 40,
+        edit_slot_width: 40,
+        view_slot_width: 46,
+        window_slot_width: 64,
+        help_slot_width: 44,
         overflow_slot_width: 26,
         left_slot_gap: 2,
         tray_slot_width: 28,
@@ -293,8 +345,10 @@ impl Metrics {
         notch_top_inset: 4,
         notch_width: 120,
         notch_height: 32,
+        notch_focus_compact_width: 184,
+        notch_compact_height: 36,
         notch_corner_radius: 16,
-        notch_expanded_corner_radius: 24,
+        notch_expanded_corner_radius: 28,
         notch_ear_radius: 0,
         notch_expanded_ear_radius: 0,
         ..Self::MACBOOK_PRO_14
@@ -335,6 +389,7 @@ pub struct Layout {
     pub previous_tab: NotchExpandedTab,
     pub compact_ring: Rect,
     pub compact_peek: Rect,
+    pub compact_cycle_steps: [Rect; 4],
     pub compact_time: Rect,
     pub compact_title: Rect,
     pub compact_trailing: Rect,
@@ -356,6 +411,7 @@ pub struct Layout {
     pub notch_tab_pomodoro: Rect,
     pub notch_tab_shelf: Rect,
     pub notch_tab_clipboard: Rect,
+    pub notch_tab_tasks: Rect,
     pub notch_tab_media: Rect,
     pub shelf_add_button: Rect,
     pub shelf_clear_button: Rect,
@@ -370,6 +426,13 @@ pub struct Layout {
     pub clipboard_body: Rect,
     pub clipboard_rows: [Rect; CLIPBOARD_PAGE_SIZE],
     pub clipboard_remove_buttons: [Rect; CLIPBOARD_PAGE_SIZE],
+    pub tasks_add_button: Rect,
+    pub tasks_clear_button: Rect,
+    pub tasks_pager_button: Rect,
+    pub tasks_body: Rect,
+    pub tasks_rows: [Rect; TASKS_PAGE_SIZE],
+    pub tasks_check_buttons: [Rect; TASKS_PAGE_SIZE],
+    pub tasks_remove_buttons: [Rect; TASKS_PAGE_SIZE],
     pub privacy_dots: Rect,
     pub privacy_mic_button: Rect,
     pub media_cover_art: Rect,
@@ -386,6 +449,7 @@ pub struct Layout {
     pub media_next_button: Rect,
     pub lyrics_progress: f32,
     pub tab_blend: f32,
+    pub press_progress: f32,
     pub icon_size: i32,
     pub start_slot: Rect,
     pub app_slot: Rect,
@@ -396,6 +460,7 @@ pub struct Layout {
     pub help_slot: Rect,
     pub overflow_slot: Rect,
     pub hidden_targets: Vec<HitTarget>,
+    pub notification: Option<NotificationLayout>,
     pub tray_slot: Rect,
     pub status_slot: Rect,
     pub status_wifi_rect: Rect,
@@ -411,6 +476,12 @@ pub struct Layout {
 impl Layout {
     #[must_use]
     pub fn hit_test(&self, x: i32, y: i32) -> Option<HitTarget> {
+        if self.panel_expansion > 0.55
+            && self.notch.contains(x, y)
+            && let Some(card) = &self.notification
+        {
+            return Some(card.hit_test(x, y));
+        }
         if self.panel_expansion > 0.55 && self.notch.contains(x, y) {
             return Some(self.hit_test_expanded_notch(x, y));
         }
@@ -447,7 +518,7 @@ impl Layout {
             } else if self.status_battery_rect.contains(x, y) {
                 Some(HitTarget::StatusBattery)
             } else {
-                Some(HitTarget::QuickSettings)
+                None
             }
         } else if self.search_slot.contains(x, y) {
             Some(HitTarget::Search)
@@ -476,6 +547,7 @@ impl Layout {
             (self.notch_tab_pomodoro, HitTarget::NotchTabPomodoro),
             (self.notch_tab_shelf, HitTarget::NotchTabShelf),
             (self.notch_tab_clipboard, HitTarget::NotchTabClipboard),
+            (self.notch_tab_tasks, HitTarget::NotchTabTasks),
             (self.notch_tab_media, HitTarget::NotchTabMedia),
         ] {
             if rect.contains(x, y) {
@@ -522,6 +594,7 @@ impl Layout {
             }
             NotchExpandedTab::Shelf => return self.hit_test_shelf(x, y),
             NotchExpandedTab::Clipboard => return self.hit_test_clipboard(x, y),
+            NotchExpandedTab::Tasks => return self.hit_test_tasks(x, y),
         }
         HitTarget::Notch
     }
@@ -545,6 +618,33 @@ impl Layout {
             }
             if row.contains(x, y) {
                 return HitTarget::ClipboardItem(index as u8);
+            }
+        }
+        HitTarget::Notch
+    }
+
+    fn hit_test_tasks(&self, x: i32, y: i32) -> HitTarget {
+        for (rect, target) in [
+            (self.tasks_add_button, HitTarget::TasksAdd),
+            (self.tasks_clear_button, HitTarget::TasksClearDone),
+            (self.tasks_pager_button, HitTarget::TasksPager),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
+        for (index, row) in self.tasks_rows.iter().enumerate() {
+            if row.is_empty() {
+                continue;
+            }
+            if self.tasks_remove_buttons[index].contains(x, y) {
+                return HitTarget::TaskRemove(index as u8);
+            }
+            if self.tasks_check_buttons[index].contains(x, y) {
+                return HitTarget::TaskCheck(index as u8);
+            }
+            if row.contains(x, y) {
+                return HitTarget::TaskItem(index as u8);
             }
         }
         HitTarget::Notch
@@ -580,6 +680,10 @@ impl Layout {
     #[must_use]
     pub fn is_hidden(&self, target: HitTarget) -> bool {
         self.hidden_targets.contains(&target)
+            || (matches!(
+                target,
+                HitTarget::StatusWifi | HitTarget::StatusVolume | HitTarget::StatusBattery
+            ) && self.hidden_targets.contains(&HitTarget::QuickSettings))
     }
 
     #[must_use]
@@ -618,6 +722,7 @@ impl Layout {
             | HitTarget::NotchTabPomodoro
             | HitTarget::NotchTabShelf
             | HitTarget::NotchTabClipboard
+            | HitTarget::NotchTabTasks
             | HitTarget::NotchTabMedia
             | HitTarget::ShelfAdd
             | HitTarget::ShelfClear
@@ -630,13 +735,23 @@ impl Layout {
             | HitTarget::ClipboardPager
             | HitTarget::ClipboardItem(_)
             | HitTarget::ClipboardRemoveItem(_)
+            | HitTarget::TasksAdd
+            | HitTarget::TasksClearDone
+            | HitTarget::TasksPager
+            | HitTarget::TaskItem(_)
+            | HitTarget::TaskCheck(_)
+            | HitTarget::TaskRemove(_)
             | HitTarget::PrivacyIndicator
             | HitTarget::PrivacyMicMute
             | HitTarget::MediaPlayPause
             | HitTarget::MediaPrevious
             | HitTarget::MediaNext
             | HitTarget::MediaSeekbar
-            | HitTarget::MediaLyricsToggle => None,
+            | HitTarget::MediaLyricsToggle
+            | HitTarget::NotificationCard
+            | HitTarget::NotificationClose
+            | HitTarget::NotificationAccept
+            | HitTarget::NotificationDecline => None,
             HitTarget::Tray => Some(self.tray_slot),
             HitTarget::StatusWifi => Some(self.status_wifi_rect),
             HitTarget::StatusVolume => Some(self.status_volume_rect),
@@ -652,9 +767,13 @@ impl Layout {
 
 impl Layout {
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn notch_control_rect(&self, target: HitTarget) -> Option<Rect> {
         if self.panel_expansion <= 0.55 {
             return None;
+        }
+        if let Some(card) = &self.notification {
+            return card.control_rect(target);
         }
         if self.pomodoro_surface == PomodoroSurface::Alert {
             let rect = match target {
@@ -668,6 +787,7 @@ impl Layout {
             HitTarget::NotchTabPomodoro => self.notch_tab_pomodoro,
             HitTarget::NotchTabShelf => self.notch_tab_shelf,
             HitTarget::NotchTabClipboard => self.notch_tab_clipboard,
+            HitTarget::NotchTabTasks => self.notch_tab_tasks,
             HitTarget::NotchTabMedia => self.notch_tab_media,
             HitTarget::FocusMode(mode) if self.active_tab == NotchExpandedTab::Pomodoro => {
                 self.pomodoro_focus_modes[mode.index()]
@@ -719,6 +839,24 @@ impl Layout {
             {
                 *self.clipboard_remove_buttons.get(usize::from(index))?
             }
+            HitTarget::TasksAdd if self.active_tab == NotchExpandedTab::Tasks => {
+                self.tasks_add_button
+            }
+            HitTarget::TasksClearDone if self.active_tab == NotchExpandedTab::Tasks => {
+                self.tasks_clear_button
+            }
+            HitTarget::TasksPager if self.active_tab == NotchExpandedTab::Tasks => {
+                self.tasks_pager_button
+            }
+            HitTarget::TaskItem(index) if self.active_tab == NotchExpandedTab::Tasks => {
+                *self.tasks_rows.get(usize::from(index))?
+            }
+            HitTarget::TaskCheck(index) if self.active_tab == NotchExpandedTab::Tasks => {
+                *self.tasks_check_buttons.get(usize::from(index))?
+            }
+            HitTarget::TaskRemove(index) if self.active_tab == NotchExpandedTab::Tasks => {
+                *self.tasks_remove_buttons.get(usize::from(index))?
+            }
             HitTarget::PrivacyMicMute => self.privacy_mic_button,
             HitTarget::MediaPrevious if self.active_tab == NotchExpandedTab::Media => {
                 self.media_prev_button
@@ -750,16 +888,24 @@ fn lerp_points(start: i32, end: i32, t: f32) -> i32 {
     start + ((end - start) as f32 * t.clamp(0.0, 1.0)).round() as i32
 }
 
-fn estimate_app_slot_points(metrics: &Metrics, app_name: &str) -> i32 {
-    let mut text_pts = 18;
-    for ch in app_name.chars().take(16) {
-        text_pts += match ch {
+pub const MENU_SLOT_HORIZONTAL_PAD_POINTS: i32 = 10;
+
+#[must_use]
+pub fn estimate_menu_text_width_points(label: &str) -> i32 {
+    label
+        .chars()
+        .take(16)
+        .map(|ch| match ch {
             'i' | 'l' | 'I' | 't' | 'f' | 'j' | 'r' | ' ' | '.' | '-' => 5,
             'm' | 'w' | 'M' | 'W' => 10,
             _ => 8,
-        };
-    }
-    text_pts.clamp(metrics.app_slot_min_width, metrics.app_slot_max_width)
+        })
+        .sum()
+}
+
+fn estimate_app_slot_points(metrics: &Metrics, app_name: &str) -> i32 {
+    (estimate_menu_text_width_points(app_name) + MENU_SLOT_HORIZONTAL_PAD_POINTS * 2)
+        .clamp(metrics.app_slot_min_width, metrics.app_slot_max_width)
 }
 
 const LEFT_TARGETS: [HitTarget; 7] = [
@@ -954,6 +1100,7 @@ pub fn compute_layout_with_hud(
     )
 }
 
+#[derive(Default)]
 struct ExpandedNotchControls {
     notch_tab_strip: Rect,
     icon: Rect,
@@ -973,6 +1120,7 @@ struct ExpandedNotchControls {
     notch_tab_pomodoro: Rect,
     notch_tab_shelf: Rect,
     notch_tab_clipboard: Rect,
+    notch_tab_tasks: Rect,
     notch_tab_media: Rect,
     shelf_add_button: Rect,
     shelf_clear_button: Rect,
@@ -987,6 +1135,13 @@ struct ExpandedNotchControls {
     clipboard_body: Rect,
     clipboard_rows: [Rect; CLIPBOARD_PAGE_SIZE],
     clipboard_remove_buttons: [Rect; CLIPBOARD_PAGE_SIZE],
+    tasks_add_button: Rect,
+    tasks_clear_button: Rect,
+    tasks_pager_button: Rect,
+    tasks_body: Rect,
+    tasks_rows: [Rect; TASKS_PAGE_SIZE],
+    tasks_check_buttons: [Rect; TASKS_PAGE_SIZE],
+    tasks_remove_buttons: [Rect; TASKS_PAGE_SIZE],
     privacy_mic_button: Rect,
     media_cover_art: Rect,
     media_source_label: Rect,
@@ -1040,9 +1195,11 @@ fn hero_buttons(
     }
 }
 
+#[derive(Default)]
 struct CompactNotchGeometry {
     ring: Rect,
     peek: Rect,
+    cycle_steps: [Rect; 4],
     time: Rect,
     title: Rect,
     trailing: Rect,
@@ -1058,7 +1215,7 @@ fn compute_compact_notch_geometry(
 ) -> CompactNotchGeometry {
     let ring_size = scale(COMPACT_RING_POINTS, dpi);
     let band_y = notch.y;
-    let band_height = (bar_height - notch.y * 2).max(ring_size);
+    let band_height = notch.height.min(bar_height - notch.y * 2).max(ring_size);
     let ring = Rect {
         x: notch.x + scale(COMPACT_RING_INSET_POINTS, dpi),
         y: band_y + (band_height - ring_size) / 2,
@@ -1101,6 +1258,7 @@ fn compute_compact_notch_geometry(
         width: (time.x - peek_gap - peek_left).max(0),
         height: band_height,
     };
+    let cycle_steps = compute_compact_cycle_steps(&peek, dpi);
     let trailing_width_pts = if media_live {
         COMPACT_LIVE_TRAILING_WIDTH_POINTS
     } else {
@@ -1125,6 +1283,7 @@ fn compute_compact_notch_geometry(
     CompactNotchGeometry {
         ring,
         peek,
+        cycle_steps,
         time,
         title,
         trailing,
@@ -1135,7 +1294,7 @@ fn compute_compact_notch_geometry(
 const COMPACT_RING_POINTS: i32 = 20;
 const COMPACT_RING_INSET_POINTS: i32 = 8;
 const COMPACT_TIME_WIDTH_POINTS: i32 = 56;
-const COMPACT_TIME_INSET_POINTS: i32 = 14;
+const COMPACT_TIME_INSET_POINTS: i32 = 12;
 const COMPACT_PEEK_GAP_POINTS: i32 = 8;
 const COMPACT_TRAILING_WIDTH_POINTS: i32 = 16;
 const COMPACT_LIVE_TRAILING_WIDTH_POINTS: i32 = 34;
@@ -1145,10 +1304,27 @@ const COMPACT_FLOATING_PRIVACY_INSET_POINTS: i32 = 8;
 const COMPACT_PRIVACY_WIDTH_POINTS: i32 = 14;
 const COMPACT_TITLE_SLACK_POINTS: i32 = 6;
 const COMPACT_MAX_WIDTH_POINTS: i32 = 520;
+const COMPACT_CYCLE_STEP_WIDTH_POINTS: i32 = 8;
+const COMPACT_CYCLE_STEP_GAP_POINTS: i32 = 4;
+const COMPACT_CYCLE_STEP_HEIGHT_POINTS: i32 = 3;
 const SECONDARY_NOTCH_SIZE_POINTS: i32 = 28;
 const SECONDARY_NOTCH_GAP_POINTS: i32 = 8;
 const SECONDARY_NOTCH_MIN_SIZE_POINTS: i32 = 12;
 const SECONDARY_NOTCH_SWAP_PULL_POINTS: i32 = 4;
+
+fn compute_compact_cycle_steps(peek: &Rect, dpi: u32) -> [Rect; 4] {
+    let gap = scale(COMPACT_CYCLE_STEP_GAP_POINTS, dpi).min(peek.width / 7);
+    let width = scale(COMPACT_CYCLE_STEP_WIDTH_POINTS, dpi).min((peek.width - gap * 3).max(0) / 4);
+    let height = scale(COMPACT_CYCLE_STEP_HEIGHT_POINTS, dpi).min(peek.height.max(0));
+    let total_width = width * 4 + gap * 3;
+    let left = peek.x + (peek.width - total_width) / 2;
+    std::array::from_fn(|index| Rect {
+        x: left + index as i32 * (width + gap),
+        y: peek.y + (peek.height - height) / 2,
+        width,
+        height,
+    })
+}
 
 fn compute_secondary_notch_rect(
     notch: Rect,
@@ -1163,7 +1339,7 @@ fn compute_secondary_notch_rect(
     }
     let floating = metrics.notch_top_inset > 0;
     let max_size_points = if floating {
-        metrics.notch_height
+        metrics.notch_compact_height
     } else {
         metrics.notch_height.min(SECONDARY_NOTCH_SIZE_POINTS)
     };
@@ -1176,7 +1352,7 @@ fn compute_secondary_notch_rect(
     let target_x = notch.right() + scale(SECONDARY_NOTCH_GAP_POINTS, dpi) - pull_px;
     let x = start_x + ((target_x - start_x) as f32 * t).round() as i32;
     let y = if floating {
-        let collapsed_notch_h = scale(metrics.notch_height, dpi);
+        let collapsed_notch_h = scale(metrics.bar_height, dpi) - notch.y * 2;
         notch.y + (collapsed_notch_h - size) / 2
     } else {
         (scale(metrics.bar_height, dpi) - size) / 2
@@ -1189,9 +1365,23 @@ fn compute_secondary_notch_rect(
     }
 }
 
-fn compact_width_points(metrics: &Metrics, title_points: i32, media_live: bool) -> i32 {
-    if title_points <= 0 {
-        return metrics.notch_compact_width;
+fn compact_width_points(
+    metrics: &Metrics,
+    title_points: i32,
+    media_live: bool,
+    primary: Option<CompactSlotKind>,
+) -> i32 {
+    let focus_sized = matches!(
+        primary,
+        Some(CompactSlotKind::Focus | CompactSlotKind::Call)
+    );
+    let base_width = if focus_sized {
+        metrics.notch_focus_compact_width
+    } else {
+        metrics.notch_compact_width
+    };
+    if focus_sized || title_points <= 0 {
+        return base_width;
     }
     let trailing_pts = if media_live {
         COMPACT_LIVE_TRAILING_WIDTH_POINTS
@@ -1204,12 +1394,12 @@ fn compact_width_points(metrics: &Metrics, title_points: i32, media_live: bool) 
         + trailing_pts
         + COMPACT_TRAILING_INSET_POINTS;
     (chrome + title_points + COMPACT_TITLE_SLACK_POINTS)
-        .min(COMPACT_MAX_WIDTH_POINTS.max(metrics.notch_compact_width))
-        .max(metrics.notch_compact_width)
+        .min(COMPACT_MAX_WIDTH_POINTS.max(base_width))
+        .max(base_width)
 }
 
 const PANEL_PAD_POINTS: i32 = 16;
-const PANEL_TAB_TOP_POINTS: i32 = 6;
+const PANEL_TAB_TOP_POINTS: i32 = 10;
 const PANEL_TAB_HEIGHT_POINTS: i32 = 24;
 const PANEL_TAB_ACTIVE_WIDTH_POINTS: i32 = 64;
 const PANEL_TAB_ICON_WIDTH_POINTS: i32 = 24;
@@ -1540,6 +1730,72 @@ fn compute_clipboard_controls(
     }
 }
 
+const TASK_CHECK_BUTTON_POINTS: i32 = 16;
+
+const _: () = assert!(TASKS_PAGE_SIZE == CLIPBOARD_PAGE_SIZE);
+
+struct TasksControlsGeometry {
+    add_button: Rect,
+    clear_button: Rect,
+    pager_button: Rect,
+    mic_button: Rect,
+    body: Rect,
+    rows: [Rect; TASKS_PAGE_SIZE],
+    check_buttons: [Rect; TASKS_PAGE_SIZE],
+    remove_buttons: [Rect; TASKS_PAGE_SIZE],
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_tasks_controls(
+    notch_y: i32,
+    content_left: i32,
+    content_right: i32,
+    tab_y: i32,
+    tab_h: i32,
+    tasks: TasksLayoutInput,
+    panel_mic_control: bool,
+    dpi: u32,
+) -> TasksControlsGeometry {
+    let shared = compute_clipboard_controls(
+        notch_y,
+        content_left,
+        content_right,
+        tab_y,
+        tab_h,
+        ClipboardLayoutInput {
+            visible_count: tasks.visible_count,
+            has_pager: tasks.has_pager,
+            has_items: tasks.has_done,
+            paused: false,
+        },
+        panel_mic_control,
+        dpi,
+    );
+    let check_size = scale(TASK_CHECK_BUTTON_POINTS, dpi);
+    let pad = scale(CLIPBOARD_ROW_REMOVE_PAD_POINTS, dpi);
+    let mut check_buttons = [Rect::default(); TASKS_PAGE_SIZE];
+    for (button, row) in check_buttons.iter_mut().zip(shared.rows) {
+        if !row.is_empty() {
+            *button = Rect {
+                x: row.x + pad,
+                y: row.y + (row.height - check_size) / 2,
+                width: check_size,
+                height: check_size,
+            };
+        }
+    }
+    TasksControlsGeometry {
+        add_button: shared.pause_button,
+        clear_button: shared.clear_button,
+        pager_button: shared.pager_button,
+        mic_button: shared.mic_button,
+        body: shared.body,
+        rows: shared.rows,
+        check_buttons,
+        remove_buttons: shared.remove_buttons,
+    }
+}
+
 fn compute_focus_mode_rects(
     surface: PomodoroSurface,
     session_left: i32,
@@ -1573,6 +1829,93 @@ fn compute_focus_mode_rects(
         height: tab_h,
     };
     [r0, r1, r2]
+}
+
+impl NotificationLayout {
+    #[must_use]
+    pub fn hit_test(&self, x: i32, y: i32) -> HitTarget {
+        if self.ringing && self.accept.contains(x, y) {
+            HitTarget::NotificationAccept
+        } else if self.ringing && self.decline.contains(x, y) {
+            HitTarget::NotificationDecline
+        } else if !self.ringing && self.close.contains(x, y) {
+            HitTarget::NotificationClose
+        } else {
+            HitTarget::NotificationCard
+        }
+    }
+
+    #[must_use]
+    pub fn control_rect(&self, target: HitTarget) -> Option<Rect> {
+        let rect = match target {
+            HitTarget::NotificationCard => self.card,
+            HitTarget::NotificationClose if !self.ringing => self.close,
+            HitTarget::NotificationAccept if self.ringing => self.accept,
+            HitTarget::NotificationDecline if self.ringing => self.decline,
+            _ => return None,
+        };
+        (!rect.is_empty()).then_some(rect)
+    }
+
+    #[must_use]
+    pub fn keyboard_targets(&self) -> Vec<HitTarget> {
+        if self.ringing {
+            vec![
+                HitTarget::NotificationDecline,
+                HitTarget::NotificationAccept,
+            ]
+        } else {
+            vec![HitTarget::NotificationCard, HitTarget::NotificationClose]
+        }
+    }
+}
+
+fn compute_notification_layout(notch: Rect, dpi: u32, ringing: bool) -> NotificationLayout {
+    let pts = |value: i32| scale(value, dpi);
+    let width = pts(380);
+    let height = pts(if ringing {
+        NOTIFICATION_RING_HEIGHT_POINTS
+    } else {
+        NOTIFICATION_BANNER_HEIGHT_POINTS
+    });
+    let origin_x = notch.x;
+    let origin_y = notch.y;
+    let at = |x: i32, y: i32, w: i32, h: i32| Rect {
+        x: origin_x + pts(x),
+        y: origin_y + pts(y),
+        width: pts(w),
+        height: pts(h),
+    };
+    let card = Rect {
+        x: origin_x,
+        y: origin_y,
+        width,
+        height,
+    };
+    if ringing {
+        return NotificationLayout {
+            ringing,
+            card,
+            badge: at(16, 28, 40, 40),
+            meta: Rect::default(),
+            title: at(68, 24, 188, 20),
+            subtitle: at(68, 46, 188, 16),
+            close: Rect::default(),
+            accept: at(320, 26, 44, 44),
+            decline: at(268, 26, 44, 44),
+        };
+    }
+    NotificationLayout {
+        ringing,
+        card,
+        badge: at(16, 26, 36, 36),
+        meta: at(64, 12, 248, 14),
+        title: at(64, 28, 300, 18),
+        subtitle: at(64, 48, 300, 32),
+        close: at(340, 10, 24, 24),
+        accept: Rect::default(),
+        decline: Rect::default(),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1627,6 +1970,7 @@ fn compute_expanded_notch_controls(
     let notch_tab_shelf = allocate_tab(NotchExpandedTab::Shelf, notch_input.shelf_enabled);
     let notch_tab_clipboard =
         allocate_tab(NotchExpandedTab::Clipboard, notch_input.clipboard_enabled);
+    let notch_tab_tasks = allocate_tab(NotchExpandedTab::Tasks, notch_input.tasks_enabled);
     let notch_tab_media = allocate_tab(NotchExpandedTab::Media, media_present);
     let notch_tab_strip = match first_tab_x {
         Some(left) => Rect {
@@ -1902,9 +2246,20 @@ fn compute_expanded_notch_controls(
         notch_input.privacy.panel_mic_control,
         dpi,
     );
+    let tasks = compute_tasks_controls(
+        oy,
+        content_left,
+        content_right,
+        tab_y,
+        tab_h,
+        notch_input.tasks,
+        notch_input.privacy.panel_mic_control,
+        dpi,
+    );
     let privacy_mic_button = match active_tab {
         NotchExpandedTab::Shelf => shelf.mic_button,
         NotchExpandedTab::Clipboard => clipboard.mic_button,
+        NotchExpandedTab::Tasks => tasks.mic_button,
         NotchExpandedTab::Media if notch_input.privacy.panel_mic_control => {
             let mic_w = scale(PRIVACY_PANEL_MIC_WIDTH_POINTS, dpi);
             Rect {
@@ -1936,6 +2291,7 @@ fn compute_expanded_notch_controls(
         notch_tab_pomodoro,
         notch_tab_shelf,
         notch_tab_clipboard,
+        notch_tab_tasks,
         notch_tab_media,
         shelf_add_button: shelf.add_button,
         shelf_clear_button: shelf.clear_button,
@@ -1950,6 +2306,13 @@ fn compute_expanded_notch_controls(
         clipboard_body: clipboard.body,
         clipboard_rows: clipboard.rows,
         clipboard_remove_buttons: clipboard.remove_buttons,
+        tasks_add_button: tasks.add_button,
+        tasks_clear_button: tasks.clear_button,
+        tasks_pager_button: tasks.pager_button,
+        tasks_body: tasks.body,
+        tasks_rows: tasks.rows,
+        tasks_check_buttons: tasks.check_buttons,
+        tasks_remove_buttons: tasks.remove_buttons,
         privacy_mic_button,
         media_cover_art,
         media_source_label,
@@ -1976,11 +2339,34 @@ pub fn compute_layout_with_notch(
     notch_input: NotchLayoutInput,
 ) -> Layout {
     let bar_height = scale(metrics.bar_height, dpi);
-    let notch_y = scale(metrics.notch_top_inset, dpi);
-    let hud_t = notch_input.hud_expansion.clamp(0.0, 1.0);
-    let compact_t = notch_input.compact_expansion.clamp(0.0, 1.0);
-    let panel_t = notch_input.panel_expansion.clamp(0.0, 1.0);
-    let privacy_extra_pts = if notch_input.privacy.compact_dots {
+    let notch_enabled = notch_input.notch_enabled;
+    let hud_t = if notch_enabled {
+        notch_input.hud_expansion.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let compact_t = if notch_enabled {
+        notch_input.compact_expansion.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let panel_t = if notch_enabled {
+        notch_input.panel_expansion.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let compact_height_pts = lerp_points(
+        metrics.notch_height,
+        metrics.notch_compact_height,
+        compact_t,
+    );
+    let compact_top_inset_pts = if metrics.notch_top_inset > 0 {
+        (metrics.bar_height - compact_height_pts) / 2
+    } else {
+        metrics.notch_top_inset
+    };
+    let notch_y = scale(compact_top_inset_pts, dpi);
+    let privacy_extra_pts = if notch_enabled && notch_input.privacy.compact_dots {
         PRIVACY_COMPACT_EXTRA_POINTS
     } else {
         0
@@ -1991,21 +2377,44 @@ pub fn compute_layout_with_notch(
         metrics,
         notch_input.compact_title_points,
         notch_input.media_live,
+        notch_input.compact_primary,
     ) + privacy_extra_pts;
     let compact_pts = lerp_points(base_pts, compact_target, compact_t);
     let hud_pts = lerp_points(base_pts, metrics.notch_hud_width + privacy_extra_pts, hud_t);
     let collapsed_pts = compact_pts.max(hud_pts);
     let lyrics_t = notch_input.lyrics_progress.clamp(0.0, 1.0);
-    let target_expanded_h = lerp_points(
-        metrics.notch_expanded_height,
-        metrics.notch_lyrics_height,
-        lyrics_t,
-    );
+    let target_expanded_h = match notch_input.notification {
+        Some(card) if card.ringing => NOTIFICATION_RING_HEIGHT_POINTS,
+        Some(_) => NOTIFICATION_BANNER_HEIGHT_POINTS,
+        None => lerp_points(
+            metrics.notch_expanded_height,
+            metrics.notch_lyrics_height,
+            lyrics_t,
+        ),
+    };
     let notch_pts_w = lerp_points(collapsed_pts, metrics.notch_expanded_width, panel_t);
-    let notch_pts_h = lerp_points(metrics.notch_height, target_expanded_h, panel_t);
+    let notch_pts_h = lerp_points(compact_height_pts, target_expanded_h, panel_t);
 
-    let notch_width = scale(notch_pts_w, dpi);
-    let notch_height = scale(notch_pts_h, dpi);
+    let unscaled_w = scale(notch_pts_w, dpi);
+    let unscaled_h = scale(notch_pts_h, dpi);
+    let press_progress = if notch_enabled {
+        notch_input.press_progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (notch_width, notch_height, notch_y) = if press_progress > 0.001 && panel_t < 0.25 {
+        let press_scale = 1.0 - 0.03 * press_progress * (1.0 - panel_t * 4.0).clamp(0.0, 1.0);
+        let compressed_w = (unscaled_w as f32 * press_scale).round() as i32;
+        let compressed_h = (unscaled_h as f32 * press_scale).round() as i32;
+        let compressed_y = if metrics.notch_top_inset > 0 {
+            notch_y + (unscaled_h - compressed_h) / 2
+        } else {
+            notch_y
+        };
+        (compressed_w, compressed_h, compressed_y)
+    } else {
+        (unscaled_w, unscaled_h, notch_y)
+    };
     let padding = scale(metrics.edge_padding, dpi);
     let left_gap = scale(metrics.left_slot_gap, dpi);
     let right_gap = scale(metrics.right_slot_gap, dpi);
@@ -2016,100 +2425,176 @@ pub fn compute_layout_with_notch(
         width: screen_width,
         height: bar_height,
     };
-    let notch = Rect {
-        x: (screen_width - notch_width) / 2,
-        y: notch_y,
-        width: notch_width,
-        height: notch_height,
-    };
     let hud_width = scale(metrics.notch_hud_width, dpi);
     let hud_geometry = compute_hud_geometry(
         Rect {
             x: (screen_width - hud_width) / 2,
-            y: notch_y,
+            y: scale(metrics.notch_top_inset, dpi),
             width: hud_width,
             height: scale(metrics.notch_height, dpi),
         },
         metrics,
         dpi,
     );
-
-    let panel_pts_w = metrics.notch_expanded_width + metrics.notch_expanded_ear_radius * 2 + 8;
-    let panel_pts_h = metrics.notch_top_inset + target_expanded_h + 4;
-    let panel_w = scale(panel_pts_w, dpi);
-    let panel_h = scale(panel_pts_h, dpi);
-    let panel_window = Rect {
-        x: (screen_width - panel_w) / 2,
-        y: 0,
-        width: panel_w,
-        height: panel_h,
-    };
-
-    let controls = compute_expanded_notch_controls(notch, dpi, &notch_input, metrics);
-    let compact = compute_compact_notch_geometry(
-        notch,
-        bar_height,
-        dpi,
-        notch_input.privacy.compact_dots && panel_t <= 0.55,
-        notch_input.media_live,
-    );
-    let secondary_t = notch_input.secondary_expansion.clamp(0.0, 1.0);
-    let swap_blend = notch_input.compact_swap_blend.clamp(0.0, 1.0);
-    let notch_secondary = compute_secondary_notch_rect(
-        notch,
-        metrics,
-        dpi,
-        secondary_t * (1.0 - panel_t),
-        swap_blend,
-    );
-
-    let control_center_width = if notch_input.control_center_enabled {
-        metrics.control_center_slot_width
+    let secondary_t = if notch_enabled {
+        notch_input.secondary_expansion.clamp(0.0, 1.0)
     } else {
-        0
+        0.0
     };
-    let right_widths = [
-        (HitTarget::Clock, scale(metrics.clock_slot_width, dpi)),
+    let swap_blend = notch_input.compact_swap_blend.clamp(0.0, 1.0);
+    let (
+        notch,
+        panel_window,
+        notification_layout,
+        controls,
+        compact,
+        notch_secondary,
+        compact_primary,
+        compact_secondary,
+    ) = if notch_enabled {
+        let notch = Rect {
+            x: (screen_width - notch_width) / 2,
+            y: notch_y,
+            width: notch_width,
+            height: notch_height,
+        };
+        let panel_pts_w = metrics.notch_expanded_width + metrics.notch_expanded_ear_radius * 2 + 8;
+        let panel_pts_h = compact_top_inset_pts + target_expanded_h + 4;
+        let panel_w = scale(panel_pts_w, dpi);
+        let panel_h = scale(panel_pts_h, dpi);
+        let panel_window = Rect {
+            x: (screen_width - panel_w) / 2,
+            y: 0,
+            width: panel_w,
+            height: panel_h,
+        };
+        let notification_layout = notch_input
+            .notification
+            .map(|card| compute_notification_layout(notch, dpi, card.ringing));
+        let controls = compute_expanded_notch_controls(notch, dpi, &notch_input, metrics);
+        let compact = compute_compact_notch_geometry(
+            notch,
+            bar_height,
+            dpi,
+            notch_input.privacy.compact_dots && panel_t <= 0.55,
+            notch_input.media_live,
+        );
+        let notch_secondary = compute_secondary_notch_rect(
+            notch,
+            metrics,
+            dpi,
+            secondary_t * (1.0 - panel_t),
+            swap_blend,
+        );
         (
-            HitTarget::Notifications,
-            scale(metrics.notification_slot_width, dpi),
-        ),
-        (HitTarget::ControlCenter, scale(control_center_width, dpi)),
-        (HitTarget::Search, scale(metrics.search_slot_width, dpi)),
+            notch,
+            panel_window,
+            notification_layout,
+            controls,
+            compact,
+            notch_secondary,
+            notch_input.compact_primary,
+            notch_input.compact_secondary,
+        )
+    } else {
         (
-            HitTarget::QuickSettings,
-            scale(metrics.status_slot_width, dpi),
-        ),
-        (HitTarget::Tray, scale(metrics.tray_slot_width, dpi)),
-    ];
-    let right_start = notch.right().max(notch_secondary.right()) + right_gap;
-    let (right_slots, right_hidden) = resolve_right_slots(
-        &right_widths,
-        right_gap,
-        right_start,
-        screen_width - padding,
-        bar_height,
-    );
-    let left_widths = [
-        scale(metrics.start_slot_width, dpi),
-        scale(estimate_app_slot_points(metrics, app_name), dpi),
-        scale(metrics.file_slot_width, dpi),
-        scale(metrics.edit_slot_width, dpi),
-        scale(metrics.view_slot_width, dpi),
-        scale(metrics.window_slot_width, dpi),
-        scale(metrics.help_slot_width, dpi),
-    ];
-    let mut row = resolve_left_slots(&LeftSlotInput {
-        widths: &left_widths,
-        overflow_width: scale(metrics.overflow_slot_width, dpi),
-        gap: left_gap,
-        start: padding,
-        limit: (notch.x - left_gap).max(padding),
-        height: bar_height,
-        force_overflow: !right_hidden.is_empty(),
-    });
-    row.slots.extend(right_slots);
-    row.hidden.extend(right_hidden);
+            Rect::default(),
+            Rect::default(),
+            None,
+            ExpandedNotchControls::default(),
+            CompactNotchGeometry::default(),
+            Rect::default(),
+            None,
+            None,
+        )
+    };
+
+    let row = if notch_input.top_bar_enabled {
+        let control_center_width = if notch_input.control_center_enabled {
+            metrics.control_center_slot_width
+        } else {
+            0
+        };
+        let item_width = |item: BarItem, points: i32| {
+            if notch_input.hidden_items.contains(item) {
+                0
+            } else {
+                scale(points, dpi)
+            }
+        };
+        let right_widths = [
+            (
+                HitTarget::Clock,
+                item_width(BarItem::Clock, metrics.clock_slot_width),
+            ),
+            (
+                HitTarget::Notifications,
+                item_width(BarItem::Notifications, metrics.notification_slot_width),
+            ),
+            (HitTarget::ControlCenter, scale(control_center_width, dpi)),
+            (
+                HitTarget::Search,
+                item_width(BarItem::Search, metrics.search_slot_width),
+            ),
+            (
+                HitTarget::QuickSettings,
+                item_width(BarItem::Status, metrics.status_slot_width),
+            ),
+            (
+                HitTarget::Tray,
+                item_width(BarItem::Tray, metrics.tray_slot_width),
+            ),
+        ];
+        let right_start = if notch_enabled {
+            notch.right().max(notch_secondary.right()) + right_gap
+        } else {
+            padding
+        };
+        let (right_slots, right_hidden) = resolve_right_slots(
+            &right_widths,
+            right_gap,
+            right_start,
+            screen_width - padding,
+            bar_height,
+        );
+        let left_widths = [
+            scale(metrics.start_slot_width, dpi),
+            scale(estimate_app_slot_points(metrics, app_name), dpi),
+            scale(metrics.file_slot_width, dpi),
+            scale(metrics.edit_slot_width, dpi),
+            scale(metrics.view_slot_width, dpi),
+            scale(metrics.window_slot_width, dpi),
+            scale(metrics.help_slot_width, dpi),
+        ];
+        let left_limit = if notch_enabled {
+            (notch.x - left_gap).max(padding)
+        } else {
+            let right_edge = right_slots
+                .iter()
+                .map(|(_, rect)| rect.x)
+                .min()
+                .unwrap_or(screen_width - padding);
+            (right_edge - left_gap).max(padding)
+        };
+        let mut row = resolve_left_slots(&LeftSlotInput {
+            widths: &left_widths,
+            overflow_width: scale(metrics.overflow_slot_width, dpi),
+            gap: left_gap,
+            start: padding,
+            limit: left_limit,
+            height: bar_height,
+            force_overflow: !right_hidden.is_empty(),
+        });
+        row.slots.extend(right_slots);
+        row.hidden.extend(right_hidden);
+        row
+    } else {
+        SlotRow {
+            slots: Vec::new(),
+            hidden: Vec::new(),
+            overflow: Rect::default(),
+        }
+    };
 
     let start_slot = row.rect(HitTarget::Start);
     let app_slot = row.rect(HitTarget::AppMenu);
@@ -2128,8 +2613,13 @@ pub fn compute_layout_with_notch(
         compute_status_sub_rects(status_slot, icon_size);
     let tray_slot = row.rect(HitTarget::Tray);
 
+    let compact_corner_radius = if metrics.notch_top_inset > 0 {
+        compact_height_pts / 2
+    } else {
+        metrics.notch_corner_radius
+    };
     let corner_pts = lerp_points(
-        metrics.notch_corner_radius,
+        compact_corner_radius,
         metrics.notch_expanded_corner_radius,
         panel_t,
     );
@@ -2150,14 +2640,15 @@ pub fn compute_layout_with_notch(
         compact_expansion: compact_t,
         secondary_expansion: secondary_t * (1.0 - panel_t),
         compact_swap_blend: swap_blend,
-        compact_primary: notch_input.compact_primary,
-        compact_secondary: notch_input.compact_secondary,
+        compact_primary,
+        compact_secondary,
         pomodoro_surface: notch_input.pomodoro_surface,
         focus_mode: notch_input.focus_mode,
         active_tab: notch_input.active_tab,
         previous_tab: notch_input.previous_tab,
         compact_ring: compact.ring,
         compact_peek: compact.peek,
+        compact_cycle_steps: compact.cycle_steps,
         compact_time: compact.time,
         compact_title: compact.title,
         compact_trailing: compact.trailing,
@@ -2179,6 +2670,7 @@ pub fn compute_layout_with_notch(
         notch_tab_pomodoro: controls.notch_tab_pomodoro,
         notch_tab_shelf: controls.notch_tab_shelf,
         notch_tab_clipboard: controls.notch_tab_clipboard,
+        notch_tab_tasks: controls.notch_tab_tasks,
         notch_tab_media: controls.notch_tab_media,
         shelf_add_button: controls.shelf_add_button,
         shelf_clear_button: controls.shelf_clear_button,
@@ -2193,6 +2685,13 @@ pub fn compute_layout_with_notch(
         clipboard_body: controls.clipboard_body,
         clipboard_rows: controls.clipboard_rows,
         clipboard_remove_buttons: controls.clipboard_remove_buttons,
+        tasks_add_button: controls.tasks_add_button,
+        tasks_clear_button: controls.tasks_clear_button,
+        tasks_pager_button: controls.tasks_pager_button,
+        tasks_body: controls.tasks_body,
+        tasks_rows: controls.tasks_rows,
+        tasks_check_buttons: controls.tasks_check_buttons,
+        tasks_remove_buttons: controls.tasks_remove_buttons,
         privacy_dots: compact.privacy_dots,
         privacy_mic_button: controls.privacy_mic_button,
         media_cover_art: controls.media_cover_art,
@@ -2209,6 +2708,7 @@ pub fn compute_layout_with_notch(
         media_next_button: controls.media_next_button,
         lyrics_progress: notch_input.lyrics_progress.clamp(0.0, 1.0),
         tab_blend: notch_input.tab_blend.clamp(0.0, 1.0),
+        press_progress,
         icon_size,
         start_slot,
         app_slot,
@@ -2219,6 +2719,7 @@ pub fn compute_layout_with_notch(
         help_slot,
         overflow_slot: row.overflow,
         hidden_targets: row.hidden,
+        notification: notification_layout,
         tray_slot,
         status_slot,
         status_wifi_rect,
@@ -2574,26 +3075,67 @@ mod tests {
     }
 
     #[test]
-    fn compact_active_pomodoro_widens_notch_to_292_points() {
-        let layout = compute_layout_with_notch(
-            &M,
+    fn compact_activities_use_style_specific_geometry() {
+        let focus = NotchLayoutInput {
+            hud_expansion: 0.0,
+            compact_expansion: 1.0,
+            compact_primary: Some(CompactSlotKind::Focus),
+            panel_expansion: 0.0,
+            pomodoro_surface: PomodoroSurface::Running,
+            active_tab: NotchExpandedTab::Pomodoro,
+            control_center_enabled: true,
+            lyrics_progress: 0.0,
+            tab_blend: 1.0,
+            compact_title_points: 120,
+            ..NotchLayoutInput::default()
+        };
+        let classic_focus = compute_layout_with_notch(&M, 1920, 96, "Finder", focus);
+        assert_eq!(classic_focus.notch.width, 200);
+        assert_eq!(classic_focus.notch.height, 32);
+
+        let island_focus =
+            compute_layout_with_notch(&Metrics::DYNAMIC_ISLAND, 1920, 96, "Finder", focus);
+        assert_eq!(island_focus.notch.width, 184);
+        assert_eq!(island_focus.notch.height, 36);
+        assert_eq!(island_focus.notch.y, 2);
+        assert_eq!(island_focus.notch_corner_radius, 18);
+        assert!(island_focus.notch.contains_rect(&island_focus.compact_ring));
+        assert!(island_focus.notch.contains_rect(&island_focus.compact_time));
+        assert!(
+            island_focus
+                .compact_cycle_steps
+                .iter()
+                .all(|step| island_focus.notch.contains_rect(step))
+        );
+
+        let music = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
             1920,
             96,
             "Finder",
             NotchLayoutInput {
-                hud_expansion: 0.0,
                 compact_expansion: 1.0,
-                panel_expansion: 0.0,
-                pomodoro_surface: PomodoroSurface::Running,
-                active_tab: NotchExpandedTab::Pomodoro,
-                control_center_enabled: true,
-                lyrics_progress: 0.0,
-                tab_blend: 1.0,
+                compact_primary: Some(CompactSlotKind::Media),
+                active_tab: NotchExpandedTab::Media,
                 ..NotchLayoutInput::default()
             },
         );
-        assert_eq!(layout.notch.width, 292);
-        assert_eq!(layout.notch.height, 32);
+        assert_eq!(music.notch.width, 292);
+        assert_eq!(music.notch.height, 36);
+        assert_eq!(music.notch.y, 2);
+
+        let expanded_focus = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                ..focus
+            },
+        );
+        assert_eq!(expanded_focus.notch.y, 2);
+        assert!(expanded_focus.panel_window.height >= expanded_focus.notch.bottom() + 4);
     }
 
     #[test]
@@ -3258,6 +3800,11 @@ mod tests {
                         HitTarget::NotchTabClipboard,
                     ),
                     (
+                        NotchExpandedTab::Tasks,
+                        layout.notch_tab_tasks,
+                        HitTarget::NotchTabTasks,
+                    ),
+                    (
                         NotchExpandedTab::Media,
                         layout.notch_tab_media,
                         HitTarget::NotchTabMedia,
@@ -3277,7 +3824,8 @@ mod tests {
                 for pair in [
                     (layout.notch_tab_pomodoro, layout.notch_tab_shelf),
                     (layout.notch_tab_shelf, layout.notch_tab_clipboard),
-                    (layout.notch_tab_clipboard, layout.notch_tab_media),
+                    (layout.notch_tab_clipboard, layout.notch_tab_tasks),
+                    (layout.notch_tab_tasks, layout.notch_tab_media),
                 ] {
                     assert_eq!(pair.1.x - pair.0.right(), gap);
                 }
@@ -3348,6 +3896,7 @@ mod tests {
                 focus_enabled: false,
                 shelf_enabled: true,
                 clipboard_enabled: false,
+                tasks_enabled: false,
                 media_present: false,
                 ..NotchLayoutInput::default()
             },
@@ -3375,6 +3924,7 @@ mod tests {
                 focus_enabled: false,
                 shelf_enabled: false,
                 clipboard_enabled: false,
+                tasks_enabled: false,
                 media_present: false,
                 ..NotchLayoutInput::default()
             },
@@ -3389,6 +3939,113 @@ mod tests {
             no_tabs.notch_control_rect(HitTarget::NotchTabClipboard),
             None
         );
+    }
+
+    #[test]
+    fn tasks_header_rows_and_buttons_stay_non_overlapping_across_dpis() {
+        for dpi in [96, 120, 144, 192] {
+            let gap = scale(4, dpi);
+            let layout = compute_layout_with_notch(
+                &M,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    active_tab: NotchExpandedTab::Tasks,
+                    privacy: PrivacyLayoutState {
+                        compact_dots: true,
+                        panel_mic_control: true,
+                    },
+                    tasks: TasksLayoutInput {
+                        visible_count: 4,
+                        has_pager: true,
+                        has_items: true,
+                        has_done: true,
+                    },
+                    ..NotchLayoutInput::default()
+                },
+            );
+            let header = [
+                layout.notch_tab_strip,
+                layout.privacy_mic_button,
+                layout.tasks_pager_button,
+                layout.tasks_add_button,
+                layout.tasks_clear_button,
+            ];
+            for (index, rect) in header.iter().enumerate() {
+                assert!(layout.notch.contains_rect(rect));
+                assert!(!rect.is_empty());
+                if let Some(next) = header.get(index + 1) {
+                    assert!(rect.right() + gap <= next.x);
+                }
+            }
+            for (index, row) in layout.tasks_rows.iter().enumerate() {
+                assert!(layout.tasks_body.contains_rect(row));
+                let active = layout.tasks_check_buttons[index];
+                let remove = layout.tasks_remove_buttons[index];
+                assert!(row.contains_rect(&active));
+                assert!(row.contains_rect(&remove));
+                assert!(active.right() < remove.x);
+                if let Some(next) = layout.tasks_rows.get(index + 1) {
+                    assert!(row.bottom() < next.y);
+                }
+            }
+            for (hit, rect) in [
+                (HitTarget::TaskRemove(2), layout.tasks_remove_buttons[2]),
+                (HitTarget::TaskCheck(2), layout.tasks_check_buttons[2]),
+                (HitTarget::TaskItem(2), layout.tasks_rows[2]),
+                (HitTarget::TasksAdd, layout.tasks_add_button),
+                (HitTarget::TasksClearDone, layout.tasks_clear_button),
+                (HitTarget::TasksPager, layout.tasks_pager_button),
+            ] {
+                let probe = if matches!(hit, HitTarget::TaskItem(_)) {
+                    (rect.x + rect.width / 2, rect.y + 1)
+                } else {
+                    (rect.x + rect.width / 2, rect.y + rect.height / 2)
+                };
+                assert_eq!(layout.hit_test(probe.0, probe.1), Some(hit));
+                assert_eq!(layout.notch_control_rect(hit), Some(rect));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_tasks_expose_no_row_or_header_controls_beyond_add() {
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Tasks,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.tasks_rows.iter().all(Rect::is_empty));
+        assert!(layout.tasks_check_buttons.iter().all(Rect::is_empty));
+        assert!(layout.tasks_clear_button.is_empty());
+        assert!(layout.tasks_pager_button.is_empty());
+        assert!(!layout.tasks_add_button.is_empty());
+        assert_eq!(layout.notch_control_rect(HitTarget::TaskItem(0)), None);
+    }
+
+    #[test]
+    fn a_disabled_tasks_tab_has_no_rect() {
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                tasks_enabled: false,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.notch_tab_tasks.is_empty());
+        assert_eq!(layout.notch_control_rect(HitTarget::NotchTabTasks), None);
     }
 
     #[test]
@@ -3696,8 +4353,9 @@ mod tests {
                 ..NotchLayoutInput::default()
             },
         );
-        assert_eq!(compact.notch.y, 4);
-        assert_eq!(compact.notch.height, 32);
+        assert_eq!(compact.notch.y, 2);
+        assert_eq!(compact.notch.height, 36);
+        assert_eq!(compact.notch_corner_radius, 18);
         assert!(compact.notch.contains_rect(&compact.compact_ring));
         assert!(compact.notch.contains_rect(&compact.compact_time));
         assert!(compact.notch.contains_rect(&compact.compact_title));
@@ -3771,7 +4429,7 @@ mod tests {
         assert_eq!(expanded.notch.y, 4);
         assert_eq!(expanded.notch.width, 380);
         assert_eq!(expanded.notch.height, 254);
-        assert_eq!(expanded.notch_corner_radius, 24);
+        assert_eq!(expanded.notch_corner_radius, 28);
         assert_eq!(expanded.notch_ear_radius, 0);
         assert!(expanded.panel_window.height >= expanded.notch.bottom() + 4);
         assert!(expanded.notch.contains_rect(&expanded.notch_tab_pomodoro));
@@ -3785,5 +4443,370 @@ mod tests {
             ),
             Some(HitTarget::MediaPlayPause)
         );
+    }
+
+    #[test]
+    fn dynamic_island_expanded_concentricity_and_tab_clearance_across_dpis() {
+        assert_eq!(
+            Metrics::DYNAMIC_ISLAND.notch_expanded_corner_radius - PANEL_PAD_POINTS,
+            12
+        );
+        for dpi in [96, 120, 144, 192] {
+            let layout = compute_layout_with_notch(
+                &Metrics::DYNAMIC_ISLAND,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    active_tab: NotchExpandedTab::Pomodoro,
+                    ..NotchLayoutInput::default()
+                },
+            );
+            assert_eq!(layout.notch_corner_radius, scale(28, dpi));
+            assert_eq!(layout.notch_tab_strip.y - layout.notch.y, scale(8, dpi));
+            assert_eq!(
+                layout.notch_tab_pomodoro.y - layout.notch.y,
+                scale(PANEL_TAB_TOP_POINTS, dpi)
+            );
+            assert!(
+                layout.pomodoro_icon.y - layout.notch_tab_pomodoro.bottom() >= scale(4, dpi),
+                "dpi {dpi}"
+            );
+
+            let shelf = compute_layout_with_notch(
+                &Metrics::DYNAMIC_ISLAND,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    active_tab: NotchExpandedTab::Shelf,
+                    ..NotchLayoutInput::default()
+                },
+            );
+            assert!(
+                shelf.shelf_dropzone.y - shelf.notch_tab_pomodoro.bottom() >= scale(4, dpi),
+                "dpi {dpi}"
+            );
+
+            let clipboard = compute_layout_with_notch(
+                &Metrics::DYNAMIC_ISLAND,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    active_tab: NotchExpandedTab::Clipboard,
+                    ..NotchLayoutInput::default()
+                },
+            );
+            assert!(
+                clipboard.clipboard_body.y - clipboard.notch_tab_pomodoro.bottom() >= scale(4, dpi),
+                "dpi {dpi}"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_slot_estimation_uses_uniform_horizontal_padding() {
+        assert_eq!(MENU_SLOT_HORIZONTAL_PAD_POINTS, 10);
+        assert_eq!(
+            estimate_menu_text_width_points("Finder"),
+            8 + 5 + 8 + 8 + 8 + 5
+        );
+        assert_eq!(
+            estimate_app_slot_points(&M, "Finder"),
+            (estimate_menu_text_width_points("Finder") + MENU_SLOT_HORIZONTAL_PAD_POINTS * 2)
+                .clamp(M.app_slot_min_width, M.app_slot_max_width)
+        );
+        assert_eq!(M.file_slot_width, 40);
+        assert_eq!(M.edit_slot_width, 40);
+        assert_eq!(M.view_slot_width, 46);
+        assert_eq!(M.window_slot_width, 64);
+        assert_eq!(M.help_slot_width, 44);
+    }
+
+    #[test]
+    fn press_progress_compresses_capsule_symmetrically_or_flush_at_top() {
+        let island_idle = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput::default(),
+        );
+        let island_pressed = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput {
+                press_progress: 1.0,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(island_pressed.notch.width < island_idle.notch.width);
+        assert!(island_pressed.notch.height < island_idle.notch.height);
+        assert!(
+            ((island_pressed.notch.x * 2 + island_pressed.notch.width)
+                - (island_idle.notch.x * 2 + island_idle.notch.width))
+                .abs()
+                <= 1
+        );
+        assert!(
+            ((island_pressed.notch.y * 2 + island_pressed.notch.height)
+                - (island_idle.notch.y * 2 + island_idle.notch.height))
+                .abs()
+                <= 1
+        );
+        assert!((island_pressed.press_progress - 1.0).abs() < f32::EPSILON);
+
+        let classic_idle = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput::default(),
+        );
+        let classic_pressed = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput {
+                press_progress: 1.5,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(classic_pressed.notch.width < classic_idle.notch.width);
+        assert!(classic_pressed.notch.height < classic_idle.notch.height);
+        assert_eq!(classic_pressed.notch.y, 0);
+        assert!((classic_pressed.press_progress - 1.0).abs() < f32::EPSILON);
+
+        let expanded_pressed = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 0.3,
+                press_progress: 1.0,
+                ..NotchLayoutInput::default()
+            },
+        );
+        let expanded_unpressed = compute_layout_with_notch(
+            &Metrics::DYNAMIC_ISLAND,
+            1920,
+            192,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 0.3,
+                press_progress: 0.0,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert_eq!(expanded_pressed.notch, expanded_unpressed.notch);
+    }
+
+    #[test]
+    fn a_user_hidden_item_has_no_slot_and_is_not_an_overflow_entry() {
+        let shown = compute_layout_with_notch(&M, 1920, 96, "Finder", NotchLayoutInput::default());
+        let hidden_items = BarItemSet::default()
+            .toggled(BarItem::Clock)
+            .toggled(BarItem::Status);
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                hidden_items,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.clock_slot.is_empty());
+        assert!(layout.status_slot.is_empty());
+        assert!(layout.status_wifi_rect.is_empty());
+        assert!(layout.hidden_targets.is_empty());
+        assert_eq!(layout.overflow_slot.width, 0);
+        assert!(layout.notification_slot.right() > shown.notification_slot.right());
+        let keyboard = layout.keyboard_targets();
+        assert!(!keyboard.contains(&HitTarget::Clock));
+        assert!(!keyboard.contains(&HitTarget::StatusWifi));
+        assert!(keyboard.contains(&HitTarget::Notifications));
+    }
+
+    #[test]
+    fn the_widest_compact_notch_overflows_nothing_on_common_wide_screens() {
+        let widest = NotchLayoutInput {
+            compact_expansion: 1.0,
+            compact_primary: Some(CompactSlotKind::Media),
+            compact_title_points: 600,
+            ..NotchLayoutInput::default()
+        };
+        for (width, dpi) in [(1366, 96), (1920, 96), (2560, 144)] {
+            let layout = compute_layout_with_notch(&M, width, dpi, "Google Chrome", widest);
+            assert!(layout.hidden_targets.is_empty(), "{width}@{dpi}");
+            assert_eq!(layout.overflow_slot.width, 0, "{width}@{dpi}");
+        }
+    }
+
+    fn notification_layout_for(ringing: bool) -> Layout {
+        compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                notification: Some(NotificationLayoutInput { ringing }),
+                ..NotchLayoutInput::default()
+            },
+        )
+    }
+
+    fn center(rect: Rect) -> (i32, i32) {
+        (rect.x + rect.width / 2, rect.y + rect.height / 2)
+    }
+
+    #[test]
+    fn a_ringing_card_is_taller_and_hits_accept_decline_and_the_card() {
+        let layout = notification_layout_for(true);
+        let card = layout.notification.expect("card");
+        assert_eq!(layout.notch.height, NOTIFICATION_RING_HEIGHT_POINTS);
+        assert!(card.ringing && card.close.is_empty());
+        let (ax, ay) = center(card.accept);
+        let (dx, dy) = center(card.decline);
+        assert_eq!(layout.hit_test(ax, ay), Some(HitTarget::NotificationAccept));
+        assert_eq!(
+            layout.hit_test(dx, dy),
+            Some(HitTarget::NotificationDecline)
+        );
+        let (tx, ty) = center(card.title);
+        assert_eq!(layout.hit_test(tx, ty), Some(HitTarget::NotificationCard));
+        assert!(card.decline.right() < card.accept.x);
+        assert!(card.accept.right() <= card.card.right());
+        assert!(card.accept.width >= 44 && card.decline.width >= 44);
+        assert_eq!(
+            layout.keyboard_targets_with_media(true),
+            vec![
+                HitTarget::NotificationDecline,
+                HitTarget::NotificationAccept
+            ]
+        );
+    }
+
+    #[test]
+    fn a_banner_card_has_a_close_control_and_no_call_buttons() {
+        let layout = notification_layout_for(false);
+        let card = layout.notification.expect("card");
+        assert_eq!(layout.notch.height, NOTIFICATION_BANNER_HEIGHT_POINTS);
+        assert!(card.accept.is_empty() && card.decline.is_empty());
+        let (cx, cy) = center(card.close);
+        assert_eq!(layout.hit_test(cx, cy), Some(HitTarget::NotificationClose));
+        let (bx, by) = center(card.badge);
+        assert_eq!(layout.hit_test(bx, by), Some(HitTarget::NotificationCard));
+        assert!(card.close.right() <= card.card.right());
+        assert_eq!(
+            layout.keyboard_targets_with_media(false),
+            vec![HitTarget::NotificationCard, HitTarget::NotificationClose]
+        );
+        assert_eq!(
+            layout.notch_control_rect(HitTarget::NotificationAccept),
+            None
+        );
+    }
+
+    #[test]
+    fn without_a_notification_the_panel_keeps_its_tabs_and_height() {
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.notification.is_none());
+        assert_eq!(layout.notch.height, M.notch_expanded_height);
+    }
+
+    #[test]
+    fn disabling_top_bar_clears_bar_slots_while_keeping_notch_interactive() {
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                top_bar_enabled: false,
+                notch_enabled: true,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.start_slot.is_empty());
+        assert!(layout.clock_slot.is_empty());
+        assert!(layout.control_center_slot.is_empty());
+        assert!(layout.hidden_targets.is_empty());
+        assert!(!layout.notch.is_empty());
+        let (nx, ny) = center(layout.notch);
+        assert_eq!(layout.hit_test(nx, ny), Some(HitTarget::Notch));
+        assert_eq!(layout.hit_test(16, 16), None);
+        assert_eq!(
+            layout.keyboard_targets_with_media(false),
+            vec![HitTarget::Notch]
+        );
+    }
+
+    #[test]
+    fn disabling_notch_clears_notch_and_gives_top_bar_the_full_width() {
+        let layout = compute_layout_with_notch(
+            &M,
+            820,
+            96,
+            "Visual Studio Code",
+            NotchLayoutInput {
+                top_bar_enabled: true,
+                notch_enabled: false,
+                panel_expansion: 1.0,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.notch.is_empty());
+        assert!(layout.panel_window.is_empty());
+        assert!((layout.panel_expansion - 0.0).abs() < f32::EPSILON);
+        assert!(layout.hidden_targets.is_empty());
+        assert!(!layout.help_slot.is_empty());
+        assert!(!layout.clock_slot.is_empty());
+        assert!(layout.help_slot.right() < layout.tray_slot.x);
+        assert!(
+            !layout
+                .keyboard_targets_with_media(true)
+                .contains(&HitTarget::Notch)
+        );
+    }
+
+    #[test]
+    fn disabling_both_top_bar_and_notch_leaves_no_hit_or_keyboard_targets() {
+        let layout = compute_layout_with_notch(
+            &M,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                top_bar_enabled: false,
+                notch_enabled: false,
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(layout.notch.is_empty());
+        assert!(layout.start_slot.is_empty());
+        assert!(layout.clock_slot.is_empty());
+        assert_eq!(layout.hit_test(960, 16), None);
+        assert_eq!(layout.hit_test(16, 16), None);
+        assert!(layout.keyboard_targets_with_media(true).is_empty());
     }
 }

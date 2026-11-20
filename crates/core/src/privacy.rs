@@ -46,6 +46,7 @@ impl MicState {
 pub struct PrivacyState {
     pub mic: MicState,
     pub camera_active: bool,
+    pub location_active: bool,
     pub app_name: Option<String>,
 }
 
@@ -57,7 +58,7 @@ impl PrivacyState {
 
     #[must_use]
     pub const fn show_in_bar(&self) -> bool {
-        self.any_active()
+        self.any_active() || self.location_active
     }
 
     #[must_use]
@@ -136,6 +137,7 @@ mod tests {
         let muted_idle = PrivacyState {
             mic: MicState::Idle { muted: true },
             camera_active: false,
+            location_active: false,
             app_name: None,
         };
         assert!(!muted_idle.show_in_bar());
@@ -146,9 +148,21 @@ mod tests {
         let zoom_call = PrivacyState {
             mic: MicState::Active { muted: false },
             camera_active: true,
+            location_active: false,
             app_name: Some(String::from("Zoom")),
         };
         assert!(zoom_call.show_in_bar());
         assert_eq!(zoom_call.pill_label(), "Mic · Cam · Zoom");
+    }
+
+    #[test]
+    fn location_alone_shows_in_the_bar_without_a_mic_control() {
+        let maps = PrivacyState {
+            location_active: true,
+            ..PrivacyState::default()
+        };
+        assert!(maps.show_in_bar());
+        assert!(!maps.any_active());
+        assert!(!maps.show_panel_control());
     }
 }

@@ -1,19 +1,12 @@
-use otto_core::scale;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
-};
+use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT};
 use windows_numerics::Vector2;
 
-use crate::glow::{linear_gradient, radial_fade};
+use crate::glow::linear_gradient;
 use crate::{FOREGROUND, Renderer};
 
-pub(crate) const AMBIENT_RADIUS_PT: i32 = 96;
-pub(crate) const AMBIENT_PEAK_ALPHA: f32 = 0.20;
 const DIM_MIX: f32 = 0.65;
 const DIM_LUMINANCE: f32 = 0.72;
-const LIP_HALO_POINTS: i32 = 2;
-const LIP_HALO_ALPHA: f32 = 0.20;
 const SOFT_SEGMENT_SHARE: f32 = 0.30;
 
 #[derive(Clone, Copy)]
@@ -25,21 +18,6 @@ pub(crate) struct TonePalette {
 }
 
 impl TonePalette {
-    pub(crate) fn from_base(base: D2D1_COLOR_F, lift: f32) -> Self {
-        let white = D2D1_COLOR_F {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: base.a,
-        };
-        Self {
-            from: mix(base, white, lift),
-            to: base,
-            accent: base,
-            text: mix(base, white, lift * 0.5),
-        }
-    }
-
     pub(crate) fn dimmed(self, dim: f32) -> Self {
         let amount = dim.clamp(0.0, 1.0) * DIM_MIX;
         if amount <= 0.0 {
@@ -144,23 +122,21 @@ impl Renderer {
         }
     }
 
-    pub(crate) fn fill_ambient_glow(&self, center: Vector2, color: D2D1_COLOR_F, clip: D2D_RECT_F) {
-        let radius = scale(AMBIENT_RADIUS_PT, self.dpi) as f32;
-        let Ok(fade) = radial_fade(&self.target, center, radius, color) else {
-            return;
+    pub(crate) fn fill_solid_circle(
+        &self,
+        center: Vector2,
+        radius: f32,
+        color: D2D1_COLOR_F,
+        alpha: f32,
+    ) {
+        let shape = D2D1_ELLIPSE {
+            point: center,
+            radiusX: radius,
+            radiusY: radius,
         };
+        let brush = self.brushes.alpha_brush(color, alpha);
         unsafe {
-            self.target
-                .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: center,
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &fade,
-            );
-            self.target.PopAxisAlignedClip();
+            self.target.FillEllipse(&shape, &brush);
         }
     }
 
@@ -169,7 +145,6 @@ impl Renderer {
         lip: otto_core::Rect,
         filled_fraction: f32,
         palette: &TonePalette,
-        glow: f32,
         alpha: f32,
     ) {
         if lip.is_empty() {
@@ -188,7 +163,7 @@ impl Renderer {
             right: lip.x as f32 + filled,
             bottom: lip.bottom() as f32,
         };
-        self.draw_lip_fill(rect, radius, palette, glow, alpha);
+        self.draw_lip_fill(rect, radius, palette, alpha);
     }
 
     pub(crate) fn draw_drifting_lip(
@@ -196,7 +171,6 @@ impl Renderer {
         lip: otto_core::Rect,
         phase: f32,
         palette: &TonePalette,
-        glow: f32,
         alpha: f32,
     ) {
         if lip.is_empty() {
@@ -239,38 +213,9 @@ impl Renderer {
                 }
             }
         }
-        let _ = glow;
     }
 
-    fn draw_lip_fill(
-        &self,
-        rect: D2D_RECT_F,
-        radius: f32,
-        palette: &TonePalette,
-        glow: f32,
-        alpha: f32,
-    ) {
-        if glow > 0.01 {
-            let halo = scale(LIP_HALO_POINTS, self.dpi) as f32;
-            let soft = self
-                .brushes
-                .alpha_brush(palette.accent, LIP_HALO_ALPHA * glow * alpha);
-            unsafe {
-                self.target.FillRoundedRectangle(
-                    &D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: rect.left - halo,
-                            top: rect.top - halo,
-                            right: rect.right + halo,
-                            bottom: rect.bottom + halo,
-                        },
-                        radiusX: radius + halo,
-                        radiusY: radius + halo,
-                    },
-                    &soft,
-                );
-            }
-        }
+    fn draw_lip_fill(&self, rect: D2D_RECT_F, radius: f32, palette: &TonePalette, alpha: f32) {
         self.fill_gradient_rounded(rect, radius, palette, alpha);
     }
 }

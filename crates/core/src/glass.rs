@@ -4,7 +4,7 @@ use crate::theme::ResolvedTheme;
 
 pub type Rgb = [f32; 3];
 
-const LIGHT_DIRECTION: (f32, f32) = (-0.6, -0.8);
+pub const LIGHT_DIRECTION: (f32, f32) = (-0.6, -0.8);
 const BASE_DPI: f32 = 96.0;
 const WHITE: Rgb = [1.0, 1.0, 1.0];
 const BLACK: Rgb = [0.0, 0.0, 0.0];
@@ -41,22 +41,22 @@ impl GlassParams {
         tint_amount: 0.05,
         luma_floor: 0.01,
         luma_ceiling: 0.66,
-        saturation: 1.48,
-        sheen_alpha: 0.07,
-        rim_base: 0.04,
-        rim_lit: 0.94,
-        rim_bounce: 0.44,
-        rim_width: 2.2,
-        inner_glow: 0.26,
-        inner_glow_depth: 13.0,
+        saturation: 1.30,
+        sheen_alpha: 0.02,
+        rim_base: 0.02,
+        rim_lit: 0.55,
+        rim_bounce: 0.20,
+        rim_width: 1.2,
+        inner_glow: 0.05,
+        inner_glow_depth: 8.0,
         outline_alpha: 0.03,
         shadow_strength: 0.04,
         shadow_depth: 8.0,
-        lens_band: 22.0,
-        lens_shift: 18.0,
+        lens_band: 10.0,
+        lens_shift: 6.0,
         lens_mix: 0.92,
         lens_tint_scale: 0.25,
-        dispersion: 3.0,
+        dispersion: 0.5,
     };
 
     pub const LIGHT: Self = Self {
@@ -64,22 +64,22 @@ impl GlassParams {
         tint_amount: 0.07,
         luma_floor: 0.52,
         luma_ceiling: 1.0,
-        saturation: 1.42,
-        sheen_alpha: 0.10,
-        rim_base: 0.06,
-        rim_lit: 0.96,
-        rim_bounce: 0.46,
-        rim_width: 2.2,
-        inner_glow: 0.28,
-        inner_glow_depth: 13.0,
+        saturation: 1.30,
+        sheen_alpha: 0.03,
+        rim_base: 0.03,
+        rim_lit: 0.45,
+        rim_bounce: 0.16,
+        rim_width: 1.2,
+        inner_glow: 0.06,
+        inner_glow_depth: 8.0,
         outline_alpha: 0.04,
         shadow_strength: 0.02,
         shadow_depth: 6.0,
-        lens_band: 22.0,
-        lens_shift: 18.0,
+        lens_band: 10.0,
+        lens_shift: 6.0,
         lens_mix: 0.92,
         lens_tint_scale: 0.25,
-        dispersion: 2.6,
+        dispersion: 0.5,
     };
 
     #[must_use]
@@ -253,6 +253,43 @@ impl RgbBuffer {
         }
     }
     #[must_use]
+    pub fn downsample_linearized(&self, factor: usize) -> Self {
+        let factor = factor.max(1);
+        let width = self.width.div_ceil(factor);
+        let height = self.height.div_ceil(factor);
+        let mut data = Vec::with_capacity(width * height * 3);
+        for dy in 0..height {
+            let y_start = dy * factor;
+            let y_end = (y_start + factor).min(self.height);
+            let block_rows = y_end - y_start;
+            for dx in 0..width {
+                let x_start = dx * factor;
+                let x_end = (x_start + factor).min(self.width);
+                let count = (block_rows * (x_end - x_start)) as f32;
+                let mut sum_r = 0.0f32;
+                let mut sum_g = 0.0f32;
+                let mut sum_b = 0.0f32;
+                for y in y_start..y_end {
+                    let row_start = y * self.width * 3;
+                    for rgb in
+                        self.data[row_start + x_start * 3..row_start + x_end * 3].chunks_exact(3)
+                    {
+                        sum_r += srgb_to_linear_fast(rgb[0]);
+                        sum_g += srgb_to_linear_fast(rgb[1]);
+                        sum_b += srgb_to_linear_fast(rgb[2]);
+                    }
+                }
+                data.extend_from_slice(&[sum_r / count, sum_g / count, sum_b / count]);
+            }
+        }
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
+    #[must_use]
     pub fn linearized(&self) -> Self {
         Self {
             width: self.width,
@@ -278,19 +315,35 @@ impl RgbBuffer {
         }
     }
 
+    pub fn box_blur_in_place(&mut self, radius: usize) {
+        if radius == 0 {
+            return;
+        }
+        let mut scratch = vec![0.0f32; self.data.len()];
+        let (width, height) = (self.width, self.height);
+        for _ in 0..BLUR_PASSES {
+            blur_lines(&self.data, &mut scratch, width, height, radius, true);
+            blur_lines(&scratch, &mut self.data, width, height, radius, false);
+        }
+    }
+
     #[must_use]
     pub fn box_blurred(&self, radius: usize) -> Self {
         let mut current = self.clone();
-        let mut scratch = vec![0.0f32; self.data.len()];
-        if radius == 0 {
-            return current;
-        }
-        let (width, height) = (self.width, self.height);
-        for _ in 0..BLUR_PASSES {
-            blur_lines(&current.data, &mut scratch, width, height, radius, true);
-            blur_lines(&scratch, &mut current.data, width, height, radius, false);
-        }
+        current.box_blur_in_place(radius);
         current
+    }
+
+    pub fn gamma_encode_and_grade_in_place(&mut self, params: &GlassParams) {
+        for texel in self.data.chunks_exact_mut(3) {
+            let srgb = [
+                linear_to_srgb(texel[0]),
+                linear_to_srgb(texel[1]),
+                linear_to_srgb(texel[2]),
+            ];
+            let graded = params.grade(srgb, 1.0);
+            texel.copy_from_slice(&graded);
+        }
     }
 
     #[must_use]
@@ -329,6 +382,15 @@ impl RgbBuffer {
         let mut out = Vec::with_capacity(self.width * self.height * 4);
         for rgb in self.data.chunks_exact(3) {
             out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn to_rgba_u8(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.width * self.height * 4);
+        for rgb in self.data.chunks_exact(3) {
+            out.extend_from_slice(&[to_byte(rgb[0]), to_byte(rgb[1]), to_byte(rgb[2]), 255]);
         }
         out
     }
@@ -460,35 +522,10 @@ pub fn soften_backdrop(
     factor: usize,
     blur_radius: usize,
 ) -> RgbBuffer {
-    capture
-        .linearized()
-        .downsample(factor)
-        .box_blurred(blur_radius)
-        .gamma_encoded()
-        .graded(params)
-}
-
-#[must_use]
-pub fn light_direction_for_pointer(shape: &GlassShape, pointer: Option<(f32, f32)>) -> (f32, f32) {
-    let Some((px, py)) = pointer else {
-        return LIGHT_DIRECTION;
-    };
-    let cx = (shape.left + shape.right) * 0.5;
-    let cy = (shape.top + shape.bottom) * 0.5;
-    let dx = px - cx;
-    let dy = py - cy;
-    let dist = dx.hypot(dy);
-    if dist < 1.0 {
-        return LIGHT_DIRECTION;
-    }
-    let bx = LIGHT_DIRECTION.0 * 0.60 + (dx / dist) * 0.40;
-    let by = LIGHT_DIRECTION.1 * 0.60 + (dy / dist) * 0.40;
-    let len = bx.hypot(by);
-    if len < 1e-4 {
-        LIGHT_DIRECTION
-    } else {
-        (bx / len, by / len)
-    }
+    let mut soft = capture.downsample_linearized(factor);
+    soft.box_blur_in_place(blur_radius);
+    soft.gamma_encode_and_grade_in_place(params);
+    soft
 }
 
 #[must_use]
@@ -559,6 +596,7 @@ pub fn glass_color_lit(
     const IOR_INV: f32 = 1.0 / 1.50;
     const BEZEL_SLOPE_GAIN: f32 = 1.25;
     const BEZEL_SHORT_RATIO: f32 = 0.44;
+    const SHARP_WEIGHT: f32 = 0.55;
 
     let distance = shape.distance(x, y);
     let depth = (-distance).max(0.0);
@@ -635,7 +673,7 @@ pub fn glass_color_lit(
             backdrop.sharp.sample(sample_x, sample_y)
         };
         let graded = params.grade(refracted, params.lens_tint_scale);
-        color = mix(color, graded, params.lens_mix * 0.55 * meniscus);
+        color = mix(color, graded, params.lens_mix * SHARP_WEIGHT * meniscus);
     }
 
     let span = (shape.bottom - shape.top).max(1.0);
@@ -671,6 +709,279 @@ fn smoothstep(t: f32) -> f32 {
     let clamped = t.clamp(0.0, 1.0);
     clamped * clamped * (3.0 - 2.0 * clamped)
 }
+const SRGB_BYTE_TO_LINEAR_LUT: [f32; 256] = [
+    0.0,
+    0.000_303_527,
+    0.000_607_054,
+    0.000_910_581,
+    0.001_214_108,
+    0.001_517_635,
+    0.001_821_162,
+    0.002_124_688_8,
+    0.002_428_216,
+    0.002_731_743,
+    0.003_035_27,
+    0.003_346_535_8,
+    0.003_676_507_4,
+    0.004_024_717,
+    0.004_391_442,
+    0.004_776_953_7,
+    0.005_181_517,
+    0.005_605_392,
+    0.006_048_833_5,
+    0.006_512_091,
+    0.006_995_410_7,
+    0.007_499_032,
+    0.008_023_193,
+    0.008_568_126,
+    0.009_134_059,
+    0.009_721_218,
+    0.010_329_823,
+    0.010_960_095,
+    0.011_612_245,
+    0.012_286_489,
+    0.012_983_032_5,
+    0.013_702_083,
+    0.014_443_845,
+    0.015_208_516,
+    0.015_996_294,
+    0.016_807_377,
+    0.017_641_956,
+    0.018_500_222,
+    0.019_382_363,
+    0.020_288_564,
+    0.021_219_011,
+    0.022_173_885,
+    0.023_153_368,
+    0.024_157_634,
+    0.025_186_861,
+    0.026_241_222,
+    0.027_320_893,
+    0.028_426_04,
+    0.029_556_835,
+    0.030_713_445,
+    0.031_896_032,
+    0.033_104_766,
+    0.034_339_808,
+    0.035_601_314,
+    0.036_889_452,
+    0.038_204_372,
+    0.039_546_236,
+    0.040_915_2,
+    0.042_311_41,
+    0.043_735_03,
+    0.045_186_203,
+    0.046_665_087,
+    0.048_171_826,
+    0.049_706_567,
+    0.051_269_464,
+    0.052_860_65,
+    0.054_480_28,
+    0.056_128_494,
+    0.057_805_438,
+    0.059_511_244,
+    0.061_246_06,
+    0.063_010_02,
+    0.064_803_27,
+    0.066_625_945,
+    0.068_478_175,
+    0.070_360_1,
+    0.072_271_85,
+    0.074_213_57,
+    0.076_185_39,
+    0.078_187_43,
+    0.080_219_83,
+    0.082_282_715,
+    0.084_376_216,
+    0.086_500_466,
+    0.088_655_59,
+    0.090_841_72,
+    0.093_058_966,
+    0.095_307_47,
+    0.097_587_354,
+    0.099_898_73,
+    0.102_241_74,
+    0.104_616_49,
+    0.107_023_105,
+    0.109_461_72,
+    0.111_932_434,
+    0.114_435_38,
+    0.116_970_67,
+    0.119_538_434,
+    0.122_138_776,
+    0.124_771_82,
+    0.127_437_68,
+    0.130_136_47,
+    0.132_868_32,
+    0.135_633_33,
+    0.138_431_62,
+    0.141_263_29,
+    0.144_128_47,
+    0.147_027_27,
+    0.149_959_79,
+    0.152_926_16,
+    0.155_926_47,
+    0.158_960_83,
+    0.162_029_39,
+    0.165_132_2,
+    0.168_269_4,
+    0.171_441_11,
+    0.174_647_4,
+    0.177_888_42,
+    0.181_164_25,
+    0.184_474_99,
+    0.187_820_78,
+    0.191_201_69,
+    0.194_617_84,
+    0.198_069_32,
+    0.201_556_25,
+    0.205_078_74,
+    0.208_636_87,
+    0.212_230_76,
+    0.215_860_53,
+    0.219_526_23,
+    0.223_227_98,
+    0.226_965_9,
+    0.230_740_07,
+    0.234_550_61,
+    0.238_397_6,
+    0.242_281_15,
+    0.246_201_35,
+    0.250_158_3,
+    0.254_152_12,
+    0.258_182_88,
+    0.262_250_7,
+    0.266_355_63,
+    0.270_497_83,
+    0.274_677_34,
+    0.278_894_3,
+    0.283_148_77,
+    0.287_440_87,
+    0.291_770_67,
+    0.296_138_3,
+    0.300_543_8,
+    0.304_987_34,
+    0.309_468_95,
+    0.313_988_75,
+    0.318_546_8,
+    0.323_143_24,
+    0.327_778_13,
+    0.332_451_55,
+    0.337_163_66,
+    0.341_914_45,
+    0.346_704_1,
+    0.351_532_64,
+    0.356_400_16,
+    0.361_306_82,
+    0.366_252_63,
+    0.371_237_7,
+    0.376_262_16,
+    0.381_326_05,
+    0.386_429_46,
+    0.391_572_5,
+    0.396_755_25,
+    0.401_977_8,
+    0.407_240_24,
+    0.412_542_64,
+    0.417_885_1,
+    0.423_267_7,
+    0.428_690_52,
+    0.434_153_68,
+    0.439_657_2,
+    0.445_201_22,
+    0.450_785_82,
+    0.456_411_03,
+    0.462_077_02,
+    0.467_783_8,
+    0.473_531_5,
+    0.479_320_2,
+    0.485_149_95,
+    0.491_020_9,
+    0.496_933,
+    0.502_886_5,
+    0.508_881_33,
+    0.514_917_7,
+    0.520_995_6,
+    0.527_115_17,
+    0.533_276_44,
+    0.539_479_5,
+    0.545_724_5,
+    0.552_011_43,
+    0.558_340_43,
+    0.564_711_5,
+    0.571_124_85,
+    0.577_580_45,
+    0.584_078_43,
+    0.590_618_85,
+    0.597_201_8,
+    0.603_827_36,
+    0.610_495_57,
+    0.617_206_6,
+    0.623_960_44,
+    0.630_757_15,
+    0.637_596_9,
+    0.644_479_7,
+    0.651_405_63,
+    0.658_374_85,
+    0.665_387_33,
+    0.672_443_15,
+    0.679_542_5,
+    0.686_685_3,
+    0.693_871_8,
+    0.701_101_9,
+    0.708_375_8,
+    0.715_693_53,
+    0.723_055_1,
+    0.730_460_76,
+    0.737_910_45,
+    0.745_404_24,
+    0.752_942_2,
+    0.760_524_5,
+    0.768_151_16,
+    0.775_822_2,
+    0.783_537_8,
+    0.791_298,
+    0.799_102_7,
+    0.806_952_3,
+    0.814_846_6,
+    0.822_785_74,
+    0.830_769_9,
+    0.838_799,
+    0.846_873_2,
+    0.854_992_6,
+    0.863_157_2,
+    0.871_367_1,
+    0.879_622_4,
+    0.887_923_1,
+    0.896_269_4,
+    0.904_661_2,
+    0.913_098_63,
+    0.921_581_86,
+    0.930_110_9,
+    0.938_685_7,
+    0.947_306_5,
+    0.955_973_3,
+    0.964_686_3,
+    0.973_445_3,
+    0.982_250_6,
+    0.991_102_1,
+    1.0,
+];
+
+const fn srgb_byte_to_linear(byte: u8) -> f32 {
+    SRGB_BYTE_TO_LINEAR_LUT[byte as usize]
+}
+
+fn srgb_to_linear_fast(value: f32) -> f32 {
+    if (0.0..=1.0).contains(&value) {
+        let byte = (value * 255.0 + 0.5) as u8;
+        if (value - f32::from(byte) / 255.0) == 0.0 {
+            return srgb_byte_to_linear(byte);
+        }
+    }
+    srgb_to_linear(value)
+}
+
 fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.040_45 {
         value / 12.92
@@ -710,8 +1021,9 @@ fn to_byte(value: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        GlassBackdrop, GlassParams, GlassShape, RgbBuffer, compose_glass, glass_color,
-        light_direction_for_pointer, mix, soften_backdrop,
+        GlassBackdrop, GlassParams, GlassShape, RgbBuffer, SRGB_BYTE_TO_LINEAR_LUT, compose_glass,
+        glass_color, mix, soften_backdrop, srgb_byte_to_linear, srgb_to_linear,
+        srgb_to_linear_fast, to_byte,
     };
     use crate::layout::Rect;
     use crate::material::Appearance;
@@ -898,7 +1210,7 @@ mod tests {
     #[test]
     fn bevel_disperses_rgb_channels_across_a_white_edge() {
         let mut sharp = RgbBuffer::filled(320, 120, [0.0; 3]);
-        for y in 0..45 {
+        for y in 0..36 {
             for x in 0..320 {
                 sharp.set_pixel(x, y, [1.0; 3]);
             }
@@ -906,13 +1218,17 @@ mod tests {
         let soft = soften_backdrop(&sharp, &GlassParams::DARK, 2, 5);
         let backdrop = backdrop_for(&sharp, &soft, 2);
         let shape = pill();
+        let dispersive = GlassParams {
+            dispersion: 3.0,
+            ..GlassParams::DARK
+        };
         let no_disp = GlassParams {
             dispersion: 0.0,
             ..GlassParams::DARK
         };
         let mut strongest = ([0.0; 3], 0.0f32);
-        for y in 30..=52 {
-            let with_disp = glass_color(&GlassParams::DARK, &shape, &backdrop, 160.0, y as f32);
+        for y in 30..=42 {
+            let with_disp = glass_color(&dispersive, &shape, &backdrop, 160.0, y as f32);
             let without_disp = glass_color(&no_disp, &shape, &backdrop, 160.0, y as f32);
             let distance = rgb_distance(with_disp, without_disp);
             if distance > strongest.1 {
@@ -1063,16 +1379,6 @@ mod tests {
     }
 
     #[test]
-    fn pointer_shifts_specular_light_toward_hovered_side() {
-        let shape = pill();
-        let default_light = light_direction_for_pointer(&shape, None);
-        let right_hover = light_direction_for_pointer(&shape, Some((270.0, 60.0)));
-        let left_hover = light_direction_for_pointer(&shape, Some((50.0, 60.0)));
-        assert!(right_hover.0 > default_light.0);
-        assert!(left_hover.0 < default_light.0);
-    }
-
-    #[test]
     fn primary_text_meets_wcag_aa_over_the_brightest_and_darkest_backdrops() {
         for theme in THEMES {
             let params = GlassParams::for_theme(theme);
@@ -1099,5 +1405,133 @@ mod tests {
                 assert!(ratio >= 3.0, "{theme:?} muted over {level}: {ratio:.2}");
             }
         }
+    }
+
+    fn bgra_pattern(width: usize, height: usize) -> RgbBuffer {
+        let mut bytes = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let b = ((x * 37 + y * 19) % 256) as u8;
+                let g = ((x * 13 + y * 53 + 7) % 256) as u8;
+                let r = ((x * 71 + y * 11 + 29) % 256) as u8;
+                bytes.extend_from_slice(&[b, g, r, 255]);
+            }
+        }
+        RgbBuffer::from_bgra(width as u32, height as u32, &bytes).unwrap()
+    }
+
+    #[test]
+    fn srgb_byte_lut_matches_srgb_to_linear_for_all_bytes() {
+        for byte in 0..=255u8 {
+            let norm = f32::from(byte) / 255.0;
+            let expected = srgb_to_linear(norm);
+            assert!(
+                (SRGB_BYTE_TO_LINEAR_LUT[byte as usize] - expected).abs() < 1e-6,
+                "lut mismatch at byte {byte}"
+            );
+            assert!(
+                (srgb_byte_to_linear(byte) - expected).abs() < 1e-6,
+                "helper mismatch at byte {byte}"
+            );
+            assert!(
+                (srgb_to_linear_fast(norm) - expected).abs() < 1e-6,
+                "fast mismatch at byte {byte}"
+            );
+        }
+        for arbitrary in [-0.1f32, 0.02, 0.3, 0.5, 0.7, 1.2] {
+            assert!((srgb_to_linear_fast(arbitrary) - srgb_to_linear(arbitrary)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn downsample_linearized_matches_reference_across_odd_and_even_dimensions() {
+        for (width, height) in [(16usize, 12usize), (17, 13), (5, 3), (1, 1)] {
+            let bgra = bgra_pattern(width, height);
+            let mut mixed = RgbBuffer::filled(width, height, [0.3, 0.5, 0.7]);
+            mixed.set_pixel(0, 0, [0.123, 0.456, 0.789]);
+            for capture in [&bgra, &mixed] {
+                for factor in [1usize, 2, 3, 4] {
+                    let fast = capture.downsample_linearized(factor);
+                    let reference = capture.linearized().downsample(factor);
+                    assert_eq!(
+                        (fast.width(), fast.height()),
+                        (reference.width(), reference.height())
+                    );
+                    for y in 0..reference.height() {
+                        for x in 0..reference.width() {
+                            assert!(
+                                rgb_distance(fast.pixel(x, y), reference.pixel(x, y)) < 1e-6,
+                                "mismatch at ({x},{y}) for {width}x{height} factor {factor}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn soften_backdrop_matches_full_res_reference_across_odd_and_even_dimensions() {
+        for (width, height) in [(32usize, 24usize), (33, 25), (19, 11)] {
+            let bgra = bgra_pattern(width, height);
+            let gradient = stripes(width, height);
+            for capture in [&bgra, &gradient] {
+                for params in [GlassParams::DARK, GlassParams::LIGHT] {
+                    for factor in [1usize, 2, 3, 4] {
+                        for radius in [0usize, 1, 3, 5] {
+                            let actual = soften_backdrop(capture, &params, factor, radius);
+                            let reference = capture
+                                .linearized()
+                                .downsample(factor)
+                                .box_blurred(radius)
+                                .gamma_encoded()
+                                .graded(&params);
+                            assert_eq!(
+                                (actual.width(), actual.height()),
+                                (reference.width(), reference.height())
+                            );
+                            for y in 0..reference.height() {
+                                for x in 0..reference.width() {
+                                    assert!(
+                                        rgb_distance(actual.pixel(x, y), reference.pixel(x, y))
+                                            < 1e-5,
+                                        "soften mismatch at ({x},{y}) for {width}x{height} factor {factor} radius {radius}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn to_rgba_u8_packs_clamped_bytes_with_opaque_alpha() {
+        let mut buffer = RgbBuffer::filled(2, 2, [0.0, 0.5, 1.0]);
+        buffer.set_pixel(1, 0, [-0.25, 1.5, 128.0 / 255.0]);
+        buffer.set_pixel(0, 1, [0.2, 0.4, 0.8]);
+        buffer.set_pixel(1, 1, [1.0, 0.0, 0.25]);
+        let rgba = buffer.to_rgba_u8();
+        assert_eq!(rgba.len(), 2 * 2 * 4);
+        let expected = [
+            to_byte(0.0),
+            to_byte(0.5),
+            to_byte(1.0),
+            255,
+            0,
+            255,
+            128,
+            255,
+            to_byte(0.2),
+            to_byte(0.4),
+            to_byte(0.8),
+            255,
+            255,
+            0,
+            to_byte(0.25),
+            255,
+        ];
+        assert_eq!(rgba, expected);
     }
 }

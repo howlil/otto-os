@@ -7,42 +7,33 @@ use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1S
 use windows::core::Result;
 use windows_numerics::Vector2;
 
-use crate::glow::draw_ring_glow;
-use crate::palette::{AMBIENT_PEAK_ALPHA, TonePalette, mix, with_alpha};
+use crate::palette::TonePalette;
 use crate::{
-    BLACK, FOREGROUND, MUSIC_ACCENT, Renderer, brighten, rect_to_d2d, rgb, translate_rect,
+    BLACK, FOREGROUND, GLYPH_STROKE_SCALE, Renderer, brighten, rect_to_d2d, rgb, translate_rect,
 };
 
-const FOCUS_FROM: D2D1_COLOR_F = rgb(255, 176, 32, 1.0);
-const FOCUS_TO: D2D1_COLOR_F = rgb(255, 106, 43, 1.0);
-const SHORT_BREAK_FROM: D2D1_COLOR_F = rgb(74, 222, 128, 1.0);
-const SHORT_BREAK_TO: D2D1_COLOR_F = rgb(45, 212, 191, 1.0);
-const LONG_BREAK_FROM: D2D1_COLOR_F = rgb(56, 189, 248, 1.0);
-const LONG_BREAK_TO: D2D1_COLOR_F = rgb(59, 130, 246, 1.0);
-const TIMER_FROM: D2D1_COLOR_F = rgb(168, 85, 247, 1.0);
-const TIMER_TO: D2D1_COLOR_F = rgb(129, 140, 248, 1.0);
-const STOPWATCH_FROM: D2D1_COLOR_F = rgb(244, 114, 182, 1.0);
-const STOPWATCH_TO: D2D1_COLOR_F = rgb(251, 113, 133, 1.0);
-const CORAL: D2D1_COLOR_F = rgb(255, 107, 87, 1.0);
-const URGENT_MIX: f32 = 0.7;
+const FOCUS_ACCENT: D2D1_COLOR_F = rgb(255, 146, 48, 1.0);
+const SHORT_BREAK_ACCENT: D2D1_COLOR_F = rgb(48, 209, 88, 1.0);
+const LONG_BREAK_ACCENT: D2D1_COLOR_F = rgb(0, 145, 255, 1.0);
+const CORAL: D2D1_COLOR_F = rgb(255, 66, 69, 1.0);
 
 pub(crate) fn pomodoro_colors(tone: PomodoroTone, dim: f32, urgent: bool) -> TonePalette {
-    let (from, to) = match tone {
-        PomodoroTone::Focus => (FOCUS_FROM, FOCUS_TO),
-        PomodoroTone::ShortBreak => (SHORT_BREAK_FROM, SHORT_BREAK_TO),
-        PomodoroTone::LongBreak => (LONG_BREAK_FROM, LONG_BREAK_TO),
-        PomodoroTone::Timer => (TIMER_FROM, TIMER_TO),
-        PomodoroTone::Stopwatch => (STOPWATCH_FROM, STOPWATCH_TO),
+    let accent = match tone {
+        PomodoroTone::Focus => FOCUS_ACCENT,
+        PomodoroTone::ShortBreak => SHORT_BREAK_ACCENT,
+        PomodoroTone::LongBreak => LONG_BREAK_ACCENT,
+        PomodoroTone::Timer | PomodoroTone::Stopwatch => FOREGROUND,
     };
     let mut colors = TonePalette {
-        from,
-        to,
-        accent: mix(from, to, 0.5),
-        text: mix(from, to, 0.35),
+        from: accent,
+        to: accent,
+        accent,
+        text: FOREGROUND,
     };
     if urgent {
-        colors.to = mix(colors.to, CORAL, URGENT_MIX);
-        colors.accent = mix(colors.accent, CORAL, URGENT_MIX);
+        colors.from = CORAL;
+        colors.to = CORAL;
+        colors.accent = CORAL;
         colors.text = CORAL;
     }
     colors.dimmed(dim)
@@ -56,8 +47,12 @@ fn center_of(rect: Rect) -> Vector2 {
 }
 
 impl Renderer {
+    fn icon_stroke(size: f32) -> f32 {
+        (size * GLYPH_STROKE_SCALE).max(1.5)
+    }
+
     fn draw_clock_glyph(&self, center: Vector2, r: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (r * 0.22).max(1.2);
+        let stroke = Self::icon_stroke(r);
         unsafe {
             self.target.DrawEllipse(
                 &D2D1_ELLIPSE {
@@ -87,7 +82,7 @@ impl Renderer {
     }
 
     fn draw_tomato_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (g * 0.16).max(1.5);
+        let stroke = Self::icon_stroke(g);
         let body = D2D1_ELLIPSE {
             point: Vector2::new(center.X, center.Y + g * 0.14),
             radiusX: g * 0.95,
@@ -117,7 +112,7 @@ impl Renderer {
     }
 
     fn draw_cup_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (g * 0.16).max(1.5);
+        let stroke = Self::icon_stroke(g);
         let body = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: center.X - g * 0.85,
@@ -154,11 +149,19 @@ impl Renderer {
     }
 
     fn draw_moon_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) -> Result<()> {
-        crate::draw_crescent_moon(&self.factory, &self.target, center, g, brush)
+        crate::draw_crescent_moon_outline(
+            &self.factory,
+            &self.target,
+            center,
+            g,
+            Self::icon_stroke(g),
+            &self.stroke_style,
+            brush,
+        )
     }
 
     fn draw_check_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (g * 0.22).max(1.8);
+        let stroke = Self::icon_stroke(g);
         let left = Vector2::new(center.X - g * 0.55, center.Y + g * 0.05);
         let valley = Vector2::new(center.X - g * 0.12, center.Y + g * 0.5);
         let right = Vector2::new(center.X + g * 0.6, center.Y - g * 0.45);
@@ -171,7 +174,7 @@ impl Renderer {
     }
 
     fn draw_hourglass_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (g * 0.17).max(1.3);
+        let stroke = Self::icon_stroke(g);
         let top = center.Y - g * 0.85;
         let bottom = center.Y + g * 0.85;
         let cap = g * 0.68;
@@ -209,7 +212,7 @@ impl Renderer {
     }
 
     fn draw_stopwatch_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (g * 0.17).max(1.3);
+        let stroke = Self::icon_stroke(g);
         let dial = Vector2::new(center.X, center.Y + g * 0.14);
         let r = g * 0.78;
         let crown_y = dial.Y - r - g * 0.24;
@@ -310,17 +313,6 @@ impl Renderer {
         let radius = scale(7, self.dpi) as f32;
         let stroke = (scale(5, self.dpi) as f32 * 0.5).max(2.0);
 
-        let glow = (scene.glow + scene.pulse * 0.5).clamp(0.0, 1.0) * alpha;
-        draw_ring_glow(
-            &self.target,
-            &self.brushes,
-            &self.stroke_style,
-            center,
-            radius,
-            stroke,
-            colors.accent,
-            glow,
-        );
         let accent = self.brushes.alpha_brush(colors.accent, alpha);
         let track = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
         self.draw_progress_ring(
@@ -347,7 +339,7 @@ impl Renderer {
         }
 
         let time_brush = self.brushes.alpha_brush(colors.text, alpha);
-        self.draw_text(
+        self.draw_tabular_text(
             &time_text,
             &self.text_compact_time,
             rect_to_d2d(layout.compact_time),
@@ -364,6 +356,31 @@ impl Renderer {
                 rect_to_d2d(layout.compact_peek),
                 &peek_brush,
             );
+        } else if let Some(fills) = scene.compact_cycle_progress() {
+            let track = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+            for (rect, fill) in layout.compact_cycle_steps.iter().zip(fills) {
+                let radius = rect.height as f32 * 0.5;
+                self.draw_rounded_box(*rect, radius, &track);
+                if fill <= 0.0 {
+                    continue;
+                }
+                let width = (rect.width as f32 * fill.clamp(0.0, 1.0))
+                    .round()
+                    .max(rect.height as f32)
+                    .min(rect.width as f32);
+                let strength = if fill >= 0.999 { 0.55 } else { 1.0 };
+                self.fill_gradient_rounded(
+                    D2D_RECT_F {
+                        left: rect.x as f32,
+                        top: rect.y as f32,
+                        right: rect.x as f32 + width,
+                        bottom: rect.bottom() as f32,
+                    },
+                    radius,
+                    &colors,
+                    strength * alpha,
+                );
+            }
         }
 
         if view.urgent {
@@ -389,17 +406,6 @@ impl Renderer {
         let center = center_of(layout.notch_secondary);
         let radius = (layout.notch_secondary.width as f32 * 0.28).max(scale(6, self.dpi) as f32);
         let stroke = (scale(5, self.dpi) as f32 * 0.5).max(2.0);
-        let glow = (scene.glow + scene.pulse * 0.5).clamp(0.0, 1.0) * alpha;
-        draw_ring_glow(
-            &self.target,
-            &self.brushes,
-            &self.stroke_style,
-            center,
-            radius,
-            stroke,
-            colors.accent,
-            glow,
-        );
         let accent = self.brushes.alpha_brush(colors.accent, alpha);
         let track = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
         self.draw_progress_ring(
@@ -504,6 +510,13 @@ impl Renderer {
                 !layout.notch_tab_clipboard.is_empty(),
             ),
             (
+                translate_rect(layout.notch_tab_tasks, -offset_x),
+                NotchExpandedTab::Tasks,
+                HitTarget::NotchTabTasks,
+                NotchExpandedTab::Tasks.short_label(),
+                !layout.notch_tab_tasks.is_empty(),
+            ),
+            (
                 translate_rect(layout.notch_tab_media, -offset_x),
                 NotchExpandedTab::Media,
                 HitTarget::NotchTabMedia,
@@ -603,7 +616,7 @@ impl Renderer {
         };
         let glyph_center = Vector2::new(glyph_x, rect.y as f32 + rect.height as f32 * 0.5);
         let glyph_r = scale(5, self.dpi) as f32;
-        self.draw_notch_tab_glyph(glyph_center, glyph_r, tab, active, alpha, &ink);
+        self.draw_notch_tab_glyph(glyph_center, glyph_r, tab, &ink);
         if active {
             self.draw_text(
                 label,
@@ -624,8 +637,6 @@ impl Renderer {
         center: Vector2,
         r: f32,
         tab: NotchExpandedTab,
-        active: bool,
-        alpha: f32,
         ink: &ID2D1SolidColorBrush,
     ) {
         let stroke = (r * 0.24).max(1.25);
@@ -633,12 +644,8 @@ impl Renderer {
             NotchExpandedTab::Pomodoro => self.draw_clock_glyph(center, r, ink),
             NotchExpandedTab::Shelf => self.draw_tray_glyph(center, r, ink),
             NotchExpandedTab::Clipboard => self.draw_clipboard_glyph(center, r, stroke, ink),
-            NotchExpandedTab::Media => {
-                let note = self
-                    .brushes
-                    .alpha_brush(MUSIC_ACCENT, if active { 1.0 } else { 0.72 } * alpha);
-                self.draw_music_note_glyph(center.X, center.Y, r, &note);
-            }
+            NotchExpandedTab::Tasks => self.draw_tasks_glyph(center, r, ink),
+            NotchExpandedTab::Media => self.draw_music_note_glyph(center.X, center.Y, r, ink),
         }
     }
 
@@ -764,6 +771,7 @@ impl Renderer {
         alpha: f32,
         hovered: Option<HitTarget>,
         scene: &PomodoroScene,
+        active_task: Option<&str>,
     ) -> Result<()> {
         let view = scene.view();
         let colors = pomodoro_colors(view.tone, scene.dim, view.urgent);
@@ -771,26 +779,7 @@ impl Renderer {
         let icon_center = center_of(icon);
         let icon_radius = icon.width as f32 * 0.5;
 
-        let notch_clip = D2D_RECT_F {
-            left: (layout.notch.x - offset_x) as f32,
-            top: layout.notch.y as f32,
-            right: (layout.notch.right() - offset_x) as f32,
-            bottom: layout.notch.bottom() as f32,
-        };
-        let ambient = AMBIENT_PEAK_ALPHA * alpha * (1.0 - scene.dim * 0.8);
-        self.fill_ambient_glow(icon_center, with_alpha(colors.accent, ambient), notch_clip);
-
-        draw_ring_glow(
-            &self.target,
-            &self.brushes,
-            &self.stroke_style,
-            icon_center,
-            icon_radius,
-            1.0,
-            colors.accent,
-            scene.glow * alpha * 0.9,
-        );
-        self.fill_gradient_circle(icon_center, icon_radius, &colors, alpha);
+        self.fill_solid_circle(icon_center, icon_radius, colors.accent, alpha);
         if view.urgent {
             let ring = self
                 .brushes
@@ -819,7 +808,7 @@ impl Renderer {
         } else {
             self.brushes.alpha_brush(FOREGROUND, time_alpha * alpha)
         };
-        self.draw_text(
+        self.draw_tabular_text(
             &view.headline,
             &self.text_timer_display,
             rect_to_d2d(translate_rect(layout.pomodoro_time, -offset_x)),
@@ -827,7 +816,7 @@ impl Renderer {
         );
         let muted = self.brushes.alpha_brush(FOREGROUND, 0.60 * alpha);
         self.draw_text(
-            &view.subtitle,
+            active_task.unwrap_or(&view.subtitle),
             &self.text_pomodoro_sub,
             rect_to_d2d(translate_rect(layout.pomodoro_subtitle, -offset_x)),
             &muted,
@@ -1028,18 +1017,6 @@ impl Renderer {
         let icon = translate_rect(layout.pomodoro_icon, -offset_x);
         let icon_center = center_of(icon);
         let icon_radius = icon.width as f32 * 0.5;
-        let notch_clip = D2D_RECT_F {
-            left: (layout.notch.x - offset_x) as f32,
-            top: layout.notch.y as f32,
-            right: (layout.notch.right() - offset_x) as f32,
-            bottom: layout.notch.bottom() as f32,
-        };
-        self.fill_ambient_glow(
-            icon_center,
-            with_alpha(colors.accent, AMBIENT_PEAK_ALPHA * 1.4 * alpha),
-            notch_clip,
-        );
-
         let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
         let header = translate_rect(layout.notch_tab_pomodoro, -offset_x);
         let alert_header = if scene.focus_mode == FocusSubMode::Timer {
@@ -1065,35 +1042,9 @@ impl Renderer {
             &muted,
         );
 
-        draw_ring_glow(
-            &self.target,
-            &self.brushes,
-            &self.stroke_style,
-            icon_center,
-            icon_radius,
-            1.0,
-            colors.accent,
-            alpha * 0.9,
-        );
-        self.fill_gradient_circle(icon_center, icon_radius, &colors, alpha);
+        self.fill_solid_circle(icon_center, icon_radius, colors.accent, alpha);
         let ink = self.brushes.alpha_brush(BLACK, 0.78 * alpha);
         self.draw_check_glyph(icon_center, icon_radius * 0.46, &ink);
-        for (dx, dy, tint) in [(-0.9, -0.8, colors.from), (0.95, -0.55, colors.to)] {
-            let dot = self.brushes.alpha_brush(tint, 0.9 * alpha);
-            unsafe {
-                self.target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2::new(
-                            icon_center.X + icon_radius * dx,
-                            icon_center.Y + icon_radius * dy,
-                        ),
-                        radiusX: scale(2, self.dpi) as f32,
-                        radiusY: scale(2, self.dpi) as f32,
-                    },
-                    &dot,
-                );
-            }
-        }
 
         let fg = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
         self.draw_text(
@@ -1164,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn each_tone_has_its_own_gradient() {
+    fn phase_accents_are_solid_and_tool_modes_are_neutral() {
         let focus = pomodoro_colors(PomodoroTone::Focus, 0.0, false);
         let short = pomodoro_colors(PomodoroTone::ShortBreak, 0.0, false);
         let long = pomodoro_colors(PomodoroTone::LongBreak, 0.0, false);
@@ -1172,12 +1123,11 @@ mod tests {
         let stopwatch = pomodoro_colors(PomodoroTone::Stopwatch, 0.0, false);
         assert!(channel_gap(focus.accent, short.accent) > 0.3);
         assert!(channel_gap(short.accent, long.accent) > 0.3);
-        assert!(channel_gap(focus.accent, timer.accent) > 0.3);
-        assert!(channel_gap(timer.accent, stopwatch.accent) > 0.3);
-        assert!(channel_gap(focus.accent, stopwatch.accent) > 0.3);
-        assert!(channel_gap(focus.from, focus.to) > 0.1);
-        assert!(channel_gap(timer.from, timer.to) > 0.1);
-        assert!(channel_gap(stopwatch.from, stopwatch.to) > 0.1);
+        assert!(channel_gap(focus.from, focus.to) < 0.001);
+        assert!(channel_gap(short.from, short.to) < 0.001);
+        assert!(channel_gap(long.from, long.to) < 0.001);
+        assert!(channel_gap(timer.accent, FOREGROUND) < 0.001);
+        assert!(channel_gap(stopwatch.accent, FOREGROUND) < 0.001);
     }
 
     #[test]

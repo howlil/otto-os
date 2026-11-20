@@ -17,7 +17,7 @@ use super::{FOREGROUND, Renderer, shared_dwrite_factory};
 
 const LYRIC_ROW_GAP_PT: i32 = 6;
 const LYRIC_PAD_PT: i32 = 14;
-const LYRIC_CARD_RADIUS_PT: i32 = 14;
+const LYRIC_CARD_RADIUS_PT: i32 = 12;
 const LYRIC_EDGE_FADE_PT: i32 = 16;
 pub(crate) const LYRIC_FONT_PT: i32 = 16;
 const LYRIC_MAX_LINES: f32 = 2.0;

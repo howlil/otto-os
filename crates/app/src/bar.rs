@@ -9,30 +9,30 @@ use crate::host::RuntimeContext;
 use crate::menu::TopBarMenuRequest;
 use crate::notch::{NotchController, NotchEffect, NotchHotkey};
 use otto_core::{
-    Appearance, BarFocus, BarFocusOutcome, BarKey, BarPointer, BarVisibility, BrandIcon,
-    ChangeGate, ControlCenterPage, HitTarget, Layout, LyricsStatus, Metrics, MotionPreference,
-    NotchAction, NotchExpandedTab, NotchHudKind, NotchLayoutInput, NotchPort, NotchStyle,
-    NowPlaying, SHELF_THUMBNAIL_MAX_PX, ShelfPayload, ShelfThumbnail, TickCadence,
-    build_bar_accessible_tree, compute_layout_with_notch, decode_bar_hit_target, detect_hud_event,
-    is_top_bar_menu_target, scale,
+    Appearance, BarFocus, BarFocusOutcome, BarHideMode, BarKey, BarPointer, BarVisibility,
+    BrandIcon, ChangeGate, ControlCenterAction, ControlCenterPage, HitTarget, Layout, LyricsStatus,
+    MenuBarPreferences, Metrics, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
+    NotchLayoutInput, NotchPort, NotchStyle, NowPlaying, SHELF_THUMBNAIL_MAX_PX, ShelfPayload,
+    ShelfThumbnail, TickCadence, build_bar_accessible_tree, compute_layout_with_notch,
+    decode_bar_hit_target, detect_hud_event, is_top_bar_menu_target, scale,
 };
 use otto_core::{BACKDROP_PADDING_PT, CaptureRegion, Rect, capture_interval_for, capture_wanted};
 use otto_platform::is_running_on_battery;
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
     AppBar, ClipboardListenerGuard, ClipboardRead, LyricsOutcome, LyricsRequest, LyricsService,
-    PowerNotificationGuard, PrimaryScreen, ShelfDropEvent, ShelfDropQueue, ShelfDropRegion,
-    ShelfDropTargetGuard, TrayOverflowOutcome, WM_APP_SHELF_EVENT, WM_APP_UIA_INVOKE,
-    WM_CLIPBOARDUPDATE, WindowsNotchPort, acknowledge_idle_wake, adjust_volume,
+    PowerNotificationGuard, PrimaryScreen, QuickCaptureInput, ShelfDropEvent, ShelfDropQueue,
+    ShelfDropRegion, ShelfDropTargetGuard, TrayOverflowOutcome, WM_APP_SHELF_EVENT,
+    WM_APP_UIA_INVOKE, WM_CLIPBOARDUPDATE, WindowsNotchPort, acknowledge_idle_wake, adjust_volume,
     clipboard_sequence_number, close_tray_overflow, current_process_id, cursor_position,
-    foreground_application, handle_wm_getobject, is_escape_down, motion_preference,
-    notify_bluetooth_hardware_change, open_spotlight_search, primary_screen,
-    read_clipboard_payload, read_system_status, register_bluetooth_hud_target, register_idle_wake,
-    register_notch_hotkeys, register_shelf_drop_target, route_bar_keys, routes_keys_to,
-    signal_command_failure, step_display_brightness, stop_routing_bar_keys,
-    stop_routing_if_targets, suppress_native_osd, take_bluetooth_hud_event, toggle_tray_overflow,
-    unregister_bluetooth_hud_target, unregister_idle_wake, unregister_notch_hotkeys,
-    watch_top_edge, window_bounds, window_change_generations,
+    foreground_application, handle_wm_getobject, is_escape_down, load_tasks, motion_preference,
+    notify_bluetooth_hardware_change, primary_screen, read_clipboard_payload, read_system_status,
+    register_bluetooth_hud_target, register_capture_hotkey, register_idle_wake,
+    register_shelf_drop_target, route_bar_keys, routes_keys_to, save_tasks, signal_command_failure,
+    step_display_brightness, stop_routing_bar_keys, stop_routing_if_targets, suppress_native_osd,
+    take_bluetooth_hud_event, toggle_tray_overflow, unregister_bluetooth_hud_target,
+    unregister_capture_hotkey, unregister_idle_wake, watch_top_edge, window_bounds,
+    window_change_generations,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -74,6 +74,7 @@ const WM_APP_BAR_KEY: u32 = 0x8000 + 21;
 const WM_APP_IDLE_WAKE: u32 = 0x8000 + 22;
 const WM_APP_BAR_BACKDROP: u32 = 0x8000 + 24;
 const WM_APP_BAR_BLUETOOTH_HUD: u32 = 0x8000 + 28;
+const WM_APP_BAR_CAPTURE: u32 = 0x8000 + 60;
 const STATUS_IDLE_MS: u32 = 1000;
 const STATUS_IDLE_AFTER_TICKS: u32 = 16;
 const MEDIA_EVERY_TICKS: u8 = 4;
@@ -126,6 +127,7 @@ pub(crate) struct Bar {
     hwnd: isize,
     panel_hwnd: isize,
     panel_visible: bool,
+    last_panel_rect: Option<Rect>,
     own_pid: u32,
     appbar: AppBar,
     renderer: Renderer,
@@ -141,6 +143,7 @@ pub(crate) struct Bar {
     notch_drop_target: Option<ShelfDropTargetGuard>,
     panel_drop_target: Option<ShelfDropTargetGuard>,
     clipboard_listener: Option<ClipboardListenerGuard>,
+    quick_capture: Option<QuickCaptureInput>,
     power_listener: Option<PowerNotificationGuard>,
     last_clipboard_seq: u32,
     suppressed_clipboard_seq: Option<u32>,
@@ -161,7 +164,10 @@ pub(crate) struct Bar {
     online_lyrics_enabled: bool,
     animating: bool,
     settle_ticks: u32,
+    top_bar_enabled: bool,
+    notch_enabled: bool,
     control_center_enabled: bool,
+    menu_prefs: MenuBarPreferences,
     motion: MotionPreference,
     visibility: BarVisibility,
     shell_full_screen: bool,
@@ -183,6 +189,9 @@ pub fn start(
         |foreground| (foreground.name, foreground.window),
     );
     let metrics = Metrics::for_style(runtime.notch_style());
+    let menu_bar = runtime.menu_bar.get();
+    let top_bar_enabled = runtime.top_bar_enabled.get();
+    let notch_enabled = runtime.notch_enabled.get();
     let screen = primary_screen();
     let notch_port = WindowsNotchPort;
     let media_enabled = runtime.media_module_enabled.get();
@@ -190,6 +199,7 @@ pub fn start(
     let focus_enabled = runtime.focus_module_enabled.get();
     let shelf_enabled = runtime.drop_shelf_enabled.get();
     let clipboard_enabled = runtime.clipboard_history_enabled.get();
+    let quick_capture_enabled = runtime.quick_capture_enabled.get();
     let hud_enabled = runtime.notch_hud_enabled.get();
     let media = if media_enabled {
         notch_port.read_now_playing()
@@ -209,11 +219,15 @@ pub fn start(
     notch.set_focus_enabled(focus_enabled);
     notch.set_shelf_enabled(shelf_enabled);
     notch.set_clipboard_enabled(clipboard_enabled);
+    if quick_capture_enabled {
+        notch.replace_tasks(load_tasks());
+        notch.set_tasks_enabled(true);
+    }
     notch.set_media_enabled(media_enabled);
     notch.set_privacy_enabled(privacy_enabled);
     notch.set_hud_enabled(hud_enabled);
     let status = read_system_status();
-    if privacy_enabled {
+    if notch_enabled && privacy_enabled {
         let _ = notch.sync_privacy_state(notch_port.read_privacy_state());
     }
     let controls = BarControlsController::new(status, active_app.clone(), active_window);
@@ -222,7 +236,12 @@ pub fn start(
         screen.width,
         screen.dpi,
         &active_app,
-        notch.layout_input(control_center_enabled),
+        NotchLayoutInput {
+            top_bar_enabled,
+            notch_enabled,
+            hidden_items: menu_bar.hidden_items,
+            ..notch.layout_input(control_center_enabled)
+        },
     );
     let (max_panel_w, max_panel_h) = max_panel_surface_size(screen.dpi);
     let renderer = Renderer::new(
@@ -238,9 +257,14 @@ pub fn start(
     if runtime.dock_enabled.get() && runtime.dock_preferences.get().hide_taskbar {
         appbar.hide_system_taskbar();
     }
-    appbar.reserve_top(screen.width, screen.height, layout.bar.height);
-    if runtime.hotkeys_enabled.get() {
-        register_notch_hotkeys(hwnd);
+    if top_bar_enabled {
+        appbar.reserve_top(screen.width, screen.height, layout.bar.height);
+    }
+    let quick_capture = (notch_enabled && quick_capture_enabled)
+        .then(|| QuickCaptureInput::create(hwnd, WM_APP_BAR_CAPTURE))
+        .flatten();
+    if runtime.hotkeys_enabled.get() && quick_capture.is_some() {
+        register_capture_hotkey(hwnd);
     }
 
     let lyrics = LyricsService::start();
@@ -253,7 +277,7 @@ pub fn start(
         layout.notch.right() + notch_pad,
         layout.bar.height + notch_pad,
     );
-    let (notch_drop_target, panel_drop_target) = if shelf_enabled {
+    let (notch_drop_target, panel_drop_target) = if notch_enabled && shelf_enabled {
         register_drop_targets(
             hwnd,
             panel_hwnd,
@@ -264,7 +288,7 @@ pub fn start(
     } else {
         (None, None)
     };
-    let clipboard_listener = clipboard_enabled
+    let clipboard_listener = (notch_enabled && clipboard_enabled)
         .then(|| ClipboardListenerGuard::register(hwnd))
         .flatten();
     let power_listener = PowerNotificationGuard::register(hwnd);
@@ -274,6 +298,7 @@ pub fn start(
         hwnd,
         panel_hwnd,
         panel_visible: false,
+        last_panel_rect: None,
         own_pid,
         appbar,
         renderer,
@@ -289,6 +314,7 @@ pub fn start(
         notch_drop_target,
         panel_drop_target,
         clipboard_listener,
+        quick_capture,
         power_listener,
         last_clipboard_seq,
         suppressed_clipboard_seq: None,
@@ -309,26 +335,39 @@ pub fn start(
         online_lyrics_enabled: runtime.online_lyrics_enabled.get(),
         animating: false,
         settle_ticks: 0,
+        top_bar_enabled,
+        notch_enabled,
         control_center_enabled,
+        menu_prefs: menu_bar,
         motion: motion_preference(),
-        visibility: BarVisibility::default(),
+        visibility: initial_visibility(menu_bar, top_bar_enabled),
         shell_full_screen: false,
-        backdrop: runtime
-            .glass_enabled
-            .get()
-            .then(|| BackdropFeed::start(hwnd, WM_APP_BAR_BACKDROP, vec![hwnd, panel_hwnd])),
+        backdrop: runtime.glass_enabled.get().then(|| {
+            BackdropFeed::start(
+                hwnd,
+                WM_APP_BAR_BACKDROP,
+                vec![hwnd, panel_hwnd],
+                runtime.capture_visible.get(),
+            )
+        }),
     };
     bar.notch.set_clock(status.clock);
     bar.notch
         .set_lyrics_in_compact(bar.online_lyrics_enabled && bar.notch.media_enabled());
-    if !runtime.onboarding_seen.get() && hud_enabled {
+    bar.notch.set_presented(bar.notch_enabled && bar.shown());
+    if !bar.notch_enabled {
+        otto_platform::withdraw_notch_rect(bar.hwnd);
+    } else if !runtime.onboarding_seen.get() && hud_enabled {
         bar.notch.trigger_hud(NotchHudKind::Welcome);
         runtime.pending_onboarding_seen.set(Some(true));
     }
     bar.sync_bar_shelf_region();
+    bar.sync_backdrop(runtime, true);
     bar.place();
     bar.present(runtime);
-    bar.sync_backdrop(runtime, true);
+    if !bar.shown() || !bar.visibility.is_visible() {
+        bar.apply_visibility(runtime);
+    }
     bar.schedule_deadline();
 
     unsafe {
@@ -341,7 +380,7 @@ pub fn start(
     }
     bar.ensure_anim_timer();
     register_idle_wake(hwnd, WM_APP_IDLE_WAKE);
-    if hud_enabled {
+    if notch_enabled && hud_enabled {
         register_bluetooth_hud_target(hwnd, WM_APP_BAR_BLUETOOTH_HUD);
     }
 
@@ -355,12 +394,17 @@ pub fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.bar.try_borrow_mut()
         && let Some(mut bar) = guard.take()
     {
+        bar.stop_anim_timer();
         unsafe {
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), STATUS_TIMER);
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), HUD_ANIM_TIMER);
             let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), DEADLINE_TIMER);
+            let _ = ShowWindow(HWND(bar.hwnd as *mut _), SW_HIDE);
+            let _ = ShowWindow(HWND(bar.panel_hwnd as *mut _), SW_HIDE);
         }
-        unregister_notch_hotkeys(bar.hwnd);
+        watch_top_edge(false, bar.screen.width, bar.screen.height);
+        unregister_capture_hotkey(bar.hwnd);
+        bar.quick_capture = None;
         stop_routing_bar_keys();
         bar.lyrics.shutdown();
     }
@@ -391,6 +435,7 @@ pub fn handle_message(
                 }
                 with_bar(runtime, |bar| {
                     bar.panel_visible = false;
+                    bar.last_panel_rect = None;
                 });
             }
             Some(LRESULT(0))
@@ -402,6 +447,10 @@ pub fn handle_message(
         }
         WM_CLIPBOARDUPDATE => {
             with_bar(runtime, |bar| bar.on_clipboard_update(runtime));
+            Some(LRESULT(0))
+        }
+        WM_APP_BAR_CAPTURE => {
+            with_bar(runtime, |bar| bar.on_quick_capture_submitted(runtime));
             Some(LRESULT(0))
         }
         WM_NCDESTROY => {
@@ -604,7 +653,6 @@ const fn wakes_status_tick(message: u32) -> bool {
         WM_APP_IDLE_WAKE
             | WM_HOTKEY
             | WM_APP_BAR_KEY
-            | WM_MOUSEMOVE
             | WM_LBUTTONDOWN
             | WM_RBUTTONUP
             | WM_MOUSEWHEEL
@@ -618,6 +666,11 @@ fn wake_for_message(runtime: &RuntimeContext, message: u32) {
     if message == WM_APP_IDLE_WAKE {
         acknowledge_idle_wake();
         with_bar(runtime, |bar| bar.idle_wake(runtime));
+        return;
+    }
+    if message == WM_MOUSEMOVE {
+        with_bar(runtime, Bar::wake_timer_only);
+        crate::dock::wake_timer_only(runtime);
         return;
     }
     if wakes_status_tick(message) {
@@ -652,7 +705,7 @@ enum ProcessedShelfEvent {
 fn handle_shelf_drop_events(runtime: &RuntimeContext) {
     let Some((shelf_enabled, queue, port)) = with_bar_result(runtime, |bar| {
         (
-            bar.notch.shelf_enabled(),
+            bar.notch_enabled && bar.notch.shelf_enabled(),
             bar.shelf_queue.clone(),
             bar.notch_port,
         )
@@ -847,6 +900,7 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
                     bar.hwnd,
                     WM_APP_BAR_BACKDROP,
                     vec![bar.hwnd, bar.panel_hwnd],
+                    runtime.capture_visible.get(),
                 ));
             }
         } else {
@@ -858,10 +912,144 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
+pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        if bar.top_bar_enabled == enabled {
+            return;
+        }
+        bar.top_bar_enabled = enabled;
+        if enabled {
+            bar.appbar
+                .reserve_top(bar.screen.width, bar.screen.height, bar.layout.bar.height);
+            let _ = bar.visibility.set_mode(bar.menu_prefs.hide_mode);
+        } else {
+            bar.appbar.release_top();
+            bar.shell_full_screen = false;
+            let _ = bar.visibility.set_mode(BarHideMode::FullScreenOnly);
+            let _ = bar
+                .visibility
+                .set_full_screen_app(bar.foreground_covers_primary());
+            bar.hovered = None;
+            if bar.focus.is_active() {
+                bar.leave_keyboard_focus(runtime);
+            }
+        }
+        bar.recompute_layout();
+        bar.sync_backdrop(runtime, true);
+        bar.apply_visibility(runtime);
+        bar.sync_panel_visibility();
+        watch_top_edge(
+            bar.hidden_for_full_screen(),
+            bar.screen.width,
+            bar.screen.height,
+        );
+        if bar.shown() {
+            bar.present(runtime);
+        }
+        bar.schedule_deadline();
+    });
+}
+
+pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
+    with_bar(runtime, |bar| {
+        if bar.notch_enabled == enabled {
+            return;
+        }
+        bar.notch_enabled = enabled;
+        if enabled {
+            if bar.notch.shelf_enabled() {
+                bar.ensure_shelf_drop_targets();
+            }
+            if bar.notch.clipboard_enabled() && bar.clipboard_listener.is_none() {
+                bar.clipboard_listener = ClipboardListenerGuard::register(bar.hwnd);
+                bar.last_clipboard_seq = clipboard_sequence_number();
+                bar.suppressed_clipboard_seq = None;
+            }
+            if bar.notch.hud_enabled() {
+                register_bluetooth_hud_target(bar.hwnd, WM_APP_BAR_BLUETOOTH_HUD);
+            }
+            if runtime.quick_capture_enabled.get() {
+                if bar.quick_capture.is_none() {
+                    bar.quick_capture = QuickCaptureInput::create(bar.hwnd, WM_APP_BAR_CAPTURE);
+                }
+                if runtime.hotkeys_enabled.get() && bar.quick_capture.is_some() {
+                    register_capture_hotkey(bar.hwnd);
+                }
+            }
+            if bar.notch.privacy_enabled() {
+                let _ = bar
+                    .notch
+                    .sync_privacy_state(bar.notch_port.read_privacy_state());
+            }
+        } else {
+            bar.notch_drop_target = None;
+            bar.panel_drop_target = None;
+            bar.pending_shelf_drag = None;
+            let _ = bar.shelf_queue.drain();
+            bar.clipboard_listener = None;
+            unregister_bluetooth_hud_target();
+            unregister_capture_hotkey(bar.hwnd);
+            bar.quick_capture = None;
+            bar.seek_drag_hwnd = None;
+            bar.touch_swipe = None;
+            bar.notch.collapse_immediately();
+            if bar.hovered.is_some_and(is_notch_target) {
+                bar.hovered = None;
+            }
+            otto_platform::withdraw_notch_rect(bar.hwnd);
+        }
+        bar.recompute_layout();
+        bar.apply_visibility(runtime);
+        bar.sync_panel_visibility();
+        watch_top_edge(
+            bar.hidden_for_full_screen(),
+            bar.screen.width,
+            bar.screen.height,
+        );
+        if bar.shown() {
+            bar.present(runtime);
+        }
+        bar.schedule_deadline();
+    });
+}
+
+pub fn leave_keyboard_focus(runtime: &RuntimeContext) {
+    with_bar(runtime, |bar| {
+        if bar.focus.is_active() {
+            bar.leave_keyboard_focus(runtime);
+        }
+    });
+}
+
+#[must_use]
+pub fn control_center_anchor(
+    runtime: &RuntimeContext,
+    trigger: HitTarget,
+) -> Option<(i32, i32, MotionPreference)> {
+    with_bar_result(runtime, |bar| {
+        bar.top_bar_enabled.then(|| {
+            (
+                bar.anchor_right(trigger),
+                bar.layout.popup_anchor_y(bar.screen.dpi),
+                bar.motion,
+            )
+        })
+    })
+    .flatten()
+}
+
+#[must_use]
+pub fn search_slot_trigger(runtime: &RuntimeContext) -> Option<Rect> {
+    with_bar_result(runtime, |bar| {
+        (bar.top_bar_enabled && bar.layout.search_slot.width > 0).then_some(bar.layout.search_slot)
+    })
+    .flatten()
+}
+
 pub fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_privacy_enabled(enabled);
-        if enabled {
+        if enabled && bar.notch_enabled {
             let _ = bar
                 .notch
                 .sync_privacy_state(bar.notch_port.read_privacy_state());
@@ -874,7 +1062,7 @@ pub fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
 pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_clipboard_enabled(enabled);
-        if enabled {
+        if enabled && bar.notch_enabled {
             if bar.clipboard_listener.is_none() {
                 bar.clipboard_listener = ClipboardListenerGuard::register(bar.hwnd);
                 bar.last_clipboard_seq = clipboard_sequence_number();
@@ -893,7 +1081,7 @@ pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
 pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_shelf_enabled(enabled);
-        if enabled {
+        if enabled && bar.notch_enabled {
             bar.ensure_shelf_drop_targets();
         } else {
             bar.notch_drop_target = None;
@@ -908,10 +1096,51 @@ pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
+fn initial_visibility(menu_bar: MenuBarPreferences, top_bar_enabled: bool) -> BarVisibility {
+    let mut visibility = BarVisibility::default();
+    let mode = if top_bar_enabled {
+        menu_bar.hide_mode
+    } else {
+        BarHideMode::FullScreenOnly
+    };
+    visibility.set_mode(mode);
+    visibility
+}
+
+pub fn set_menu_bar_preferences(runtime: &RuntimeContext, preferences: MenuBarPreferences) {
+    with_bar(runtime, |bar| {
+        let items_changed = bar.menu_prefs.hidden_items != preferences.hidden_items;
+        let bg_changed = bar.menu_prefs.show_background != preferences.show_background;
+        let keep_changed = bar.menu_prefs.keep_notch != preferences.keep_notch;
+        bar.menu_prefs = preferences;
+        let visibility_changed = if bar.top_bar_enabled {
+            bar.visibility.set_mode(preferences.hide_mode) || keep_changed
+        } else {
+            false
+        };
+        if items_changed {
+            bar.recompute_layout();
+        }
+        if bg_changed {
+            bar.sync_backdrop(runtime, true);
+        }
+        if visibility_changed {
+            bar.apply_visibility(runtime);
+        }
+        watch_top_edge(
+            bar.hidden_for_full_screen(),
+            bar.screen.width,
+            bar.screen.height,
+        );
+        bar.present(runtime);
+        bar.schedule_deadline();
+    });
+}
+
 pub fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_hud_enabled(enabled);
-        if enabled {
+        if enabled && bar.notch_enabled {
             register_bluetooth_hud_target(bar.hwnd, WM_APP_BAR_BLUETOOTH_HUD);
         } else {
             unregister_bluetooth_hud_target();
@@ -967,16 +1196,44 @@ pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
 
 pub fn set_hotkeys_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
-        if enabled {
-            register_notch_hotkeys(bar.hwnd);
+        if enabled && bar.notch_enabled && bar.quick_capture.is_some() {
+            register_capture_hotkey(bar.hwnd);
         } else {
-            unregister_notch_hotkeys(bar.hwnd);
+            unregister_capture_hotkey(bar.hwnd);
         }
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+pub fn set_quick_capture_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
+        if enabled {
+            bar.notch.replace_tasks(load_tasks());
+            if bar.notch_enabled && bar.quick_capture.is_none() {
+                bar.quick_capture = QuickCaptureInput::create(bar.hwnd, WM_APP_BAR_CAPTURE);
+            }
+            if bar.notch_enabled && runtime.hotkeys_enabled.get() && bar.quick_capture.is_some() {
+                register_capture_hotkey(bar.hwnd);
+            }
+            bar.notch
+                .set_tasks_enabled(!bar.notch_enabled || bar.quick_capture.is_some());
+        } else {
+            unregister_capture_hotkey(bar.hwnd);
+            bar.quick_capture = None;
+            bar.notch.set_tasks_enabled(false);
+            bar.notch.replace_tasks(otto_core::TasksState::default());
+        }
+        bar.recompute_layout();
+        bar.sync_panel_visibility();
+        bar.present(runtime);
+        bar.ensure_anim_timer();
+    });
+}
+
+pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+    with_bar(runtime, |bar| {
+        if let Some(feed) = bar.backdrop.as_mut() {
+            feed.set_capture_visible(visible);
+        }
         bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
@@ -1085,25 +1342,47 @@ impl Bar {
     }
 
     fn notch_input(&self) -> NotchLayoutInput {
-        self.notch.layout_input(self.control_center_enabled)
+        NotchLayoutInput {
+            top_bar_enabled: self.top_bar_enabled,
+            notch_enabled: self.notch_enabled,
+            hidden_items: self.menu_prefs.hidden_items,
+            ..self.notch.layout_input(self.control_center_enabled)
+        }
     }
 
     fn recompute_layout(&mut self) {
         let renderer = &self.renderer;
-        if self.notch.sync_compact_title_width(
-            Instant::now(),
-            crate::notch::unix_now_ms(),
-            |text| renderer.compact_title_points(text),
-        ) {
+        if self.notch_enabled
+            && self.notch.sync_compact_title_width(
+                Instant::now(),
+                crate::notch::unix_now_ms(),
+                |text| renderer.compact_title_points(text),
+            )
+        {
             self.ensure_anim_timer();
         }
+        let notch_input = self.notch_input();
+        let settled = notch_input.panel_expansion <= 0.0 && notch_input.press_progress <= 0.0;
         self.layout = compute_layout_with_notch(
             &self.metrics,
             self.screen.width,
             self.screen.dpi,
             self.controls.active_app(),
-            self.notch_input(),
+            notch_input,
         );
+        if !self.notch_enabled {
+            otto_platform::withdraw_notch_rect(self.hwnd);
+        } else if settled {
+            let island = self.layout.notch.union(&self.layout.notch_secondary);
+            otto_platform::publish_notch_rect(
+                self.hwnd,
+                otto_core::Rect {
+                    y: self.layout.notch.y,
+                    height: self.layout.notch.height,
+                    ..island
+                },
+            );
+        }
         self.sync_bar_shelf_region();
     }
 
@@ -1126,7 +1405,7 @@ impl Bar {
     }
 
     fn on_bluetooth_hud(&mut self, runtime: &RuntimeContext, kind: NotchHudKind) {
-        if !self.notch.hud_enabled() {
+        if !self.notch_enabled || !self.notch.hud_enabled() {
             return;
         }
         self.notch.trigger_hud(kind);
@@ -1135,8 +1414,35 @@ impl Bar {
         self.schedule_deadline();
     }
 
+    fn open_quick_capture(&self) {
+        let Some(capture) = &self.quick_capture else {
+            return;
+        };
+        let center = self.layout.notch.x + self.layout.notch.width / 2;
+        capture.show(center, self.layout.notch.bottom(), self.screen.dpi);
+    }
+
+    fn on_quick_capture_submitted(&mut self, runtime: &RuntimeContext) {
+        let Some(submission) = self
+            .quick_capture
+            .as_ref()
+            .and_then(QuickCaptureInput::take_submission)
+        else {
+            return;
+        };
+        if !self.notch.add_task(&submission.text) {
+            signal_command_failure();
+            return;
+        }
+        if !save_tasks(self.notch.tasks_state()) {
+            signal_command_failure();
+        }
+        self.recompute_layout();
+        self.present(runtime);
+    }
+
     fn on_clipboard_update(&mut self, runtime: &RuntimeContext) {
-        if !self.notch.clipboard_enabled() {
+        if !self.notch_enabled || !self.notch.clipboard_enabled() {
             return;
         }
         if self.notch.clipboard_state().paused {
@@ -1244,11 +1550,13 @@ impl Bar {
     ) {
         match notification {
             otto_platform::ShellNotification::PositionChanged => {
-                self.appbar.reserve_top(
-                    self.screen.width,
-                    self.screen.height,
-                    self.layout.bar.height,
-                );
+                if self.top_bar_enabled {
+                    self.appbar.reserve_top(
+                        self.screen.width,
+                        self.screen.height,
+                        self.layout.bar.height,
+                    );
+                }
             }
             otto_platform::ShellNotification::FullScreenApp(active) => {
                 self.shell_full_screen = active;
@@ -1295,8 +1603,11 @@ impl Bar {
     }
 
     fn apply_visibility(&mut self, runtime: &RuntimeContext) {
-        self.notch.set_presented(self.visibility.is_visible());
-        if self.visibility.is_visible() {
+        self.notch.set_presented(self.notch_enabled && self.shown());
+        if !self.visibility.is_visible() {
+            crate::menu::close(runtime);
+        }
+        if self.shown() {
             self.place();
             self.present(runtime);
             self.schedule_deadline();
@@ -1309,10 +1620,23 @@ impl Bar {
             let _ = ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE);
         }
         self.panel_visible = false;
+        self.last_panel_rect = None;
+    }
+
+    const fn top_bar_chrome_visible(&self) -> bool {
+        self.top_bar_enabled && self.visibility.is_visible()
+    }
+
+    fn shown(&self) -> bool {
+        if self.top_bar_enabled {
+            self.visibility.is_visible() || (self.notch_enabled && self.menu_prefs.keep_notch)
+        } else {
+            self.notch_enabled && self.visibility.is_visible()
+        }
     }
 
     fn place(&self) {
-        if !self.visibility.is_visible() {
+        if !self.shown() {
             return;
         }
         let _ = unsafe {
@@ -1329,23 +1653,28 @@ impl Bar {
     }
 
     fn sync_panel_visibility(&mut self) {
-        let should_show = self.notch.panel_expansion() > 0.005 && self.visibility.is_visible();
+        let should_show =
+            self.notch_enabled && self.notch.panel_expansion() > 0.005 && self.shown();
         if should_show {
-            let _ = unsafe {
-                SetWindowPos(
-                    HWND(self.panel_hwnd as *mut _),
-                    Some(HWND_TOPMOST),
-                    self.layout.panel_window.x,
-                    self.layout.panel_window.y,
-                    self.layout.panel_window.width,
-                    self.layout.panel_window.height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                )
-            };
+            if !self.panel_visible || self.last_panel_rect != Some(self.layout.panel_window) {
+                let _ = unsafe {
+                    SetWindowPos(
+                        HWND(self.panel_hwnd as *mut _),
+                        Some(HWND_TOPMOST),
+                        self.layout.panel_window.x,
+                        self.layout.panel_window.y,
+                        self.layout.panel_window.width,
+                        self.layout.panel_window.height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    )
+                };
+                self.last_panel_rect = Some(self.layout.panel_window);
+            }
             self.panel_visible = true;
         } else if self.panel_visible {
             let _ = unsafe { ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE) };
             self.panel_visible = false;
+            self.last_panel_rect = None;
         }
     }
 
@@ -1360,6 +1689,7 @@ impl Bar {
                 )
             };
             if timer != 0 {
+                otto_platform::begin_fine_timing();
                 self.animating = true;
                 self.settle_ticks = 10;
             }
@@ -1372,7 +1702,7 @@ impl Bar {
             unsafe {
                 let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), HUD_ANIM_TIMER);
             }
-            otto_platform::trim_working_set();
+            otto_platform::end_fine_timing();
         }
     }
 
@@ -1381,6 +1711,7 @@ impl Bar {
     }
 
     fn rebuild_with_metrics(&mut self, runtime: &RuntimeContext, metrics: Metrics) {
+        self.last_panel_rect = None;
         self.screen = primary_screen();
         self.metrics = metrics;
         self.recompute_layout();
@@ -1400,22 +1731,25 @@ impl Bar {
             }
         }
         self.appbar.rebase(self.screen.width, self.screen.height);
-        self.appbar.reserve_top(
-            self.screen.width,
-            self.screen.height,
-            self.layout.bar.height,
-        );
+        if self.top_bar_enabled {
+            self.appbar.reserve_top(
+                self.screen.width,
+                self.screen.height,
+                self.layout.bar.height,
+            );
+        }
+        self.sync_backdrop(runtime, true);
         self.place();
         self.present(runtime);
-        self.sync_backdrop(runtime, true);
         self.ensure_anim_timer();
     }
 
     fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted =
-            !runtime.capture_visible.get() && capture_wanted(&appearance, self.backdrop.is_some());
-        let visible = self.visibility.is_visible();
+        let wanted = capture_wanted(&appearance, self.backdrop.is_some())
+            && self.top_bar_enabled
+            && self.menu_prefs.show_background;
+        let visible = self.top_bar_chrome_visible();
         let Some(feed) = self.backdrop.as_mut() else {
             return;
         };
@@ -1442,7 +1776,13 @@ impl Bar {
         else {
             return;
         };
-        let active = self.panel_visible || self.hovered.is_some();
+        if !self.renderer.has_bar_backdrop()
+            && let Some(pixels) =
+                otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
+        {
+            self.renderer.set_bar_backdrop(pixels, region.origin());
+        }
+        let active = (self.panel_visible || self.hovered.is_some()) && feed.recently_changed();
         let interval = capture_interval_for(is_running_on_battery(), active);
         feed.request(region, interval, force);
     }
@@ -1459,6 +1799,12 @@ impl Bar {
         if let Some(interval) = self.cadence.wake() {
             self.set_status_interval(interval);
             self.run_tick(runtime, true);
+        }
+    }
+
+    fn wake_timer_only(&mut self) {
+        if let Some(interval) = self.cadence.wake() {
+            self.set_status_interval(interval);
         }
     }
 
@@ -1485,7 +1831,9 @@ impl Bar {
     }
 
     fn hidden_for_full_screen(&self) -> bool {
-        self.visibility.tracks_pointer() && !self.visibility.is_visible()
+        (self.top_bar_enabled || self.notch_enabled)
+            && self.visibility.tracks_pointer()
+            && !self.visibility.is_visible()
     }
 
     fn status_busy(&self, runtime: &RuntimeContext, dirty: bool) -> bool {
@@ -1528,7 +1876,7 @@ impl Bar {
             crate::window_controls::poll_foreground(runtime);
         }
         if self.periodic_due(MAINTAIN_EVERY_TICKS) {
-            if self.notch.hud_enabled() {
+            if self.notch_enabled && self.notch.hud_enabled() {
                 suppress_native_osd();
             }
             self.appbar.maintain(
@@ -1536,7 +1884,7 @@ impl Bar {
                 self.screen.height,
                 self.layout.bar.height,
             );
-            if self.panel_visible && self.visibility.is_visible() {
+            if self.panel_visible && self.shown() {
                 let _ = unsafe {
                     SetWindowPos(
                         HWND(self.panel_hwnd as *mut _),
@@ -1584,13 +1932,19 @@ impl Bar {
                 self.recompute_layout();
                 dirty = true;
             }
-            if change.window
-                && (crate::menu::active_top_bar_target(runtime).is_some()
+            if change.window {
+                if crate::menu::active_top_bar_target(runtime).is_some()
                     || crate::menu::is_calendar_open(runtime)
-                    || crate::menu::is_notification_open(runtime))
-            {
-                crate::menu::close(runtime);
-                dirty = true;
+                    || crate::menu::is_notification_open(runtime)
+                {
+                    crate::menu::close(runtime);
+                    dirty = true;
+                }
+                if self.notch.collapse_from_external_focus_change() {
+                    self.recompute_layout();
+                    self.sync_panel_visibility();
+                    dirty = true;
+                }
             }
         }
         self.sync_full_screen(runtime);
@@ -1602,6 +1956,7 @@ impl Bar {
         if self.refresh_media(force_media) {
             dirty = true;
         }
+        dirty |= self.sync_notification_feed();
         if dirty {
             self.ensure_anim_timer();
             self.present(runtime);
@@ -1613,17 +1968,50 @@ impl Bar {
             self.screen.height,
         );
         let busy = self.status_busy(runtime, dirty);
+        self.observe_cadence(busy);
+    }
+
+    fn observe_cadence(&mut self, busy: bool) {
         if let Some(interval) = self.cadence.observe(busy) {
             self.set_status_interval(interval);
+            if self.cadence.is_idle() {
+                otto_platform::trim_working_set();
+            }
         }
+    }
+
+    fn sync_notification_feed(&mut self) -> bool {
+        if !self.notch_enabled {
+            return false;
+        }
+        let Some(snapshot) = otto_platform::take_notification_changes() else {
+            return false;
+        };
+        if !self
+            .notch
+            .ingest_notifications(&snapshot.items, Instant::now())
+        {
+            return false;
+        }
+        self.recompute_layout();
+        self.sync_panel_visibility();
+        true
     }
 
     fn refresh_media(&mut self, force_media: bool) -> bool {
         let mut dirty = false;
-        if should_refresh_system_status(force_media, self.cadence.is_idle(), self.maintain_ticks)
+        if (self.top_bar_enabled || self.notch_enabled)
+            && should_refresh_system_status(
+                force_media,
+                self.cadence.is_idle(),
+                self.maintain_ticks,
+            )
             && self.refresh_system_status()
         {
             dirty = true;
+        }
+        if !self.notch_enabled {
+            return dirty;
         }
         if self.notch.privacy_enabled()
             && self
@@ -1651,7 +2039,8 @@ impl Bar {
             latest.input_lang = previous.input_lang;
         }
         let mut dirty = false;
-        if self.notch.hud_enabled()
+        if self.notch_enabled
+            && self.notch.hud_enabled()
             && let Some(event) = detect_hud_event(previous, latest)
         {
             self.notch.trigger_hud(event);
@@ -1666,6 +2055,12 @@ impl Bar {
 
     fn schedule_deadline(&self) {
         let hwnd = Some(HWND(self.hwnd as *mut _));
+        if !self.notch_enabled {
+            unsafe {
+                let _ = KillTimer(hwnd, DEADLINE_TIMER);
+            }
+            return;
+        }
         let now = Instant::now();
         match self.notch.next_deadline(now) {
             Some(deadline) => {
@@ -1705,6 +2100,16 @@ impl Bar {
                 }
             }
             NotchEffect::PickShelfFiles => false,
+            NotchEffect::SaveTasks => {
+                if !save_tasks(self.notch.tasks_state()) {
+                    signal_command_failure();
+                }
+                false
+            }
+            NotchEffect::OpenQuickCapture => {
+                self.open_quick_capture();
+                false
+            }
             NotchEffect::CopyClipboard(payload) => {
                 if let Some(seq) = self.notch_port.copy_clipboard(&payload) {
                     self.suppressed_clipboard_seq = Some(seq);
@@ -1728,7 +2133,13 @@ impl Bar {
     }
 
     fn on_deadline(&mut self, runtime: &RuntimeContext) {
-        let update = self.notch.sync_clock(Instant::now());
+        let now = Instant::now();
+        let (cx, cy) = cursor_position();
+        let hovered = self.layout.notch.contains(cx, cy);
+        let mut update = self.notch.sync_clock(now);
+        if self.notch.sync_notifications(now, hovered) {
+            update.changed = true;
+        }
         self.apply_notch_update(runtime, update);
         self.schedule_deadline();
     }
@@ -1782,7 +2193,7 @@ impl Bar {
     }
 
     fn enter_keyboard_focus(&mut self, runtime: &RuntimeContext) {
-        if !self.visibility.is_visible() {
+        if !self.shown() {
             return;
         }
         crate::menu::close(runtime);
@@ -1795,7 +2206,7 @@ impl Bar {
     }
 
     fn enter_from_dock(&mut self, runtime: &RuntimeContext, from_end: bool) {
-        if !self.visibility.is_visible() {
+        if !self.shown() {
             stop_routing_if_targets(self.hwnd);
             return;
         }
@@ -1836,7 +2247,7 @@ impl Bar {
         if !self.focus.is_active() {
             return;
         }
-        if !routes_keys_to(self.hwnd) || !self.visibility.is_visible() {
+        if !routes_keys_to(self.hwnd) || !self.shown() {
             self.leave_keyboard_focus(runtime);
         } else if self.focus.revalidate(&self.keyboard_targets()) {
             self.present(runtime);
@@ -1879,8 +2290,8 @@ impl Bar {
         }
         if let Some(action) = BarControlsController::click_action(target) {
             match action {
-                BarControlAction::ControlCenter(page) => {
-                    self.toggle_control_center(runtime, page, true);
+                BarControlAction::ControlCenter { page, trigger } => {
+                    self.toggle_control_center(runtime, page, trigger, true);
                 }
                 other => self.perform(runtime, other),
             }
@@ -1935,8 +2346,8 @@ impl Bar {
                 self.present(runtime);
                 if let Some(action) = BarControlsController::click_action(target) {
                     match action {
-                        BarControlAction::ControlCenter(page) => {
-                            self.toggle_control_center(runtime, page, true);
+                        BarControlAction::ControlCenter { page, trigger } => {
+                            self.toggle_control_center(runtime, page, trigger, true);
                         }
                         other => self.perform(runtime, other),
                     }
@@ -1955,10 +2366,11 @@ impl Bar {
             }
             return;
         }
-        if hotkey_id == otto_platform::HOTKEY_CONTROL_CENTER {
-            self.leave_keyboard_focus(runtime);
-            self.toggle_control_center(runtime, ControlCenterPage::Main, true);
-            self.present(runtime);
+        if !self.notch_enabled {
+            return;
+        }
+        if hotkey_id == otto_platform::HOTKEY_QUICK_CAPTURE {
+            self.open_quick_capture();
             return;
         }
         self.ensure_anim_timer();
@@ -2012,8 +2424,10 @@ impl Bar {
         self.ensure_mouse_tracking(source_hwnd);
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
 
-        self.notch
-            .handle_pointer_move(self.layout.notch.contains(x, y));
+        if self.notch_enabled {
+            self.notch
+                .handle_pointer_move(self.layout.notch.contains(x, y));
+        }
 
         let target = self.layout.hit_test(x, y);
         if target != self.hovered || self.layout.notch.contains(x, y) {
@@ -2117,6 +2531,7 @@ impl Bar {
                 | HitTarget::PomodoroSkip
                 | HitTarget::NotchTabShelf
                 | HitTarget::NotchTabClipboard
+                | HitTarget::NotchTabTasks
                 | HitTarget::ShelfAdd
                 | HitTarget::ShelfClear
                 | HitTarget::ShelfPager
@@ -2127,7 +2542,13 @@ impl Bar {
                 | HitTarget::ClipboardClear
                 | HitTarget::ClipboardPager
                 | HitTarget::ClipboardItem(_)
-                | HitTarget::ClipboardRemoveItem(_)),
+                | HitTarget::ClipboardRemoveItem(_)
+                | HitTarget::TasksAdd
+                | HitTarget::TasksClearDone
+                | HitTarget::TasksPager
+                | HitTarget::TaskItem(_)
+                | HitTarget::TaskCheck(_)
+                | HitTarget::TaskRemove(_)),
             ) = hit
         {
             let update = self.notch.handle_wheel(target, delta);
@@ -2279,9 +2700,21 @@ impl Bar {
         &self,
         runtime: &RuntimeContext,
         page: ControlCenterPage,
+        trigger: HitTarget,
         focused: bool,
     ) {
         if !self.control_center_enabled {
+            let action = match page {
+                ControlCenterPage::Wifi => Some(ControlCenterAction::OpenWifi),
+                ControlCenterPage::Sound => Some(ControlCenterAction::OpenSound),
+                _ => None,
+            };
+            if let Some(action) = action {
+                let _ = close_tray_overflow();
+                crate::menu::close(runtime);
+                crate::control_center::close(runtime);
+                crate::control_center::open_settings_action(action);
+            }
             return;
         }
         let _ = close_tray_overflow();
@@ -2292,12 +2725,18 @@ impl Bar {
             return;
         }
         crate::menu::close(runtime);
-        let anchor_right = self.anchor_right(HitTarget::ControlCenter);
+        let anchor_right = self.anchor_right(trigger);
         let anchor_y = self.layout.popup_anchor_y(self.screen.dpi);
         if focused {
-            crate::control_center::open_at_page_focused(runtime, page, anchor_right, anchor_y);
+            crate::control_center::open_at_page_focused(
+                runtime,
+                page,
+                anchor_right,
+                anchor_y,
+                self.motion,
+            );
         } else {
-            crate::control_center::open_at_page(runtime, page, anchor_right, anchor_y);
+            crate::control_center::open_at_page(runtime, page, anchor_right, anchor_y, self.motion);
         }
     }
 
@@ -2334,14 +2773,23 @@ impl Bar {
                     signal_command_failure();
                 }
             }
-            BarControlAction::ControlCenter(page) => {
-                self.toggle_control_center(runtime, page, false);
+            BarControlAction::ControlCenter { page, trigger } => {
+                self.toggle_control_center(runtime, page, trigger, false);
             }
-            BarControlAction::Search => {
+            BarControlAction::OpenSettings(action) => {
                 let _ = close_tray_overflow();
                 crate::menu::close(runtime);
                 crate::control_center::close(runtime);
-                open_spotlight_search();
+                crate::control_center::open_settings_action(action);
+            }
+            BarControlAction::Search => {
+                self.leave_keyboard_focus(runtime);
+                let _ = close_tray_overflow();
+                crate::menu::close(runtime);
+                crate::control_center::close(runtime);
+                let trigger =
+                    (self.layout.search_slot.width > 0).then_some(self.layout.search_slot);
+                crate::spotlight::open_search(runtime, trigger);
             }
             BarControlAction::Notifications => {
                 let _ = close_tray_overflow();
@@ -2380,38 +2828,56 @@ impl Bar {
     ) {
         self.ensure_anim_timer();
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
-        if let Some(HitTarget::ShelfItem(slot)) = self.layout.hit_test(x, y) {
-            let update = self.notch.handle_shelf_right_click(slot);
-            self.apply_notch_update(runtime, update);
-            return;
-        }
-        if self.layout.secondary_expansion > 0.25 && self.layout.notch_secondary.contains(x, y) {
-            let update = self.notch.dismiss_secondary_compact(Instant::now());
-            if update.changed {
-                self.recompute_layout();
-                self.present(runtime);
+        if self.notch_enabled {
+            if let Some(HitTarget::ShelfItem(slot)) = self.layout.hit_test(x, y) {
+                let update = self.notch.handle_shelf_right_click(slot);
+                self.apply_notch_update(runtime, update);
                 return;
             }
-        }
-        if self.layout.notch.contains(x, y) {
-            let update = self.notch.dismiss_compact(Instant::now());
-            if update.changed {
-                self.recompute_layout();
-                self.present(runtime);
-                return;
+            if self.layout.secondary_expansion > 0.25 && self.layout.notch_secondary.contains(x, y)
+            {
+                let update = self.notch.dismiss_secondary_compact(Instant::now());
+                if update.changed {
+                    self.recompute_layout();
+                    self.present(runtime);
+                    return;
+                }
+            }
+            if self.layout.notch.contains(x, y) {
+                let update = self.notch.dismiss_compact(Instant::now());
+                if update.changed {
+                    self.recompute_layout();
+                    self.present(runtime);
+                    return;
+                }
             }
         }
-        let anchor_x = if self.layout.hit_test(x, y) == Some(HitTarget::Start) {
-            self.layout.start_slot.x
-        } else {
-            x
-        };
-        self.open_menu(runtime, HitTarget::Start, Some(anchor_x));
-        self.present(runtime);
+        if self.top_bar_chrome_visible() {
+            let anchor_x = if self.layout.hit_test(x, y) == Some(HitTarget::Start) {
+                self.layout.start_slot.x
+            } else {
+                x
+            };
+            self.open_menu(runtime, HitTarget::Start, Some(anchor_x));
+            self.present(runtime);
+        } else if self.notch_enabled && self.layout.notch.contains(x, y) {
+            crate::menu::open_tray_menu(
+                runtime,
+                x,
+                self.layout.popup_anchor_y(self.screen.dpi),
+                false,
+            );
+            self.present(runtime);
+        }
     }
 
     fn present(&mut self, runtime: &RuntimeContext) {
-        runtime.focus_active.set(self.notch.focus_active());
+        runtime
+            .focus_active
+            .set(self.notch_enabled && self.notch.focus_active());
+        if !self.shown() {
+            return;
+        }
         let hovered = self
             .hovered
             .or_else(|| crate::menu::active_top_bar_target(runtime))
@@ -2419,6 +2885,10 @@ impl Bar {
                 crate::menu::is_notification_open(runtime).then_some(HitTarget::Notifications)
             })
             .or_else(|| crate::menu::is_calendar_open(runtime).then_some(HitTarget::Clock));
+        self.renderer
+            .set_bar_background(self.top_bar_enabled && self.menu_prefs.show_background);
+        self.renderer
+            .set_bar_chrome_hidden(!self.top_bar_chrome_visible());
         let appearance = crate::theme_state::appearance(runtime);
         let media = self
             .notch
@@ -2442,6 +2912,7 @@ impl Bar {
                 self.notch.anim_phase(),
                 appearance,
                 privacy,
+                self.notch.call_scene(Instant::now()).as_ref(),
             ),
         );
         if self.panel_visible {
@@ -2458,7 +2929,11 @@ impl Bar {
                     self.notch.lyrics_view(),
                     self.notch.shelf_state(),
                     self.notch.clipboard_state(),
+                    self.notch.tasks_state(),
                     privacy,
+                    self.notch
+                        .notification_presentation(Instant::now())
+                        .as_ref(),
                 ),
             );
         }
@@ -2478,6 +2953,7 @@ const fn active_notch_tab_target(tab: NotchExpandedTab) -> HitTarget {
         NotchExpandedTab::Pomodoro => HitTarget::NotchTabPomodoro,
         NotchExpandedTab::Shelf => HitTarget::NotchTabShelf,
         NotchExpandedTab::Clipboard => HitTarget::NotchTabClipboard,
+        NotchExpandedTab::Tasks => HitTarget::NotchTabTasks,
         NotchExpandedTab::Media => HitTarget::NotchTabMedia,
     }
 }
@@ -2497,6 +2973,7 @@ fn is_notch_target(target: HitTarget) -> bool {
             | HitTarget::NotchTabPomodoro
             | HitTarget::NotchTabShelf
             | HitTarget::NotchTabClipboard
+            | HitTarget::NotchTabTasks
             | HitTarget::NotchTabMedia
             | HitTarget::ShelfAdd
             | HitTarget::ShelfClear
@@ -2509,12 +2986,22 @@ fn is_notch_target(target: HitTarget) -> bool {
             | HitTarget::ClipboardPager
             | HitTarget::ClipboardItem(_)
             | HitTarget::ClipboardRemoveItem(_)
+            | HitTarget::TasksAdd
+            | HitTarget::TasksClearDone
+            | HitTarget::TasksPager
+            | HitTarget::TaskItem(_)
+            | HitTarget::TaskCheck(_)
+            | HitTarget::TaskRemove(_)
             | HitTarget::PrivacyIndicator
             | HitTarget::PrivacyMicMute
             | HitTarget::MediaPlayPause
             | HitTarget::MediaPrevious
             | HitTarget::MediaNext
             | HitTarget::MediaLyricsToggle
+            | HitTarget::NotificationCard
+            | HitTarget::NotificationClose
+            | HitTarget::NotificationAccept
+            | HitTarget::NotificationDecline
     )
 }
 
@@ -2524,6 +3011,9 @@ pub fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) 
 
 pub fn toggle_focus_mode(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| {
+        if !bar.notch_enabled {
+            return;
+        }
         bar.ensure_anim_timer();
         let update = bar.notch.handle_hotkey(NotchHotkey::TogglePomodoro);
         bar.apply_notch_update(runtime, update);
@@ -2534,7 +3024,7 @@ pub fn toggle_focus_mode(runtime: &RuntimeContext) {
 
 pub fn open_notch_media(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| {
-        if !bar.notch.media_enabled() || bar.notch.media().is_none() {
+        if !bar.notch_enabled || !bar.notch.media_enabled() || bar.notch.media().is_none() {
             return;
         }
         bar.ensure_anim_timer();
@@ -2543,18 +3033,6 @@ pub fn open_notch_media(runtime: &RuntimeContext) {
         bar.sync_panel_visibility();
         bar.present(runtime);
         bar.schedule_deadline();
-    });
-}
-
-pub fn open_otto_settings(runtime: &RuntimeContext) {
-    with_bar(runtime, |bar| {
-        crate::menu::close(runtime);
-        crate::control_center::open_at_page(
-            runtime,
-            ControlCenterPage::OttoSettings,
-            bar.anchor_right(HitTarget::ControlCenter),
-            bar.layout.bar.height + 4,
-        );
     });
 }
 
@@ -2586,6 +3064,7 @@ const fn should_wheel_collapse_notch(
                 HitTarget::NotchTabPomodoro
                     | HitTarget::NotchTabShelf
                     | HitTarget::NotchTabClipboard
+                    | HitTarget::NotchTabTasks
                     | HitTarget::NotchTabMedia
             )
         )
@@ -2724,5 +3203,13 @@ mod tests {
         assert!(
             super::prepare_modal_action(&runtime, DeferredModalAction::PickShelfFiles).is_none()
         );
+    }
+
+    #[test]
+    fn mouse_move_uses_non_blocking_wake_while_clicks_and_hotkeys_wake_synchronously() {
+        assert!(!super::wakes_status_tick(super::WM_MOUSEMOVE));
+        assert!(super::wakes_status_tick(super::WM_LBUTTONDOWN));
+        assert!(super::wakes_status_tick(super::WM_HOTKEY));
+        assert!(super::wakes_status_tick(super::WM_POWERBROADCAST));
     }
 }

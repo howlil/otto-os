@@ -1,5 +1,5 @@
 use crate::control_center::{
-    ControlCenterHitTarget, ControlCenterLayout, ControlCenterSnapshot, OttoSettingsCategory,
+    ControlCenterHitTarget, ControlCenterLayout, ControlCenterSnapshot, OttoSettingsArea,
     control_center_focus_targets,
 };
 use crate::dock::DockLayout;
@@ -77,6 +77,14 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::ControlCenter => 39,
         HitTarget::Clock => 40,
         HitTarget::Notifications => 41,
+        HitTarget::NotificationCard => 42,
+        HitTarget::NotificationClose => 43,
+        HitTarget::NotificationAccept => 44,
+        HitTarget::NotificationDecline => 45,
+        HitTarget::NotchTabTasks => 46,
+        HitTarget::TasksAdd => 47,
+        HitTarget::TasksClearDone => 48,
+        HitTarget::TasksPager => 49,
         HitTarget::PomodoroPreset(i) => 100 + i as i32,
         HitTarget::FocusMode(mode) => 200 + mode.index() as i32,
         HitTarget::ShelfItem(i) => 300 + i as i32,
@@ -84,6 +92,9 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::ShelfRemoveItem(i) => 500 + i as i32,
         HitTarget::ClipboardItem(i) => 600 + i as i32,
         HitTarget::ClipboardRemoveItem(i) => 700 + i as i32,
+        HitTarget::TaskItem(i) => 800 + i as i32,
+        HitTarget::TaskCheck(i) => 900 + i as i32,
+        HitTarget::TaskRemove(i) => 1000 + i as i32,
     }
 }
 
@@ -131,6 +142,14 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         39 => Some(HitTarget::ControlCenter),
         40 => Some(HitTarget::Clock),
         41 => Some(HitTarget::Notifications),
+        42 => Some(HitTarget::NotificationCard),
+        43 => Some(HitTarget::NotificationClose),
+        44 => Some(HitTarget::NotificationAccept),
+        45 => Some(HitTarget::NotificationDecline),
+        46 => Some(HitTarget::NotchTabTasks),
+        47 => Some(HitTarget::TasksAdd),
+        48 => Some(HitTarget::TasksClearDone),
+        49 => Some(HitTarget::TasksPager),
         100..=199 => Some(HitTarget::PomodoroPreset((tag - 100) as u8)),
         200 => Some(HitTarget::FocusMode(FocusSubMode::Pomodoro)),
         201 => Some(HitTarget::FocusMode(FocusSubMode::Timer)),
@@ -140,6 +159,9 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         500..=599 => Some(HitTarget::ShelfRemoveItem((tag - 500) as u8)),
         600..=699 => Some(HitTarget::ClipboardItem((tag - 600) as u8)),
         700..=799 => Some(HitTarget::ClipboardRemoveItem((tag - 700) as u8)),
+        800..=899 => Some(HitTarget::TaskItem((tag - 800) as u8)),
+        900..=999 => Some(HitTarget::TaskCheck((tag - 900) as u8)),
+        1000..=1099 => Some(HitTarget::TaskRemove((tag - 1000) as u8)),
         _ => None,
     }
 }
@@ -168,7 +190,7 @@ pub const fn encode_control_center_target(target: ControlCenterHitTarget) -> i32
         ControlCenterHitTarget::HeaderToggle => 20,
         ControlCenterHitTarget::FooterPrimary => 21,
         ControlCenterHitTarget::FooterSecondary => 22,
-        ControlCenterHitTarget::OttoCategoryTab(cat) => 40 + cat.index() as i32,
+        ControlCenterHitTarget::OttoAreaCard(area) => 40 + area.index() as i32,
         ControlCenterHitTarget::SubPanelItem(idx) => 1000 + idx as i32,
     }
 }
@@ -197,17 +219,8 @@ pub const fn decode_control_center_target(tag: i32) -> Option<ControlCenterHitTa
         20 => Some(ControlCenterHitTarget::HeaderToggle),
         21 => Some(ControlCenterHitTarget::FooterPrimary),
         22 => Some(ControlCenterHitTarget::FooterSecondary),
-        40 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::All,
-        )),
-        41 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::Modules,
-        )),
-        42 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::NotchAndDock,
-        )),
-        43 => Some(ControlCenterHitTarget::OttoCategoryTab(
-            OttoSettingsCategory::System,
+        40..=45 => Some(ControlCenterHitTarget::OttoAreaCard(
+            OttoSettingsArea::ALL[(tag - 40) as usize],
         )),
         1000..=99999 => Some(ControlCenterHitTarget::SubPanelItem((tag - 1000) as usize)),
         _ => None,
@@ -235,6 +248,7 @@ fn bar_target_role(target: HitTarget) -> AccessibleRole {
         HitTarget::NotchTabPomodoro
         | HitTarget::NotchTabShelf
         | HitTarget::NotchTabClipboard
+        | HitTarget::NotchTabTasks
         | HitTarget::NotchTabMedia => AccessibleRole::Tab,
         HitTarget::MediaSeekbar => AccessibleRole::Slider,
         _ => AccessibleRole::Button,
@@ -287,6 +301,30 @@ fn bar_shelf_clipboard_metadata(target: HitTarget) -> Option<(String, String)> {
             format!("otto.notch.clipboard.remove.{i}"),
             format!("Remove Clipboard Item {}", i + 1),
         ),
+        HitTarget::TasksAdd => (
+            String::from("otto.notch.tasks.add"),
+            String::from("Add Task"),
+        ),
+        HitTarget::TasksClearDone => (
+            String::from("otto.notch.tasks.clear_done"),
+            String::from("Clear Done Tasks"),
+        ),
+        HitTarget::TasksPager => (
+            String::from("otto.notch.tasks.pager"),
+            String::from("Tasks Page"),
+        ),
+        HitTarget::TaskItem(i) => (
+            format!("otto.notch.tasks.item.{i}"),
+            format!("Focus on Task {}", i + 1),
+        ),
+        HitTarget::TaskCheck(i) => (
+            format!("otto.notch.tasks.check.{i}"),
+            format!("Toggle Task {} Done", i + 1),
+        ),
+        HitTarget::TaskRemove(i) => (
+            format!("otto.notch.tasks.remove.{i}"),
+            format!("Remove Task {}", i + 1),
+        ),
         _ => return None,
     };
     Some(pair)
@@ -338,6 +376,7 @@ fn bar_notch_target_metadata(target: HitTarget) -> Option<(String, String)> {
             String::from("otto.notch.tab.clipboard"),
             String::from("Clipboard"),
         ),
+        HitTarget::NotchTabTasks => (String::from("otto.notch.tab.tasks"), String::from("Tasks")),
         HitTarget::NotchTabMedia => (
             String::from("otto.notch.tab.media"),
             String::from("Now Playing"),
@@ -414,6 +453,22 @@ fn bar_target_metadata(target: HitTarget, app_name: &str) -> (String, String) {
         HitTarget::Notifications => (
             String::from("otto.bar.notifications"),
             String::from("Notifications"),
+        ),
+        HitTarget::NotificationCard => (
+            String::from("otto.notch.notification"),
+            String::from("Open Notification"),
+        ),
+        HitTarget::NotificationClose => (
+            String::from("otto.notch.notification.dismiss"),
+            String::from("Dismiss Notification"),
+        ),
+        HitTarget::NotificationAccept => (
+            String::from("otto.notch.call.open"),
+            String::from("Open Call Window"),
+        ),
+        HitTarget::NotificationDecline => (
+            String::from("otto.notch.call.dismiss"),
+            String::from("Dismiss Call Alert"),
         ),
         _ => (String::from("otto.bar.clock"), String::from("Clock")),
     }
@@ -544,10 +599,10 @@ fn control_center_subpanel_meta(
             String::from("Toggle"),
             AccessibleRole::Button,
         ),
-        ControlCenterHitTarget::OttoCategoryTab(cat) => (
-            format!("otto.cc.category.{}", cat.index()),
-            format!("{cat:?}"),
-            AccessibleRole::Tab,
+        ControlCenterHitTarget::OttoAreaCard(area) => (
+            format!("otto.cc.area.{}", area.index()),
+            String::from(area.label()),
+            AccessibleRole::Button,
         ),
         ControlCenterHitTarget::SubPanelItem(idx) => (
             format!("otto.cc.item.{idx}"),
@@ -707,7 +762,7 @@ mod tests {
     };
     use crate::control_center::{
         ControlCenterHitTarget, ControlCenterMetrics, ControlCenterPage, ControlCenterPlacement,
-        ControlCenterSnapshot, OttoSettingsCategory, compute_control_center_layout,
+        ControlCenterSnapshot, OttoSettingsArea, compute_control_center_layout,
     };
     use crate::dock::{DockInput, DockMetrics, compute_dock_layout};
     use crate::layout::{HitTarget, Metrics, Rect, compute_layout_for_app};
@@ -735,7 +790,7 @@ mod tests {
         for target in [
             ControlCenterHitTarget::WifiToggle,
             ControlCenterHitTarget::BatteryTile,
-            ControlCenterHitTarget::OttoCategoryTab(OttoSettingsCategory::NotchAndDock),
+            ControlCenterHitTarget::OttoAreaCard(OttoSettingsArea::Notch),
             ControlCenterHitTarget::SubPanelItem(7),
             ControlCenterHitTarget::FooterSecondary,
         ] {

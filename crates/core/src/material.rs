@@ -294,6 +294,19 @@ impl SemanticColors {
     pub const fn focus_ring(&self) -> Rgba {
         self.text_primary
     }
+
+    #[must_use]
+    pub const fn notch_rim_stops(&self, is_high_contrast: bool) -> (Rgba, Rgba, Rgba) {
+        if is_high_contrast {
+            (self.specular_rim, self.specular_rim, self.specular_rim)
+        } else {
+            (
+                Rgba::new(1.0, 1.0, 1.0, 0.18),
+                Rgba::new(1.0, 1.0, 1.0, 0.06),
+                Rgba::new(1.0, 1.0, 1.0, 0.11),
+            )
+        }
+    }
 }
 
 const fn pressed_alpha(alpha: f32) -> f32 {
@@ -651,5 +664,23 @@ mod tests {
                 height: 36,
             }
         );
+    }
+
+    #[test]
+    fn notch_rim_stops_order_specular_alphas_and_honor_high_contrast() {
+        let glass = appearance(ResolvedTheme::Dark, true).colors();
+        let (top, mid, bottom) = glass.notch_rim_stops(false);
+        assert!(top.a > bottom.a);
+        assert!(bottom.a > mid.a);
+
+        let high_contrast = Appearance {
+            contrast: Some(ContrastColors::BLACK_THEME),
+            ..appearance(ResolvedTheme::Dark, true)
+        }
+        .colors();
+        let (hc_top, hc_mid, hc_bottom) = high_contrast.notch_rim_stops(true);
+        assert_eq!(hc_top, high_contrast.specular_rim);
+        assert_eq!(hc_mid, high_contrast.specular_rim);
+        assert_eq!(hc_bottom, high_contrast.specular_rim);
     }
 }

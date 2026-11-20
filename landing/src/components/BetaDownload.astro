@@ -1,0 +1,84 @@
+---
+import { Download } from "lucide-astro";
+
+const releasesUrl = "https://github.com/howlil/otto-os/releases";
+---
+
+<div id="unduh" class="mt-7 flex w-full scroll-mt-24 flex-col items-center">
+  <a
+    href={releasesUrl}
+    data-beta-download
+    aria-describedby="beta-download-status"
+    class="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-accent px-5 text-sm font-medium text-white transition-colors duration-150 hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
+  >
+    <Download size={16} strokeWidth={1.8} aria-hidden="true" />
+    <span data-beta-download-label>Unduh Otto OS</span>
+  </a>
+  <p
+    id="beta-download-status"
+    role="status"
+    aria-live="polite"
+    class="mt-3 text-xs leading-relaxed text-muted sm:text-sm"
+    data-beta-download-status
+  >
+    Memeriksa rilis terbaru…
+  </p>
+</div>
+
+<script>
+  type ReleaseDownloadInfo = {
+    version: string | null;
+    downloadUrl: string | null;
+    downloads: number;
+    prerelease?: boolean;
+  };
+
+  function isReleaseDownloadInfo(value: unknown): value is ReleaseDownloadInfo {
+    if (typeof value !== "object" || value === null) return false;
+    const info = value as Record<string, unknown>;
+    return (
+      (typeof info.version === "string" || info.version === null) &&
+      (typeof info.downloadUrl === "string" || info.downloadUrl === null) &&
+      Number.isInteger(info.downloads) &&
+      Number(info.downloads) >= 0 &&
+      (typeof info.prerelease === "boolean" || typeof info.prerelease === "undefined")
+    );
+  }
+
+  const link = document.querySelector<HTMLAnchorElement>("[data-beta-download]");
+  const label = document.querySelector<HTMLElement>("[data-beta-download-label]");
+  const status = document.querySelector<HTMLElement>("[data-beta-download-status]");
+
+  if (link && label && status) {
+    const releasesUrl = "https://github.com/howlil/otto-os/releases";
+    const formatCount = (count: number) => new Intl.NumberFormat("id-ID").format(count);
+
+    try {
+      const response = await fetch("/api/beta-downloads", {
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Release metadata unavailable");
+
+      const payload: unknown = await response.json();
+      if (!isReleaseDownloadInfo(payload)) throw new Error("Invalid release metadata");
+
+      if (payload.downloadUrl && payload.version) {
+        link.href = payload.downloadUrl;
+        label.textContent = payload.prerelease
+          ? `Unduh Beta ${payload.version}`
+          : `Unduh Otto OS ${payload.version}`;
+        status.textContent = payload.prerelease
+          ? `${formatCount(payload.downloads)} unduhan beta`
+          : `${formatCount(payload.downloads)} unduhan`;
+      } else {
+        link.href = releasesUrl;
+        label.textContent = "Lihat rilis terbaru";
+        status.textContent = `Rilis belum diterbitkan · ${formatCount(payload.downloads)} unduhan`;
+      }
+    } catch {
+      link.href = releasesUrl;
+      label.textContent = "Buka halaman rilis";
+      status.textContent = "Status unduhan belum dapat dimuat.";
+    }
+  }
+</script>

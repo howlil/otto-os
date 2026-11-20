@@ -2,9 +2,11 @@ mod actions;
 mod appbar;
 mod audio;
 mod backdrop;
+mod background_cleanup;
 mod blur;
 mod caption;
 mod capture;
+mod capture_input;
 mod clipboard;
 mod com;
 mod connectivity;
@@ -22,40 +24,51 @@ mod media;
 mod motion;
 mod native_minimize;
 mod notch;
+mod notch_rect;
 mod notifications;
 mod os_events;
 mod os_version;
 mod privacy;
 mod screen;
 mod shelf;
+mod spotlight;
 mod startup;
 mod status;
+mod tasks;
 mod theme;
+mod timer_resolution;
 mod trash;
+mod tray_icon;
 mod uia;
+mod window_corners;
 mod window_model;
 mod winrt_io;
 mod worker;
 
 pub use actions::{
-    HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
-    MenuCommandResult, MenuNavEvent, TrayOverflowOutcome, adjust_volume, close_tray_overflow,
-    execute_control_center_command, execute_top_bar_command, is_escape_down, is_shift_down,
-    load_apple_fonts, open_calendar_notifications, open_downloads_folder, open_path,
+    HOTKEY_CONTROL_CENTER, HOTKEY_FOCUS_BAR, HOTKEY_OTTO_SETTINGS, HOTKEY_QUICK_CAPTURE,
+    HOTKEY_SPOTLIGHT, HOTKEY_TOGGLE_DOCK, HOTKEY_TOGGLE_NOTCH, HOTKEY_TOGGLE_POMODORO,
+    HOTKEY_TOGGLE_TOP_BAR, MenuCommandResult, MenuNavEvent, TrayOverflowOutcome, adjust_volume,
+    close_tray_overflow, execute_control_center_command, execute_top_bar_command, is_escape_down,
+    is_shift_down, load_apple_fonts, open_calendar_notifications, open_downloads_folder, open_path,
     open_quick_settings, open_spotlight_search, open_start_menu, open_task_view,
-    play_pomodoro_chime, poll_menu_events, register_notch_hotkeys, remove_apple_fonts,
-    signal_command_failure, toggle_tray_overflow, trim_working_set, unregister_notch_hotkeys,
+    play_pomodoro_chime, poll_menu_events, register_capture_hotkey, register_notch_hotkeys,
+    register_settings_hotkey, register_shell_hotkeys, remove_apple_fonts, signal_command_failure,
+    toggle_tray_overflow, trim_working_set, unregister_capture_hotkey, unregister_notch_hotkeys,
+    unregister_settings_hotkey, unregister_shell_hotkeys,
 };
 pub use appbar::{
-    APPBAR_CALLBACK_MESSAGE, AppBar, ShellNotification, classify_shell_notification,
-    restore_shell_from_recovery,
+    APPBAR_CALLBACK_MESSAGE, AppBar, DockReservation, ShellNotification,
+    classify_shell_notification, restore_shell_from_recovery,
 };
 pub use audio::{
     set_system_mute, set_system_volume, shutdown_audio_task, step_system_volume, toggle_system_mute,
 };
 pub use backdrop::{
-    BackdropFrame, BackdropRequest, BackdropWorker, exclude_from_capture, include_in_capture,
+    BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, exclude_from_capture,
+    include_in_capture,
 };
+pub use background_cleanup::set_background_cleanup;
 pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
 pub use caption::{
     activate_window_no_restore, double_click_ms, drag_threshold, drag_threshold_exceeded,
@@ -64,6 +77,7 @@ pub use caption::{
     window_corner_radius_px,
 };
 pub use capture::release_capture_if_owned;
+pub use capture_input::{CaptureSubmission, QuickCaptureInput};
 pub use clipboard::{
     ClipboardListenerGuard, ClipboardRead, WM_CLIPBOARDUPDATE, clipboard_sequence_number,
     read_clipboard_payload,
@@ -112,9 +126,11 @@ pub use native_minimize::{
     acknowledge_native_minimize, install_native_minimize_hook, uninstall_native_minimize_hook,
 };
 pub use notch::WindowsNotchPort;
+pub use notch_rect::{publish_notch_rect, withdraw_notch_rect};
 pub use notifications::{
     clear_notifications, dismiss_notification, read_notification_app_counts,
-    read_notifications_snapshot, request_notification_access, shutdown_notifications_task,
+    read_notifications_snapshot, remove_notification, request_notification_access,
+    shutdown_notifications_task, take_notification_changes,
 };
 pub use os_events::{
     WindowChangeGenerations, acknowledge_window_sync, install_window_event_hooks,
@@ -133,10 +149,12 @@ pub use shelf::{
     ShelfDropEvent, ShelfDropQueue, ShelfDropRegion, ShelfDropTargetGuard, WM_APP_SHELF_EVENT,
     register_shelf_drop_target,
 };
+pub use spotlight::collect_spotlight_apps;
 pub use startup::{read_launch_at_login, set_launch_at_login};
 pub use status::{
     read_system_status, set_display_brightness, shutdown_status_task, step_display_brightness,
 };
+pub use tasks::{load_tasks, save_tasks};
 pub use theme::{
     PowerNotificationGuard, is_battery_saver_active, is_high_contrast_active,
     is_running_on_battery, is_system_in_dark_mode, is_transparency_enabled, read_system_appearance,
@@ -145,7 +163,9 @@ pub use theme::{
 pub use trash::{
     empty_recycle_bin, is_recycle_bin_full, resume_recycle_bin_task, shutdown_recycle_bin_task,
 };
+pub use tray_icon::{TrayIcon, TrayIconEvent, WM_APP_TRAY_ICON, classify_tray_icon_message};
 pub use uia::{WM_APP_UIA_INVOKE, handle_wm_getobject};
+pub use window_corners::{restore_rounded_corners, round_window_corners};
 pub use window_model::{
     ApplicationContext, ForegroundApplication, application_of, enumerate_windows,
     execute_window_command, foreground_application, hide_application, hide_other_applications,
@@ -166,6 +186,7 @@ pub fn resume_background_tasks() {
 }
 
 pub fn shutdown_background_tasks() {
+    background_cleanup::set_background_cleanup(false);
     media::shutdown_media_task();
     audio::shutdown_audio_task();
     privacy::shutdown_privacy_task();
@@ -175,3 +196,5 @@ pub fn shutdown_background_tasks() {
     notifications::shutdown_notifications_task();
     control_center::shutdown_update_check_task();
 }
+
+pub use timer_resolution::{begin_fine_timing, end_fine_timing};

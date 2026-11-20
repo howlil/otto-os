@@ -3,12 +3,13 @@ use std::time::{Duration, Instant};
 use crate::backdrop_feed::BackdropFeed;
 use crate::host::{PluginId, RuntimeContext};
 use otto_core::{
-    BACKDROP_PADDING_PT, BarKey, CaptureRegion, ControlCenterAction, ControlCenterCommand,
+    BACKDROP_PADDING_PT, BarItem, BarKey, CaptureRegion, ControlCenterAction, ControlCenterCommand,
     ControlCenterFocus, ControlCenterFocusOutcome, ControlCenterHitTarget, ControlCenterLayout,
     ControlCenterMetrics, ControlCenterPage, ControlCenterPlacement, ControlCenterPort,
-    ControlCenterSnapshot, OttoSettingKind, PluginSettingsState, SystemSettingsState,
-    UPDATE_CHECKING_LABEL, build_control_center_accessible_tree, capture_interval_for,
-    capture_wanted, compute_control_center_layout_for_snapshot, control_center_action,
+    ControlCenterSnapshot, DockSettingsChange, MotionMetrics, MotionPreference, OttoSettingKind,
+    PluginSettingsState, SystemSettingsState, UPDATE_CHECKING_LABEL, animate_value,
+    build_control_center_accessible_tree, capture_interval_for, capture_wanted,
+    compute_control_center_layout_for_snapshot, control_center_action,
     control_center_focus_targets, decode_control_center_target, next_dock_icon_size, scale,
     scroll_offset_for_item, step_slider_percent, subpanel_opener_target,
 };
@@ -33,6 +34,7 @@ const CC_POLL_TIMER: usize = 31;
 const WM_GETOBJECT: u32 = 0x003D;
 const CC_POLL_MS: u32 = 16;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
+const SCENE_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const WHEEL_SCROLL_STEP: i32 = 36;
 const WM_APP_CONTROL_CENTER_KEY: u32 = 0x8000 + 26;
 const WM_APP_CONTROL_CENTER_BACKDROP: u32 = 0x8000 + 27;
@@ -54,10 +56,14 @@ pub(crate) struct ControlCenterSurface {
     dragging: Option<ControlCenterHitTarget>,
     visible: bool,
     opened_at: Instant,
+    dismissed_outside_at: Option<Instant>,
     was_mouse_down: bool,
     last_cursor: (i32, i32),
-    last_specular_cursor: (i32, i32),
     backdrop: Option<BackdropFeed>,
+    motion: MotionPreference,
+    morph_progress: Option<f32>,
+    morph_tick_at: Instant,
+    last_scene_present: Instant,
 }
 
 enum PostClickAction {
@@ -85,11 +91,49 @@ impl ControlCenterSurface {
             dragging: None,
             visible: false,
             opened_at: Instant::now(),
+            dismissed_outside_at: None,
             was_mouse_down: false,
             last_cursor: (0, 0),
-            last_specular_cursor: (0, 0),
             backdrop: None,
+            motion: MotionPreference::Full,
+            morph_progress: None,
+            morph_tick_at: Instant::now(),
+            last_scene_present: Instant::now(),
         }
+    }
+
+    fn reset_after_area_change(
+        &mut self,
+        runtime: &RuntimeContext,
+        focus_target: Option<ControlCenterHitTarget>,
+    ) {
+        self.scroll_offset = 0;
+        self.hovered = None;
+        self.pressed = None;
+        self.relayout();
+        if self.focus.is_active() {
+            let targets = control_center_focus_targets(&self.layout, &self.snapshot);
+            match focus_target {
+                Some(preferred) => {
+                    let _ = self.focus.enter_target(&targets, preferred);
+                }
+                None => {
+                    let _ = self.focus.enter(&targets);
+                }
+            }
+            self.ensure_focused_visible();
+        }
+        self.place();
+        self.sync_backdrop(runtime, true);
+        self.present(runtime);
+    }
+
+    fn scene_is_animating(&self) -> bool {
+        self.visible
+            && self.motion.allows_motion()
+            && self.snapshot.page == ControlCenterPage::OttoSettings
+            && (self.snapshot.otto_area.is_some()
+                || matches!(self.hovered, Some(ControlCenterHitTarget::OttoAreaCard(_))))
     }
 
     fn ensure_renderer(&mut self) -> Result<()> {
@@ -101,8 +145,9 @@ impl ControlCenterSurface {
 
     fn sync_snapshot(&mut self, runtime: &RuntimeContext) {
         self.snapshot.status = self.port.read_system_status();
-        self.snapshot.focus_active =
-            runtime.focus_module_enabled.get() && runtime.focus_active.get();
+        self.snapshot.focus_active = runtime.notch_enabled.get()
+            && runtime.focus_module_enabled.get()
+            && runtime.focus_active.get();
         self.snapshot.media = if runtime.media_module_enabled.get() {
             self.port.read_now_playing()
         } else {
@@ -113,7 +158,10 @@ impl ControlCenterSurface {
         self.snapshot.audio_outputs = self.port.read_audio_outputs();
         self.snapshot.settings.online_lyrics = runtime.online_lyrics_enabled.get();
         self.snapshot.settings.dock = runtime.dock_preferences.get();
+        self.snapshot.settings.menu_bar = runtime.menu_bar.get();
         self.snapshot.settings.plugins = PluginSettingsState {
+            top_bar: runtime.top_bar_enabled.get(),
+            notch: runtime.notch_enabled.get(),
             dock: runtime.dock_enabled.get(),
             window_controls: runtime.window_controls_enabled.get(),
             genie: runtime.genie_enabled.get(),
@@ -131,6 +179,8 @@ impl ControlCenterSurface {
             notch_hud: runtime.notch_hud_enabled.get(),
             media_module: runtime.media_module_enabled.get(),
             focus_module: runtime.focus_module_enabled.get(),
+            background_cleanup: runtime.background_cleanup_enabled.get(),
+            quick_capture: runtime.quick_capture_enabled.get(),
         };
         if let Some(status) = self.port.poll_update_status() {
             self.snapshot.update_status = Some(status);
@@ -178,7 +228,6 @@ impl ControlCenterSurface {
         let appearance = crate::theme_state::appearance(runtime);
         let wanted = self.visible
             && self.hwnd != 0
-            && !runtime.capture_visible.get()
             && capture_wanted(&appearance, runtime.glass_enabled.get());
         if !wanted {
             if let Some(feed) = self.backdrop.as_mut()
@@ -196,6 +245,7 @@ impl ControlCenterSurface {
                 self.hwnd,
                 WM_APP_CONTROL_CENTER_BACKDROP,
                 vec![self.hwnd],
+                runtime.capture_visible.get(),
             ));
         }
         let Some(feed) = self.backdrop.as_mut() else {
@@ -212,6 +262,44 @@ impl ControlCenterSurface {
         };
         let interval = capture_interval_for(is_running_on_battery(), self.visible);
         feed.request(region, interval, force);
+    }
+
+    fn prime_backdrop(&mut self, runtime: &RuntimeContext) {
+        if !capture_wanted(
+            &crate::theme_state::appearance(runtime),
+            runtime.glass_enabled.get(),
+        ) {
+            return;
+        }
+        if self.ensure_renderer().is_err() {
+            return;
+        }
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        if renderer.has_backdrop() {
+            return;
+        }
+        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let Some(region) = CaptureRegion::padded_to_screen(
+            self.layout.window,
+            pad,
+            self.screen.width,
+            self.screen.height,
+        ) else {
+            return;
+        };
+        if let Some(pixels) =
+            otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
+        {
+            renderer.set_backdrop(
+                pixels,
+                (
+                    region.x - self.layout.window.x,
+                    region.y - self.layout.window.y,
+                ),
+            );
+        }
     }
 
     fn on_backdrop(&mut self, runtime: &RuntimeContext) {
@@ -243,7 +331,14 @@ impl ControlCenterSurface {
                 hovered: self.hovered,
                 pressed: self.pressed.filter(|target| Some(*target) == self.hovered),
                 focused: self.focus.current(),
+                morph_progress: self.morph_progress,
+                scene_time: if self.motion.allows_motion() {
+                    self.opened_at.elapsed().as_secs_f32()
+                } else {
+                    0.0
+                },
             };
+            self.last_scene_present = Instant::now();
             crate::host::log_present_error(
                 "control-center",
                 renderer.present(
@@ -264,12 +359,16 @@ impl ControlCenterSurface {
         anchor_right: i32,
         anchor_y: i32,
         focused: bool,
+        motion: MotionPreference,
     ) {
         let _ = self.leave_keyboard_focus();
         self.screen = primary_screen();
         self.anchor_right = anchor_right;
         self.anchor_y = anchor_y;
+        self.motion = motion;
+        self.start_morph();
         self.snapshot.page = page;
+        self.snapshot.otto_area = None;
         self.snapshot.audio_switch_failed = false;
         self.snapshot.last_error = None;
         self.scroll_offset = 0;
@@ -282,9 +381,11 @@ impl ControlCenterSurface {
             let _ = self.enter_keyboard_focus();
         }
         self.opened_at = Instant::now();
+        self.dismissed_outside_at = None;
         self.was_mouse_down = poll_menu_events().0;
         self.last_cursor = cursor_position();
         self.visible = true;
+        self.prime_backdrop(runtime);
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
@@ -307,6 +408,7 @@ impl ControlCenterSurface {
         self.hovered = None;
         self.pressed = None;
         self.dragging = None;
+        self.morph_progress = None;
         self.backdrop = None;
         let _ = release_capture_if_owned(self.hwnd);
         unsafe {
@@ -314,6 +416,38 @@ impl ControlCenterSurface {
             let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
         }
         self.renderer = None;
+        otto_platform::trim_working_set();
+    }
+
+    fn start_morph(&mut self) {
+        let progress = self.morph_progress.unwrap_or(0.0);
+        self.morph_tick_at = Instant::now();
+        self.morph_progress = self.motion.allows_motion().then_some(progress);
+    }
+
+    fn advance_morph(&mut self) -> bool {
+        let Some(progress) = self.morph_progress else {
+            return false;
+        };
+        let now = Instant::now();
+        let dt = now
+            .saturating_duration_since(self.morph_tick_at)
+            .as_secs_f32()
+            .clamp(0.001, 0.1);
+        self.morph_tick_at = now;
+        let next = animate_value(
+            progress,
+            1.0,
+            MotionMetrics::default().control_center_morph_rate,
+            dt,
+            self.motion,
+        );
+        if next >= 0.995 {
+            self.morph_progress = None;
+        } else {
+            self.morph_progress = Some(next);
+        }
+        true
     }
 
     fn enter_keyboard_focus(&mut self) -> bool {
@@ -462,9 +596,6 @@ impl ControlCenterSurface {
     }
 
     fn on_mouse_move(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
-        if let Some(renderer) = self.renderer.as_ref() {
-            renderer.set_pointer(Some((x as f32, y as f32)));
-        }
         if let Some(target) = self.dragging {
             self.apply_slider(runtime, target, x);
             return;
@@ -474,11 +605,8 @@ impl ControlCenterSurface {
         let pressed_active_changed = self
             .pressed
             .is_some_and(|target| (self.hovered == Some(target)) != (next == Some(target)));
-        let specular_moved =
-            (x - self.last_specular_cursor.0).abs() + (y - self.last_specular_cursor.1).abs() >= 18;
-        if next != self.hovered || cleared_focus || pressed_active_changed || specular_moved {
+        if next != self.hovered || cleared_focus || pressed_active_changed {
             self.hovered = next;
-            self.last_specular_cursor = (x, y);
             self.present(runtime);
         }
     }
@@ -559,7 +687,16 @@ impl ControlCenterSurface {
             self.opened_at.elapsed() >= OPEN_CLICK_GRACE,
             inside,
         ) {
+            if !matches!(nav_event, Some(MenuNavEvent::Escape)) {
+                self.dismissed_outside_at = Some(Instant::now());
+            }
             return PostClickAction::Close;
+        }
+        if self.advance_morph()
+            || (self.scene_is_animating()
+                && self.last_scene_present.elapsed() >= SCENE_FRAME_INTERVAL)
+        {
+            self.present(runtime);
         }
         if self.dragging.is_some() {
             return PostClickAction::None;
@@ -573,13 +710,8 @@ impl ControlCenterSurface {
                     cursor.0 - self.layout.window.x,
                     cursor.1 - self.layout.window.y,
                 );
-            } else {
-                if let Some(renderer) = self.renderer.as_ref() {
-                    renderer.set_pointer(None);
-                }
-                if self.hovered.take().is_some() {
-                    self.present(runtime);
-                }
+            } else if self.hovered.take().is_some() {
+                self.present(runtime);
             }
         }
         PostClickAction::None
@@ -643,10 +775,12 @@ pub fn open_at_page(
     page: ControlCenterPage,
     anchor_right: i32,
     anchor_y: i32,
+    motion: MotionPreference,
 ) {
+    crate::spotlight::close(runtime);
     crate::menu::close(runtime);
     with_cc(runtime, |surface| {
-        surface.open(runtime, page, anchor_right, anchor_y, false);
+        surface.open(runtime, page, anchor_right, anchor_y, false, motion);
     });
 }
 
@@ -655,11 +789,87 @@ pub fn open_at_page_focused(
     page: ControlCenterPage,
     anchor_right: i32,
     anchor_y: i32,
+    motion: MotionPreference,
 ) {
+    crate::spotlight::close(runtime);
     crate::menu::close(runtime);
     with_cc(runtime, |surface| {
-        surface.open(runtime, page, anchor_right, anchor_y, true);
+        surface.open(runtime, page, anchor_right, anchor_y, true, motion);
     });
+}
+
+fn resolve_anchor(
+    runtime: &RuntimeContext,
+    trigger: otto_core::HitTarget,
+    from_tray: bool,
+) -> (i32, i32, MotionPreference) {
+    if !from_tray
+        && runtime.top_bar_enabled.get()
+        && let Some(anchor) = crate::bar::control_center_anchor(runtime, trigger)
+    {
+        return anchor;
+    }
+    let screen = primary_screen();
+    let motion = otto_platform::motion_preference();
+    let anchor_right = screen.width - scale(8, screen.dpi);
+    let anchor_y = if from_tray {
+        screen.height - 1
+    } else {
+        scale(12, screen.dpi)
+    };
+    (anchor_right, anchor_y, motion)
+}
+
+pub fn toggle_from_host(
+    runtime: &RuntimeContext,
+    page: ControlCenterPage,
+    focused: bool,
+    from_tray: bool,
+) {
+    let _ = otto_platform::close_tray_overflow();
+    if is_open(runtime) && active_page(runtime) == Some(page) {
+        close(runtime);
+        return;
+    }
+    if from_tray {
+        let mut suppressed = false;
+        with_cc(runtime, |surface| {
+            if surface
+                .dismissed_outside_at
+                .take()
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+            {
+                suppressed = true;
+            }
+        });
+        if suppressed {
+            return;
+        }
+    }
+    let (anchor_right, anchor_y, motion) =
+        resolve_anchor(runtime, otto_core::HitTarget::ControlCenter, from_tray);
+    if focused {
+        open_at_page_focused(runtime, page, anchor_right, anchor_y, motion);
+    } else {
+        open_at_page(runtime, page, anchor_right, anchor_y, motion);
+    }
+}
+
+pub fn open_otto_settings(runtime: &RuntimeContext, from_tray: bool) {
+    let _ = otto_platform::close_tray_overflow();
+    let (anchor_right, anchor_y, motion) =
+        resolve_anchor(runtime, otto_core::HitTarget::ControlCenter, from_tray);
+    open_at_page(
+        runtime,
+        ControlCenterPage::OttoSettings,
+        anchor_right,
+        anchor_y,
+        motion,
+    );
+}
+
+pub fn open_settings_action(action: ControlCenterAction) {
+    WindowsControlCenter.execute(action);
 }
 
 pub fn repaint(runtime: &RuntimeContext) {
@@ -693,8 +903,11 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_cc(runtime, |surface| {
+        if let Some(feed) = surface.backdrop.as_mut() {
+            feed.set_capture_visible(visible);
+        }
         surface.sync_backdrop(runtime, true);
         surface.present(runtime);
     });
@@ -810,7 +1023,7 @@ const fn is_deferred_host_command(command: &ControlCenterCommand) -> bool {
         ControlCenterCommand::ToggleSetting(kind) => {
             !matches!(kind, OttoSettingKind::LaunchAtLogin)
         }
-        ControlCenterCommand::CycleDockIconSize => true,
+        ControlCenterCommand::CycleDockIconSize | ControlCenterCommand::CycleMenuBarHide => true,
         _ => false,
     }
 }
@@ -826,7 +1039,7 @@ fn apply_post_action(runtime: &RuntimeContext, action: PostClickAction) {
                     | ControlCenterCommand::CycleTheme
                     | ControlCenterCommand::OpenPage(_)
                     | ControlCenterCommand::Back
-                    | ControlCenterCommand::SelectOttoCategory(_)
+                    | ControlCenterCommand::OpenOttoArea(_)
             ) || (is_deferred_host_command(&command)
                 && crate::host::is_host_active());
             execute_command(runtime, command);
@@ -843,9 +1056,7 @@ fn execute_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
     match command {
         ControlCenterCommand::OpenPage(page) => navigate_open_page(runtime, page),
         ControlCenterCommand::Back => navigate_back(runtime),
-        ControlCenterCommand::SelectOttoCategory(category) => {
-            select_otto_category(runtime, category);
-        }
+        ControlCenterCommand::OpenOttoArea(area) => open_otto_area(runtime, area),
         ControlCenterCommand::ToggleWifi
         | ControlCenterCommand::ConnectWifi(_)
         | ControlCenterCommand::ToggleBluetooth
@@ -853,7 +1064,7 @@ fn execute_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
             execute_connectivity_command(runtime, command);
         }
         ControlCenterCommand::ToggleFocus => {
-            if runtime.focus_module_enabled.get() {
+            if runtime.notch_enabled.get() && runtime.focus_module_enabled.get() {
                 crate::bar::toggle_focus_mode(runtime);
             }
         }
@@ -900,7 +1111,7 @@ fn execute_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
             }
         }
         ControlCenterCommand::OpenNotchMedia => {
-            if runtime.media_module_enabled.get() {
+            if runtime.notch_enabled.get() && runtime.media_module_enabled.get() {
                 crate::bar::open_notch_media(runtime);
             }
         }
@@ -909,6 +1120,11 @@ fn execute_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
             let mut prefs = runtime.dock_preferences.get();
             prefs.icon_size = next_dock_icon_size(prefs.icon_size);
             runtime.pending_dock_preferences.set(Some(prefs));
+        }
+        ControlCenterCommand::CycleMenuBarHide => {
+            let mut prefs = runtime.menu_bar.get();
+            prefs.hide_mode = prefs.hide_mode.next();
+            runtime.pending_menu_bar.set(Some(prefs));
         }
         ControlCenterCommand::OpenSettings(action) => {
             with_cc(runtime, |surface| surface.port.execute(action));
@@ -935,7 +1151,11 @@ fn execute_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
 
 fn navigate_open_page(runtime: &RuntimeContext, page: ControlCenterPage) {
     with_cc(runtime, |surface| {
+        if surface.snapshot.page != page {
+            surface.start_morph();
+        }
         surface.snapshot.page = page;
+        surface.snapshot.otto_area = None;
         surface.snapshot.audio_switch_failed = false;
         surface.snapshot.last_error = None;
         surface.scroll_offset = 0;
@@ -956,7 +1176,15 @@ fn navigate_open_page(runtime: &RuntimeContext, page: ControlCenterPage) {
 
 fn navigate_back(runtime: &RuntimeContext) {
     with_cc(runtime, |surface| {
+        if surface.snapshot.page == ControlCenterPage::OttoSettings
+            && close_otto_area(surface, runtime)
+        {
+            return;
+        }
         let prev_page = surface.snapshot.page;
+        if prev_page != ControlCenterPage::Main {
+            surface.start_morph();
+        }
         surface.snapshot.page = ControlCenterPage::Main;
         surface.snapshot.last_error = None;
         surface.scroll_offset = 0;
@@ -979,19 +1207,23 @@ fn navigate_back(runtime: &RuntimeContext) {
     });
 }
 
-fn select_otto_category(runtime: &RuntimeContext, category: otto_core::OttoSettingsCategory) {
+fn open_otto_area(runtime: &RuntimeContext, area: otto_core::OttoSettingsArea) {
     with_cc(runtime, |surface| {
-        if surface.snapshot.otto_category != category {
-            surface.snapshot.otto_category = category;
-            surface.scroll_offset = 0;
-            surface.hovered = None;
-            surface.pressed = None;
-            surface.relayout();
-            surface.place();
-            surface.sync_backdrop(runtime, true);
-            surface.present(runtime);
+        if surface.snapshot.otto_area != Some(area) {
+            surface.start_morph();
+            surface.snapshot.otto_area = Some(area);
+            surface.reset_after_area_change(runtime, None);
         }
     });
+}
+
+fn close_otto_area(surface: &mut ControlCenterSurface, runtime: &RuntimeContext) -> bool {
+    let Some(area) = surface.snapshot.otto_area.take() else {
+        return false;
+    };
+    surface.start_morph();
+    surface.reset_after_area_change(runtime, Some(ControlCenterHitTarget::OttoAreaCard(area)));
+    true
 }
 
 fn execute_connectivity_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
@@ -1038,13 +1270,42 @@ fn toggle_dock_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
         OttoSettingKind::DockHideTaskbar => prefs.hide_taskbar = !prefs.hide_taskbar,
         OttoSettingKind::DockShowDownloads => prefs.show_downloads = !prefs.show_downloads,
         OttoSettingKind::DockShowTrash => prefs.show_trash = !prefs.show_trash,
-        OttoSettingKind::DockAutohide => prefs.autohide = !prefs.autohide,
+        OttoSettingKind::DockAutohide => prefs = prefs.apply(DockSettingsChange::ToggleHiding),
+        OttoSettingKind::DockReserveSpace => {
+            prefs = prefs.apply(DockSettingsChange::ToggleReserveSpace);
+        }
         OttoSettingKind::DockMagnification => prefs.magnification = !prefs.magnification,
         _ => return,
     }
     runtime.pending_dock_preferences.set(Some(prefs));
 }
 
+fn toggle_menu_bar_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
+    let mut prefs = runtime.menu_bar.get();
+    match kind {
+        OttoSettingKind::MenuBarBackground => prefs.show_background = !prefs.show_background,
+        OttoSettingKind::MenuBarKeepNotch => prefs.keep_notch = !prefs.keep_notch,
+        OttoSettingKind::MenuBarTray => {
+            prefs.hidden_items = prefs.hidden_items.toggled(BarItem::Tray);
+        }
+        OttoSettingKind::MenuBarStatus => {
+            prefs.hidden_items = prefs.hidden_items.toggled(BarItem::Status);
+        }
+        OttoSettingKind::MenuBarSearch => {
+            prefs.hidden_items = prefs.hidden_items.toggled(BarItem::Search);
+        }
+        OttoSettingKind::MenuBarNotifications => {
+            prefs.hidden_items = prefs.hidden_items.toggled(BarItem::Notifications);
+        }
+        OttoSettingKind::MenuBarClock => {
+            prefs.hidden_items = prefs.hidden_items.toggled(BarItem::Clock);
+        }
+        _ => return,
+    }
+    runtime.pending_menu_bar.set(Some(prefs));
+}
+
+#[allow(clippy::too_many_lines)]
 fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
     match kind {
         OttoSettingKind::DynamicIsland => {
@@ -1052,6 +1313,12 @@ fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
                 &runtime.dynamic_island_enabled,
                 &runtime.pending_dynamic_island,
             );
+        }
+        OttoSettingKind::TopBar => {
+            runtime.queue_plugin_toggle(PluginId::TopBar, !runtime.top_bar_enabled.get());
+        }
+        OttoSettingKind::Notch => {
+            toggle_flag(&runtime.notch_enabled, &runtime.pending_notch_enabled);
         }
         OttoSettingKind::Dock => {
             runtime.queue_plugin_toggle(PluginId::Dock, !runtime.dock_enabled.get());
@@ -1086,16 +1353,29 @@ fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
         OttoSettingKind::NotchHud => {
             toggle_flag(&runtime.notch_hud_enabled, &runtime.pending_notch_hud);
         }
+        OttoSettingKind::BackgroundCleanup => {
+            toggle_flag(
+                &runtime.background_cleanup_enabled,
+                &runtime.pending_background_cleanup,
+            );
+        }
         OttoSettingKind::MediaModule => {
             toggle_flag(&runtime.media_module_enabled, &runtime.pending_media_module);
         }
         OttoSettingKind::FocusModule => {
             toggle_flag(&runtime.focus_module_enabled, &runtime.pending_focus_module);
         }
+        OttoSettingKind::QuickCapture => {
+            toggle_flag(
+                &runtime.quick_capture_enabled,
+                &runtime.pending_quick_capture,
+            );
+        }
         OttoSettingKind::DockHideTaskbar
         | OttoSettingKind::DockShowDownloads
         | OttoSettingKind::DockShowTrash
         | OttoSettingKind::DockAutohide
+        | OttoSettingKind::DockReserveSpace
         | OttoSettingKind::DockMagnification => toggle_dock_setting(runtime, kind),
         OttoSettingKind::CaptureVisible => {
             toggle_flag(&runtime.capture_visible, &runtime.pending_capture_visible);
@@ -1123,6 +1403,13 @@ fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
         OttoSettingKind::ClassicLogo => {
             toggle_flag(&runtime.classic_logo_enabled, &runtime.pending_classic_logo);
         }
+        OttoSettingKind::MenuBarBackground
+        | OttoSettingKind::MenuBarKeepNotch
+        | OttoSettingKind::MenuBarTray
+        | OttoSettingKind::MenuBarStatus
+        | OttoSettingKind::MenuBarSearch
+        | OttoSettingKind::MenuBarNotifications
+        | OttoSettingKind::MenuBarClock => toggle_menu_bar_setting(runtime, kind),
     }
 }
 
@@ -1173,8 +1460,8 @@ mod tests {
 
     use otto_core::{
         BarKey, ControlCenterAction, ControlCenterCommand, ControlCenterHitTarget,
-        ControlCenterPage, ControlCenterPort, NowPlaying, OttoSettingKind, OttoSettingsSnapshot,
-        SystemStatus, UPDATE_CHECKING_LABEL, control_center_focus_targets,
+        ControlCenterPage, ControlCenterPort, NowPlaying, OttoSettingKind, SystemStatus,
+        UPDATE_CHECKING_LABEL, control_center_focus_targets,
     };
     use otto_platform::MenuNavEvent;
 
@@ -1382,29 +1669,30 @@ mod tests {
         assert_eq!(surface.snapshot.status.brightness, Some(60));
 
         surface.snapshot.page = ControlCenterPage::OttoSettings;
+        surface.snapshot.otto_area = Some(otto_core::OttoSettingsArea::Dock);
+        surface.snapshot.settings.plugins.dock = true;
+        surface.snapshot.settings.dock.hide_taskbar = true;
         surface.scroll_offset = 0;
         surface.relayout();
+        let last = surface
+            .snapshot
+            .subpanel_item_count(ControlCenterPage::OttoSettings)
+            - 1;
+        let target_idx = last - 1;
         let settings_targets = control_center_focus_targets(&surface.layout, &surface.snapshot);
-        let target_idx = OttoSettingsSnapshot::row_count() - 2;
         assert_eq!(
             surface
                 .focus
-                .enter_target(&settings_targets, ControlCenterHitTarget::FooterSecondary),
-            Some(ControlCenterHitTarget::FooterSecondary)
+                .enter_target(&settings_targets, ControlCenterHitTarget::BackButton),
+            Some(ControlCenterHitTarget::BackButton)
         );
-        assert!(matches!(
-            surface.on_key(&runtime, BarKey::Up),
-            PostClickAction::None
-        ));
         assert!(matches!(
             surface.on_key(&runtime, BarKey::Up),
             PostClickAction::None
         ));
         assert_eq!(
             surface.focus.current(),
-            Some(ControlCenterHitTarget::SubPanelItem(
-                OttoSettingsSnapshot::row_count() - 1
-            ))
+            Some(ControlCenterHitTarget::SubPanelItem(last))
         );
         assert!(surface.scroll_offset > 0);
         let item_rect = surface.layout.items[target_idx];
@@ -1431,20 +1719,29 @@ mod tests {
 
         execute_command(
             &runtime,
-            ControlCenterCommand::SelectOttoCategory(otto_core::OttoSettingsCategory::System),
+            ControlCenterCommand::OpenOttoArea(otto_core::OttoSettingsArea::System),
         );
         {
             let guard = runtime.control_center.borrow();
             let cc = guard.as_ref().unwrap();
             assert_eq!(
-                cc.snapshot.otto_category,
-                otto_core::OttoSettingsCategory::System
+                cc.snapshot.otto_area,
+                Some(otto_core::OttoSettingsArea::System)
             );
             assert_eq!(cc.scroll_offset, 0);
             assert!(cc.layout.window.height < all_height);
         }
+        execute_command(&runtime, ControlCenterCommand::Back);
+        {
+            let guard = runtime.control_center.borrow();
+            let cc = guard.as_ref().unwrap();
+            assert_eq!(cc.snapshot.otto_area, None);
+            assert_eq!(cc.snapshot.page, ControlCenterPage::OttoSettings);
+            assert_eq!(cc.layout.window.height, all_height);
+        }
 
         toggle_setting(&runtime, OttoSettingKind::LiquidGlass);
+        toggle_setting(&runtime, OttoSettingKind::Notch);
         toggle_setting(&runtime, OttoSettingKind::Dock);
         toggle_setting(&runtime, OttoSettingKind::Genie);
         toggle_setting(&runtime, OttoSettingKind::PrivacyIndicators);
@@ -1453,9 +1750,11 @@ mod tests {
         toggle_setting(&runtime, OttoSettingKind::NotchHud);
         toggle_setting(&runtime, OttoSettingKind::MediaModule);
         toggle_setting(&runtime, OttoSettingKind::FocusModule);
+        toggle_setting(&runtime, OttoSettingKind::QuickCapture);
         toggle_setting(&runtime, OttoSettingKind::DockHideTaskbar);
 
         assert_eq!(runtime.pending_liquid_glass.take(), Some(false));
+        assert_eq!(runtime.pending_notch_enabled.take(), Some(false));
         assert_eq!(
             runtime.take_plugin_toggles(),
             vec![
@@ -1469,6 +1768,7 @@ mod tests {
         assert_eq!(runtime.pending_notch_hud.take(), Some(false));
         assert_eq!(runtime.pending_media_module.take(), Some(false));
         assert_eq!(runtime.pending_focus_module.take(), Some(false));
+        assert_eq!(runtime.pending_quick_capture.take(), Some(true));
         let dock_prefs = runtime.pending_dock_preferences.take().unwrap();
         assert!(!dock_prefs.hide_taskbar);
 

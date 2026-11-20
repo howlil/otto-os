@@ -12,6 +12,8 @@ pub enum NotchAction {
     ShelfOpen(ShelfPayload),
     ShelfCopy(ShelfPayload),
     ShelfReveal(ShelfPayload),
+    NotificationOpen(u32),
+    NotificationDismiss(u32),
 }
 
 pub trait NotchPort {

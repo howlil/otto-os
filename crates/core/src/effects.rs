@@ -58,6 +58,8 @@ pub fn dock_settings_rows(preferences: DockPreferences) -> Vec<MenuRow> {
         size(CMD_DOCK_SIZE_SMALL, "Small", DOCK_ICON_SMALL),
         size(CMD_DOCK_SIZE_MEDIUM, "Medium", DOCK_ICON_MEDIUM),
         size(CMD_DOCK_SIZE_LARGE, "Large", DOCK_ICON_LARGE),
+        MenuRow::Separator,
+        MenuRow::item(CMD_OTTO_SETTINGS, "Otto Settings...", "⌃⌥,"),
     ]
 }
 
@@ -75,8 +77,17 @@ pub enum DockEffect {
     TogglePin,
     EmptyTrash,
     Hide,
+    HideOthers,
     Quit,
+    ForceQuit,
+    RevealInExplorer,
     Fail(CommandOutcome),
+}
+
+impl DockEffect {
+    pub const CMD_REVEAL: usize = 505;
+    pub const CMD_HIDE_OTHERS: usize = 506;
+    pub const CMD_FORCE_QUIT: usize = 507;
 }
 
 #[must_use]
@@ -93,6 +104,18 @@ pub fn dock_activation_effect(app: Option<&AppInfo>) -> DockEffect {
 
 #[must_use]
 pub fn dock_command_effect(cmd: usize, app: Option<&AppInfo>) -> Option<DockEffect> {
+    match cmd {
+        CMD_DOCK_PIN => return Some(DockEffect::TogglePin),
+        CMD_DOCK_TOGGLE => return Some(dock_activation_effect(app)),
+        CMD_DOCK_NEW_WINDOW => return Some(DockEffect::Launch),
+        CMD_DOCK_EMPTY_TRASH => return Some(DockEffect::EmptyTrash),
+        CMD_DOCK_HIDE => return app.map(|_| DockEffect::Hide),
+        CMD_DOCK_QUIT => return app.map(|_| DockEffect::Quit),
+        DockEffect::CMD_REVEAL => return Some(DockEffect::RevealInExplorer),
+        DockEffect::CMD_HIDE_OTHERS => return app.map(|_| DockEffect::HideOthers),
+        DockEffect::CMD_FORCE_QUIT => return app.map(|_| DockEffect::ForceQuit),
+        _ => {}
+    }
     if let Some(index) = cmd.checked_sub(CMD_DOCK_WINDOW_BASE) {
         let window = app
             .and_then(|app| app.primary_windows().nth(index))
@@ -102,21 +125,15 @@ pub fn dock_command_effect(cmd: usize, app: Option<&AppInfo>) -> Option<DockEffe
             DockEffect::ShowWindow,
         ));
     }
-    match cmd {
-        CMD_DOCK_PIN => Some(DockEffect::TogglePin),
-        CMD_DOCK_TOGGLE => Some(dock_activation_effect(app)),
-        CMD_DOCK_NEW_WINDOW => Some(DockEffect::Launch),
-        CMD_DOCK_EMPTY_TRASH => Some(DockEffect::EmptyTrash),
-        CMD_DOCK_HIDE => app.map(|_| DockEffect::Hide),
-        CMD_DOCK_QUIT => app.map(|_| DockEffect::Quit),
-        _ => None,
-    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DockDropInput {
     pub source: usize,
     pub source_reorderable: bool,
+    pub source_pinnable: bool,
     pub beyond_unpin_line: bool,
     pub target: Option<usize>,
     pub target_reorderable: bool,
@@ -126,6 +143,7 @@ pub struct DockDropInput {
 pub enum DockDropEffect {
     Unpin,
     Reorder { target: usize },
+    PinAt { target: usize },
     Nothing,
 }
 
@@ -134,7 +152,15 @@ pub fn dock_drop_effect(input: DockDropInput) -> DockDropEffect {
     if input.beyond_unpin_line && input.source_reorderable {
         return DockDropEffect::Unpin;
     }
+    if input.beyond_unpin_line {
+        return DockDropEffect::Nothing;
+    }
     match input.target {
+        Some(target)
+            if !input.source_reorderable && input.source_pinnable && input.target_reorderable =>
+        {
+            DockDropEffect::PinAt { target }
+        }
         Some(target)
             if target != input.source && input.source_reorderable && input.target_reorderable =>
         {
@@ -350,10 +376,57 @@ mod tests {
         DockDropInput {
             source: 3,
             source_reorderable: true,
+            source_pinnable: false,
             beyond_unpin_line: false,
             target: Some(5),
             target_reorderable: true,
         }
+    }
+
+    #[test]
+    fn dock_reveal_hide_others_and_force_quit_commands_resolve_to_effects() {
+        let running = app(vec![window(11, WindowPresence::Visible)]);
+        assert_eq!(
+            dock_command_effect(DockEffect::CMD_REVEAL, None),
+            Some(DockEffect::RevealInExplorer)
+        );
+        assert_eq!(
+            dock_command_effect(DockEffect::CMD_REVEAL, Some(&running)),
+            Some(DockEffect::RevealInExplorer)
+        );
+        assert_eq!(dock_command_effect(DockEffect::CMD_HIDE_OTHERS, None), None);
+        assert_eq!(
+            dock_command_effect(DockEffect::CMD_HIDE_OTHERS, Some(&running)),
+            Some(DockEffect::HideOthers)
+        );
+        assert_eq!(dock_command_effect(DockEffect::CMD_FORCE_QUIT, None), None);
+        assert_eq!(
+            dock_command_effect(DockEffect::CMD_FORCE_QUIT, Some(&running)),
+            Some(DockEffect::ForceQuit)
+        );
+    }
+
+    #[test]
+    fn dragging_a_pinnable_unpinned_app_onto_a_pin_pins_it_there() {
+        let input = DockDropInput {
+            source: 6,
+            source_reorderable: false,
+            source_pinnable: true,
+            beyond_unpin_line: false,
+            target: Some(2),
+            target_reorderable: true,
+        };
+        assert_eq!(dock_drop_effect(input), DockDropEffect::PinAt { target: 2 });
+        let beyond = DockDropInput {
+            beyond_unpin_line: true,
+            ..input
+        };
+        assert_eq!(dock_drop_effect(beyond), DockDropEffect::Nothing);
+        let onto_unpinned = DockDropInput {
+            target_reorderable: false,
+            ..input
+        };
+        assert_eq!(dock_drop_effect(onto_unpinned), DockDropEffect::Nothing);
     }
 
     #[test]
@@ -460,6 +533,7 @@ mod tests {
         assert!(labels.contains(&String::from("Turn Magnification Off:false")));
         assert!(labels.contains(&String::from("Medium:true")));
         assert!(labels.contains(&String::from("Large:false")));
+        assert!(labels.contains(&String::from("Otto Settings...:false")));
         assert_eq!(
             super::dock_settings_effect(super::CMD_DOCK_SIZE_LARGE),
             Some(DockSettingsChange::IconSize(DOCK_ICON_LARGE))

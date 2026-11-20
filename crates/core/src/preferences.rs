@@ -1,3 +1,4 @@
+use crate::menu_bar::{BarHideMode, BarItemSet, MenuBarPreferences};
 use crate::theme::ThemeMode;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub struct AppPreferences {
     pub capture_visible: bool,
     pub hotkeys_enabled: bool,
     pub classic_logo: bool,
+    pub notch_enabled: bool,
     pub dynamic_island: bool,
     pub onboarding_seen: bool,
     pub privacy_indicators: bool,
@@ -30,6 +32,9 @@ pub struct AppPreferences {
     pub notch_hud: bool,
     pub media_module: bool,
     pub focus_module: bool,
+    pub background_cleanup: bool,
+    pub menu_bar: MenuBarPreferences,
+    pub quick_capture: bool,
 }
 
 impl Default for AppPreferences {
@@ -39,6 +44,7 @@ impl Default for AppPreferences {
             capture_visible: false,
             hotkeys_enabled: true,
             classic_logo: false,
+            notch_enabled: true,
             dynamic_island: false,
             onboarding_seen: false,
             privacy_indicators: true,
@@ -48,6 +54,9 @@ impl Default for AppPreferences {
             notch_hud: true,
             media_module: true,
             focus_module: true,
+            background_cleanup: false,
+            menu_bar: MenuBarPreferences::default(),
+            quick_capture: false,
         }
     }
 }
@@ -73,6 +82,10 @@ impl AppPreferences {
             } else if let Some(value) = trimmed.strip_prefix("classic_logo=") {
                 if let Some(parsed) = parse_bool(value) {
                     prefs.classic_logo = parsed;
+                }
+            } else if let Some(value) = trimmed.strip_prefix("notch_enabled=") {
+                if let Some(parsed) = parse_bool(value) {
+                    prefs.notch_enabled = parsed;
                 }
             } else if let Some(value) = trimmed.strip_prefix("dynamic_island=") {
                 if let Some(parsed) = parse_bool(value) {
@@ -106,10 +119,32 @@ impl AppPreferences {
                 if let Some(parsed) = parse_bool(value) {
                     prefs.media_module = parsed;
                 }
-            } else if let Some(value) = trimmed.strip_prefix("focus_module=")
+            } else if let Some(value) = trimmed.strip_prefix("focus_module=") {
+                if let Some(parsed) = parse_bool(value) {
+                    prefs.focus_module = parsed;
+                }
+            } else if let Some(value) = trimmed.strip_prefix("background_cleanup=")
                 && let Some(parsed) = parse_bool(value)
             {
-                prefs.focus_module = parsed;
+                prefs.background_cleanup = parsed;
+            } else if let Some(value) = trimmed.strip_prefix("menu_bar_hide=") {
+                if let Some(mode) = BarHideMode::parse_config(value) {
+                    prefs.menu_bar.hide_mode = mode;
+                }
+            } else if let Some(value) = trimmed.strip_prefix("menu_bar_hidden=") {
+                prefs.menu_bar.hidden_items = BarItemSet::parse_config(value);
+            } else if let Some(value) = trimmed.strip_prefix("menu_bar_background=")
+                && let Some(parsed) = parse_bool(value)
+            {
+                prefs.menu_bar.show_background = parsed;
+            } else if let Some(value) = trimmed.strip_prefix("menu_bar_keep_notch=")
+                && let Some(parsed) = parse_bool(value)
+            {
+                prefs.menu_bar.keep_notch = parsed;
+            } else if let Some(value) = trimmed.strip_prefix("quick_capture=")
+                && let Some(parsed) = parse_bool(value)
+            {
+                prefs.quick_capture = parsed;
             }
         }
         prefs
@@ -118,11 +153,12 @@ impl AppPreferences {
     #[must_use]
     pub fn config_lines(&self) -> String {
         format!(
-            "theme_mode={}\ncapture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nliquid_glass={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}",
+            "theme_mode={}\ncapture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\nnotch_enabled={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nliquid_glass={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}\nbackground_cleanup={}\nmenu_bar_hide={}\nmenu_bar_hidden={}\nmenu_bar_background={}\nmenu_bar_keep_notch={}\nquick_capture={}",
             self.theme_mode.config_value(),
             self.capture_visible,
             self.hotkeys_enabled,
             self.classic_logo,
+            self.notch_enabled,
             self.dynamic_island,
             self.onboarding_seen,
             self.privacy_indicators,
@@ -132,6 +168,12 @@ impl AppPreferences {
             self.notch_hud,
             self.media_module,
             self.focus_module,
+            self.background_cleanup,
+            self.menu_bar.hide_mode.config_value(),
+            self.menu_bar.hidden_items.config_value(),
+            self.menu_bar.show_background,
+            self.menu_bar.keep_notch,
+            self.quick_capture,
         )
     }
 
@@ -173,6 +215,7 @@ mod tests {
         assert!(!prefs.capture_visible);
         assert!(prefs.hotkeys_enabled);
         assert!(!prefs.classic_logo);
+        assert!(prefs.notch_enabled);
         assert!(!prefs.dynamic_island);
         assert!(!prefs.onboarding_seen);
         assert!(prefs.privacy_indicators);
@@ -182,6 +225,9 @@ mod tests {
         assert!(prefs.notch_hud);
         assert!(prefs.media_module);
         assert!(prefs.focus_module);
+        assert!(!prefs.background_cleanup);
+        assert_eq!(prefs.menu_bar, MenuBarPreferences::default());
+        assert!(!prefs.quick_capture);
         assert_eq!(prefs.brand_icon(), BrandIcon::Otto);
         assert_eq!(prefs.notch_style(), NotchStyle::ClassicNotch);
     }
@@ -193,6 +239,7 @@ mod tests {
             capture_visible: true,
             hotkeys_enabled: false,
             classic_logo: true,
+            notch_enabled: false,
             dynamic_island: true,
             onboarding_seen: true,
             privacy_indicators: false,
@@ -202,6 +249,14 @@ mod tests {
             notch_hud: false,
             media_module: false,
             focus_module: false,
+            background_cleanup: true,
+            menu_bar: MenuBarPreferences {
+                hide_mode: BarHideMode::Always,
+                hidden_items: BarItemSet::parse_config("tray,clock"),
+                show_background: false,
+                keep_notch: true,
+            },
+            quick_capture: true,
         };
         assert_eq!(prefs.brand_icon(), BrandIcon::ClassicApple);
         assert_eq!(prefs.notch_style(), NotchStyle::DynamicIsland);
@@ -215,6 +270,7 @@ mod tests {
         assert!(!parsed.capture_visible);
         assert!(!parsed.hotkeys_enabled);
         assert!(!parsed.classic_logo);
+        assert!(parsed.notch_enabled);
         assert!(!parsed.dynamic_island);
         assert!(!parsed.onboarding_seen);
         assert!(parsed.privacy_indicators);
@@ -224,5 +280,21 @@ mod tests {
         assert!(parsed.notch_hud);
         assert!(parsed.media_module);
         assert!(parsed.focus_module);
+        assert!(!parsed.background_cleanup);
+        assert_eq!(parsed.menu_bar, MenuBarPreferences::default());
+        assert!(!parsed.quick_capture);
+    }
+
+    #[test]
+    fn menu_bar_keys_ignore_invalid_values_independently() {
+        let parsed = AppPreferences::parse_config(
+            "menu_bar_hide=sometimes
+menu_bar_hidden=search,bogus
+menu_bar_background=maybe
+",
+        );
+        assert_eq!(parsed.menu_bar.hide_mode, BarHideMode::FullScreenOnly);
+        assert_eq!(parsed.menu_bar.hidden_items.config_value(), "search");
+        assert!(parsed.menu_bar.show_background);
     }
 }

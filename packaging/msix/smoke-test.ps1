@@ -52,7 +52,8 @@ public static class OttoSmokeNative
         var windows = new List<IntPtr>();
         EnumWindows((window, _) =>
         {
-            GetWindowThreadProcessId(window, out var owner);
+            uint owner;
+            GetWindowThreadProcessId(window, out owner);
             if (owner == processId && IsWindowVisible(window))
             {
                 windows.Add(window);

@@ -1,6 +1,7 @@
 use otto_core::{HitTarget, Layout, PRIVACY_DOT_POINTS, PrivacyState, Rect, scale};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
@@ -12,6 +13,7 @@ use windows_numerics::Vector2;
 use super::{EQUALIZER_GREEN, FOREGROUND, Renderer, rect_to_d2d, rgb, translate_rect};
 
 const PRIVACY_ORANGE: D2D1_COLOR_F = rgb(255, 159, 10, 1.0);
+const PRIVACY_BLUE: D2D1_COLOR_F = rgb(10, 132, 255, 1.0);
 const MUTED_FILL: D2D1_COLOR_F = rgb(255, 69, 58, 0.24);
 const MUTED_BORDER: D2D1_COLOR_F = rgb(255, 69, 58, 0.48);
 const MIC_ACTIVE_FILL: D2D1_COLOR_F = rgb(255, 159, 10, 0.20);
@@ -23,6 +25,7 @@ const CAM_ACTIVE_BORDER: D2D1_COLOR_F = rgb(48, 209, 88, 0.44);
 enum PrivacyDotKind {
     Camera,
     Microphone,
+    Location,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,15 +36,16 @@ enum PillTone {
     Neutral,
 }
 
-fn visible_bar_dots(privacy: &PrivacyState) -> Vec<PrivacyDotKind> {
-    let mut dots = Vec::with_capacity(2);
+fn visible_bar_dot(privacy: &PrivacyState) -> Option<PrivacyDotKind> {
     if privacy.camera_active {
-        dots.push(PrivacyDotKind::Camera);
+        Some(PrivacyDotKind::Camera)
+    } else if privacy.mic.is_active() {
+        Some(PrivacyDotKind::Microphone)
+    } else if privacy.location_active {
+        Some(PrivacyDotKind::Location)
+    } else {
+        None
     }
-    if privacy.mic.is_active() {
-        dots.push(PrivacyDotKind::Microphone);
-    }
-    dots
 }
 
 fn panel_pill_label(privacy: &PrivacyState, compact: bool) -> String {
@@ -78,10 +82,9 @@ impl Renderer {
         if layout.privacy_dots.is_empty() || !privacy.show_in_bar() {
             return;
         }
-        let dots = visible_bar_dots(privacy);
-        if dots.is_empty() {
+        let Some(kind) = visible_bar_dot(privacy) else {
             return;
-        }
+        };
         if hovered == Some(HitTarget::PrivacyIndicator) {
             let hover_rect = D2D1_ROUNDED_RECT {
                 rect: rect_to_d2d(Rect {
@@ -100,39 +103,55 @@ impl Renderer {
         }
         let dot_d = (scale(PRIVACY_DOT_POINTS, self.dpi) as f32).max(5.0);
         let dot_r = dot_d * 0.5;
-        let gap = (scale(2, self.dpi) as f32).max(2.0);
-        let total_w = dot_d * dots.len() as f32 + gap * (dots.len().saturating_sub(1)) as f32;
-        let start_cx = layout.privacy_dots.x as f32
-            + (layout.privacy_dots.width as f32 - total_w) * 0.5
-            + dot_r;
+        let cx = layout.privacy_dots.x as f32 + layout.privacy_dots.width as f32 * 0.5;
         let cy = layout.privacy_dots.y as f32 + layout.privacy_dots.height as f32 * 0.5;
-        for (index, kind) in dots.into_iter().enumerate() {
-            let cx = start_cx + index as f32 * (dot_d + gap);
-            let color = match kind {
-                PrivacyDotKind::Camera => EQUALIZER_GREEN,
-                PrivacyDotKind::Microphone => PRIVACY_ORANGE,
-            };
-            let halo = self.brushes.alpha_brush(color, 0.24);
-            let core = self.brushes.alpha_brush(color, 0.96);
-            unsafe {
-                self.target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2::new(cx, cy),
-                        radiusX: dot_r * 1.45,
-                        radiusY: dot_r * 1.45,
-                    },
-                    &halo,
-                );
-                self.target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2::new(cx, cy),
-                        radiusX: dot_r,
-                        radiusY: dot_r,
-                    },
-                    &core,
-                );
-            }
+        if kind == PrivacyDotKind::Location {
+            let _ = self.draw_location_arrow(cx, cy, dot_r * 1.5);
+            return;
         }
+        let color = match kind {
+            PrivacyDotKind::Camera => EQUALIZER_GREEN,
+            _ => PRIVACY_ORANGE,
+        };
+        let halo = self.brushes.alpha_brush(color, 0.24);
+        let core = self.brushes.alpha_brush(color, 0.96);
+        unsafe {
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(cx, cy),
+                    radiusX: dot_r * 1.45,
+                    radiusY: dot_r * 1.45,
+                },
+                &halo,
+            );
+            self.target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(cx, cy),
+                    radiusX: dot_r,
+                    radiusY: dot_r,
+                },
+                &core,
+            );
+        }
+    }
+
+    fn draw_location_arrow(&self, cx: f32, cy: f32, half: f32) -> Result<()> {
+        let brush = self.brushes.alpha_brush(PRIVACY_BLUE, 0.96);
+        unsafe {
+            let arrow = self.factory.CreatePathGeometry()?;
+            let sink = arrow.Open()?;
+            sink.BeginFigure(
+                Vector2::new(cx + half * 0.9, cy - half * 0.9),
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            sink.AddLine(Vector2::new(cx - half * 0.85, cy - half * 0.05));
+            sink.AddLine(Vector2::new(cx - half * 0.05, cy + half * 0.05));
+            sink.AddLine(Vector2::new(cx + half * 0.05, cy + half * 0.85));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.target.FillGeometry(&arrow, &brush, None);
+        }
+        Ok(())
     }
 
     pub(crate) fn draw_panel_privacy_pill(
@@ -219,7 +238,7 @@ impl Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_mic_glyph(
+    pub(super) fn draw_mic_glyph(
         &self,
         cx: f32,
         cy: f32,
@@ -300,25 +319,31 @@ impl Renderer {
 mod tests {
     use otto_core::{MicState, PrivacyState};
 
-    use super::{PillTone, PrivacyDotKind, panel_pill_label, pill_tone, visible_bar_dots};
+    use super::{PillTone, PrivacyDotKind, panel_pill_label, pill_tone, visible_bar_dot};
 
     #[test]
-    fn bar_dots_include_camera_then_microphone_only_when_active() {
+    fn bar_indicator_shows_one_dot_and_prioritizes_camera() {
         let mut state = PrivacyState {
             mic: MicState::Idle { muted: true },
             camera_active: false,
+            location_active: false,
             app_name: None,
         };
-        assert!(visible_bar_dots(&state).is_empty());
+        assert_eq!(visible_bar_dot(&state), None);
 
         state.mic = MicState::Active { muted: false };
-        assert_eq!(visible_bar_dots(&state), vec![PrivacyDotKind::Microphone]);
+        assert_eq!(visible_bar_dot(&state), Some(PrivacyDotKind::Microphone));
 
         state.camera_active = true;
-        assert_eq!(
-            visible_bar_dots(&state),
-            vec![PrivacyDotKind::Camera, PrivacyDotKind::Microphone]
-        );
+        assert_eq!(visible_bar_dot(&state), Some(PrivacyDotKind::Camera));
+
+        state.camera_active = false;
+        state.mic = MicState::Idle { muted: false };
+        state.location_active = true;
+        assert_eq!(visible_bar_dot(&state), Some(PrivacyDotKind::Location));
+
+        state.mic = MicState::Active { muted: false };
+        assert_eq!(visible_bar_dot(&state), Some(PrivacyDotKind::Microphone));
     }
 
     #[test]
@@ -326,6 +351,7 @@ mod tests {
         let live = PrivacyState {
             mic: MicState::Active { muted: false },
             camera_active: false,
+            location_active: false,
             app_name: Some(String::from("Zoom")),
         };
         assert_eq!(panel_pill_label(&live, true), "Mic");
@@ -335,6 +361,7 @@ mod tests {
         let muted = PrivacyState {
             mic: MicState::Active { muted: true },
             camera_active: true,
+            location_active: false,
             app_name: Some(String::from("OBS")),
         };
         assert_eq!(panel_pill_label(&muted, true), "Off");

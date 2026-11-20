@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 
 use otto_core::{
     AppCommand, AppInfo, AppleIconKind, CMD_DOCK_EMPTY_TRASH, CMD_DOCK_HIDE, CMD_DOCK_NEW_WINDOW,
-    CMD_DOCK_PIN, CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, Capability, CropRegion,
-    MenuRow, PixelLimits, Rect, ShelfThumbnail, StableOrder, WindowPresence, bgra_layout,
-    crop_bgra, group_windows, is_blank_frame, resize_bgra, scale_dimension,
+    CMD_DOCK_PIN, CMD_DOCK_QUIT, CMD_DOCK_TOGGLE, CMD_DOCK_WINDOW_BASE, Capability, CommandOutcome,
+    CropRegion, DockEffect, MenuRow, PixelLimits, Rect, ShelfThumbnail, StableOrder,
+    WindowPresence, bgra_layout, crop_bgra, group_windows, is_blank_frame, resize_bgra,
+    scale_dimension,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, HWND, LPARAM, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED, DwmFlush,
     DwmGetWindowAttribute, DwmSetWindowAttribute,
@@ -24,8 +27,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+};
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP, SHFILEINFOW,
     SHGFI_SYSICONINDEX, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, ShellExecuteW,
@@ -64,7 +70,7 @@ pub struct StackItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockItemKind {
     Finder,
-    Launchpad,
+    Apps,
     App { exe_path: String },
     Downloads,
     Trash { is_full: bool },
@@ -139,6 +145,200 @@ fn window_covers_dock(
         || (rect.right - rect.left >= screen_width - COVER_WIDTH_SLACK
             && rect.bottom - rect.top >= screen_height - COVER_HEIGHT_SLACK
             && rect.bottom >= screen_height - COVER_BOTTOM_SLACK)
+}
+
+fn window_is_fullscreen_on_primary(
+    on_primary: bool,
+    zoomed: bool,
+    rect: RECT,
+    screen_width: i32,
+    screen_height: i32,
+) -> bool {
+    on_primary
+        && !zoomed
+        && screen_width > 0
+        && screen_height > 0
+        && rect.left <= 0
+        && rect.top <= 0
+        && rect.right >= screen_width
+        && rect.bottom >= screen_height
+}
+
+const fn rects_overlap(a: RECT, b: RECT) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
+impl DockEntry {
+    #[must_use]
+    pub fn any_window_overlaps(zone: otto_core::Rect, own_pid: u32) -> bool {
+        struct Probe {
+            zone: RECT,
+            own_pid: u32,
+            found: bool,
+        }
+
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
+            if is_normal_visible_window(hwnd, probe.own_pid)
+                && rects_overlap(visible_window_rect(hwnd), probe.zone)
+            {
+                probe.found = true;
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+
+        let mut probe = Probe {
+            zone: RECT {
+                left: zone.x,
+                top: zone.y,
+                right: zone.right(),
+                bottom: zone.bottom(),
+            },
+            own_pid,
+            found: false,
+        };
+        unsafe {
+            let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
+        }
+        probe.found
+    }
+
+    #[must_use]
+    pub fn is_fullscreen_on_primary(screen_width: i32, screen_height: i32, own_pid: u32) -> bool {
+        struct Probe {
+            screen_width: i32,
+            screen_height: i32,
+            own_pid: u32,
+            primary_monitor: HMONITOR,
+            found: bool,
+        }
+
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
+            if is_normal_visible_window(hwnd, probe.own_pid) {
+                let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                let on_primary = monitor == probe.primary_monitor;
+                let zoomed = on_primary && unsafe { IsZoomed(hwnd) }.as_bool();
+                let rect = if on_primary && !zoomed {
+                    visible_window_rect(hwnd)
+                } else {
+                    RECT::default()
+                };
+                if window_is_fullscreen_on_primary(
+                    on_primary,
+                    zoomed,
+                    rect,
+                    probe.screen_width,
+                    probe.screen_height,
+                ) {
+                    probe.found = true;
+                    return BOOL(0);
+                }
+            }
+            BOOL(1)
+        }
+
+        let primary_monitor =
+            unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        let mut probe = Probe {
+            screen_width,
+            screen_height,
+            own_pid,
+            primary_monitor,
+            found: false,
+        };
+        unsafe {
+            let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
+        }
+        probe.found
+    }
+
+    #[must_use]
+    pub fn pin_at_target(&self, target_key: &str) -> bool {
+        let DockItemKind::App { exe_path } = &self.kind else {
+            return false;
+        };
+        let Some(pins) = read_pinned_file() else {
+            return false;
+        };
+        let Some(updated) = insert_pin_at(pins, &self.key, exe_path, target_key) else {
+            return false;
+        };
+        save_pinned_apps(&updated)
+    }
+
+    pub fn reveal_in_explorer(&self) {
+        match &self.kind {
+            DockItemKind::App { exe_path } if !exe_path.is_empty() => {
+                let wide_args = to_wide(&format!("/select,\"{exe_path}\""));
+                unsafe {
+                    let _ = ShellExecuteW(
+                        None,
+                        w!("open"),
+                        w!("explorer.exe"),
+                        PCWSTR(wide_args.as_ptr()),
+                        PCWSTR::null(),
+                        SW_SHOW,
+                    );
+                }
+            }
+            DockItemKind::Downloads => shell_open(w!("shell:Downloads")),
+            DockItemKind::Finder => shell_open(w!("explorer.exe")),
+            DockItemKind::Trash { .. } => shell_open(w!("shell:RecycleBinFolder")),
+            DockItemKind::App { .. } | DockItemKind::Apps | DockItemKind::Overflow { .. } => {}
+        }
+    }
+
+    #[must_use]
+    pub fn force_quit(&self, own_pid: u32) -> CommandOutcome {
+        let Some(app) = self.app.as_ref() else {
+            return CommandOutcome::TargetGone;
+        };
+        let pids = app.process_ids();
+        if pids.is_empty() {
+            return CommandOutcome::TargetGone;
+        }
+        let mut any_completed = false;
+        let mut any_denied = false;
+        for pid in pids {
+            if pid == 0 || pid == own_pid {
+                continue;
+            }
+            if app
+                .windows
+                .iter()
+                .any(|window| window.identity.process_id == pid && window.traits.elevated)
+            {
+                any_denied = true;
+                continue;
+            }
+            match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
+                Ok(handle) => {
+                    let terminated = unsafe { TerminateProcess(handle, 1) }.is_ok();
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                    if terminated {
+                        any_completed = true;
+                    } else {
+                        any_denied = true;
+                    }
+                }
+                Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {
+                    any_denied = true;
+                }
+                Err(_) => {}
+            }
+        }
+        if any_completed {
+            CommandOutcome::Completed
+        } else if any_denied {
+            CommandOutcome::Denied
+        } else {
+            CommandOutcome::TargetGone
+        }
+    }
 }
 
 #[must_use]
@@ -907,9 +1107,9 @@ pub fn collect_dock_entries_with_options(
             None => finder,
         },
         fixed_dock_entry(
-            "__launchpad__",
-            "Launchpad",
-            DockItemKind::Launchpad,
+            "__apps__",
+            "Apps",
+            DockItemKind::Apps,
             AppleIconKind::Launchpad,
         ),
     ];
@@ -989,8 +1189,7 @@ pub fn other_applications_visible(entries: &[DockEntry], key: &str) -> bool {
 pub fn launch_new_instance(entry: &DockEntry) {
     match &entry.kind {
         DockItemKind::Finder => shell_open(w!("explorer.exe")),
-        DockItemKind::Launchpad => crate::actions::open_start_menu(),
-        DockItemKind::Overflow { .. } => {}
+        DockItemKind::Apps | DockItemKind::Overflow { .. } => {}
         DockItemKind::Downloads => shell_open(w!("shell:Downloads")),
         DockItemKind::Trash { .. } => shell_open(w!("shell:RecycleBinFolder")),
         DockItemKind::App { exe_path } => {
@@ -1037,6 +1236,15 @@ fn push_capable(rows: &mut Vec<MenuRow>, capability: Capability, id: usize, labe
 
 #[must_use]
 pub fn build_dock_context_menu_rows(entry: &DockEntry, other_apps_visible: bool) -> Vec<MenuRow> {
+    let alt_down = (unsafe { GetAsyncKeyState(0x12) } as u16 & 0x8000) != 0;
+    build_dock_context_menu_rows_with_alt(entry, other_apps_visible, alt_down)
+}
+
+fn build_dock_context_menu_rows_with_alt(
+    entry: &DockEntry,
+    other_apps_visible: bool,
+    alt_down: bool,
+) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if let Some(app) = &entry.app {
         for (index, window) in app.primary_windows().enumerate() {
@@ -1058,8 +1266,8 @@ pub fn build_dock_context_menu_rows(entry: &DockEntry, other_apps_visible: bool)
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, open_label, ""));
         }
         DockItemKind::Overflow { .. } => {}
-        DockItemKind::Launchpad => {
-            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Start", ""));
+        DockItemKind::Apps => {
+            rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Apps", ""));
         }
         DockItemKind::Downloads => {
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, "Open Downloads", ""));
@@ -1081,22 +1289,49 @@ pub fn build_dock_context_menu_rows(entry: &DockEntry, other_apps_visible: bool)
                 entry.pinned,
                 true,
             ));
+            rows.push(MenuRow::item(DockEffect::CMD_REVEAL, "Show in Finder", ""));
             rows.push(MenuRow::item(CMD_DOCK_TOGGLE, open_label, ""));
             if let Some(app) = &entry.app {
                 rows.push(MenuRow::item(CMD_DOCK_NEW_WINDOW, "Open New Instance", ""));
-                push_capable(
-                    &mut rows,
-                    app.capability(AppCommand::Hide, other_apps_visible),
-                    CMD_DOCK_HIDE,
-                    "Hide",
-                );
+                if alt_down {
+                    push_capable(
+                        &mut rows,
+                        app.capability(AppCommand::HideOthers, other_apps_visible),
+                        DockEffect::CMD_HIDE_OTHERS,
+                        "Hide Others",
+                    );
+                } else {
+                    push_capable(
+                        &mut rows,
+                        app.capability(AppCommand::Hide, other_apps_visible),
+                        CMD_DOCK_HIDE,
+                        "Hide",
+                    );
+                }
                 rows.push(MenuRow::Separator);
-                push_capable(
-                    &mut rows,
-                    app.capability(AppCommand::Quit, other_apps_visible),
-                    CMD_DOCK_QUIT,
-                    "Quit",
-                );
+                if alt_down {
+                    let elevated = app.windows.iter().any(|window| window.traits.elevated);
+                    let force_quit_cap = if !app.has_primary_window() {
+                        Capability::Unsupported
+                    } else if elevated {
+                        Capability::Denied
+                    } else {
+                        Capability::Available
+                    };
+                    push_capable(
+                        &mut rows,
+                        force_quit_cap,
+                        DockEffect::CMD_FORCE_QUIT,
+                        "Force Quit",
+                    );
+                } else {
+                    push_capable(
+                        &mut rows,
+                        app.capability(AppCommand::Quit, other_apps_visible),
+                        CMD_DOCK_QUIT,
+                        "Quit",
+                    );
+                }
             }
         }
     }
@@ -1134,7 +1369,18 @@ pub fn extract_dock_icon(entry: &DockEntry) -> Option<IconBitmap> {
     let DockItemKind::App { exe_path } = &entry.kind else {
         return None;
     };
-    let raw = file_icon_bitmap(exe_path)
+    let shell_icon = entry
+        .key
+        .starts_with(USER_MODEL_KEY_PREFIX)
+        .then(|| crate::shelf::extract_shell_icon(exe_path, 256))
+        .flatten()
+        .map(|icon| IconBitmap {
+            width: icon.width,
+            height: icon.height,
+            pixels: icon.bgra,
+        });
+    let raw = shell_icon
+        .or_else(|| file_icon_bitmap(exe_path))
         .or_else(|| entry.hwnds.first().copied().and_then(window_icon_bitmap))?;
     Some(normalize_to_macos_squircle(&raw))
 }
@@ -1633,7 +1879,9 @@ fn classify_apple_icon(exe_path: &str) -> Option<AppleIconKind> {
         "code" | "code - insiders" | "cursor" | "windsurf" | "zed" | "devenv" => {
             Some(AppleIconKind::Code)
         }
-        "spotify" | "music" | "itunes" | "wmplayer" | "foobar2000" | "vlc" => {
+        "spotify" | "music" | "applemusic" | "itunes" | "youtube music" | "youtubemusic"
+        | "amazon music" | "amazonmusic" | "tidal" | "deezer" | "qobuz" | "plexamp"
+        | "wmplayer" | "foobar2000" | "musicbee" | "mediamonkey" | "winamp" | "aimp" | "vlc" => {
             Some(AppleIconKind::Music)
         }
         _ => None,
@@ -1769,6 +2017,26 @@ fn move_pin(pins: &mut Vec<PinnedApp>, moved_key: &str, target_key: &str) -> boo
     let pin = pins.remove(from);
     pins.insert(to, pin);
     true
+}
+
+fn insert_pin_at(
+    mut pins: Vec<PinnedApp>,
+    key: &str,
+    executable: &str,
+    target_key: &str,
+) -> Option<Vec<PinnedApp>> {
+    if pins.iter().any(|pin| pin.key == key) || pins.len() >= MAX_PINNED_APPS {
+        return None;
+    }
+    let target_pos = pins.iter().position(|pin| pin.key == target_key)?;
+    pins.insert(
+        target_pos,
+        PinnedApp {
+            key: String::from(key),
+            executable: String::from(executable),
+        },
+    );
+    Some(pins)
 }
 
 fn pinned_config_path() -> Option<PathBuf> {
@@ -2032,7 +2300,7 @@ pub fn open_file_with_dock_entry(entry: &DockEntry, file_path: &str) {
                 );
             }
         }
-        DockItemKind::Launchpad | DockItemKind::Overflow { .. } => {}
+        DockItemKind::Apps | DockItemKind::Overflow { .. } => {}
     }
 }
 
@@ -2049,13 +2317,14 @@ fn save_pinned_apps(apps: &[PinnedApp]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DockEntry, DockItemKind, MAX_PINNED_APPS, PinnedApp, build_default_pinned_apps,
-        build_dock_context_menu_rows, format_pinned, move_pin, parse_pinned, pinned_from_read,
-        toggled_pins, window_covers_dock,
+        AppleIconKind, DockEntry, DockItemKind, MAX_PINNED_APPS, PinnedApp,
+        build_default_pinned_apps, build_dock_context_menu_rows_with_alt, classify_apple_icon,
+        format_pinned, insert_pin_at, move_pin, parse_pinned, pinned_from_read, rects_overlap,
+        toggled_pins, window_covers_dock, window_is_fullscreen_on_primary,
     };
     use otto_core::{
-        AppIdentity, CMD_DOCK_WINDOW_BASE, MenuRow, WindowIdentity, WindowInfo, WindowPresence,
-        WindowRole, WindowTraits, group_windows,
+        AppIdentity, CMD_DOCK_HIDE, CMD_DOCK_QUIT, CMD_DOCK_WINDOW_BASE, DockEffect, MenuRow,
+        WindowIdentity, WindowInfo, WindowPresence, WindowRole, WindowTraits, group_windows,
     };
     use windows::Win32::Foundation::RECT;
 
@@ -2066,6 +2335,98 @@ mod tests {
             right,
             bottom,
         }
+    }
+
+    #[test]
+    fn popular_music_players_get_the_music_tile_and_video_or_unknown_apps_do_not() {
+        for exe in [
+            r"C:\Apps\Spotify.exe",
+            r"C:\Apps\AppleMusic.exe",
+            r"C:\Apps\YouTube Music.exe",
+            r"C:\Apps\Amazon Music.exe",
+            r"C:\Apps\TIDAL.exe",
+            r"C:\Apps\Deezer.exe",
+            r"C:\Apps\Qobuz.exe",
+            r"C:\Apps\Plexamp.exe",
+            r"C:\Apps\foobar2000.exe",
+            r"C:\Apps\MusicBee.exe",
+            r"C:\Apps\AIMP.exe",
+            r"C:\Apps\winamp.exe",
+        ] {
+            assert_eq!(
+                classify_apple_icon(exe),
+                Some(AppleIconKind::Music),
+                "{exe}"
+            );
+        }
+        for exe in [
+            r"C:\Apps\Plex.exe",
+            r"C:\Apps\Kodi.exe",
+            r"C:\Apps\Netflix.exe",
+            r"C:\Apps\SomethingElse.exe",
+        ] {
+            assert_eq!(classify_apple_icon(exe), None, "{exe}");
+        }
+    }
+
+    #[test]
+    fn overlap_needs_real_intersection_and_touching_edges_do_not_count() {
+        let zone = rect(400, 1000, 1500, 1080);
+        assert!(rects_overlap(rect(0, 0, 1920, 1080), zone));
+        assert!(rects_overlap(rect(1400, 900, 1700, 1010), zone));
+        assert!(!rects_overlap(rect(0, 0, 1920, 1000), zone));
+        assert!(!rects_overlap(rect(0, 1000, 400, 1080), zone));
+        assert!(!rects_overlap(rect(1500, 1000, 1920, 1080), zone));
+    }
+
+    #[test]
+    #[ignore = "creates a real window far off screen"]
+    fn a_real_window_inside_the_zone_is_detected_and_one_outside_is_not() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_EX_APPWINDOW,
+            WS_POPUP,
+        };
+        use windows::core::w;
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_APPWINDOW,
+                w!("STATIC"),
+                w!("otto-dock-overlap-test"),
+                WS_POPUP,
+                30_000,
+                30_000,
+                400,
+                300,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create probe window");
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+        let bounds = super::visible_window_rect(hwnd);
+        let inside = otto_core::Rect {
+            x: bounds.left + 20,
+            y: bounds.bottom - 40,
+            width: 200,
+            height: 100,
+        };
+        let outside = otto_core::Rect {
+            x: bounds.right + 5_000,
+            y: bounds.bottom + 5_000,
+            width: 200,
+            height: 100,
+        };
+        let own_other = std::process::id() + 1;
+        let detected = DockEntry::any_window_overlaps(inside, own_other);
+        let ignored_as_own = DockEntry::any_window_overlaps(inside, std::process::id());
+        let elsewhere = DockEntry::any_window_overlaps(outside, own_other);
+        let _ = unsafe { DestroyWindow(hwnd) };
+        assert!(detected);
+        assert!(!ignored_as_own);
+        assert!(!elsewhere);
     }
 
     #[test]
@@ -2130,11 +2491,15 @@ mod tests {
             hidden: false,
             minimized: false,
         };
-        let rows = build_dock_context_menu_rows(&entry, true);
+        let rows = build_dock_context_menu_rows_with_alt(&entry, true, false);
         let window_ids: Vec<usize> = rows
             .iter()
             .filter_map(|row| match row {
-                MenuRow::Item { id, .. } if *id >= CMD_DOCK_WINDOW_BASE => Some(*id),
+                MenuRow::Item { id, .. }
+                    if *id >= CMD_DOCK_WINDOW_BASE && *id < DockEffect::CMD_REVEAL =>
+                {
+                    Some(*id)
+                }
                 _ => None,
             })
             .collect();
@@ -2273,5 +2638,75 @@ mod tests {
         assert!(super::is_active_download_temp_name("setup.TMP"));
         assert!(!super::is_active_download_temp_name("notes.pdf"));
         assert!(!super::is_active_download_temp_name("photo.png"));
+    }
+
+    #[test]
+    fn fullscreen_detection_excludes_maximized_and_secondary_monitor_windows() {
+        let full = rect(0, 0, 1920, 1080);
+        assert!(window_is_fullscreen_on_primary(
+            true, false, full, 1920, 1080
+        ));
+        assert!(!window_is_fullscreen_on_primary(
+            true, true, full, 1920, 1080
+        ));
+        assert!(!window_is_fullscreen_on_primary(
+            false, false, full, 1920, 1080
+        ));
+        assert!(!window_is_fullscreen_on_primary(
+            true,
+            false,
+            rect(0, 0, 1920, 1040),
+            1920,
+            1080
+        ));
+    }
+
+    #[test]
+    fn insert_pin_at_places_new_pin_at_target_position() {
+        let pins = vec![pin("a", "A.exe"), pin("b", "B.exe")];
+        let updated = insert_pin_at(pins.clone(), "c", "C.exe", "b").expect("inserted");
+        let keys: Vec<&str> = updated.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["a", "c", "b"]);
+        assert!(insert_pin_at(pins.clone(), "a", "A.exe", "b").is_none());
+        assert!(insert_pin_at(pins, "c", "C.exe", "missing").is_none());
+    }
+
+    #[test]
+    fn context_menu_includes_show_in_finder_and_swaps_alt_actions() {
+        let app = group_windows(vec![window(1)]).remove(0);
+        let entry = DockEntry {
+            key: String::from("editor.exe"),
+            title: String::from("Editor"),
+            kind: DockItemKind::App {
+                exe_path: String::from("C:\\Tools\\editor.exe"),
+            },
+            apple_icon: None,
+            app: Some(app),
+            hwnds: vec![1],
+            window_titles: Vec::new(),
+            running: true,
+            active: false,
+            pinned: false,
+            hidden: false,
+            minimized: false,
+        };
+        let normal = build_dock_context_menu_rows_with_alt(&entry, true, false);
+        assert!(normal.iter().any(|row| {
+            matches!(row, MenuRow::Item { id, label, .. } if *id == DockEffect::CMD_REVEAL && label == "Show in Finder")
+        }));
+        assert!(normal.iter().any(|row| {
+            matches!(row, MenuRow::Item { id, label, .. } if *id == CMD_DOCK_HIDE && label == "Hide")
+        }));
+        assert!(normal.iter().any(|row| {
+            matches!(row, MenuRow::Item { id, label, .. } if *id == CMD_DOCK_QUIT && label == "Quit")
+        }));
+
+        let alt = build_dock_context_menu_rows_with_alt(&entry, true, true);
+        assert!(alt.iter().any(|row| {
+            matches!(row, MenuRow::Item { id, label, .. } if *id == DockEffect::CMD_HIDE_OTHERS && label == "Hide Others")
+        }));
+        assert!(alt.iter().any(|row| {
+            matches!(row, MenuRow::Item { id, label, .. } if *id == DockEffect::CMD_FORCE_QUIT && label == "Force Quit")
+        }));
     }
 }

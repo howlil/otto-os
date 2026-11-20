@@ -4,28 +4,30 @@ use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
 use otto_core::{
     AppMenuState, BACKDROP_PADDING_PT, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY,
-    CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER,
-    CMD_NOTIF_CLEAR_ALL, CMD_NOTIF_REQUEST_ACCESS, Capability, CaptureRegion, CommandOutcome,
-    ControlCenterEffect, ControlCenterPort, DOWNLOADS_STACK_MAX_ITEMS, DockPreferences,
-    DownloadsEffect, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
-    EstimatedMenuText, HitTarget, MAX_VISIBLE_NOTIFICATIONS, MenuAnchor, MenuContext, MenuRow,
-    MenuTextMeasure, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange,
-    WindowCommand, WindowInfo, WindowMenuEffect, WindowMenuState, build_calendar_rows,
+    CMD_CONTROL_CENTER, CMD_DOCK_OVERFLOW_BASE, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER,
+    CMD_NOTIF_CLEAR_ALL, CMD_NOTIF_REQUEST_ACCESS, CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_QUIT,
+    CMD_TOGGLE_DOCK, CMD_TOGGLE_NOTCH, CMD_TOGGLE_TOP_BAR, CalendarControl, Capability,
+    CaptureRegion, CommandOutcome, ControlCenterEffect, ControlCenterPage, ControlCenterPort,
+    DOWNLOADS_STACK_MAX_ITEMS, DockPreferences, DownloadsEffect, DownloadsStackEntry,
+    DownloadsStackHit, DownloadsStackLayout, EstimatedMenuText, HitTarget,
+    MAX_VISIBLE_NOTIFICATIONS, MenuAnchor, MenuContext, MenuRow, MenuTextMeasure, PopupMenuLayout,
+    PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowCommand, WindowInfo,
+    WindowMenuEffect, WindowMenuEntry, WindowMenuState, build_calendar_rows,
     build_menu_overflow_rows, build_notification_rows, build_top_bar_menu_rows,
-    build_window_tiling_menu_rows, capture_interval_for, capture_wanted,
+    build_tray_menu_rows, build_window_tiling_menu_rows, capture_interval_for, capture_wanted,
     compute_downloads_stack_layout, compute_popup_menu_layout, control_center_effect,
     dock_overflow_choice, dock_settings_effect, dock_settings_rows, downloads_effect,
     downloads_stack_hit_test, next_downloads_stack_focus, notification_dismiss_index,
     overflow_menu_target, scale, shift_month, window_menu_effect,
 };
 use otto_platform::{
-    DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter, application_of,
-    build_dock_context_menu_rows, current_process_id, cursor_position, execute_top_bar_command,
-    focus_window_hwnd, is_running_on_battery, monitor_work_area_at, open_downloads_folder,
-    open_path, poll_menu_events, primary_screen, read_downloads_stack_items,
+    ApplicationContext, DockEntry, MenuNavEvent, PrimaryScreen, StackItem, WindowsControlCenter,
+    application_of, build_dock_context_menu_rows, current_process_id, cursor_position,
+    execute_top_bar_command, focus_window_hwnd, is_running_on_battery, monitor_work_area_at,
+    open_downloads_folder, open_path, poll_menu_events, primary_screen, read_downloads_stack_items,
     read_downloads_stack_thumbnails, signal_command_failure, window_command_capability,
 };
-use otto_render::{DownloadsStackRenderer, PopupMenuRenderer};
+use otto_render::{DownloadsStackRenderer, MenuHover, PopupMenuRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
@@ -83,6 +85,9 @@ enum MenuSource {
         entries: Vec<DockEntry>,
     },
     DockSettings,
+    Tray {
+        from_tray: bool,
+    },
 }
 
 struct DownloadsStackView {
@@ -105,12 +110,13 @@ pub(crate) struct PopupMenu {
     anchor: MenuAnchor,
     scroll_offset: i32,
     hovered_row: Option<usize>,
+    hovered_calendar: Option<CalendarControl>,
     source: Option<MenuSource>,
     visible: bool,
     opened_at: Instant,
+    outside_since: Option<Instant>,
     was_mouse_down: bool,
     last_cursor: (i32, i32),
-    last_specular_cursor: (i32, i32),
     backdrop: Option<BackdropFeed>,
 }
 
@@ -162,12 +168,13 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         anchor,
         scroll_offset: 0,
         hovered_row: None,
+        hovered_calendar: None,
         source: None,
         visible: false,
         opened_at: Instant::now(),
+        outside_since: None,
         was_mouse_down: false,
         last_cursor: (0, 0),
-        last_specular_cursor: (0, 0),
         backdrop: None,
     };
     *runtime.menu.borrow_mut() = Some(menu);
@@ -207,20 +214,43 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
             if let Some(renderer) = menu.renderer.as_ref() {
                 renderer.clear_backdrop();
             }
+            if let Some(renderer) = menu.stack_renderer.as_ref() {
+                renderer.clear_backdrop();
+            }
         }
         menu.sync_backdrop(runtime, true);
         menu.present(runtime);
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_menu(runtime, |menu| {
+        if let Some(feed) = menu.backdrop.as_mut() {
+            feed.set_capture_visible(visible);
+        }
         menu.sync_backdrop(runtime, true);
         menu.present(runtime);
     });
 }
 
-fn top_bar_context<'a>(request: &TopBarMenuRequest<'a>, own_pid: u32) -> MenuContext<'a> {
+fn truncate_window_title(raw: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    let mut out = String::new();
+    for ch in trimmed.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if trimmed.chars().count() > max_chars && max_chars > 1 {
+        out.pop();
+        out.push('…');
+    }
+    out
+}
+
+fn top_bar_context<'a>(
+    request: &TopBarMenuRequest<'a>,
+    app_context: Option<&ApplicationContext>,
+    app_windows: &'a [WindowMenuEntry],
+) -> MenuContext<'a> {
     let Some(window) = request.window else {
         return MenuContext {
             file_manager: request.app_name == "Finder",
@@ -228,7 +258,7 @@ fn top_bar_context<'a>(request: &TopBarMenuRequest<'a>, own_pid: u32) -> MenuCon
         };
     };
     let app = if request.target == HitTarget::AppMenu {
-        application_of(window.identity, own_pid).map_or(AppMenuState::NONE, |context| {
+        app_context.map_or(AppMenuState::NONE, |context| {
             AppMenuState::of(&context.app, context.other_apps_visible)
         })
     } else {
@@ -240,6 +270,7 @@ fn top_bar_context<'a>(request: &TopBarMenuRequest<'a>, own_pid: u32) -> MenuCon
         tabbed: window.traits.full_screen_shortcut,
         window: Some(WindowMenuState::of(window)),
         app,
+        app_windows,
     }
 }
 
@@ -255,9 +286,36 @@ pub fn open_top_bar_menu(runtime: &RuntimeContext, request: &TopBarMenuRequest<'
         });
         return;
     }
+    let own_pid = current_process_id();
+    let app_context = request
+        .window
+        .filter(|_| matches!(request.target, HitTarget::AppMenu | HitTarget::WindowMenu))
+        .and_then(|window| application_of(window.identity, own_pid));
+    let app_windows: Vec<WindowMenuEntry> = app_context
+        .as_ref()
+        .filter(|_| request.target == HitTarget::WindowMenu)
+        .map(|context| {
+            context
+                .app
+                .primary_windows()
+                .take(64)
+                .map(|win| {
+                    let title = if win.title.trim().is_empty() {
+                        win.app_name.clone()
+                    } else {
+                        truncate_window_title(&win.title, 36)
+                    };
+                    WindowMenuEntry {
+                        title,
+                        active: win.active,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let rows = build_top_bar_menu_rows(
         request.target,
-        &top_bar_context(request, current_process_id()),
+        &top_bar_context(request, app_context.as_ref(), &app_windows),
     );
     let source = MenuSource::TopBar {
         bar_hwnd: request.bar_hwnd,
@@ -299,6 +357,35 @@ pub fn open_dock_settings_menu(
             MenuAnchor::AboveDock { center_x, bottom_y },
             dock_settings_rows(preferences),
             MenuSource::DockSettings,
+        );
+    });
+}
+
+pub fn open_tray_menu(runtime: &RuntimeContext, anchor_x: i32, anchor_y: i32, above_cursor: bool) {
+    let rows = build_tray_menu_rows(
+        runtime.top_bar_enabled.get(),
+        runtime.notch_enabled.get(),
+        runtime.dock_enabled.get(),
+    );
+    let anchor = if above_cursor {
+        MenuAnchor::AboveDock {
+            center_x: anchor_x,
+            bottom_y: anchor_y,
+        }
+    } else {
+        MenuAnchor::BelowPoint {
+            x: anchor_x,
+            y: anchor_y,
+        }
+    };
+    with_menu(runtime, |menu| {
+        menu.open(
+            runtime,
+            anchor,
+            rows,
+            MenuSource::Tray {
+                from_tray: above_cursor,
+            },
         );
     });
 }
@@ -573,7 +660,7 @@ fn execute_window_menu_command(
             false
         }
         WindowMenuEffect::OpenOttoSettings => {
-            crate::bar::open_otto_settings(runtime);
+            crate::control_center::open_otto_settings(runtime, false);
             false
         }
         WindowMenuEffect::OpenLogs => {
@@ -586,6 +673,49 @@ fn execute_window_menu_command(
             report(result.outcome);
             result.quit_requested
         }
+    }
+}
+
+fn dispatch_tray_selection(runtime: &RuntimeContext, from_tray: bool, cmd: usize) {
+    match cmd {
+        CMD_OTTO_SETTINGS => crate::control_center::open_otto_settings(runtime, from_tray),
+        CMD_CONTROL_CENTER => crate::control_center::toggle_from_host(
+            runtime,
+            ControlCenterPage::Main,
+            false,
+            from_tray,
+        ),
+        CMD_TOGGLE_TOP_BAR => {
+            runtime.queue_plugin_toggle(
+                crate::host::PluginId::TopBar,
+                !runtime.top_bar_enabled.get(),
+            );
+        }
+        CMD_TOGGLE_NOTCH => {
+            runtime
+                .pending_notch_enabled
+                .set(Some(!runtime.notch_enabled.get()));
+        }
+        CMD_TOGGLE_DOCK => {
+            runtime.queue_plugin_toggle(crate::host::PluginId::Dock, !runtime.dock_enabled.get());
+        }
+        CMD_OPEN_LOGS => {
+            let _ = otto_platform::open_logs_folder();
+        }
+        CMD_QUIT => {
+            let bar_hwnd = runtime.bar_hwnd.get();
+            if bar_hwnd != 0 {
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(HWND(bar_hwnd as *mut _)),
+                        WM_CLOSE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            }
+        }
+        _ => {}
     }
 }
 
@@ -664,11 +794,14 @@ fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, cmd: usize) 
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));
         }
         MenuSource::DockSettings => {
-            if let Some(change) = dock_settings_effect(cmd) {
+            if cmd == CMD_OTTO_SETTINGS {
+                crate::control_center::open_otto_settings(runtime, true);
+            } else if let Some(change) = dock_settings_effect(cmd) {
                 let next = runtime.dock_preferences.get().apply(change);
                 runtime.pending_dock_preferences.set(Some(next));
             }
         }
+        MenuSource::Tray { from_tray } => dispatch_tray_selection(runtime, from_tray, cmd),
         MenuSource::DockOverflow { entries } => {
             if let Some(index) = dock_overflow_choice(cmd, entries.len()) {
                 crate::dock::activate_overflow_entry(runtime, &entries[index]);
@@ -694,6 +827,7 @@ impl PopupMenu {
             self.hide();
             return;
         }
+        crate::spotlight::close(runtime);
         crate::control_center::close(runtime);
         self.screen = primary_screen();
         self.stack_view = None;
@@ -704,12 +838,15 @@ impl PopupMenu {
         self.scroll_offset = 0;
         self.relayout();
         self.hovered_row = None;
+        self.hovered_calendar = None;
         self.source = Some(source);
         self.opened_at = Instant::now();
+        self.outside_since = None;
         self.was_mouse_down = true;
         self.last_cursor = cursor_position();
         self.visible = true;
 
+        self.prime_backdrop(runtime);
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
@@ -730,6 +867,7 @@ impl PopupMenu {
         bottom_y: i32,
         items: Vec<StackItem>,
     ) {
+        crate::spotlight::close(runtime);
         crate::control_center::close(runtime);
         self.screen = primary_screen();
         self.rows.clear();
@@ -765,10 +903,12 @@ impl PopupMenu {
             active_hit: DownloadsStackHit::None,
         });
         self.opened_at = Instant::now();
+        self.outside_since = None;
         self.was_mouse_down = true;
         self.last_cursor = cursor_position();
         self.visible = true;
 
+        self.prime_backdrop(runtime);
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
@@ -867,7 +1007,9 @@ impl PopupMenu {
         }
         let restore_hwnd = self.target_hwnd();
         self.visible = false;
+        self.outside_since = None;
         self.hovered_row = None;
+        self.hovered_calendar = None;
         self.source = None;
         self.stack_view = None;
         self.stack_renderer = None;
@@ -895,6 +1037,19 @@ impl PopupMenu {
         let source = self.source.take()?;
         self.hide();
         Some((source, cmd))
+    }
+
+    fn calendar_control_at(&self, x: i32, y: i32) -> Option<CalendarControl> {
+        self.layout.calendar_control_at(&self.rows, x, y)
+    }
+
+    fn take_calendar_selection(&mut self, control: CalendarControl) -> Option<(MenuSource, usize)> {
+        if !matches!(self.source, Some(MenuSource::Calendar { .. })) {
+            return None;
+        }
+        let source = self.source.take()?;
+        self.hide();
+        Some((source, control.command()))
     }
 
     fn take_stack_selection(&mut self, hit: DownloadsStackHit) -> Option<(MenuSource, usize)> {
@@ -987,6 +1142,47 @@ impl PopupMenu {
         None
     }
 
+    fn should_auto_close_window_controls(&mut self, gx: i32, gy: i32) -> bool {
+        if !matches!(self.source, Some(MenuSource::WindowControls { .. })) {
+            return false;
+        }
+        let padded = Rect {
+            x: self.layout.window.x - 18,
+            y: self.layout.window.y - 36,
+            width: self.layout.window.width + 36,
+            height: self.layout.window.height + 54,
+        };
+        if padded.contains(gx, gy) {
+            self.outside_since = None;
+            false
+        } else {
+            self.outside_since.get_or_insert(Instant::now());
+            self.outside_since
+                .is_some_and(|t| t.elapsed() >= Duration::from_millis(180))
+        }
+    }
+
+    fn track_pointer(&mut self, runtime: &RuntimeContext, cursor: (i32, i32), inside: bool) {
+        let (local_x, local_y) = (
+            cursor.0 - self.layout.window.x,
+            cursor.1 - self.layout.window.y,
+        );
+        let pointed = inside
+            .then(|| self.layout.hit_test(local_x, local_y))
+            .flatten();
+        if pointed.is_some() && pointed != self.hovered_row {
+            self.hovered_row = pointed;
+            self.present(runtime);
+        }
+        let control = inside
+            .then(|| self.calendar_control_at(local_x, local_y))
+            .flatten();
+        if control != self.hovered_calendar {
+            self.hovered_calendar = control;
+            self.present(runtime);
+        }
+    }
+
     fn on_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<(MenuSource, usize)> {
         if !self.visible {
             return None;
@@ -1000,23 +1196,7 @@ impl PopupMenu {
         let inside = self.layout.window.contains(gx, gy);
         if cursor != self.last_cursor {
             self.last_cursor = cursor;
-            if let Some(renderer) = self.renderer.as_ref() {
-                let pointer = inside.then_some((
-                    (gx - self.layout.window.x) as f32,
-                    (gy - self.layout.window.y) as f32,
-                ));
-                renderer.set_pointer(pointer);
-            }
-            let pointed = inside
-                .then(|| {
-                    self.layout
-                        .hit_test(gx - self.layout.window.x, gy - self.layout.window.y)
-                })
-                .flatten();
-            if pointed.is_some() && pointed != self.hovered_row {
-                self.hovered_row = pointed;
-                self.present(runtime);
-            }
+            self.track_pointer(runtime, (gx, gy), inside);
         }
 
         let (mouse_down, nav_event) = poll_menu_events();
@@ -1033,7 +1213,17 @@ impl PopupMenu {
                 let row = self.layout.next_interactive_row(self.hovered_row);
                 self.select_row(runtime, row);
             }
-            Some(MenuNavEvent::Left | MenuNavEvent::Right) | None => {}
+            Some(step @ (MenuNavEvent::Left | MenuNavEvent::Right)) => {
+                let control = if matches!(step, MenuNavEvent::Left) {
+                    CalendarControl::Previous
+                } else {
+                    CalendarControl::Next
+                };
+                if let Some(selection) = self.take_calendar_selection(control) {
+                    return Some(selection);
+                }
+            }
+            None => {}
             Some(MenuNavEvent::Char(ch)) => {
                 if let Some(row) = self
                     .layout
@@ -1051,6 +1241,30 @@ impl PopupMenu {
             }
         }
 
+        let released = !mouse_down
+            && self.was_mouse_down
+            && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
+            && inside;
+        let (local_x, local_y) = (gx - self.layout.window.x, gy - self.layout.window.y);
+        if released && let Some(control) = self.calendar_control_at(local_x, local_y) {
+            self.was_mouse_down = false;
+            if let Some(selection) = self.take_calendar_selection(control) {
+                return Some(selection);
+            }
+        }
+        if released
+            && let Some(row) = self.hovered_row
+            && self.layout.hit_test(local_x, local_y) == Some(row)
+        {
+            self.was_mouse_down = false;
+            if let Some(selection) = self.take_selection(row) {
+                return Some(selection);
+            }
+        }
+        if self.should_auto_close_window_controls(gx, gy) {
+            self.hide();
+            return None;
+        }
         if mouse_down
             && !self.was_mouse_down
             && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
@@ -1075,15 +1289,11 @@ impl PopupMenu {
             }
             return;
         }
-        if let Some(renderer) = self.renderer.as_ref() {
-            renderer.set_pointer(Some((x as f32, y as f32)));
-        }
         let next = self.layout.hit_test(x, y);
-        let specular_moved =
-            (x - self.last_specular_cursor.0).abs() + (y - self.last_specular_cursor.1).abs() >= 18;
-        if next != self.hovered_row || specular_moved {
+        let control = self.calendar_control_at(x, y);
+        if next != self.hovered_row || control != self.hovered_calendar {
             self.hovered_row = next;
-            self.last_specular_cursor = (x, y);
+            self.hovered_calendar = control;
             self.present(runtime);
         }
     }
@@ -1117,11 +1327,54 @@ impl PopupMenu {
         self.take_selection(row)
     }
 
+    fn prime_backdrop(&self, runtime: &RuntimeContext) {
+        let appearance = crate::theme_state::appearance(runtime);
+        if !capture_wanted(&appearance, runtime.glass_enabled.get()) {
+            return;
+        }
+        let needs_backdrop = if self.stack_view.is_some() {
+            self.stack_renderer
+                .as_ref()
+                .is_some_and(|renderer| !renderer.has_backdrop())
+        } else {
+            self.renderer
+                .as_ref()
+                .is_some_and(|renderer| !renderer.has_backdrop())
+        };
+        if !needs_backdrop {
+            return;
+        }
+        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let Some(region) = CaptureRegion::padded_to_screen(
+            self.layout.window,
+            pad,
+            self.screen.width,
+            self.screen.height,
+        ) else {
+            return;
+        };
+        let Some(pixels) =
+            otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
+        else {
+            return;
+        };
+        let local = (
+            region.x - self.layout.window.x,
+            region.y - self.layout.window.y,
+        );
+        if self.stack_view.is_some() {
+            if let Some(renderer) = self.stack_renderer.as_ref() {
+                renderer.set_backdrop(pixels, local);
+            }
+        } else if let Some(renderer) = self.renderer.as_ref() {
+            renderer.set_backdrop(pixels, local);
+        }
+    }
+
     fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
         let wanted = self.visible
             && self.hwnd != 0
-            && !runtime.capture_visible.get()
             && capture_wanted(&appearance, runtime.glass_enabled.get());
         if !wanted {
             if let Some(feed) = self.backdrop.as_mut()
@@ -1132,6 +1385,9 @@ impl PopupMenu {
             if let Some(renderer) = self.renderer.as_ref() {
                 renderer.clear_backdrop();
             }
+            if let Some(renderer) = self.stack_renderer.as_ref() {
+                renderer.clear_backdrop();
+            }
             return;
         }
         if self.backdrop.is_none() {
@@ -1139,6 +1395,7 @@ impl PopupMenu {
                 self.hwnd,
                 WM_APP_MENU_BACKDROP,
                 vec![self.hwnd],
+                runtime.capture_visible.get(),
             ));
         }
         let Some(feed) = self.backdrop.as_mut() else {
@@ -1165,7 +1422,11 @@ impl PopupMenu {
             update.origin.0 - self.layout.window.x,
             update.origin.1 - self.layout.window.y,
         );
-        if self.ensure_renderer()
+        if self.stack_view.is_some() {
+            if let Some(renderer) = self.stack_renderer.as_ref() {
+                renderer.set_backdrop(update.pixels, local);
+            }
+        } else if self.ensure_renderer()
             && let Some(renderer) = self.renderer.as_ref()
         {
             renderer.set_backdrop(update.pixels, local);
@@ -1203,7 +1464,10 @@ impl PopupMenu {
                 self.hwnd,
                 &self.layout,
                 &self.rows,
-                self.hovered_row,
+                MenuHover {
+                    row: self.hovered_row,
+                    calendar: self.hovered_calendar,
+                },
                 appearance,
             ),
         );

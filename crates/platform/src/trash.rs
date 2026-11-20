@@ -1,21 +1,24 @@
-use std::mem::size_of;
+use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
 use windows::Win32::UI::Shell::{
     FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, SHEmptyRecycleBinW, SHFILEOPSTRUCTW,
-    SHFileOperationW, SHQUERYRBINFO, SHQueryRecycleBinW,
+    SHFileOperationW,
 };
-use windows::core::{BOOL, PCWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR};
 
 use crate::com::ComGuard;
 use crate::worker::join_within;
 
 const TRASH_CACHE_TTL: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const DRIVE_FIXED: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct TrashCache {
@@ -72,12 +75,28 @@ pub fn recycle_path(path: &str) -> bool {
 }
 
 fn query_recycle_bin_full() -> bool {
-    let mut info = SHQUERYRBINFO {
-        cbSize: size_of::<SHQUERYRBINFO>() as u32,
-        ..SHQUERYRBINFO::default()
-    };
-    let queried = unsafe { SHQueryRecycleBinW(PCWSTR::null(), &raw mut info).is_ok() };
-    queried && (info.i64NumItems > 0 || info.i64Size > 0)
+    let drives = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|bit| drives & (1 << bit) != 0)
+        .map(|bit| format!("{}:\\", char::from(b'A' + bit)))
+        .filter(|root| unsafe { GetDriveTypeW(&HSTRING::from(root.as_str())) } == DRIVE_FIXED)
+        .any(|root| drive_bin_has_items(Path::new(&root)))
+}
+
+fn drive_bin_has_items(root: &Path) -> bool {
+    fs::read_dir(root.join("$Recycle.Bin")).is_ok_and(|owners| {
+        owners
+            .flatten()
+            .any(|owner| owner_bin_has_items(&owner.path()))
+    })
+}
+
+fn owner_bin_has_items(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|mut entries| {
+        entries.any(|entry| {
+            entry.is_ok_and(|entry| !entry.file_name().eq_ignore_ascii_case("desktop.ini"))
+        })
+    })
 }
 
 fn store_cache(full: bool) -> bool {
@@ -221,7 +240,7 @@ mod tests {
 
     use super::{
         SHUTTING_DOWN, TRASH_QUERY_PENDING, TRASH_QUERY_TASK, TrashQueryGuard, is_recycle_bin_full,
-        resume_recycle_bin_task, shutdown_recycle_bin_task,
+        owner_bin_has_items, resume_recycle_bin_task, shutdown_recycle_bin_task,
     };
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -245,6 +264,43 @@ mod tests {
         }));
         assert!(outcome.is_err());
         assert!(!TRASH_QUERY_PENDING.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_owner_bin_with_only_desktop_ini_is_empty_and_any_other_entry_makes_it_full() {
+        let dir = std::env::temp_dir().join(format!("otto-trash-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create probe dir");
+        assert!(!owner_bin_has_items(&dir.join("missing")));
+        assert!(!owner_bin_has_items(&dir));
+        std::fs::write(dir.join("desktop.ini"), b"").expect("write desktop.ini");
+        assert!(!owner_bin_has_items(&dir));
+        std::fs::write(dir.join("$I1234.txt"), b"x").expect("write item");
+        assert!(owner_bin_has_items(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "reads the real Recycle Bin and waits on the slow shell count"]
+    fn the_probe_agrees_with_the_shell_and_is_far_faster() {
+        use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+        use windows::core::PCWSTR;
+
+        let started = std::time::Instant::now();
+        let probed = super::query_recycle_bin_full();
+        let probe_time = started.elapsed();
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+            ..SHQUERYRBINFO::default()
+        };
+        let queried = unsafe { SHQueryRecycleBinW(PCWSTR::null(), &raw mut info) }.is_ok();
+        assert!(queried);
+        assert_eq!(probed, info.i64NumItems > 0 || info.i64Size > 0);
+        assert!(
+            probe_time < std::time::Duration::from_millis(250),
+            "{probe_time:?}"
+        );
+        println!("probe {probe_time:?}, shell items {}", info.i64NumItems);
     }
 
     #[test]

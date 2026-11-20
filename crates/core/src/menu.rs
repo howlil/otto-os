@@ -1,4 +1,7 @@
 use crate::app_model::{AppCommand, AppInfo, Capability, WindowCommand, WindowInfo};
+use crate::calendar::{
+    CALENDAR_POPUP_WIDTH, CalendarControl, calendar_row_height, compute_calendar_layout,
+};
 use crate::layout::{HitTarget, Rect, scale};
 
 pub const CMD_NONE: usize = 0;
@@ -23,6 +26,8 @@ pub const CMD_APP_HIDE: usize = 18;
 pub const CMD_APP_HIDE_OTHERS: usize = 19;
 pub const CMD_APP_QUIT: usize = 25;
 pub const CMD_APP_SHOW_ALL: usize = 27;
+pub const CMD_APP_SETTINGS: usize = 28;
+pub const CMD_WIN_BRING_ALL_TO_FRONT: usize = 29;
 
 pub const CMD_FILE_NEW: usize = 20;
 pub const CMD_FILE_NEW_TAB: usize = 21;
@@ -73,6 +78,10 @@ pub const CMD_OTTO_SETTINGS: usize = 80;
 pub const CMD_OPEN_LOGS: usize = 81;
 pub const CMD_NOTIF_CLEAR_ALL: usize = 82;
 pub const CMD_NOTIF_REQUEST_ACCESS: usize = 83;
+pub const CMD_CONTROL_CENTER: usize = 84;
+pub const CMD_TOGGLE_TOP_BAR: usize = 85;
+pub const CMD_TOGGLE_NOTCH: usize = 86;
+pub const CMD_TOGGLE_DOCK: usize = 87;
 pub const CMD_OVERFLOW_MENU_BASE: usize = 90;
 pub const CMD_DOCK_PIN: usize = 100;
 pub const CMD_DOCK_TOGGLE: usize = 101;
@@ -83,6 +92,39 @@ pub const CMD_DOCK_HIDE: usize = 105;
 pub const CMD_DOCK_WINDOW_BASE: usize = 200;
 pub const CMD_NOTIF_DISMISS_BASE: usize = 1000;
 pub const MAX_VISIBLE_NOTIFICATIONS: usize = 5;
+pub const NOTIFICATION_CARD_HEIGHT: i32 = 68;
+pub const NOTIFICATION_CARD_WIDTH: i32 = 320;
+
+const NOTIFICATION_BADGE_COLORS: [[u8; 3]; 7] = [
+    [255, 69, 58],
+    [255, 159, 10],
+    [48, 209, 88],
+    [10, 132, 255],
+    [191, 90, 242],
+    [100, 210, 255],
+    [255, 55, 95],
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationBadge {
+    pub initial: char,
+    pub color: [u8; 3],
+}
+
+#[must_use]
+pub fn notification_badge(app_name: &str) -> NotificationBadge {
+    let initial = app_name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or('?', |c| c.to_uppercase().next().unwrap_or(c));
+    let hash = app_name.bytes().fold(0x811c_9dc5_u32, |acc, byte| {
+        (acc ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    NotificationBadge {
+        initial,
+        color: NOTIFICATION_BADGE_COLORS[hash as usize % NOTIFICATION_BADGE_COLORS.len()],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationSummary {
@@ -256,7 +298,6 @@ pub struct PopupMenuMetrics {
     pub right_pad: i32,
     pub slider_height: i32,
     pub slider_inset: i32,
-    pub calendar_cell_height: i32,
     pub screen_margin: i32,
     pub max_height: i32,
 }
@@ -269,14 +310,13 @@ impl PopupMenuMetrics {
         pad_y: 5,
         row_height: 24,
         separator_height: 9,
-        corner_radius: 10,
-        row_corner_radius: 5,
+        corner_radius: 13,
+        row_corner_radius: 8,
         check_col_width: 20,
         shortcut_gap: 24,
         right_pad: 12,
         slider_height: 46,
         slider_inset: 14,
-        calendar_cell_height: 26,
         screen_margin: 6,
         max_height: 520,
     };
@@ -309,6 +349,7 @@ impl MenuTextMeasure for EstimatedMenuText {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PopupMenuRowLayout {
     pub index: usize,
@@ -316,11 +357,13 @@ pub struct PopupMenuRowLayout {
     pub rect: Rect,
     pub is_separator: bool,
     pub is_slider: bool,
+    pub is_calendar: bool,
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PopupMenuLayout {
+    pub dpi: u32,
     pub window: Rect,
     pub viewport: Rect,
     pub content_height: i32,
@@ -381,6 +424,26 @@ impl PopupMenuLayout {
             .iter()
             .find(|row| !row.is_separator && row.enabled && row.rect.contains(local_x, local_y))
             .map(|row| row.index)
+    }
+
+    #[must_use]
+    pub fn calendar_control_at(
+        &self,
+        rows: &[MenuRow],
+        local_x: i32,
+        local_y: i32,
+    ) -> Option<CalendarControl> {
+        if !self.viewport.contains(local_x, local_y) {
+            return None;
+        }
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.is_calendar && row.rect.contains(local_x, local_y))?;
+        let MenuRow::Calendar { year, month, .. } = rows.get(row.index)? else {
+            return None;
+        };
+        compute_calendar_layout(row.rect, self.dpi, *year, *month).control_at(local_x, local_y)
     }
 
     #[must_use]
@@ -510,6 +573,7 @@ fn measure_columns(
         + scale(metrics.right_pad, dpi);
     let (mut label, mut shortcut) = (0, 0);
     let mut notification_card_width = 0;
+    let mut calendar_width = 0;
     for row in rows {
         match row {
             MenuRow::Item {
@@ -523,9 +587,12 @@ fn measure_columns(
                 }
             }
             MenuRow::Notification { .. } => {
-                notification_card_width = scale(284, dpi);
+                notification_card_width = scale(NOTIFICATION_CARD_WIDTH, dpi);
             }
-            MenuRow::Slider { .. } | MenuRow::Calendar { .. } | MenuRow::Separator => {}
+            MenuRow::Calendar { .. } => {
+                calendar_width = scale(CALENDAR_POPUP_WIDTH, dpi);
+            }
+            MenuRow::Slider { .. } | MenuRow::Separator => {}
         }
     }
     let gap = if shortcut > 0 {
@@ -536,6 +603,7 @@ fn measure_columns(
     ColumnWidths {
         width: (fixed + label + gap + shortcut)
             .max(notification_card_width)
+            .max(calendar_width)
             .clamp(min_w, max_w.max(min_w)),
         shortcut,
     }
@@ -566,14 +634,14 @@ pub fn compute_popup_menu_layout(
             MenuRow::Slider { id, .. } => {
                 (*id, scale(metrics.slider_height, dpi), false, true, true)
             }
-            MenuRow::Calendar { .. } => (
-                CMD_NONE,
-                scale(metrics.calendar_cell_height, dpi) * 8,
+            MenuRow::Calendar { .. } => (CMD_NONE, calendar_row_height(dpi), true, false, false),
+            MenuRow::Notification { id, .. } => (
+                *id,
+                scale(NOTIFICATION_CARD_HEIGHT, dpi),
+                false,
+                false,
                 true,
-                false,
-                false,
             ),
-            MenuRow::Notification { id, .. } => (*id, scale(52, dpi), false, false, true),
             MenuRow::Separator => (
                 CMD_NONE,
                 scale(metrics.separator_height, dpi),
@@ -611,6 +679,7 @@ pub fn compute_popup_menu_layout(
             },
             is_separator,
             is_slider,
+            is_calendar: matches!(rows[index], MenuRow::Calendar { .. }),
             enabled,
         });
         y += row_height;
@@ -626,6 +695,7 @@ pub fn compute_popup_menu_layout(
     let win_y = raw_y.clamp(min_y, (bounds.bottom() - height - margin).max(min_y));
 
     PopupMenuLayout {
+        dpi,
         window: Rect {
             x: win_x,
             y: win_y,
@@ -805,6 +875,12 @@ impl AppMenuState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMenuEntry {
+    pub title: String,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuContext<'a> {
     pub app_name: &'a str,
@@ -812,6 +888,7 @@ pub struct MenuContext<'a> {
     pub tabbed: bool,
     pub window: Option<WindowMenuState>,
     pub app: AppMenuState,
+    pub app_windows: &'a [WindowMenuEntry],
 }
 
 impl<'a> MenuContext<'a> {
@@ -823,6 +900,7 @@ impl<'a> MenuContext<'a> {
             tabbed: false,
             window: None,
             app: AppMenuState::NONE,
+            app_windows: &[],
         }
     }
 
@@ -841,17 +919,32 @@ pub fn build_apple_menu_rows() -> Vec<MenuRow> {
     vec![
         MenuRow::item(CMD_START, "Open Start", ""),
         MenuRow::Separator,
-        MenuRow::item(CMD_OTTO_SETTINGS, "Otto Settings...", ""),
+        MenuRow::item(CMD_OTTO_SETTINGS, "Otto Settings...", "⌃⌥,"),
         MenuRow::item(CMD_OPEN_LOGS, "Open Logs Folder", ""),
         MenuRow::item(CMD_SETTINGS, "System Settings...", ""),
-        MenuRow::item(CMD_TASKMGR, "Force Quit (Task Manager)...", ""),
+        MenuRow::item(CMD_TASKMGR, "Force Quit (Task Manager)...", "⌥⌘⎋"),
         MenuRow::Separator,
         MenuRow::item(CMD_SLEEP, "Sleep", ""),
         MenuRow::item(CMD_RESTART, "Restart...", ""),
         MenuRow::item(CMD_SHUTDOWN, "Shut Down...", ""),
         MenuRow::Separator,
-        MenuRow::item(CMD_LOCK, "Lock Screen", ""),
+        MenuRow::item(CMD_LOCK, "Lock Screen", "⌃⌘Q"),
         MenuRow::item(CMD_QUIT, "Quit Otto Bar", ""),
+    ]
+}
+
+#[must_use]
+pub fn build_tray_menu_rows(top_bar: bool, notch: bool, dock: bool) -> Vec<MenuRow> {
+    vec![
+        MenuRow::item(CMD_OTTO_SETTINGS, "Otto Settings...", "⌃⌥,"),
+        MenuRow::item(CMD_CONTROL_CENTER, "Control Center", "⌃⌥C"),
+        MenuRow::Separator,
+        MenuRow::check_item(CMD_TOGGLE_TOP_BAR, "Top Bar", top_bar, true),
+        MenuRow::check_item(CMD_TOGGLE_NOTCH, "Notch", notch, true),
+        MenuRow::check_item(CMD_TOGGLE_DOCK, "Otto Dock", dock, true),
+        MenuRow::Separator,
+        MenuRow::item(CMD_OPEN_LOGS, "Open Logs Folder", ""),
+        MenuRow::item(CMD_QUIT, "Quit Otto OS", ""),
     ]
 }
 
@@ -864,17 +957,25 @@ fn build_app_menu_rows(context: &MenuContext<'_>) -> Vec<MenuRow> {
     }
     push_capable(
         &mut rows,
+        context.shortcuts(),
+        CMD_APP_SETTINGS,
+        "Settings...",
+        "⌘,",
+    );
+    rows.push(MenuRow::Separator);
+    push_capable(
+        &mut rows,
         context.app.hide,
         CMD_APP_HIDE,
         format!("Hide {name}"),
-        "",
+        "⌘H",
     );
     push_capable(
         &mut rows,
         context.app.hide_others,
         CMD_APP_HIDE_OTHERS,
         "Hide Others",
-        "",
+        "⌥⌘H",
     );
     push_capable(
         &mut rows,
@@ -884,17 +985,12 @@ fn build_app_menu_rows(context: &MenuContext<'_>) -> Vec<MenuRow> {
         "",
     );
     rows.push(MenuRow::Separator);
-    rows.push(MenuRow::item(
-        CMD_TASKMGR,
-        "Force Quit (Task Manager)...",
-        "",
-    ));
     push_capable(
         &mut rows,
         context.app.quit,
         CMD_APP_QUIT,
         format!("Quit {name}"),
-        "",
+        "⌘Q",
     );
     rows
 }
@@ -918,7 +1014,7 @@ fn build_file_menu_rows(context: &MenuContext<'_>) -> Vec<MenuRow> {
         push_capable(&mut rows, keys, CMD_FILE_SAVE_AS, "Save As...", "⇧⌃S");
     }
     rows.push(MenuRow::Separator);
-    push_capable(&mut rows, close, CMD_WIN_CLOSE, "Close Window", "");
+    push_capable(&mut rows, close, CMD_WIN_CLOSE, "Close Window", "⌘W");
     rows
 }
 
@@ -980,7 +1076,7 @@ fn build_window_menu_rows(context: &MenuContext<'_>) -> Vec<MenuRow> {
         context.window_capability(|window| window.minimize),
         CMD_WIN_MINIMIZE,
         "Minimize",
-        "",
+        "⌘M",
     );
     push_capable(
         &mut rows,
@@ -1007,6 +1103,23 @@ fn build_window_menu_rows(context: &MenuContext<'_>) -> Vec<MenuRow> {
     rows.push(MenuRow::Separator);
     rows.push(MenuRow::item(CMD_TASK_VIEW, "Mission Control", "⊞Tab"));
     rows.push(MenuRow::item(CMD_SHOW_DESKTOP, "Show Desktop", "⊞D"));
+    if !context.app_windows.is_empty() {
+        rows.push(MenuRow::Separator);
+        rows.push(MenuRow::item(
+            CMD_WIN_BRING_ALL_TO_FRONT,
+            "Bring All to Front",
+            "",
+        ));
+        rows.push(MenuRow::Separator);
+        for (index, entry) in context.app_windows.iter().enumerate() {
+            rows.push(MenuRow::check_item(
+                CMD_DOCK_WINDOW_BASE + index,
+                entry.title.clone(),
+                entry.active,
+                true,
+            ));
+        }
+    }
     rows
 }
 
@@ -1043,10 +1156,6 @@ pub fn build_top_bar_menu_rows(target: HitTarget, context: &MenuContext<'_>) -> 
 pub fn build_calendar_rows(year: u16, month: u8, today: Option<u8>) -> Vec<MenuRow> {
     vec![
         MenuRow::Calendar { year, month, today },
-        MenuRow::Separator,
-        MenuRow::item(CMD_CAL_PREVIOUS, "Previous Month", ""),
-        MenuRow::item(CMD_CAL_NEXT, "Next Month", ""),
-        MenuRow::item(CMD_CAL_TODAY, "Go to Today", ""),
         MenuRow::Separator,
         MenuRow::item(CMD_CAL_SETTINGS, "Date & Time Settings...", ""),
     ]
@@ -1241,6 +1350,7 @@ mod tests {
             tabbed: false,
             window: Some(WindowMenuState::of(&info)),
             app: AppMenuState::of(&app, true),
+            app_windows: &[],
         }
     }
 
@@ -1344,12 +1454,82 @@ mod tests {
     fn app_menu_separates_hide_quit_and_window_close() {
         let rows = build_top_bar_menu_rows(HitTarget::AppMenu, &context(WindowTraits::STANDARD));
         let enabled = ids(&rows, true);
+        assert!(enabled.contains(&CMD_APP_SETTINGS));
         assert!(enabled.contains(&CMD_APP_HIDE));
         assert!(enabled.contains(&CMD_APP_HIDE_OTHERS));
         assert!(enabled.contains(&CMD_APP_QUIT));
+        assert!(!enabled.contains(&CMD_TASKMGR));
         assert!(!enabled.contains(&CMD_WIN_CLOSE));
         assert!(!enabled.contains(&CMD_WIN_MINIMIZE));
         assert!(!enabled.contains(&CMD_APP_SHOW_ALL));
+    }
+
+    #[test]
+    fn macos_shortcut_glyphs_appear_on_apple_app_file_and_window_menus() {
+        fn find_shortcut(rows: &[MenuRow], target_id: usize) -> Option<&str> {
+            rows.iter().find_map(|row| match row {
+                MenuRow::Item { id, shortcut, .. } if *id == target_id => Some(shortcut.as_str()),
+                _ => None,
+            })
+        }
+        let apple = build_apple_menu_rows();
+        assert_eq!(find_shortcut(&apple, CMD_TASKMGR), Some("⌥⌘⎋"));
+        assert_eq!(find_shortcut(&apple, CMD_LOCK), Some("⌃⌘Q"));
+
+        let ctx = context(WindowTraits::STANDARD);
+        let app = build_top_bar_menu_rows(HitTarget::AppMenu, &ctx);
+        assert_eq!(find_shortcut(&app, CMD_APP_SETTINGS), Some("⌘,"));
+        assert_eq!(find_shortcut(&app, CMD_APP_HIDE), Some("⌘H"));
+        assert_eq!(find_shortcut(&app, CMD_APP_HIDE_OTHERS), Some("⌥⌘H"));
+        assert_eq!(find_shortcut(&app, CMD_APP_QUIT), Some("⌘Q"));
+
+        let file = build_top_bar_menu_rows(HitTarget::FileMenu, &ctx);
+        assert_eq!(find_shortcut(&file, CMD_WIN_CLOSE), Some("⌘W"));
+
+        let window_rows = build_top_bar_menu_rows(HitTarget::WindowMenu, &ctx);
+        assert_eq!(find_shortcut(&window_rows, CMD_WIN_MINIMIZE), Some("⌘M"));
+        assert!(!ids(&window_rows, false).contains(&CMD_WIN_BRING_ALL_TO_FRONT));
+    }
+
+    #[test]
+    fn window_menu_lists_app_windows_and_bring_all_to_front() {
+        let entries = [
+            WindowMenuEntry {
+                title: String::from("main.rs"),
+                active: true,
+            },
+            WindowMenuEntry {
+                title: String::from("lib.rs"),
+                active: false,
+            },
+        ];
+        let mut ctx = context(WindowTraits::STANDARD);
+        ctx.app_windows = &entries;
+        let rows = build_top_bar_menu_rows(HitTarget::WindowMenu, &ctx);
+        let enabled = ids(&rows, true);
+        assert!(enabled.contains(&CMD_WIN_BRING_ALL_TO_FRONT));
+        assert!(enabled.contains(&CMD_DOCK_WINDOW_BASE));
+        assert!(enabled.contains(&(CMD_DOCK_WINDOW_BASE + 1)));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item {
+                id,
+                label,
+                checked: true,
+                enabled: true,
+                ..
+            } if *id == CMD_DOCK_WINDOW_BASE && label == "main.rs"
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            MenuRow::Item {
+                id,
+                label,
+                checked: false,
+                enabled: true,
+                ..
+            } if *id == CMD_DOCK_WINDOW_BASE + 1 && label == "lib.rs"
+        )));
     }
 
     #[test]
@@ -1493,17 +1673,41 @@ mod tests {
     }
 
     #[test]
-    fn calendar_row_is_tall_and_not_interactive() {
+    fn calendar_row_is_a_fixed_height_grid_and_only_the_header_controls_are_interactive() {
         let rows = build_calendar_rows(2026, 11, Some(11));
         let layout = layout_for(&rows, MenuAnchor::BelowPoint { x: 1500, y: 34 });
         let cal = layout.rows[0].rect;
-        assert_eq!(cal.height, 26 * 8);
+        assert!(layout.rows[0].is_calendar);
+        assert_eq!(cal.height, calendar_row_height(96));
+        assert!(layout.window.width >= scale(CALENDAR_POPUP_WIDTH, 96));
         assert_eq!(layout.hit_test(cal.x + 10, cal.y + 10), None);
-        assert_eq!(layout.command_at(2), Some(CMD_CAL_PREVIOUS));
-        assert!(
-            !rows
-                .iter()
-                .any(|row| matches!(row, MenuRow::Notification { .. }))
+        assert_eq!(layout.command_at(2), Some(CMD_CAL_SETTINGS));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, MenuRow::Item { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn calendar_header_controls_are_hit_through_the_menu_layout() {
+        let rows = build_calendar_rows(2026, 11, Some(11));
+        let layout = layout_for(&rows, MenuAnchor::BelowPoint { x: 1500, y: 34 });
+        let calendar = compute_calendar_layout(layout.rows[0].rect, layout.dpi, 2026, 11);
+        for (control, rect) in calendar.controls {
+            let (x, y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+            assert_eq!(layout.calendar_control_at(&rows, x, y), Some(control));
+        }
+        let cell = calendar.cells[10].rect;
+        assert_eq!(
+            layout.calendar_control_at(&rows, cell.x + 4, cell.y + 4),
+            None
+        );
+        let settings = layout.rows[2].rect;
+        assert_eq!(
+            layout.calendar_control_at(&rows, settings.x + 4, settings.y + 4),
+            None
         );
     }
 
@@ -1618,5 +1822,61 @@ mod tests {
             row,
             MenuRow::Item { id, .. } if *id == CMD_CC_CALENDAR
         )));
+    }
+
+    #[test]
+    fn popup_menu_shell_and_row_pills_are_concentric() {
+        let metrics = PopupMenuMetrics::MACOS_SONOMA;
+        assert_eq!(metrics.corner_radius, 13);
+        assert_eq!(metrics.row_corner_radius, 8);
+        assert_eq!(metrics.pad_x, 5);
+        assert_eq!(metrics.pad_y, 5);
+        assert_eq!(
+            metrics.corner_radius - metrics.pad_x,
+            metrics.row_corner_radius
+        );
+        let rows = vec![MenuRow::item(1, "New Window", "⌘N")];
+        let layout = layout_for(&rows, MenuAnchor::TopBar { x: 100, y: 34 });
+        assert!((layout.corner_radius - 13.0).abs() < f32::EPSILON);
+        assert!((layout.row_corner_radius - 8.0).abs() < f32::EPSILON);
+        assert_eq!(layout.rows[0].rect.x, 5);
+        assert_eq!(layout.rows[0].rect.y, 5);
+    }
+
+    #[test]
+    fn notification_badge_uses_a_stable_initial_and_color_per_app() {
+        let mail = notification_badge("Mail");
+        assert_eq!(mail.initial, 'M');
+        assert_eq!(mail, notification_badge("Mail"));
+        assert_eq!(notification_badge("  slack").initial, 'S');
+        assert_eq!(notification_badge("").initial, '?');
+        assert_eq!(notification_badge("!!").initial, '?');
+    }
+
+    #[test]
+    fn tray_menu_exposes_settings_control_center_module_checks_and_quit() {
+        let rows = build_tray_menu_rows(false, true, false);
+        let commands = ids(&rows, true);
+        assert_eq!(
+            commands,
+            vec![
+                CMD_OTTO_SETTINGS,
+                CMD_CONTROL_CENTER,
+                CMD_TOGGLE_TOP_BAR,
+                CMD_TOGGLE_NOTCH,
+                CMD_TOGGLE_DOCK,
+                CMD_OPEN_LOGS,
+                CMD_QUIT,
+            ]
+        );
+        let checked = |target: usize| {
+            rows.iter().find_map(|row| match row {
+                MenuRow::Item { id, checked, .. } if *id == target => Some(*checked),
+                _ => None,
+            })
+        };
+        assert_eq!(checked(CMD_TOGGLE_TOP_BAR), Some(false));
+        assert_eq!(checked(CMD_TOGGLE_NOTCH), Some(true));
+        assert_eq!(checked(CMD_TOGGLE_DOCK), Some(false));
     }
 }

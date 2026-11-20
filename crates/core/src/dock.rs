@@ -89,6 +89,7 @@ pub struct DockPreferences {
     pub magnification: bool,
     pub icon_size: i32,
     pub autohide: bool,
+    pub reserve_space: bool,
     pub hide_taskbar: bool,
     pub show_downloads: bool,
     pub show_trash: bool,
@@ -101,6 +102,7 @@ impl Default for DockPreferences {
             magnification: true,
             icon_size: DOCK_ICON_MEDIUM,
             autohide: false,
+            reserve_space: false,
             hide_taskbar: true,
             show_downloads: true,
             show_trash: true,
@@ -117,6 +119,7 @@ const DOCK_ICON_MAX: i32 = 80;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockSettingsChange {
     ToggleHiding,
+    ToggleReserveSpace,
     ToggleMagnification,
     ToggleHideTaskbar,
     ToggleShowDownloads,
@@ -130,6 +133,12 @@ impl DockPreferences {
         match change {
             DockSettingsChange::ToggleHiding => Self {
                 autohide: !self.autohide,
+                reserve_space: false,
+                ..self
+            },
+            DockSettingsChange::ToggleReserveSpace => Self {
+                reserve_space: !self.reserve_space,
+                autohide: false,
                 ..self
             },
             DockSettingsChange::ToggleMagnification => Self {
@@ -179,7 +188,9 @@ impl DockPreferences {
                 .map_or(defaults.icon_size, |size| {
                     size.clamp(DOCK_ICON_MIN, DOCK_ICON_MAX)
                 }),
-            autohide: config_flag(contents, "dock_autohide", defaults.autohide),
+            autohide: config_flag(contents, "dock_autohide", defaults.autohide)
+                && !config_flag(contents, "dock_reserve_space", defaults.reserve_space),
+            reserve_space: config_flag(contents, "dock_reserve_space", defaults.reserve_space),
             hide_taskbar: config_flag(contents, "dock_hide_taskbar", defaults.hide_taskbar),
             show_downloads: config_flag(contents, "dock_show_downloads", defaults.show_downloads),
             show_trash: config_flag(contents, "dock_show_trash", defaults.show_trash),
@@ -189,8 +200,9 @@ impl DockPreferences {
     #[must_use]
     pub fn config_lines(self) -> String {
         format!(
-            "dock_autohide={}\ndock_magnification={}\ndock_icon_size={}\ndock_hide_taskbar={}\ndock_show_downloads={}\ndock_show_trash={}\n",
+            "dock_autohide={}\ndock_reserve_space={}\ndock_magnification={}\ndock_icon_size={}\ndock_hide_taskbar={}\ndock_show_downloads={}\ndock_show_trash={}\n",
             self.autohide,
+            self.reserve_space,
             self.magnification,
             self.icon_size,
             self.hide_taskbar,
@@ -262,6 +274,7 @@ pub struct DockLayout {
     pub tooltip_height: f32,
     pub items: Vec<DockItemLayout>,
     pub hovered_index: Option<usize>,
+    pub rest_height: i32,
 }
 
 impl DockLayout {
@@ -271,6 +284,48 @@ impl DockLayout {
         self.items
             .iter()
             .position(|item| item.contains(fx, fy, gap_pad))
+    }
+
+    #[must_use]
+    pub fn reorder_slot_index(&self, x: i32, app_count: usize) -> Option<usize> {
+        let limit = app_count.min(self.items.len());
+        if limit == 0 {
+            return None;
+        }
+        let fx = x as f32;
+        let first = &self.items[0];
+        let last = &self.items[limit - 1];
+        let pad = first.size * 0.5;
+        if fx < first.x - pad || fx > last.x + last.size + pad {
+            return None;
+        }
+        self.items[..limit]
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.x + a.size * 0.5 - fx).abs();
+                let db = (b.x + b.size * 0.5 - fx).abs();
+                da.total_cmp(&db)
+            })
+            .map(|(idx, _)| idx)
+    }
+
+    #[must_use]
+    pub fn preview_reordered_indices(
+        count: usize,
+        drag_from: Option<usize>,
+        drag_to: Option<usize>,
+    ) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..count).collect();
+        if let (Some(from), Some(to)) = (drag_from, drag_to)
+            && from < count
+            && to < count
+            && from != to
+        {
+            let moved = indices.remove(from);
+            indices.insert(to, moved);
+        }
+        indices
     }
 }
 
@@ -327,6 +382,7 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
     let unmag_pill_h = pad_top + base_icon + pad_bottom;
     let headroom = (max_icon - base_icon) + max_bounce + tooltip_gap + tooltip_height + 16.0;
     let window_height = (unmag_pill_h + bottom_margin + headroom).ceil() as i32;
+    let rest_height = (unmag_pill_h + bottom_margin).ceil() as i32;
 
     if total_items == 0 {
         return DockLayout {
@@ -345,6 +401,7 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
             tooltip_height,
             items: Vec::new(),
             hovered_index: None,
+            rest_height,
         };
     }
 
@@ -411,7 +468,27 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
         tooltip_height,
         items,
         hovered_index,
+        rest_height,
     }
+}
+
+#[must_use]
+pub fn dock_rest_zone(layout: &DockLayout, screen_height: i32) -> Option<Rect> {
+    (!layout.pill.is_empty()).then_some(Rect {
+        x: layout.pill.x,
+        y: screen_height - layout.rest_height,
+        width: layout.pill.width,
+        height: layout.rest_height,
+    })
+}
+
+#[must_use]
+pub const fn dock_should_hide(
+    preferences: DockPreferences,
+    fullscreen_covered: bool,
+    window_overlaps: bool,
+) -> bool {
+    fullscreen_covered || (preferences.autohide && window_overlaps)
 }
 
 const SCREEN_EDGE_ALLOWANCE: f32 = 32.0;
@@ -806,6 +883,68 @@ mod tests {
     }
 
     #[test]
+    fn auto_hide_and_reserved_space_are_mutually_exclusive() {
+        let base = DockPreferences::default();
+        let hiding = base.apply(DockSettingsChange::ToggleHiding);
+        assert!(hiding.autohide && !hiding.reserve_space);
+        let reserved = hiding.apply(DockSettingsChange::ToggleReserveSpace);
+        assert!(reserved.reserve_space && !reserved.autohide);
+        let back = reserved.apply(DockSettingsChange::ToggleHiding);
+        assert!(back.autohide && !back.reserve_space);
+        let off = back.apply(DockSettingsChange::ToggleHiding);
+        assert!(!off.autohide && !off.reserve_space);
+        let both = DockPreferences::parse_config(
+            "dock_autohide=true
+dock_reserve_space=true
+",
+        );
+        assert!(both.reserve_space && !both.autohide);
+        let legacy = DockPreferences::parse_config(
+            "dock_autohide=true
+",
+        );
+        assert!(legacy.autohide && !legacy.reserve_space);
+        let text = reserved.config_lines();
+        assert_eq!(DockPreferences::parse_config(&text), reserved);
+    }
+
+    #[test]
+    fn smart_hide_follows_overlap_and_fullscreen_hides_in_every_mode() {
+        let always = DockPreferences::default();
+        let smart = always.apply(DockSettingsChange::ToggleHiding);
+        let reserved = always.apply(DockSettingsChange::ToggleReserveSpace);
+        assert!(!dock_should_hide(always, false, true));
+        assert!(!dock_should_hide(reserved, false, true));
+        assert!(dock_should_hide(smart, false, true));
+        assert!(!dock_should_hide(smart, false, false));
+        for prefs in [always, smart, reserved] {
+            assert!(dock_should_hide(prefs, true, false));
+        }
+    }
+
+    #[test]
+    fn the_rest_zone_ignores_hide_progress_and_magnification() {
+        let mut resting = sample_input(None, 0.0);
+        let mut hidden = sample_input(Some(900.0), 1.0);
+        hidden.hide_progress = 1.0;
+        resting.hide_progress = 0.0;
+        let a = compute_dock_layout(&M, resting);
+        let b = compute_dock_layout(&M, hidden);
+        assert_eq!(a.rest_height, b.rest_height);
+        let zone = dock_rest_zone(&a, 1080).expect("zone");
+        assert_eq!(zone.bottom(), 1080);
+        assert_eq!(zone.y, 1080 - a.rest_height);
+        assert_eq!(zone.x, a.pill.x);
+        assert_eq!(zone.width, a.pill.width);
+        assert!(a.rest_height >= a.pill.height + 6);
+        let mut empty = sample_input(None, 0.0);
+        empty.app_count = 0;
+        empty.right_count = 0;
+        empty.has_trash = false;
+        assert!(dock_rest_zone(&compute_dock_layout(&M, empty), 1080).is_none());
+    }
+
+    #[test]
     fn config_tolerates_spacing_line_endings_and_first_value_wins() {
         let prefs = DockPreferences::parse_config(
             "  dock_icon_size = 64 \r\n\tdock_autohide=true\r\ndock_icon_size=40\r\n",
@@ -1088,5 +1227,37 @@ mod tests {
                     .all(|item| item.y - badge_overhang >= 0.0)
             );
         }
+    }
+
+    #[test]
+    fn live_drag_preview_reorders_slots_and_resolves_target_x() {
+        assert_eq!(
+            DockLayout::preview_reordered_indices(6, Some(3), Some(1)),
+            vec![0, 3, 1, 2, 4, 5]
+        );
+        assert_eq!(
+            DockLayout::preview_reordered_indices(6, Some(1), Some(4)),
+            vec![0, 2, 3, 4, 1, 5]
+        );
+        assert_eq!(
+            DockLayout::preview_reordered_indices(6, Some(2), Some(2)),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            DockLayout::preview_reordered_indices(6, None, Some(2)),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            DockLayout::preview_reordered_indices(4, Some(4), Some(1)),
+            vec![0, 1, 2, 3]
+        );
+
+        let layout = compute_dock_layout(&M, sample_input(None, 0.0));
+        let slot2_x = (layout.items[2].x + layout.items[2].size * 0.5) as i32;
+        assert_eq!(layout.reorder_slot_index(slot2_x, 4), Some(2));
+        let trash_x = (layout.items[4].x + layout.items[4].size * 0.5) as i32;
+        assert_eq!(layout.reorder_slot_index(trash_x, 4), None);
+        assert_eq!(layout.reorder_slot_index(0, 4), None);
+        assert_eq!(layout.reorder_slot_index(slot2_x, 0), None);
     }
 }

@@ -304,11 +304,18 @@ pub enum NotchExpandedTab {
     Pomodoro,
     Shelf,
     Clipboard,
+    Tasks,
     Media,
 }
 
 impl NotchExpandedTab {
-    pub const ALL: [Self; 4] = [Self::Pomodoro, Self::Shelf, Self::Clipboard, Self::Media];
+    pub const ALL: [Self; 5] = [
+        Self::Pomodoro,
+        Self::Shelf,
+        Self::Clipboard,
+        Self::Tasks,
+        Self::Media,
+    ];
 
     #[must_use]
     pub const fn index(self) -> usize {
@@ -316,7 +323,8 @@ impl NotchExpandedTab {
             Self::Pomodoro => 0,
             Self::Shelf => 1,
             Self::Clipboard => 2,
-            Self::Media => 3,
+            Self::Tasks => 3,
+            Self::Media => 4,
         }
     }
 
@@ -326,6 +334,7 @@ impl NotchExpandedTab {
             Self::Pomodoro => "Focus",
             Self::Shelf => "Shelf",
             Self::Clipboard => "Clipboard",
+            Self::Tasks => "Tasks",
             Self::Media => "Now Playing",
         }
     }
@@ -336,6 +345,7 @@ impl NotchExpandedTab {
             Self::Pomodoro => "Focus",
             Self::Shelf => "Shelf",
             Self::Clipboard => "Clip",
+            Self::Tasks => "Tasks",
             Self::Media => "Music",
         }
     }
@@ -657,11 +667,12 @@ mod tests {
         assert_eq!(NotchExpandedTab::Shelf.label(), "Shelf");
         assert_eq!(NotchExpandedTab::Clipboard.label(), "Clipboard");
         assert_eq!(NotchExpandedTab::Clipboard.short_label(), "Clip");
+        assert_eq!(NotchExpandedTab::Tasks.label(), "Tasks");
         assert_eq!(NotchExpandedTab::Media.label(), "Now Playing");
         assert_eq!(NotchExpandedTab::Media.short_label(), "Music");
         assert_eq!(
             NotchExpandedTab::ALL.map(NotchExpandedTab::index),
-            [0, 1, 2, 3]
+            [0, 1, 2, 3, 4]
         );
     }
 

@@ -26,10 +26,14 @@ const CONSENT_MICROPHONE_PATH: PCWSTR = w!(
 const CONSENT_WEBCAM_PATH: PCWSTR = w!(
     "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam"
 );
+const CONSENT_LOCATION_PATH: PCWSTR = w!(
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location"
+);
 const READY_TIMEOUT: Duration = Duration::from_millis(250);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 static CAMERA_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LOCATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LOADED: AtomicBool = AtomicBool::new(false);
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 static CONSENT_APP_NAME: Mutex<Option<String>> = Mutex::new(None);
@@ -292,9 +296,11 @@ fn scan_consent_store(base_path: PCWSTR, verify_nonpackaged_process: bool) -> Op
 fn refresh_consent_state() {
     let cam_app = scan_consent_store(CONSENT_WEBCAM_PATH, true);
     let mic_app = scan_consent_store(CONSENT_MICROPHONE_PATH, true);
+    let location_app = scan_consent_store(CONSENT_LOCATION_PATH, true);
     CAMERA_ACTIVE.store(cam_app.is_some(), Ordering::Release);
+    LOCATION_ACTIVE.store(location_app.is_some(), Ordering::Release);
     if let Ok(mut guard) = CONSENT_APP_NAME.lock() {
-        *guard = cam_app.or(mic_app);
+        *guard = cam_app.or(mic_app).or(location_app);
     }
     LOADED.store(true, Ordering::Release);
 }
@@ -311,12 +317,15 @@ fn privacy_worker(shutdown: &OwnedHandle, ready: &SyncSender<()>) {
         return;
     }
     refresh_consent_state();
-    let mut watches = Vec::with_capacity(2);
-    if let Some(watch) = RegWatch::open(CONSENT_WEBCAM_PATH) {
-        watches.push(watch);
-    }
-    if let Some(watch) = RegWatch::open(CONSENT_MICROPHONE_PATH) {
-        watches.push(watch);
+    let mut watches = Vec::with_capacity(3);
+    for path in [
+        CONSENT_WEBCAM_PATH,
+        CONSENT_MICROPHONE_PATH,
+        CONSENT_LOCATION_PATH,
+    ] {
+        if let Some(watch) = RegWatch::open(path) {
+            watches.push(watch);
+        }
     }
     arm_watches(&watches);
     let _ = ready.send(());
@@ -390,6 +399,7 @@ pub(crate) fn read_privacy_state() -> PrivacyState {
         return PrivacyState {
             mic: MicState::Unavailable,
             camera_active: false,
+            location_active: false,
             app_name: None,
         };
     }
@@ -398,6 +408,7 @@ pub(crate) fn read_privacy_state() -> PrivacyState {
     }
     let mic = super::audio::read_mic_state();
     let camera_active = CAMERA_ACTIVE.load(Ordering::Acquire);
+    let location_active = LOCATION_ACTIVE.load(Ordering::Acquire);
     let app_name = CONSENT_APP_NAME
         .try_lock()
         .ok()
@@ -405,6 +416,7 @@ pub(crate) fn read_privacy_state() -> PrivacyState {
     PrivacyState {
         mic,
         camera_active,
+        location_active,
         app_name,
     }
 }
@@ -426,6 +438,7 @@ fn stop_runtime() -> bool {
     let _ = unsafe { SetEvent(runtime.shutdown_event.as_handle()) };
     let joined = join_within(runtime.handle, SHUTDOWN_TIMEOUT);
     CAMERA_ACTIVE.store(false, Ordering::Release);
+    LOCATION_ACTIVE.store(false, Ordering::Release);
     if !SHUTTING_DOWN.load(Ordering::Acquire) {
         LOADED.store(false, Ordering::Release);
     }

@@ -1,44 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
-import { joinWaitlist, saveWaitlistProfile } from "@/data/waitlistApi";
+import { joinWaitlist } from "@/data/waitlistApi";
 import {
   WAITLIST_ERROR_MESSAGES,
-  WAITLIST_PLATFORMS,
-  WAITLIST_USAGES,
+  MAX_EMAIL_LENGTH,
   isValidWaitlistEmail,
 } from "@/domain/waitlist";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
-import { Select } from "@/components/ui/Select";
 
-type Phase =
-  | "form"
-  | "sending"
-  | "joined"
-  | "saving-profile"
-  | "profiled"
-  | "duplicate"
-  | "skipped";
+type Phase = "form" | "sending" | "joined" | "duplicate";
 
-const PLATFORM_OPTIONS = WAITLIST_PLATFORMS.map((value) => ({ value, label: value }));
-const USAGE_OPTIONS = WAITLIST_USAGES.map((value) => ({ value, label: value }));
-
-export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}) {
+export default function WaitlistForm() {
+  const emailId = useId();
+  const errorId = `${emailId}-error`;
   const emailInputRef = useRef<HTMLInputElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
   const [email, setEmail] = useState("");
   const [website, setWebsite] = useState("");
   const [phase, setPhase] = useState<Phase>("form");
-  const [joinedEmail, setJoinedEmail] = useState("");
-  const [token, setToken] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
-  const [windowsVersion, setWindowsVersion] = useState("");
-  const [usage, setUsage] = useState("");
 
   useEffect(() => {
     const status = new URLSearchParams(window.location.search).get("waitlist");
     if (!status) return;
     if (status === "ok") {
-      setPhase("duplicate");
+      setPhase("joined");
     } else if (status === "invalid") {
       setErrorMessage(WAITLIST_ERROR_MESSAGES.invalid_email);
     } else if (status === "rate_limited") {
@@ -47,6 +33,10 @@ export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}
       setErrorMessage(WAITLIST_ERROR_MESSAGES.invalid_body);
     }
   }, []);
+
+  useEffect(() => {
+    if (phase === "joined" || phase === "duplicate") statusRef.current?.focus();
+  }, [phase]);
 
   async function join(event: { preventDefault: () => void }) {
     event.preventDefault();
@@ -72,138 +62,23 @@ export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}
         return;
       }
 
-      setJoinedEmail(email.trim().toLowerCase());
       setEmail("");
-
-      if (data.token) {
-        setToken(data.token);
-        setPhase("joined");
-      } else {
-        setToken(null);
-        setPhase("duplicate");
-      }
+      setPhase(data.token ? "joined" : "duplicate");
     } catch {
       setErrorMessage("Koneksi terputus saat mengirim. Periksa jaringan lalu coba lagi.");
       setPhase("form");
     }
   }
 
-  async function saveProfile(event: { preventDefault: () => void }) {
-    event.preventDefault();
-    if (!token || phase !== "joined") return;
-
-    if (!windowsVersion || !usage) {
-      setErrorMessage(WAITLIST_ERROR_MESSAGES.invalid_profile);
-      return;
-    }
-
-    setPhase("saving-profile");
-    setErrorMessage(undefined);
-
-    try {
-      const data = await saveWaitlistProfile({
-        email: joinedEmail,
-        token,
-        platform: windowsVersion,
-        usage,
-      });
-
-      if (!data.ok) {
-        setErrorMessage(
-          WAITLIST_ERROR_MESSAGES[data.error ?? ""] ??
-            "Profil belum tersimpan. Coba lagi atau lewati langkah ini.",
-        );
-        setPhase("joined");
-        return;
-      }
-
-      setToken(null);
-      setPhase("profiled");
-    } catch {
-      setErrorMessage("Koneksi terputus. Coba simpan ulang atau klik Lewati.");
-      setPhase("joined");
-    }
-  }
-
-  function skipProfile() {
-    setToken(null);
-    setErrorMessage(undefined);
-    setPhase("skipped");
-  }
-
-  if (phase !== "form" && phase !== "sending") {
-    const canEditProfile = phase === "joined" || phase === "saving-profile";
-    const savingProfile = phase === "saving-profile";
-
-    const heading =
-      phase === "duplicate"
-        ? "Email ini sudah ada di waitlist"
-        : "Kamu masuk waitlist";
-
-    const description =
-      phase === "profiled"
-        ? "Profil tersimpan. Undangan akan dikirim ke email ini saat gelombang beta dibuka."
-        : phase === "skipped"
-          ? "Pendaftaran selesai. Kami kabari lewat email saat beta dibuka."
-          : phase === "duplicate"
-            ? "Undangan beta akan dikirim ke alamat ini begitu giliran gelombang berikutnya dibuka."
-            : "Undangan akan dikirim ke email ini saat batch beta berikutnya dibuka. Isi dua info singkat ini jika ingin membantu pemilihan tester (opsional).";
-
+  if (phase === "joined" || phase === "duplicate") {
     return (
-      <div className={modal ? "w-full text-left" : "w-full max-w-md rounded-2xl border border-line bg-surface p-5 text-left shadow-[0_8px_24px_rgb(15_17_21/0.06)] sm:p-6"}>
-        <p role="status" className="text-base font-medium text-ink">
-          {heading}
+      <div className="w-full text-left">
+        <p ref={statusRef} tabIndex={-1} role="status" className="text-sm font-medium text-ink outline-none">
+          {phase === "duplicate" ? "Email ini sudah ada di waitlist" : "Kamu masuk waitlist"}
         </p>
-        <p aria-live="polite" className="mt-1.5 text-sm leading-relaxed text-ink-soft">
-          {description}
+        <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+          Kami kabari saat beta siap. Pendaftaran belum langsung memberi akses.
         </p>
-
-        {canEditProfile ? (
-          <form onSubmit={saveProfile} noValidate className="mt-5 flex flex-col gap-4">
-            <Select
-              label="Versi Windows kamu"
-              placeholder="Pilih versi Windows"
-              options={PLATFORM_OPTIONS}
-              value={windowsVersion}
-              disabled={savingProfile}
-              onChange={(event) => {
-                setWindowsVersion(event.target.value);
-                if (errorMessage) setErrorMessage(undefined);
-              }}
-            />
-            <Select
-              label="Seberapa sering kamu berpindah banyak aplikasi?"
-              placeholder="Pilih frekuensi"
-              options={USAGE_OPTIONS}
-              value={usage}
-              disabled={savingProfile}
-              onChange={(event) => {
-                setUsage(event.target.value);
-                if (errorMessage) setErrorMessage(undefined);
-              }}
-            />
-            {errorMessage ? (
-              <p role="alert" className="text-xs leading-relaxed text-danger">
-                {errorMessage}
-              </p>
-            ) : null}
-            <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
-              <Button
-                type="button"
-                variant="ghost"
-                size="md"
-                className={modal ? "rounded-full" : undefined}
-                disabled={savingProfile}
-                onClick={skipProfile}
-              >
-                Lewati
-              </Button>
-              <Button type="submit" variant="primary" size="md" loading={savingProfile} className={modal ? "rounded-full" : undefined}>
-                Simpan profil
-              </Button>
-            </div>
-          </form>
-        ) : null}
       </div>
     );
   }
@@ -214,27 +89,40 @@ export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}
       action="/api/waitlist"
       onSubmit={join}
       noValidate
-      className={modal ? "flex w-full flex-col gap-3" : "flex w-full max-w-md flex-col items-stretch gap-3 sm:flex-row sm:items-start"}
+      className="w-full"
     >
-      <div className="min-w-0 flex-1">
-        <Input
+      <label htmlFor={emailId} className="sr-only">Email</label>
+      <div className={`flex min-w-0 items-center gap-1 rounded-full border bg-surface-subtle p-1.5 transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20 ${errorMessage ? "border-danger" : "border-line-strong"}`}>
+        <input
           ref={emailInputRef}
-          label="Email"
-          hideLabel
+          id={emailId}
           name="email"
           type="email"
           autoComplete="email"
+          maxLength={MAX_EMAIL_LENGTH}
           placeholder="nama@email.com"
-          className={modal ? "rounded-full" : undefined}
+          className="h-11 min-w-0 flex-1 rounded-full bg-transparent px-3 text-base text-ink outline-none placeholder:text-muted"
+          aria-invalid={Boolean(errorMessage)}
+          aria-describedby={errorMessage ? errorId : undefined}
           value={email}
           readOnly={phase === "sending"}
           onChange={(event) => {
             setEmail(event.target.value);
             if (errorMessage) setErrorMessage(undefined);
           }}
-          error={errorMessage}
           required
         />
+        <Button
+          type="submit"
+          variant="primary"
+          size="md"
+          loading={phase === "sending"}
+          disabled={phase === "sending"}
+          aria-label="Join Beta"
+          className="w-28 shrink-0 rounded-full!"
+        >
+          Join Beta
+        </Button>
       </div>
       <input
         type="text"
@@ -246,15 +134,7 @@ export default function WaitlistForm({ modal = false }: { modal?: boolean } = {}
         aria-hidden="true"
         className="sr-only"
       />
-      <Button
-        type="submit"
-        variant="primary"
-        size="lg"
-        loading={phase === "sending"}
-        className={modal ? "w-full shrink-0 rounded-full" : "w-full shrink-0 sm:w-auto"}
-      >
-        Daftar beta
-      </Button>
+      {errorMessage ? <p id={errorId} role="alert" className="mt-2 text-xs leading-relaxed text-danger">{errorMessage}</p> : null}
     </form>
   );
 }

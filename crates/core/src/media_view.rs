@@ -16,11 +16,39 @@ const BROWSER_PREFIXES: [&str; 8] = [
     "iexplore",
 ];
 const BROWSER_EXACT: [&str; 2] = ["edge", "arc"];
-const KNOWN_SOURCES: [(&str, &str); 6] = [
-    ("spotify", "Spotify"),
-    ("vlc", "VLC"),
+const KNOWN_SOURCES: &[(&str, &str)] = &[
+    ("applemusic", "Apple Music"),
+    ("apple music", "Apple Music"),
     ("itunes", "iTunes"),
+    ("youtubemusic", "YouTube Music"),
+    ("youtube music", "YouTube Music"),
+    ("spotify", "Spotify"),
+    ("amazonmusic", "Amazon Music"),
+    ("amazon music", "Amazon Music"),
+    ("tidal", "TIDAL"),
+    ("deezer", "Deezer"),
+    ("qobuz", "Qobuz"),
+    ("soundcloud", "SoundCloud"),
+    ("pandora", "Pandora"),
+    ("audible", "Audible"),
+    ("pocketcasts", "Pocket Casts"),
+    ("plexamp", "Plexamp"),
+    ("plex", "Plex"),
+    ("jellyfin", "Jellyfin"),
+    ("kodi", "Kodi"),
+    ("foobar2000", "foobar2000"),
     ("musicbee", "MusicBee"),
+    ("mediamonkey", "MediaMonkey"),
+    ("winamp", "Winamp"),
+    ("aimp", "AIMP"),
+    ("potplayer", "PotPlayer"),
+    ("mpc-hc", "MPC-HC"),
+    ("mpc-be", "MPC-BE"),
+    ("vlc", "VLC"),
+    ("netflix", "Netflix"),
+    ("disneyplus", "Disney+"),
+    ("twitch", "Twitch"),
+    ("zunevideo", "Movies & TV"),
     ("zunemusic", "Media Player"),
     ("mediaplayer", "Media Player"),
 ];
@@ -41,7 +69,8 @@ pub fn source_label(source_app: &str) -> String {
     if is_browser {
         return String::from("Browser");
     }
-    if let Some((_, label)) = KNOWN_SOURCES.iter().find(|(key, _)| lowered.contains(key)) {
+    let package = source_app.to_ascii_lowercase();
+    if let Some((_, label)) = KNOWN_SOURCES.iter().find(|(key, _)| package.contains(key)) {
         return (*label).to_owned();
     }
     let name = identity
@@ -216,8 +245,44 @@ mod tests {
     }
 
     #[test]
+    fn popular_music_and_media_apps_get_their_brand_names() {
+        let cases = [
+            ("AppleMusic.exe", "Apple Music"),
+            ("AppleInc.AppleMusicWin_nzyj5cx40ttqa!App", "Apple Music"),
+            ("AppleInc.iTunes_nzyj5cx40ttqa!iTunes", "iTunes"),
+            ("YouTube Music.exe", "YouTube Music"),
+            ("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "Spotify"),
+            ("Amazon Music.exe", "Amazon Music"),
+            ("tidal.exe", "TIDAL"),
+            ("Deezer.exe", "Deezer"),
+            ("Qobuz.exe", "Qobuz"),
+            ("Plexamp.exe", "Plexamp"),
+            ("Plex.exe", "Plex"),
+            ("foobar2000.exe", "foobar2000"),
+            ("AIMP.exe", "AIMP"),
+            ("winamp.exe", "Winamp"),
+            ("PotPlayerMini64.exe", "PotPlayer"),
+            (
+                "Microsoft.ZuneVideo_8wekyb3d8bbwe!Microsoft.ZuneVideo",
+                "Movies & TV",
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(source_label(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn every_known_source_label_fits_the_label_budget() {
+        for (key, label) in KNOWN_SOURCES {
+            assert!(label.chars().count() <= SOURCE_LABEL_MAX_CHARS, "{label}");
+            assert_eq!(*key, key.to_ascii_lowercase(), "{key} must be lowercase");
+        }
+    }
+
+    #[test]
     fn unknown_sources_are_cleaned_and_capped() {
-        assert_eq!(source_label("tidal.exe"), "Tidal");
+        assert_eq!(source_label("soundbox.exe"), "Soundbox");
         assert_eq!(source_label("Search.exe"), "Search");
         assert_eq!(source_label("arc.exe"), "Browser");
         assert_eq!(source_label("Acme.SoundBox_abc!App"), "App");

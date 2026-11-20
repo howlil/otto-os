@@ -8,15 +8,16 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, HCURSOR, IDC_ARROW, LoadCursorW, MSG, PostQuitMessage, RegisterClassExW, SW_HIDE,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSEXW, WNDPROC, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_HOTKEY, WNDCLASSEXW, WNDPROC,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{Error, PCWSTR, Result, w};
 
-use crate::{bar, control_center, dock, genie, menu, window_controls};
+use crate::{bar, control_center, dock, genie, menu, spotlight, window_controls};
 use otto_core::{
-    AppPreferences, BrandIcon, DockPreferences, NotchStyle, SystemAppearance, ThemeMode,
+    AppPreferences, BrandIcon, DockPreferences, MenuBarPreferences, NotchStyle, SystemAppearance,
+    ThemeMode,
 };
 use otto_platform::{
     replace_file_atomically, restore_hidden_windows, resume_background_tasks,
@@ -25,14 +26,19 @@ use otto_platform::{
 
 const CONFIG_FILE: &str = "plugins.txt";
 const SUPPORTED_CONFIG_VERSION: u32 = 1;
-const TOGGLEABLE_PLUGINS: [PluginId; 3] =
-    [PluginId::Dock, PluginId::WindowControls, PluginId::Genie];
+const TOGGLEABLE_PLUGINS: [PluginId; 4] = [
+    PluginId::Dock,
+    PluginId::WindowControls,
+    PluginId::Genie,
+    PluginId::TopBar,
+];
 
 const fn toggleable_plugin_index(plugin: PluginId) -> Option<usize> {
     match plugin {
         PluginId::Dock => Some(0),
         PluginId::WindowControls => Some(1),
         PluginId::Genie => Some(2),
+        PluginId::TopBar => Some(3),
         _ => None,
     }
 }
@@ -41,6 +47,7 @@ const fn toggleable_plugin_index(plugin: PluginId) -> Option<usize> {
 pub enum PluginId {
     PopupMenu,
     TopBar,
+    Spotlight,
     Dock,
     WindowControls,
     Genie,
@@ -65,6 +72,7 @@ enum SurfaceSlot {
     WindowControls,
     Genie,
     ControlCenter,
+    Spotlight,
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +123,12 @@ const CONTROL_CENTER_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
     slot: SurfaceSlot::ControlCenter,
     topmost: true,
 };
+const SPOTLIGHT_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
+    class_name: w!("OttoSpotlight"),
+    wnd_proc: Some(spotlight_window_proc),
+    slot: SurfaceSlot::Spotlight,
+    topmost: true,
+};
 
 const PLUGIN_DESCRIPTORS: &[PluginDescriptor] = &[
     PluginDescriptor {
@@ -132,6 +146,14 @@ const PLUGIN_DESCRIPTORS: &[PluginDescriptor] = &[
         surface: None,
         start: Some(start_top_bar),
         stop: stop_top_bar,
+    },
+    PluginDescriptor {
+        id: PluginId::Spotlight,
+        required: true,
+        dependencies: POPUP_DEPENDENCY,
+        surface: Some(SPOTLIGHT_SURFACE),
+        start: Some(start_spotlight),
+        stop: stop_spotlight,
     },
     PluginDescriptor {
         id: PluginId::Genie,
@@ -160,7 +182,7 @@ const PLUGIN_DESCRIPTORS: &[PluginDescriptor] = &[
     PluginDescriptor {
         id: PluginId::ControlCenter,
         required: false,
-        dependencies: &[PluginId::PopupMenu, PluginId::TopBar],
+        dependencies: POPUP_DEPENDENCY,
         surface: Some(CONTROL_CENTER_SURFACE),
         start: Some(start_control_center),
         stop: stop_control_center,
@@ -172,6 +194,7 @@ impl PluginId {
         match self {
             Self::PopupMenu => "popup_menu",
             Self::TopBar => "top_bar",
+            Self::Spotlight => "spotlight",
             Self::Dock => "dock",
             Self::WindowControls => "window_controls",
             Self::Genie => "genie",
@@ -183,6 +206,7 @@ impl PluginId {
         match value.trim() {
             "popup_menu" => Some(Self::PopupMenu),
             "top_bar" => Some(Self::TopBar),
+            "spotlight" => Some(Self::Spotlight),
             "dock" => Some(Self::Dock),
             "window_controls" | "traffic_light" => Some(Self::WindowControls),
             "genie" => Some(Self::Genie),
@@ -227,6 +251,7 @@ impl Default for PluginConfig {
             enabled: vec![
                 PluginId::PopupMenu,
                 PluginId::TopBar,
+                PluginId::Spotlight,
                 PluginId::Dock,
                 PluginId::WindowControls,
                 PluginId::Genie,
@@ -325,8 +350,8 @@ impl PluginConfig {
         if !self.enabled.contains(&PluginId::PopupMenu) {
             self.enabled.push(PluginId::PopupMenu);
         }
-        if !self.enabled.contains(&PluginId::TopBar) {
-            self.enabled.push(PluginId::TopBar);
+        if !self.enabled.contains(&PluginId::Spotlight) {
+            self.enabled.push(PluginId::Spotlight);
         }
     }
 
@@ -354,6 +379,7 @@ struct Surfaces {
     window_controls: Option<HWND>,
     genie: Option<HWND>,
     control_center: Option<HWND>,
+    spotlight: Option<HWND>,
 }
 
 impl Surfaces {
@@ -366,6 +392,7 @@ impl Surfaces {
             SurfaceSlot::WindowControls => self.window_controls,
             SurfaceSlot::Genie => self.genie,
             SurfaceSlot::ControlCenter => self.control_center,
+            SurfaceSlot::Spotlight => self.spotlight,
         }
     }
 
@@ -375,6 +402,7 @@ impl Surfaces {
             SurfaceSlot::WindowControls => &mut self.window_controls,
             SurfaceSlot::Genie => &mut self.genie,
             SurfaceSlot::ControlCenter => &mut self.control_center,
+            SurfaceSlot::Spotlight => &mut self.spotlight,
             SurfaceSlot::Bar | SurfaceSlot::Panel | SurfaceSlot::Menu => {
                 return Err(Error::new(
                     windows::Win32::Foundation::E_INVALIDARG,
@@ -392,6 +420,7 @@ impl Surfaces {
             SurfaceSlot::WindowControls => self.window_controls.take(),
             SurfaceSlot::Genie => self.genie.take(),
             SurfaceSlot::ControlCenter => self.control_center.take(),
+            SurfaceSlot::Spotlight => self.spotlight.take(),
             SurfaceSlot::Bar | SurfaceSlot::Panel | SurfaceSlot::Menu => None,
         }
     }
@@ -404,6 +433,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) window_controls: RefCell<Option<window_controls::WindowControls>>,
     pub(crate) genie: RefCell<Option<genie::Genie>>,
     pub(crate) control_center: RefCell<Option<control_center::ControlCenterSurface>>,
+    pub(crate) spotlight: RefCell<Option<spotlight::SpotlightSurface>>,
     pub(crate) bar_hwnd: Cell<isize>,
     pub(crate) dock_hwnd: Cell<isize>,
     pub(crate) window_controls_hwnd: Cell<isize>,
@@ -416,6 +446,8 @@ pub(crate) struct RuntimeContext {
     pub(crate) dock_preferences: Cell<DockPreferences>,
     pub(crate) pending_dock_preferences: Cell<Option<DockPreferences>>,
     pub(crate) focus_active: Cell<bool>,
+    pub(crate) top_bar_enabled: Cell<bool>,
+    pub(crate) notch_enabled: Cell<bool>,
     pub(crate) dock_enabled: Cell<bool>,
     pub(crate) window_controls_enabled: Cell<bool>,
     pub(crate) genie_enabled: Cell<bool>,
@@ -430,12 +462,16 @@ pub(crate) struct RuntimeContext {
     pub(crate) notch_hud_enabled: Cell<bool>,
     pub(crate) media_module_enabled: Cell<bool>,
     pub(crate) focus_module_enabled: Cell<bool>,
+    pub(crate) background_cleanup_enabled: Cell<bool>,
+    pub(crate) menu_bar: Cell<MenuBarPreferences>,
+    pub(crate) quick_capture_enabled: Cell<bool>,
     pub(crate) onboarding_seen: Cell<bool>,
-    pub(crate) pending_plugin_toggles: [Cell<Option<bool>>; 3],
+    pub(crate) pending_plugin_toggles: [Cell<Option<bool>>; 4],
     pub(crate) pending_theme_mode: Cell<Option<ThemeMode>>,
     pub(crate) pending_capture_visible: Cell<Option<bool>>,
     pub(crate) pending_hotkeys_enabled: Cell<Option<bool>>,
     pub(crate) pending_classic_logo: Cell<Option<bool>>,
+    pub(crate) pending_notch_enabled: Cell<Option<bool>>,
     pub(crate) pending_dynamic_island: Cell<Option<bool>>,
     pub(crate) pending_liquid_glass: Cell<Option<bool>>,
     pub(crate) pending_privacy_indicators: Cell<Option<bool>>,
@@ -444,6 +480,9 @@ pub(crate) struct RuntimeContext {
     pub(crate) pending_notch_hud: Cell<Option<bool>>,
     pub(crate) pending_media_module: Cell<Option<bool>>,
     pub(crate) pending_focus_module: Cell<Option<bool>>,
+    pub(crate) pending_background_cleanup: Cell<Option<bool>>,
+    pub(crate) pending_menu_bar: Cell<Option<MenuBarPreferences>>,
+    pub(crate) pending_quick_capture: Cell<Option<bool>>,
     pub(crate) pending_onboarding_seen: Cell<Option<bool>>,
     pub(crate) pending_end_session: Cell<bool>,
     pub(crate) pending_modal_action: RefCell<Option<bar::DeferredModalAction>>,
@@ -459,6 +498,7 @@ impl RuntimeContext {
             window_controls: RefCell::new(None),
             genie: RefCell::new(None),
             control_center: RefCell::new(None),
+            spotlight: RefCell::new(None),
             bar_hwnd: Cell::new(0),
             dock_hwnd: Cell::new(0),
             window_controls_hwnd: Cell::new(0),
@@ -471,6 +511,8 @@ impl RuntimeContext {
             dock_preferences: Cell::new(DockPreferences::default()),
             pending_dock_preferences: Cell::new(None),
             focus_active: Cell::new(false),
+            top_bar_enabled: Cell::new(true),
+            notch_enabled: Cell::new(true),
             dock_enabled: Cell::new(true),
             window_controls_enabled: Cell::new(true),
             genie_enabled: Cell::new(true),
@@ -485,12 +527,16 @@ impl RuntimeContext {
             notch_hud_enabled: Cell::new(true),
             media_module_enabled: Cell::new(true),
             focus_module_enabled: Cell::new(true),
+            background_cleanup_enabled: Cell::new(false),
+            menu_bar: Cell::new(MenuBarPreferences::default()),
+            quick_capture_enabled: Cell::new(false),
             onboarding_seen: Cell::new(false),
-            pending_plugin_toggles: [const { Cell::new(None) }; 3],
+            pending_plugin_toggles: [const { Cell::new(None) }; 4],
             pending_theme_mode: Cell::new(None),
             pending_capture_visible: Cell::new(None),
             pending_hotkeys_enabled: Cell::new(None),
             pending_classic_logo: Cell::new(None),
+            pending_notch_enabled: Cell::new(None),
             pending_dynamic_island: Cell::new(None),
             pending_liquid_glass: Cell::new(None),
             pending_privacy_indicators: Cell::new(None),
@@ -499,6 +545,9 @@ impl RuntimeContext {
             pending_notch_hud: Cell::new(None),
             pending_media_module: Cell::new(None),
             pending_focus_module: Cell::new(None),
+            pending_background_cleanup: Cell::new(None),
+            pending_menu_bar: Cell::new(None),
+            pending_quick_capture: Cell::new(None),
             pending_onboarding_seen: Cell::new(None),
             pending_end_session: Cell::new(false),
             pending_modal_action: RefCell::new(None),
@@ -558,6 +607,7 @@ impl RuntimeContext {
         self.capture_visible.set(preferences.capture_visible);
         self.hotkeys_enabled.set(preferences.hotkeys_enabled);
         self.classic_logo_enabled.set(preferences.classic_logo);
+        self.notch_enabled.set(preferences.notch_enabled);
         self.dynamic_island_enabled.set(preferences.dynamic_island);
         self.liquid_glass_pref.set(preferences.liquid_glass);
         self.privacy_indicators_enabled
@@ -568,6 +618,10 @@ impl RuntimeContext {
         self.notch_hud_enabled.set(preferences.notch_hud);
         self.media_module_enabled.set(preferences.media_module);
         self.focus_module_enabled.set(preferences.focus_module);
+        self.background_cleanup_enabled
+            .set(preferences.background_cleanup);
+        self.menu_bar.set(preferences.menu_bar);
+        self.quick_capture_enabled.set(preferences.quick_capture);
         self.onboarding_seen.set(preferences.onboarding_seen);
     }
 }
@@ -578,6 +632,9 @@ struct Host {
     ex_style: WINDOW_EX_STYLE,
     blur: bool,
     config: PluginConfig,
+    recovery_hotkeys: bool,
+    tray_icon: Option<otto_platform::TrayIcon>,
+    taskbar_created_message: Option<u32>,
     surfaces: Option<Surfaces>,
     started: Vec<PluginId>,
     states: Vec<(PluginId, PluginState)>,
@@ -652,6 +709,9 @@ pub fn start(blur: bool) -> Result<()> {
         ex_style: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         blur,
         config,
+        recovery_hotkeys: false,
+        tray_icon: None,
+        taskbar_created_message: None,
         surfaces: None,
         started: Vec::new(),
         states: PLUGIN_DESCRIPTORS
@@ -669,15 +729,18 @@ pub fn start(blur: bool) -> Result<()> {
     host.runtime.blur_supported.set(blur);
     host.runtime.glass_enabled.set(
         blur && host.config.preferences.liquid_glass
-            && host.runtime.system_appearance.get().transparency,
+            && host.runtime.system_appearance.get().contrast.is_none(),
     );
     if !host.config.preferences.media_module {
         otto_platform::shutdown_media_task();
     }
-    if !host.config.preferences.privacy_indicators {
+    if !host.config.preferences.notch_enabled || !host.config.preferences.privacy_indicators {
         otto_platform::shutdown_privacy_task();
     }
-    otto_platform::set_volume_hud_hook_enabled(host.config.preferences.notch_hud);
+    otto_platform::set_volume_hud_hook_enabled(
+        host.config.preferences.notch_enabled && host.config.preferences.notch_hud,
+    );
+    otto_platform::set_background_cleanup(host.config.preferences.background_cleanup);
     host.sync_plugin_flags();
     if let Err(error) = host.initialize() {
         let hwnds = host.shutdown();
@@ -782,6 +845,11 @@ pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
                     );
                 });
             }
+            PluginId::TopBar => {
+                with_host_read(|host| {
+                    window_controls::sync_bar_height(&host.runtime);
+                });
+            }
             _ => {}
         }
     }
@@ -858,6 +926,9 @@ fn descriptor(plugin: PluginId) -> &'static PluginDescriptor {
 impl Host {
     fn sync_plugin_flags(&self) {
         self.runtime
+            .top_bar_enabled
+            .set(self.config.is_enabled(PluginId::TopBar));
+        self.runtime
             .dock_enabled
             .set(self.config.is_enabled(PluginId::Dock));
         self.runtime
@@ -918,6 +989,16 @@ impl Host {
             }
         };
         self.runtime.bar_hwnd.set(bar.0 as isize);
+        self.tray_icon = otto_platform::TrayIcon::register(bar.0 as isize);
+        self.taskbar_created_message = self
+            .tray_icon
+            .as_ref()
+            .and_then(otto_platform::TrayIcon::taskbar_created_message);
+        self.recovery_hotkeys = otto_platform::register_shell_hotkeys(bar.0 as isize);
+        let _ = otto_platform::register_settings_hotkey(bar.0 as isize);
+        if self.runtime.hotkeys_enabled.get() {
+            otto_platform::register_notch_hotkeys(bar.0 as isize);
+        }
         self.surfaces = Some(Surfaces {
             bar,
             panel,
@@ -926,10 +1007,20 @@ impl Host {
             window_controls: None,
             genie: None,
             control_center: None,
+            spotlight: None,
         });
+        bar::start(
+            &self.runtime,
+            surface(self, SurfaceSlot::Bar)?.0 as isize,
+            surface(self, SurfaceSlot::Panel)?.0 as isize,
+            self.blur,
+            self.config.is_enabled(PluginId::ControlCenter),
+        )?;
 
         for descriptor in PLUGIN_DESCRIPTORS {
-            if !self.config.is_enabled(descriptor.id) {
+            if !self.config.is_enabled(descriptor.id)
+                || !dependencies_enabled(&self.config, descriptor.dependencies)
+            {
                 continue;
             }
             match self.start_plugin(descriptor.id) {
@@ -991,10 +1082,10 @@ impl Host {
         enabled: bool,
         persist: impl FnOnce(&PluginConfig) -> Result<()>,
     ) -> Result<()> {
-        if descriptor(plugin).required {
+        if !user_can_toggle(plugin) {
             return Err(Error::new(
                 windows::Win32::Foundation::E_INVALIDARG,
-                "The Otto top bar is required",
+                "This Otto plugin cannot be turned off",
             ));
         }
         if enabled == self.config.is_enabled(plugin) {
@@ -1024,8 +1115,44 @@ impl Host {
             self.sync_plugin_flags();
             return Err(error);
         }
+        self.start_dependents(plugin);
         self.sync_plugin_flags();
         Ok(())
+    }
+
+    fn start_dependents(&mut self, plugin: PluginId) {
+        let mut restarted = vec![plugin];
+        for descriptor in PLUGIN_DESCRIPTORS {
+            let depends = descriptor
+                .dependencies
+                .iter()
+                .any(|dependency| restarted.contains(dependency));
+            if !depends
+                || !self.config.is_enabled(descriptor.id)
+                || self.started.contains(&descriptor.id)
+            {
+                continue;
+            }
+            match self.start_plugin(descriptor.id) {
+                Ok(()) => restarted.push(descriptor.id),
+                Err(error) => report_plugin_failure(descriptor.id, &error),
+            }
+        }
+    }
+
+    fn dependents_first(&self, plugin: PluginId) -> Vec<PluginId> {
+        let mut chain = vec![plugin];
+        for candidate in &self.started {
+            if descriptor(*candidate)
+                .dependencies
+                .iter()
+                .any(|dependency| chain.contains(dependency))
+            {
+                chain.push(*candidate);
+            }
+        }
+        chain.reverse();
+        chain
     }
 
     fn disable_plugin(
@@ -1033,10 +1160,10 @@ impl Host {
         plugin: PluginId,
         persist: impl FnOnce(&PluginConfig) -> Result<()>,
     ) -> Result<()> {
-        if let Some(dependent) = enabled_dependent(plugin, &self.config) {
+        if plugin == PluginId::TopBar && !self.recovery_hotkeys {
             return Err(Error::new(
-                windows::Win32::Foundation::E_INVALIDARG,
-                format!("Disable {} before {}", dependent.name(), plugin.name()),
+                windows::Win32::Foundation::E_FAIL,
+                "Ctrl+Alt+B or Ctrl+Alt+D is taken by another app, so the Top Bar cannot be turned off safely",
             ));
         }
         self.config.set_enabled(plugin, false);
@@ -1045,7 +1172,9 @@ impl Host {
             self.sync_plugin_flags();
             return Err(error);
         }
-        self.stop_plugin(plugin);
+        for stopping in self.dependents_first(plugin) {
+            self.stop_plugin(stopping);
+        }
         self.sync_plugin_flags();
         Ok(())
     }
@@ -1076,14 +1205,14 @@ impl Host {
         } else {
             WINDOW_EX_STYLE(self.ex_style.0 & !WS_EX_TOPMOST.0)
         };
-        let ex_style = if matches!(descriptor.slot, SurfaceSlot::Genie) {
-            WINDOW_EX_STYLE(
+        let ex_style = match descriptor.slot {
+            SurfaceSlot::Genie => WINDOW_EX_STYLE(
                 (base_ex_style.0 & !WS_EX_LAYERED.0)
                     | WS_EX_NOREDIRECTIONBITMAP.0
                     | WS_EX_TRANSPARENT.0,
-            )
-        } else {
-            base_ex_style
+            ),
+            SurfaceSlot::Spotlight => WINDOW_EX_STYLE(base_ex_style.0 & !WS_EX_NOACTIVATE.0),
+            _ => base_ex_style,
         };
         let surface = create_overlay_window(
             self.instance,
@@ -1160,24 +1289,32 @@ impl Host {
         for plugin in reverse_lifecycle_order(&started) {
             self.stop_started_plugin(plugin);
         }
+        let allow_real_hwnd = {
+            #[cfg(test)]
+            {
+                !self.instance.is_invalid()
+            }
+            #[cfg(not(test))]
+            {
+                true
+            }
+        };
+        bar::stop(&self.runtime);
+        self.tray_icon = None;
+        let bar_hwnd = self.runtime.bar_hwnd.get();
+        if allow_real_hwnd && bar_hwnd != 0 {
+            otto_platform::unregister_notch_hotkeys(bar_hwnd);
+            otto_platform::unregister_settings_hotkey(bar_hwnd);
+            otto_platform::unregister_shell_hotkeys(bar_hwnd);
+        }
         let _ = restore_hidden_windows();
         shutdown_background_tasks();
-        if let Some(surfaces) = self.surfaces.take() {
-            let allow_real_hwnd = {
-                #[cfg(test)]
-                {
-                    !self.instance.is_invalid()
-                }
-                #[cfg(not(test))]
-                {
-                    true
-                }
-            };
-            if allow_real_hwnd {
-                self.runtime.queue_destroy_hwnd(surfaces.menu.0 as isize);
-                self.runtime.queue_destroy_hwnd(surfaces.panel.0 as isize);
-                self.runtime.queue_destroy_hwnd(surfaces.bar.0 as isize);
-            }
+        if let Some(surfaces) = self.surfaces.take()
+            && allow_real_hwnd
+        {
+            self.runtime.queue_destroy_hwnd(surfaces.menu.0 as isize);
+            self.runtime.queue_destroy_hwnd(surfaces.panel.0 as isize);
+            self.runtime.queue_destroy_hwnd(surfaces.bar.0 as isize);
         }
         for (_, state) in &mut self.states {
             *state = PluginState::Disabled;
@@ -1192,17 +1329,18 @@ fn dependencies_running(started: &[PluginId], dependencies: &[PluginId]) -> bool
         .all(|dependency| started.contains(dependency))
 }
 
-fn reverse_lifecycle_order(started: &[PluginId]) -> impl Iterator<Item = PluginId> + '_ {
-    started.iter().rev().copied()
+fn dependencies_enabled(config: &PluginConfig, dependencies: &[PluginId]) -> bool {
+    dependencies
+        .iter()
+        .all(|dependency| config.is_enabled(*dependency))
 }
 
-fn enabled_dependent(plugin: PluginId, config: &PluginConfig) -> Option<PluginId> {
-    PLUGIN_DESCRIPTORS
-        .iter()
-        .find(|candidate| {
-            config.is_enabled(candidate.id) && candidate.dependencies.contains(&plugin)
-        })
-        .map(|candidate| candidate.id)
+fn user_can_toggle(plugin: PluginId) -> bool {
+    plugin == PluginId::TopBar || !descriptor(plugin).required
+}
+
+fn reverse_lifecycle_order(started: &[PluginId]) -> impl Iterator<Item = PluginId> + '_ {
+    started.iter().rev().copied()
 }
 
 fn surface(host: &Host, slot: SurfaceSlot) -> Result<HWND> {
@@ -1221,14 +1359,10 @@ fn start_popup_menu(host: &Host) -> Result<()> {
     menu::start(&host.runtime, surface(host, SurfaceSlot::Menu)?.0 as isize)
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn start_top_bar(host: &Host) -> Result<()> {
-    bar::start(
-        &host.runtime,
-        surface(host, SurfaceSlot::Bar)?.0 as isize,
-        surface(host, SurfaceSlot::Panel)?.0 as isize,
-        host.blur,
-        host.config.is_enabled(PluginId::ControlCenter),
-    )
+    bar::set_top_bar_enabled(&host.runtime, true);
+    Ok(())
 }
 
 fn start_dock(host: &Host) -> Result<()> {
@@ -1254,12 +1388,21 @@ fn start_control_center(host: &Host) -> Result<()> {
     Ok(())
 }
 
+fn start_spotlight(host: &Host) -> Result<()> {
+    spotlight::start(
+        &host.runtime,
+        surface(host, SurfaceSlot::Spotlight)?.0 as isize,
+    );
+    Ok(())
+}
+
 fn stop_popup_menu(runtime: &RuntimeContext) {
     menu::stop(runtime);
 }
 
 fn stop_top_bar(runtime: &RuntimeContext) {
-    bar::stop(runtime);
+    menu::close(runtime);
+    bar::set_top_bar_enabled(runtime, false);
 }
 
 fn stop_dock(runtime: &RuntimeContext) {
@@ -1276,6 +1419,10 @@ fn stop_genie(runtime: &RuntimeContext) {
 
 fn stop_control_center(runtime: &RuntimeContext) {
     control_center::stop(runtime);
+}
+
+fn stop_spotlight(runtime: &RuntimeContext) {
+    spotlight::stop(runtime);
 }
 
 fn report_plugin_failure(plugin: PluginId, error: &Error) {
@@ -1340,6 +1487,7 @@ struct PendingPreferences {
     capture_visible: Option<bool>,
     hotkeys_enabled: Option<bool>,
     classic_logo: Option<bool>,
+    notch_enabled: Option<bool>,
     dynamic_island: Option<bool>,
     liquid_glass: Option<bool>,
     privacy_indicators: Option<bool>,
@@ -1348,15 +1496,41 @@ struct PendingPreferences {
     notch_hud: Option<bool>,
     media_module: Option<bool>,
     focus_module: Option<bool>,
+    background_cleanup: Option<bool>,
+    menu_bar: Option<MenuBarPreferences>,
+    quick_capture: Option<bool>,
     onboarding_seen: Option<bool>,
 }
 
 impl PendingPreferences {
+    fn take_from(runtime: &RuntimeContext) -> Self {
+        Self {
+            theme_mode: runtime.pending_theme_mode.take(),
+            capture_visible: runtime.pending_capture_visible.take(),
+            hotkeys_enabled: runtime.pending_hotkeys_enabled.take(),
+            classic_logo: runtime.pending_classic_logo.take(),
+            notch_enabled: runtime.pending_notch_enabled.take(),
+            dynamic_island: runtime.pending_dynamic_island.take(),
+            liquid_glass: runtime.pending_liquid_glass.take(),
+            privacy_indicators: runtime.pending_privacy_indicators.take(),
+            clipboard_history: runtime.pending_clipboard_history.take(),
+            drop_shelf: runtime.pending_drop_shelf.take(),
+            notch_hud: runtime.pending_notch_hud.take(),
+            media_module: runtime.pending_media_module.take(),
+            focus_module: runtime.pending_focus_module.take(),
+            background_cleanup: runtime.pending_background_cleanup.take(),
+            menu_bar: runtime.pending_menu_bar.take(),
+            quick_capture: runtime.pending_quick_capture.take(),
+            onboarding_seen: runtime.pending_onboarding_seen.take(),
+        }
+    }
+
     fn has_change(&self) -> bool {
         self.theme_mode.is_some()
             || self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
             || self.classic_logo.is_some()
+            || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
             || self.liquid_glass.is_some()
             || self.privacy_indicators.is_some()
@@ -1365,6 +1539,9 @@ impl PendingPreferences {
             || self.notch_hud.is_some()
             || self.media_module.is_some()
             || self.focus_module.is_some()
+            || self.background_cleanup.is_some()
+            || self.menu_bar.is_some()
+            || self.quick_capture.is_some()
             || self.onboarding_seen.is_some()
     }
 
@@ -1373,6 +1550,7 @@ impl PendingPreferences {
             || self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
             || self.classic_logo.is_some()
+            || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
             || self.liquid_glass.is_some()
             || self.privacy_indicators.is_some()
@@ -1381,6 +1559,9 @@ impl PendingPreferences {
             || self.notch_hud.is_some()
             || self.media_module.is_some()
             || self.focus_module.is_some()
+            || self.background_cleanup.is_some()
+            || self.menu_bar.is_some()
+            || self.quick_capture.is_some()
     }
 }
 
@@ -1411,21 +1592,7 @@ fn dispatch_runtime_message(
         let online_lyrics = host.runtime.pending_online_lyrics.take();
         let dock = host.runtime.pending_dock_preferences.take();
         let plugin_toggles = host.runtime.take_plugin_toggles();
-        let preferences = PendingPreferences {
-            theme_mode: host.runtime.pending_theme_mode.take(),
-            capture_visible: host.runtime.pending_capture_visible.take(),
-            hotkeys_enabled: host.runtime.pending_hotkeys_enabled.take(),
-            classic_logo: host.runtime.pending_classic_logo.take(),
-            dynamic_island: host.runtime.pending_dynamic_island.take(),
-            liquid_glass: host.runtime.pending_liquid_glass.take(),
-            privacy_indicators: host.runtime.pending_privacy_indicators.take(),
-            clipboard_history: host.runtime.pending_clipboard_history.take(),
-            drop_shelf: host.runtime.pending_drop_shelf.take(),
-            notch_hud: host.runtime.pending_notch_hud.take(),
-            media_module: host.runtime.pending_media_module.take(),
-            focus_module: host.runtime.pending_focus_module.take(),
-            onboarding_seen: host.runtime.pending_onboarding_seen.take(),
-        };
+        let preferences = PendingPreferences::take_from(&host.runtime);
         let end_session = host.runtime.pending_end_session.take();
         let raw_modal = host
             .runtime
@@ -1453,10 +1620,11 @@ fn dispatch_runtime_message(
     let mut plugin_error = None;
     let had_plugin_toggles = !pending.plugin_toggles.is_empty();
     for (plugin, enabled) in pending.plugin_toggles {
-        if let Err(error) = set_plugin_enabled(plugin, enabled)
-            && plugin_error.is_none()
-        {
-            plugin_error = Some(error.message());
+        if let Err(error) = set_plugin_enabled(plugin, enabled) {
+            otto_platform::signal_command_failure();
+            if plugin_error.is_none() {
+                plugin_error = Some(error.message());
+            }
         }
     }
     let mut dock_changed = false;
@@ -1502,6 +1670,7 @@ fn dispatch_runtime_message(
     result
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
     if pending.has_change()
         && let Ok(updated) = update_preferences(|prefs| {
@@ -1516,6 +1685,9 @@ fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
             }
             if let Some(classic) = pending.classic_logo {
                 prefs.classic_logo = classic;
+            }
+            if let Some(notch_enabled) = pending.notch_enabled {
+                prefs.notch_enabled = notch_enabled;
             }
             if let Some(dynamic_island) = pending.dynamic_island {
                 prefs.dynamic_island = dynamic_island;
@@ -1541,6 +1713,15 @@ fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
             if let Some(focus_module) = pending.focus_module {
                 prefs.focus_module = focus_module;
             }
+            if let Some(background_cleanup) = pending.background_cleanup {
+                prefs.background_cleanup = background_cleanup;
+            }
+            if let Some(menu_bar) = pending.menu_bar {
+                prefs.menu_bar = menu_bar;
+            }
+            if let Some(quick_capture) = pending.quick_capture {
+                prefs.quick_capture = quick_capture;
+            }
             if let Some(seen) = pending.onboarding_seen {
                 prefs.onboarding_seen = seen;
             }
@@ -1557,12 +1738,24 @@ fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
                 dock::set_capture_visible(&host.runtime, updated.capture_visible);
                 control_center::set_capture_visible(&host.runtime, updated.capture_visible);
                 menu::set_capture_visible(&host.runtime, updated.capture_visible);
+                spotlight::set_capture_visible(&host.runtime, updated.capture_visible);
             }
             if pending.hotkeys_enabled.is_some() {
+                let bar_hwnd = host.runtime.bar_hwnd.get();
+                if bar_hwnd != 0 {
+                    if updated.hotkeys_enabled {
+                        otto_platform::register_notch_hotkeys(bar_hwnd);
+                    } else {
+                        otto_platform::unregister_notch_hotkeys(bar_hwnd);
+                    }
+                }
                 bar::set_hotkeys_enabled(&host.runtime, updated.hotkeys_enabled);
             }
             if pending.classic_logo.is_some() {
                 bar::set_brand_icon(&host.runtime, updated.brand_icon());
+            }
+            if pending.notch_enabled.is_some() {
+                bar::set_notch_enabled(&host.runtime, updated.notch_enabled);
             }
             if pending.dynamic_island.is_some() {
                 let style = updated.notch_style();
@@ -1587,6 +1780,13 @@ fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
             if pending.focus_module.is_some() {
                 bar::set_focus_module_enabled(&host.runtime, updated.focus_module);
             }
+            if pending.menu_bar.is_some() {
+                host.runtime.menu_bar.set(updated.menu_bar);
+                bar::set_menu_bar_preferences(&host.runtime, updated.menu_bar);
+            }
+            if pending.quick_capture.is_some() {
+                bar::set_quick_capture_enabled(&host.runtime, updated.quick_capture);
+            }
         });
     }
     pending.affects_ui()
@@ -1596,8 +1796,8 @@ fn sync_pending_platform_modules(
     pending: &PendingPreferences,
     updated: &otto_core::AppPreferences,
 ) {
-    if pending.privacy_indicators.is_some() {
-        if updated.privacy_indicators {
+    if pending.notch_enabled.is_some() || pending.privacy_indicators.is_some() {
+        if updated.notch_enabled && updated.privacy_indicators {
             otto_platform::resume_privacy_task();
         } else {
             otto_platform::shutdown_privacy_task();
@@ -1610,8 +1810,11 @@ fn sync_pending_platform_modules(
             otto_platform::shutdown_media_task();
         }
     }
-    if pending.notch_hud.is_some() {
-        otto_platform::set_volume_hud_hook_enabled(updated.notch_hud);
+    if pending.notch_enabled.is_some() || pending.notch_hud.is_some() {
+        otto_platform::set_volume_hud_hook_enabled(updated.notch_enabled && updated.notch_hud);
+    }
+    if pending.background_cleanup.is_some() {
+        otto_platform::set_background_cleanup(updated.background_cleanup);
     }
 }
 
@@ -1633,6 +1836,39 @@ fn safe_window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+fn handle_taskbar_created(message: u32) -> bool {
+    if message == 0 {
+        return false;
+    }
+    let mut handled = false;
+    with_host_read(|host| {
+        if host.taskbar_created_message == Some(message) {
+            if let Some(tray) = host.tray_icon.as_ref() {
+                let _ = tray.re_add();
+            }
+            handled = true;
+        }
+    });
+    handled
+}
+
+fn handle_tray_icon_event(runtime: &RuntimeContext, event: otto_platform::TrayIconEvent) {
+    match event {
+        otto_platform::TrayIconEvent::LeftClick => {
+            control_center::toggle_from_host(
+                runtime,
+                otto_core::ControlCenterPage::OttoSettings,
+                false,
+                true,
+            );
+        }
+        otto_platform::TrayIconEvent::RightClick => {
+            let (cx, cy) = otto_platform::cursor_position();
+            menu::open_tray_menu(runtime, cx, cy, true);
+        }
+    }
+}
+
 unsafe extern "system" fn bar_window_proc(
     hwnd: HWND,
     message: u32,
@@ -1640,10 +1876,58 @@ unsafe extern "system" fn bar_window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     safe_window_proc(hwnd, message, wparam, lparam, || {
+        if handle_taskbar_created(message) {
+            return Some(LRESULT(0));
+        }
         dispatch_runtime_message(|runtime| {
+            if message == otto_platform::WM_APP_TRAY_ICON {
+                if let Some(event) = otto_platform::classify_tray_icon_message(lparam.0) {
+                    handle_tray_icon_event(runtime, event);
+                }
+                return Some(LRESULT(0));
+            }
+            if message == WM_HOTKEY && handle_host_hotkey(runtime, wparam.0 as i32) {
+                return Some(LRESULT(0));
+            }
             bar::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
         })
     })
+}
+
+fn handle_host_hotkey(runtime: &RuntimeContext, hotkey_id: i32) -> bool {
+    match hotkey_id {
+        otto_platform::HOTKEY_TOGGLE_TOP_BAR => {
+            runtime.queue_plugin_toggle(PluginId::TopBar, !runtime.top_bar_enabled.get());
+        }
+        otto_platform::HOTKEY_TOGGLE_DOCK => {
+            runtime.queue_plugin_toggle(PluginId::Dock, !runtime.dock_enabled.get());
+        }
+        otto_platform::HOTKEY_OTTO_SETTINGS => {
+            bar::leave_keyboard_focus(runtime);
+            control_center::toggle_from_host(
+                runtime,
+                otto_core::ControlCenterPage::OttoSettings,
+                true,
+                false,
+            );
+        }
+        otto_platform::HOTKEY_CONTROL_CENTER => {
+            bar::leave_keyboard_focus(runtime);
+            control_center::toggle_from_host(
+                runtime,
+                otto_core::ControlCenterPage::Main,
+                true,
+                false,
+            );
+        }
+        otto_platform::HOTKEY_SPOTLIGHT => {
+            bar::leave_keyboard_focus(runtime);
+            let trigger = bar::search_slot_trigger(runtime);
+            spotlight::toggle_from_hotkey(runtime, trigger);
+        }
+        _ => return false,
+    }
+    true
 }
 
 unsafe extern "system" fn dock_window_proc(
@@ -1698,6 +1982,19 @@ unsafe extern "system" fn control_center_window_proc(
     })
 }
 
+unsafe extern "system" fn spotlight_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            spotlight::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+        })
+    })
+}
+
 unsafe extern "system" fn menu_window_proc(
     hwnd: HWND,
     message: u32,
@@ -1717,7 +2014,7 @@ mod tests {
         ConfigSource, Error, HCURSOR, HINSTANCE, HOST, HWND, Host, LRESULT, MODAL_ACTION_ACTIVE,
         ModalActionGuard, PLUGIN_DESCRIPTORS, PluginConfig, PluginId, PluginState, Result,
         RuntimeContext, SurfaceSlot, Surfaces, WINDOW_EX_STYLE, bar, dependencies_running,
-        descriptor, dispatch_runtime_message, enabled_dependent, reverse_lifecycle_order,
+        descriptor, dispatch_runtime_message, handle_host_hotkey, reverse_lifecycle_order,
         set_dock_preferences, set_online_lyrics_enabled, set_plugin_enabled, should_post_quit,
         update_preferences,
     };
@@ -1743,6 +2040,9 @@ mod tests {
             ex_style: WINDOW_EX_STYLE::default(),
             blur: false,
             config,
+            recovery_hotkeys: true,
+            tray_icon: None,
+            taskbar_created_message: None,
             surfaces: Some(Surfaces {
                 bar: hwnd(1),
                 panel: hwnd(2),
@@ -1751,8 +2051,9 @@ mod tests {
                 window_controls: None,
                 genie: None,
                 control_center: None,
+                spotlight: None,
             }),
-            started: vec![PluginId::PopupMenu, PluginId::TopBar],
+            started: vec![PluginId::PopupMenu, PluginId::TopBar, PluginId::Spotlight],
             states: PLUGIN_DESCRIPTORS
                 .iter()
                 .map(|descriptor| (descriptor.id, PluginState::Disabled))
@@ -1810,7 +2111,10 @@ mod tests {
         assert!(!host.config.is_enabled(PluginId::ControlCenter));
         host.stop_plugin(PluginId::ControlCenter);
         host.stop_plugin(PluginId::ControlCenter);
-        assert_eq!(host.started, vec![PluginId::PopupMenu, PluginId::TopBar]);
+        assert_eq!(
+            host.started,
+            vec![PluginId::PopupMenu, PluginId::TopBar, PluginId::Spotlight]
+        );
     }
 
     #[test]
@@ -1853,11 +2157,24 @@ mod tests {
     }
 
     #[test]
-    fn config_keeps_required_top_bar_and_ignores_unknown_plugins() {
+    fn config_keeps_required_plugins_and_ignores_unknown_plugins() {
         let config = PluginConfig::parse("version=1\nenabled=dock,unknown\n");
-        assert!(config.is_enabled(PluginId::TopBar));
+        assert!(config.is_enabled(PluginId::PopupMenu));
+        assert!(config.is_enabled(PluginId::Spotlight));
         assert!(config.is_enabled(PluginId::Dock));
         assert!(!config.is_enabled(PluginId::WindowControls));
+    }
+
+    #[test]
+    fn config_can_leave_the_top_bar_disabled() {
+        let config = PluginConfig::parse("version=1\nenabled=popup_menu,spotlight,dock\n");
+        assert!(!config.is_enabled(PluginId::TopBar));
+        assert!(config.is_enabled(PluginId::Dock));
+        let mut toggled = PluginConfig::default();
+        toggled.set_enabled(PluginId::TopBar, false);
+        assert!(!toggled.is_enabled(PluginId::TopBar));
+        assert!(toggled.is_enabled(PluginId::PopupMenu));
+        assert!(toggled.is_enabled(PluginId::Spotlight));
     }
 
     #[test]
@@ -1932,38 +2249,206 @@ dock_icon_size=64
             window_controls: None,
             genie: None,
             control_center: None,
+            spotlight: None,
         };
         let dock = hwnd(4);
         let control_center = hwnd(5);
+        let spotlight = hwnd(6);
         surfaces.store(SurfaceSlot::Dock, dock).unwrap();
         surfaces
             .store(SurfaceSlot::ControlCenter, control_center)
             .unwrap();
+        surfaces.store(SurfaceSlot::Spotlight, spotlight).unwrap();
         assert_eq!(surfaces.get(SurfaceSlot::Dock), Some(dock));
         assert_eq!(
             surfaces.get(SurfaceSlot::ControlCenter),
             Some(control_center)
         );
+        assert_eq!(surfaces.get(SurfaceSlot::Spotlight), Some(spotlight));
         assert_eq!(surfaces.take(SurfaceSlot::Dock), Some(dock));
         assert_eq!(
             surfaces.take(SurfaceSlot::ControlCenter),
             Some(control_center)
         );
+        assert_eq!(surfaces.take(SurfaceSlot::Spotlight), Some(spotlight));
         assert_eq!(surfaces.get(SurfaceSlot::Dock), None);
         assert_eq!(surfaces.get(SurfaceSlot::ControlCenter), None);
-        assert!(surfaces.store(SurfaceSlot::Menu, hwnd(6)).is_err());
+        assert_eq!(surfaces.get(SurfaceSlot::Spotlight), None);
+        assert!(surfaces.store(SurfaceSlot::Menu, hwnd(7)).is_err());
     }
 
     #[test]
-    fn enabled_dependents_block_dependency_disable() {
-        let mut config = PluginConfig::default();
-        assert_eq!(enabled_dependent(PluginId::Genie, &config), None);
+    fn dependents_are_listed_before_the_plugin_they_rely_on() {
+        let mut host = host_with_required_plugins();
+        host.started = vec![
+            PluginId::PopupMenu,
+            PluginId::TopBar,
+            PluginId::Spotlight,
+            PluginId::Dock,
+            PluginId::ControlCenter,
+        ];
         assert_eq!(
-            enabled_dependent(PluginId::TopBar, &config),
-            Some(PluginId::ControlCenter)
+            host.dependents_first(PluginId::TopBar),
+            vec![PluginId::TopBar]
         );
-        config.set_enabled(PluginId::ControlCenter, false);
-        assert_eq!(enabled_dependent(PluginId::TopBar, &config), None);
+        assert_eq!(
+            host.dependents_first(PluginId::PopupMenu),
+            vec![
+                PluginId::ControlCenter,
+                PluginId::Dock,
+                PluginId::Spotlight,
+                PluginId::TopBar,
+                PluginId::PopupMenu,
+            ]
+        );
+        assert_eq!(
+            host.dependents_first(PluginId::Genie),
+            vec![PluginId::Genie]
+        );
+    }
+
+    #[test]
+    fn turning_the_top_bar_off_keeps_control_center_and_spotlight_running() {
+        let mut host = host_with_required_plugins();
+        host.config.set_enabled(PluginId::ControlCenter, true);
+        host.started = vec![
+            PluginId::PopupMenu,
+            PluginId::TopBar,
+            PluginId::Spotlight,
+            PluginId::ControlCenter,
+        ];
+        let saved = std::cell::RefCell::new(Vec::new());
+        host.set_plugin_enabled(PluginId::TopBar, false, |config| {
+            *saved.borrow_mut() = config.enabled.clone();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            host.started,
+            vec![
+                PluginId::PopupMenu,
+                PluginId::Spotlight,
+                PluginId::ControlCenter,
+            ]
+        );
+        assert!(!host.runtime.top_bar_enabled.get());
+        assert!(host.runtime.notch_enabled.get());
+        assert!(host.config.is_enabled(PluginId::ControlCenter));
+        assert!(host.config.is_enabled(PluginId::Spotlight));
+        let saved = saved.into_inner();
+        assert!(!saved.contains(&PluginId::TopBar));
+        assert!(saved.contains(&PluginId::ControlCenter));
+    }
+
+    #[test]
+    fn failed_save_keeps_the_top_bar_and_its_dependents_running() {
+        let mut host = host_with_required_plugins();
+        let result = host.set_plugin_enabled(PluginId::TopBar, false, failing_save);
+        assert!(result.is_err());
+        assert!(is_running(&host, PluginId::TopBar));
+        assert!(is_running(&host, PluginId::Spotlight));
+        assert!(host.config.is_enabled(PluginId::TopBar));
+    }
+
+    #[test]
+    fn top_bar_stays_on_when_the_recovery_hotkeys_are_unavailable() {
+        let mut host = host_with_required_plugins();
+        host.recovery_hotkeys = false;
+        let result = host.set_plugin_enabled(PluginId::TopBar, false, working_save);
+        assert!(result.is_err());
+        assert!(is_running(&host, PluginId::TopBar));
+        assert!(host.config.is_enabled(PluginId::TopBar));
+        host.set_plugin_enabled(PluginId::Dock, false, working_save)
+            .unwrap();
+    }
+
+    #[test]
+    fn only_the_top_bar_can_be_turned_off_among_required_plugins() {
+        let mut host = host_with_required_plugins();
+        assert!(super::user_can_toggle(PluginId::TopBar));
+        assert!(super::user_can_toggle(PluginId::Dock));
+        assert!(!super::user_can_toggle(PluginId::PopupMenu));
+        assert!(!super::user_can_toggle(PluginId::Spotlight));
+        let result = host.set_plugin_enabled(PluginId::Spotlight, false, working_save);
+        assert!(result.is_err());
+        assert!(is_running(&host, PluginId::Spotlight));
+    }
+
+    #[test]
+    fn enabling_popup_menu_restarts_the_dependents_that_stay_enabled() {
+        let mut host = host_with_required_plugins();
+        host.config.set_enabled(PluginId::Dock, false);
+        host.config.set_enabled(PluginId::WindowControls, false);
+        host.config.set_enabled(PluginId::Genie, false);
+        host.config.set_enabled(PluginId::ControlCenter, true);
+        host.started = vec![PluginId::PopupMenu];
+        host.start_dependents(PluginId::PopupMenu);
+        assert!(is_running(&host, PluginId::TopBar));
+        assert!(is_running(&host, PluginId::Spotlight));
+        assert!(is_running(&host, PluginId::ControlCenter));
+        assert!(!is_running(&host, PluginId::Dock));
+    }
+
+    #[test]
+    fn shell_and_host_hotkeys_queue_toggles_and_route_independent_surfaces() {
+        let runtime = RuntimeContext::new(false);
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_TOGGLE_TOP_BAR
+        ));
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_TOGGLE_DOCK
+        ));
+        assert_eq!(
+            runtime.take_plugin_toggles(),
+            vec![(PluginId::Dock, false), (PluginId::TopBar, false)]
+        );
+        runtime.top_bar_enabled.set(false);
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_TOGGLE_TOP_BAR
+        ));
+        assert_eq!(
+            runtime.take_plugin_toggles(),
+            vec![(PluginId::TopBar, true)]
+        );
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_OTTO_SETTINGS
+        ));
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_CONTROL_CENTER
+        ));
+        assert!(handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_SPOTLIGHT
+        ));
+        assert!(!handle_host_hotkey(
+            &runtime,
+            otto_platform::HOTKEY_TOGGLE_NOTCH
+        ));
+        assert!(runtime.take_plugin_toggles().is_empty());
+    }
+
+    #[test]
+    fn startup_starts_control_center_and_spotlight_even_when_top_bar_is_disabled() {
+        let mut config = PluginConfig::default();
+        config.set_enabled(PluginId::TopBar, false);
+        let startable = PLUGIN_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| {
+                config.is_enabled(descriptor.id)
+                    && super::dependencies_enabled(&config, descriptor.dependencies)
+            })
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>();
+        assert!(!startable.contains(&PluginId::TopBar));
+        assert!(startable.contains(&PluginId::Spotlight));
+        assert!(startable.contains(&PluginId::ControlCenter));
+        assert!(startable.contains(&PluginId::Dock));
+        assert!(startable.contains(&PluginId::PopupMenu));
     }
 
     #[test]
@@ -1971,6 +2456,7 @@ dock_icon_size=64
         let started = vec![
             PluginId::PopupMenu,
             PluginId::TopBar,
+            PluginId::Spotlight,
             PluginId::Genie,
             PluginId::Dock,
             PluginId::WindowControls,
@@ -1984,6 +2470,7 @@ dock_icon_size=64
                 PluginId::WindowControls,
                 PluginId::Dock,
                 PluginId::Genie,
+                PluginId::Spotlight,
                 PluginId::TopBar,
                 PluginId::PopupMenu,
             ]
@@ -1997,6 +2484,7 @@ dock_icon_size=64
         config.preferences.capture_visible = true;
         config.preferences.hotkeys_enabled = false;
         config.preferences.classic_logo = true;
+        config.preferences.notch_enabled = false;
         config.preferences.onboarding_seen = true;
         let serialized = format!(
             "version=1\nenabled=popup_menu,top_bar\nonline_lyrics=false\n{}\n{}\n",

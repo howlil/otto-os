@@ -54,7 +54,7 @@ BEGIN\n\
         BLOCK \"040904b0\"\n\
         BEGIN\n\
             VALUE \"FileDescription\", \"Otto OS\"\n\
-            VALUE \"FileVersion\", \"{pkg_version}.0\"\n\
+            VALUE \"FileVersion\", \"{major}.{minor}.{patch}.0\"\n\
             VALUE \"InternalName\", \"otto-os.exe\"\n\
             VALUE \"LegalCopyright\", \"MIT License\"\n\
             VALUE \"OriginalFilename\", \"otto-os.exe\"\n\

@@ -32,6 +32,7 @@ static NOTIF_LISTENER_SUB: OnceLock<Mutex<Option<(UserNotificationListener, i64)
     OnceLock::new();
 static NOTIF_DIRTY: AtomicBool = AtomicBool::new(true);
 static NOTIF_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static NOTIF_PRIMED: AtomicBool = AtomicBool::new(false);
 
 fn cache_lock() -> &'static Mutex<NotifCacheState> {
     NOTIF_CACHE.get_or_init(|| Mutex::new(NotifCacheState::default()))
@@ -271,8 +272,61 @@ pub fn read_notifications_snapshot() -> NotificationCenterSnapshot {
     snapshot
 }
 
+fn activate_notification_source(item: &NotificationSummary) {
+    let windows = crate::window_model::enumerate_windows(crate::dock::current_process_id());
+    let target_aumid =
+        (!item.app_id.is_empty()).then(|| otto_core::AppIdentity::user_model_id(&item.app_id));
+    if let Some(window) = windows.into_iter().find(|window| {
+        window.role == otto_core::WindowRole::Primary
+            && (target_aumid
+                .as_ref()
+                .is_some_and(|aumid| &window.app == aumid)
+                || window.app_name.eq_ignore_ascii_case(&item.app_name))
+    }) {
+        crate::dock::focus_window_hwnd(window.identity.hwnd);
+        return;
+    }
+    if !item.app_id.is_empty() {
+        let target = format!("shell:AppsFolder\\{}", item.app_id);
+        let wide = windows::core::HSTRING::from(target.as_str());
+        let _ = crate::actions::shell_exec_ok(
+            windows::core::PCWSTR(wide.as_ptr()),
+            windows::core::PCWSTR::null(),
+        );
+    }
+}
+
 #[must_use]
 pub fn dismiss_notification(id: u32) -> bool {
+    if NOTIF_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return false;
+    }
+    let _com = crate::com::ComGuard::multithreaded();
+    let Ok(listener) = UserNotificationListener::Current() else {
+        return false;
+    };
+    let ok = listener.RemoveNotification(id).is_ok();
+    if ok {
+        NOTIF_DIRTY.store(true, Ordering::Release);
+        let source = cache_lock().lock().ok().and_then(|mut guard| {
+            let found = guard
+                .snapshot
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .cloned();
+            guard.snapshot.items.retain(|item| item.id != id);
+            found
+        });
+        if let Some(item) = source {
+            activate_notification_source(&item);
+        }
+    }
+    ok
+}
+
+#[must_use]
+pub fn remove_notification(id: u32) -> bool {
     if NOTIF_SHUTTING_DOWN.load(Ordering::Acquire) {
         return false;
     }
@@ -288,6 +342,17 @@ pub fn dismiss_notification(id: u32) -> bool {
         }
     }
     ok
+}
+
+#[must_use]
+pub fn take_notification_changes() -> Option<NotificationCenterSnapshot> {
+    if NOTIF_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
+    if !NOTIF_PRIMED.swap(true, Ordering::AcqRel) || NOTIF_DIRTY.load(Ordering::Acquire) {
+        return Some(read_notifications_snapshot());
+    }
+    None
 }
 
 #[must_use]

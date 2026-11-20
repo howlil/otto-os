@@ -1,14 +1,19 @@
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_GRADIENT_STOP};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP};
+#[cfg(test)]
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, ID2D1DCRenderTarget,
-    ID2D1LinearGradientBrush, ID2D1RadialGradientBrush, ID2D1StrokeStyle,
+    D2D1_ELLIPSE, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, ID2D1RadialGradientBrush, ID2D1StrokeStyle,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    ID2D1DCRenderTarget, ID2D1LinearGradientBrush,
 };
 use windows::core::Result;
 use windows_numerics::Vector2;
 
+#[cfg(test)]
 use crate::theme::BrushPalette;
 
+#[cfg(test)]
 const GLOW_LAYERS: [GlowLayer; 3] = [
     GlowLayer {
         spread: 1.2,
@@ -24,6 +29,7 @@ const GLOW_LAYERS: [GlowLayer; 3] = [
     },
 ];
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct GlowLayer {
     spread: f32,
@@ -61,6 +67,7 @@ pub(crate) fn linear_gradient(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn radial_fade(
     target: &ID2D1DCRenderTarget,
     center: Vector2,
@@ -93,35 +100,7 @@ pub(crate) fn radial_fade(
     }
 }
 
-pub(crate) fn draw_rounded_glow(
-    target: &ID2D1DCRenderTarget,
-    brushes: &BrushPalette,
-    rect: D2D_RECT_F,
-    radius: f32,
-    color: D2D1_COLOR_F,
-    intensity: f32,
-) {
-    let intensity = intensity.clamp(0.0, 1.0);
-    if intensity <= 0.0 {
-        return;
-    }
-    for layer in GLOW_LAYERS.iter().rev() {
-        let brush = brushes.alpha_brush(color, layer.alpha * intensity);
-        unsafe {
-            target.DrawRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &brush,
-                1.0 + layer.spread * 2.0,
-                None,
-            );
-        }
-    }
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_ring_glow(
     target: &ID2D1DCRenderTarget,

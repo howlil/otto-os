@@ -11,20 +11,21 @@ use otto_core::{
     TickCadence, WindowCommand, WindowIdentity, advance_bounce_phase, animate_value, bounce_offset,
     build_dock_accessible_tree, capture_interval_for, capture_wanted, compute_dock_layout,
     dock_activation_effect, dock_capacity, dock_command_effect, dock_drop_effect, dock_entry_badge,
-    dock_entry_progress, scale, split_dock_overflow,
+    dock_entry_progress, dock_rest_zone, dock_should_hide, scale, split_dock_overflow,
 };
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
-    DockEntry, DockEntryOptions, DockItemKind, IconBitmap, PrimaryScreen, WM_APP_UIA_INVOKE,
-    collect_dock_entries_with_options, current_process_id, cursor_position, empty_recycle_bin,
-    enable_drag_accept_files, execute_window_command, extract_dock_icon, extract_dropped_files,
-    extract_window_icon, handle_wm_getobject, has_maximized_or_fullscreen_window, hide_application,
-    is_escape_down, is_running_on_battery, is_window_minimized, launch_new_instance,
-    motion_preference, open_file_with_dock_entry, other_applications_visible, overflow_dock_entry,
-    primary_screen, quit_application, read_downloads_active_progress, read_notification_app_counts,
-    remove_pinned_app, reorder_pinned_apps, resume_recycle_bin_task, route_bar_keys,
-    routes_keys_to, show_application, shutdown_recycle_bin_task, signal_command_failure,
-    stop_routing_if_targets, toggle_pin_entry, watch_bottom_edge, window_change_generations,
+    DockEntry, DockEntryOptions, DockItemKind, DockReservation, IconBitmap, PrimaryScreen,
+    WM_APP_UIA_INVOKE, collect_dock_entries_with_options, current_process_id, cursor_position,
+    empty_recycle_bin, enable_drag_accept_files, execute_window_command, extract_dock_icon,
+    extract_dropped_files, extract_window_icon, handle_wm_getobject, hide_application,
+    hide_other_applications, is_escape_down, is_running_on_battery, is_window_minimized,
+    launch_new_instance, motion_preference, open_file_with_dock_entry, other_applications_visible,
+    overflow_dock_entry, primary_screen, quit_application, read_downloads_active_progress,
+    read_notification_app_counts, remove_pinned_app, reorder_pinned_apps, resume_recycle_bin_task,
+    route_bar_keys, routes_keys_to, show_application, shutdown_recycle_bin_task,
+    signal_command_failure, stop_routing_if_targets, toggle_pin_entry, watch_bottom_edge,
+    window_change_generations,
 };
 use otto_render::{DockRenderItem, DockRenderer};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -46,7 +47,7 @@ const DOCK_POLL_TIMER: usize = 10;
 const DOCK_ANIM_TIMER: usize = 11;
 const DOCK_POLL_MS: u32 = 150;
 const DOCK_ENTRIES_FALLBACK_TICKS: u32 = 14;
-const DOCK_COVER_FALLBACK_TICKS: u32 = 7;
+const DOCK_BACKDROP_FALLBACK_TICKS: u32 = 7;
 const DOCK_IDLE_MS: u32 = 1000;
 const DOCK_REVEAL_BAND: i32 = 6;
 const WM_APP_DOCK_KEY: u32 = 0x8000 + 23;
@@ -81,11 +82,13 @@ impl Default for AnimState {
 #[derive(Default)]
 struct DragState {
     start_idx: Option<usize>,
+    hover_idx: Option<usize>,
     start_pos: (i32, i32),
     current_pos: (i32, i32),
     is_dragging: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Dock {
     hwnd: isize,
     own_pid: u32,
@@ -105,9 +108,11 @@ pub(crate) struct Dock {
     anim: AnimState,
     drag: DragState,
     preferences: DockPreferences,
+    fullscreen_covered: bool,
+    window_overlaps: bool,
+    reservation: Option<DockReservation>,
+    fullscreen_gate: ChangeGate,
     entries_gate: ChangeGate,
-    cover_gate: ChangeGate,
-    covered: bool,
     cadence: TickCadence,
     focus: DockFocus,
     backdrop: Option<BackdropFeed>,
@@ -171,23 +176,31 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         anim: AnimState::default(),
         drag: DragState::default(),
         preferences,
+        fullscreen_covered: false,
+        window_overlaps: false,
+        reservation: None,
+        fullscreen_gate: ChangeGate::new(DOCK_BACKDROP_FALLBACK_TICKS),
         entries_gate: ChangeGate::new(DOCK_ENTRIES_FALLBACK_TICKS),
-        cover_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
-        covered: false,
         cadence: TickCadence::new(DOCK_POLL_MS, DOCK_IDLE_MS, DOCK_IDLE_AFTER_TICKS),
         focus: DockFocus::default(),
-        backdrop: runtime
-            .glass_enabled
-            .get()
-            .then(|| BackdropFeed::start(hwnd, WM_APP_DOCK_BACKDROP, vec![hwnd])),
-        backdrop_gate: ChangeGate::new(DOCK_COVER_FALLBACK_TICKS),
+        backdrop: runtime.glass_enabled.get().then(|| {
+            BackdropFeed::start(
+                hwnd,
+                WM_APP_DOCK_BACKDROP,
+                vec![hwnd],
+                runtime.capture_visible.get(),
+            )
+        }),
+        backdrop_gate: ChangeGate::new(DOCK_BACKDROP_FALLBACK_TICKS),
         notification_counts: read_notification_app_counts(),
         downloads_progress: read_downloads_active_progress(),
         badge_poll_tick: 0,
     };
+    dock.refresh_cover();
+    dock.sync_reservation();
+    dock.sync_backdrop(runtime, true);
     dock.place();
     dock.present(runtime);
-    dock.sync_backdrop(runtime, true);
 
     unsafe {
         SetTimer(
@@ -222,9 +235,11 @@ pub fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
-    if matches!(
+    if message == WM_MOUSEMOVE {
+        wake_timer_only(runtime);
+    } else if matches!(
         message,
-        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY | WM_APP_UIA_INVOKE
+        WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY | WM_APP_UIA_INVOKE
     ) {
         wake(runtime);
     }
@@ -269,7 +284,7 @@ pub fn handle_message(
         }
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);
-            with_dock(runtime, |dock| dock.on_mouse_move(x, y));
+            with_dock(runtime, |dock| dock.on_mouse_move(runtime, x, y));
             Some(LRESULT(0))
         }
         WM_MOUSELEAVE => {
@@ -292,7 +307,14 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_CAPTURECHANGED => {
-            with_dock(runtime, |dock| dock.drag = DragState::default());
+            with_dock(runtime, |dock| {
+                let was_dragging = dock.drag.is_dragging;
+                dock.drag = DragState::default();
+                if was_dragging {
+                    dock.recompute_layout();
+                    dock.present(runtime);
+                }
+            });
             Some(LRESULT(0))
         }
         WM_DROPFILES => {
@@ -333,6 +355,10 @@ pub fn enter_keyboard_focus(runtime: &RuntimeContext, from_end: bool) {
 
 pub fn wake(runtime: &RuntimeContext) {
     with_dock(runtime, |dock| dock.wake(runtime));
+}
+
+pub fn wake_timer_only(runtime: &RuntimeContext) {
+    with_dock(runtime, Dock::wake_timer_only);
 }
 
 fn with_dock(runtime: &RuntimeContext, action: impl FnOnce(&mut Dock)) {
@@ -477,6 +503,7 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
                     dock.hwnd,
                     WM_APP_DOCK_BACKDROP,
                     vec![dock.hwnd],
+                    runtime.capture_visible.get(),
                 ));
             }
         } else {
@@ -488,8 +515,11 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, _visible: bool) {
+pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_dock(runtime, |dock| {
+        if let Some(feed) = dock.backdrop.as_mut() {
+            feed.set_capture_visible(visible);
+        }
         dock.sync_backdrop(runtime, true);
         dock.present(runtime);
     });
@@ -500,12 +530,15 @@ pub fn activate_overflow_entry(runtime: &RuntimeContext, entry: &DockEntry) {
 }
 
 fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target: Option<Rect>) {
-    execute_dock_effect(
-        runtime,
-        dock_activation_effect(entry.app.as_ref()),
-        entry,
-        target,
-    );
+    let effect = dock_activation_effect(entry.app.as_ref());
+    if !entry.active
+        && matches!(effect, DockEffect::ShowWindow(window) if !is_window_minimized(window.hwnd))
+        && let Some(app) = entry.app.as_ref()
+    {
+        report(show_application(app, current_process_id()));
+        return;
+    }
+    execute_dock_effect(runtime, effect, entry, target);
 }
 
 pub fn execute_dock_menu_command(
@@ -527,6 +560,9 @@ fn execute_dock_effect(
 ) {
     let own_pid = current_process_id();
     match effect {
+        DockEffect::Launch if matches!(entry.kind, DockItemKind::Apps) => {
+            crate::spotlight::open_apps(runtime, target);
+        }
         DockEffect::Launch => launch_new_instance(entry),
         DockEffect::ShowWindow(window) => show_window(runtime, window, target),
         DockEffect::TogglePin => {
@@ -534,13 +570,19 @@ fn execute_dock_effect(
             with_dock(runtime, |dock| dock.refresh_entries(runtime));
         }
         DockEffect::EmptyTrash => empty_recycle_bin(),
-        DockEffect::Unhide | DockEffect::Hide | DockEffect::Quit => {
+        DockEffect::RevealInExplorer => entry.reveal_in_explorer(),
+        DockEffect::ForceQuit => {
+            report(entry.force_quit(own_pid));
+            with_dock(runtime, |dock| dock.refresh_entries(runtime));
+        }
+        DockEffect::Unhide | DockEffect::Hide | DockEffect::HideOthers | DockEffect::Quit => {
             let Some(app) = entry.app.as_ref() else {
                 return;
             };
             report(match effect {
                 DockEffect::Unhide => show_application(app, own_pid),
                 DockEffect::Hide => hide_application(app, own_pid),
+                DockEffect::HideOthers => hide_other_applications(&app.identity, own_pid),
                 _ => quit_application(app, own_pid),
             });
         }
@@ -596,17 +638,21 @@ impl Dock {
         self.present(runtime);
     }
 
-    fn cancel_drag(&mut self) {
+    fn cancel_drag(&mut self) -> bool {
         if self.drag.start_idx.is_some() {
+            let was_dragging = self.drag.is_dragging;
             self.drag = DragState::default();
             let _ = release_capture_if_owned(self.hwnd);
+            if was_dragging {
+                self.recompute_layout();
+                return true;
+            }
         }
+        false
     }
 
-    fn cancel_drag_on_escape(&mut self) {
-        if self.drag.start_idx.is_some() && is_escape_down() {
-            self.cancel_drag();
-        }
+    fn cancel_drag_on_escape(&mut self) -> bool {
+        self.drag.start_idx.is_some() && is_escape_down() && self.cancel_drag()
     }
 
     fn track_hover_from_cursor(&mut self) {
@@ -635,7 +681,7 @@ impl Dock {
         self.displayed_entries().0
     }
 
-    fn displayed_entries(&self) -> (Vec<DockEntry>, Vec<DockEntry>) {
+    fn base_displayed_entries(&self) -> (Vec<DockEntry>, Vec<DockEntry>) {
         let mut all = self.all_entries();
         let right_items = all
             .iter()
@@ -663,6 +709,21 @@ impl Dock {
         all.push(overflow_dock_entry(hidden.len()));
         all.extend(right);
         (all, hidden)
+    }
+
+    fn displayed_entries(&self) -> (Vec<DockEntry>, Vec<DockEntry>) {
+        let (mut visible, hidden) = self.base_displayed_entries();
+        if self.drag.is_dragging
+            && let (Some(from), Some(to)) = (self.drag.start_idx, self.drag.hover_idx)
+        {
+            let (app_count, _, _) = count_entries(&visible);
+            if from < app_count && to < app_count && from != to {
+                let order =
+                    DockLayout::preview_reordered_indices(visible.len(), Some(from), Some(to));
+                visible = order.into_iter().map(|i| visible[i].clone()).collect();
+            }
+        }
+        (visible, hidden)
     }
 
     fn all_entries(&self) -> Vec<DockEntry> {
@@ -706,10 +767,39 @@ impl Dock {
         };
     }
 
+    fn refresh_cover(&mut self) {
+        self.fullscreen_covered = DockEntry::is_fullscreen_on_primary(
+            self.screen.width,
+            self.screen.height,
+            self.own_pid,
+        );
+        self.window_overlaps = self.preferences.autohide
+            && dock_rest_zone(&self.layout, self.screen.height)
+                .is_some_and(|zone| DockEntry::any_window_overlaps(zone, self.own_pid));
+    }
+
+    fn sync_reservation(&mut self) {
+        if !(self.preferences.reserve_space && self.preferences.hide_taskbar) {
+            self.reservation = None;
+            return;
+        }
+        if self.reservation.is_none() {
+            self.reservation = DockReservation::register(self.hwnd);
+        }
+        if let Some(reservation) = self.reservation.as_mut() {
+            reservation.reserve(
+                self.screen.width,
+                self.screen.height,
+                self.layout.rest_height,
+            );
+        }
+    }
+
     fn rebuild(&mut self, runtime: &RuntimeContext) {
         self.screen = primary_screen();
-        self.cover_gate.invalidate();
         self.recompute_layout();
+        self.refresh_cover();
+        self.sync_reservation();
         let all = self.combined_entries();
         if let Ok(mut renderer) = DockRenderer::new(
             self.layout.window_width,
@@ -722,15 +812,14 @@ impl Dock {
                 feed.reset();
             }
         }
+        self.sync_backdrop(runtime, true);
         self.place();
         self.present(runtime);
-        self.sync_backdrop(runtime, true);
     }
 
     fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted =
-            !runtime.capture_visible.get() && capture_wanted(&appearance, self.backdrop.is_some());
+        let wanted = capture_wanted(&appearance, self.backdrop.is_some());
         let hidden = self.anim.hide_progress >= DOCK_HIDDEN_PROGRESS;
         let (origin_x, origin_y) = self.window_origin();
         let window = Rect {
@@ -756,10 +845,26 @@ impl Dock {
         if hidden {
             return;
         }
+        if !force && self.anim.timer_running && self.renderer.has_backdrop() {
+            return;
+        }
         if let Some(region) = region {
+            if !self.renderer.has_backdrop()
+                && let Some(pixels) = otto_platform::capture_backdrop_now(
+                    region.origin(),
+                    region.width,
+                    region.height,
+                )
+            {
+                self.renderer
+                    .set_backdrop(pixels, (region.x - origin_x, region.y - origin_y));
+            }
             feed.request(
                 region,
-                capture_interval_for(is_running_on_battery(), self.hovering),
+                capture_interval_for(
+                    is_running_on_battery(),
+                    self.hovering && feed.recently_changed(),
+                ),
                 force,
             );
         }
@@ -810,7 +915,7 @@ impl Dock {
             if !matches!(
                 old_e.kind,
                 DockItemKind::Finder
-                    | DockItemKind::Launchpad
+                    | DockItemKind::Apps
                     | DockItemKind::Downloads
                     | DockItemKind::Trash { .. }
             ) && !latest.iter().any(|new_e| new_e.key == old_e.key)
@@ -845,12 +950,18 @@ impl Dock {
     }
 
     fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
-        let mut dirty = false;
-        self.cancel_drag_on_escape();
+        let mut dirty = self.cancel_drag_on_escape();
         let generations = window_change_generations();
         if self.refresh_entries_if_changed(generations.map(|changes| changes.topology)) {
             dirty = true;
         }
+        if self
+            .fullscreen_gate
+            .should_refresh(generations.map(|changes| changes.geometry))
+        {
+            self.refresh_cover();
+        }
+        self.sync_reservation();
         self.badge_poll_tick = self.badge_poll_tick.wrapping_add(1);
         if dirty
             || self
@@ -871,17 +982,11 @@ impl Dock {
         let local_x = gx;
         let local_y = gy - win_top;
 
-        if self
-            .cover_gate
-            .should_refresh(generations.map(|changes| changes.geometry))
-        {
-            self.covered = has_maximized_or_fullscreen_window(
-                self.screen.width,
-                self.screen.height,
-                self.own_pid,
-            );
-        }
-        let fullscreen_or_max = self.covered || self.preferences.autohide;
+        let should_auto_hide = dock_should_hide(
+            self.preferences,
+            self.fullscreen_covered,
+            self.window_overlaps,
+        );
 
         let at_bottom_edge = gy >= self.screen.height - DOCK_REVEAL_BAND;
         let in_interactive_zone = self.anim.hide_progress < 0.85
@@ -889,7 +994,7 @@ impl Dock {
             && local_x <= self.layout.pill.right() + 20
             && local_y >= self.layout.pill.y - 36;
 
-        let target_hide = fullscreen_or_max && !at_bottom_edge && !in_interactive_zone;
+        let target_hide = should_auto_hide && !at_bottom_edge && !in_interactive_zone;
         if target_hide != self.anim.should_hide {
             self.anim.should_hide = target_hide;
             if self.anim.should_hide {
@@ -923,7 +1028,7 @@ impl Dock {
             self.screen.width,
             self.screen.height,
         );
-        let reveal_needs_polling = fullscreen_or_max && (!hidden || generations.is_none());
+        let reveal_needs_polling = should_auto_hide && (!hidden || generations.is_none());
         self.sync_keyboard_focus(runtime);
         let geometry_changed = self
             .backdrop_gate
@@ -944,6 +1049,12 @@ impl Dock {
         if let Some(interval) = self.cadence.wake() {
             self.set_poll_interval(interval);
             self.on_poll_timer(runtime);
+        }
+    }
+
+    fn wake_timer_only(&mut self) {
+        if let Some(interval) = self.cadence.wake() {
+            self.set_poll_interval(interval);
         }
     }
 
@@ -1006,38 +1117,43 @@ impl Dock {
 
         let mut presence_animating = false;
         for entry in &self.entries {
-            let cur = self.presence.get(&entry.key).copied().unwrap_or(1.0);
-            let next = animate_value(
-                cur,
-                1.0,
-                self.motion_metrics.dock_presence_enter_rate,
-                dt,
-                self.motion,
-            );
-            self.presence.insert(entry.key.clone(), next);
-            if (next - 1.0).abs() > 0.002 {
-                presence_animating = true;
+            if let Some(cur) = self.presence.get_mut(&entry.key) {
+                let next = animate_value(
+                    *cur,
+                    1.0,
+                    self.motion_metrics.dock_presence_enter_rate,
+                    dt,
+                    self.motion,
+                );
+                if (next - 1.0).abs() > 0.002 {
+                    *cur = next;
+                    presence_animating = true;
+                } else {
+                    self.presence.remove(&entry.key);
+                }
             }
         }
-        let mut still_closing = Vec::new();
-        for closing in self.closing_entries.drain(..) {
-            let cur = self.presence.get(&closing.key).copied().unwrap_or(1.0);
-            let next = animate_value(
-                cur,
-                0.0,
-                self.motion_metrics.dock_presence_exit_rate,
-                dt,
-                self.motion,
-            );
-            if next > 0.03 {
-                self.presence.insert(closing.key.clone(), next);
-                still_closing.push(closing);
-                presence_animating = true;
-            } else {
-                self.presence.remove(&closing.key);
+        if !self.closing_entries.is_empty() {
+            let mut still_closing = Vec::new();
+            for closing in self.closing_entries.drain(..) {
+                let cur = self.presence.get(&closing.key).copied().unwrap_or(1.0);
+                let next = animate_value(
+                    cur,
+                    0.0,
+                    self.motion_metrics.dock_presence_exit_rate,
+                    dt,
+                    self.motion,
+                );
+                if next > 0.03 {
+                    self.presence.insert(closing.key.clone(), next);
+                    still_closing.push(closing);
+                    presence_animating = true;
+                } else {
+                    self.presence.remove(&closing.key);
+                }
             }
+            self.closing_entries = still_closing;
         }
-        self.closing_entries = still_closing;
 
         self.recompute_layout();
         self.present(runtime);
@@ -1056,7 +1172,7 @@ impl Dock {
         }
     }
 
-    fn on_mouse_move(&mut self, x: i32, y: i32) {
+    fn on_mouse_move(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
         if !self.tracking_mouse {
             let mut track = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -1078,6 +1194,14 @@ impl Dock {
                     self.drag.is_dragging = true;
                 }
             }
+            if self.drag.is_dragging {
+                let next_hover = self.drag_preview_target(x, y);
+                if next_hover != self.drag.hover_idx {
+                    self.drag.hover_idx = next_hover;
+                    self.recompute_layout();
+                    self.present(runtime);
+                }
+            }
         }
 
         if self.anim.should_hide {
@@ -1091,11 +1215,9 @@ impl Dock {
         if near_pill {
             self.hovering = true;
             self.last_cursor_x = Some(x as f32);
-            self.renderer.set_pointer(Some((x as f32, y as f32)));
             self.ensure_animating();
         } else if self.hovering {
             self.hovering = false;
-            self.renderer.set_pointer(None);
             self.ensure_animating();
         }
     }
@@ -1113,8 +1235,43 @@ impl Dock {
             && local_y <= self.layout.pill.bottom();
         if !still_over_dock && self.hovering {
             self.hovering = false;
-            self.renderer.set_pointer(None);
             self.ensure_animating();
+        }
+    }
+
+    fn drag_preview_target(&self, x: i32, y: i32) -> Option<usize> {
+        let start_idx = self.drag.start_idx?;
+        let (base, _) = self.base_displayed_entries();
+        let source = base.get(start_idx)?;
+        let is_reorderable = |candidate: &DockEntry| {
+            candidate.pinned && matches!(candidate.kind, DockItemKind::App { .. })
+        };
+        let is_pinnable = |candidate: &DockEntry| {
+            !candidate.pinned && matches!(candidate.kind, DockItemKind::App { .. })
+        };
+        let source_reorderable = is_reorderable(source);
+        let source_pinnable = is_pinnable(source);
+        if !source_reorderable && !source_pinnable {
+            return None;
+        }
+        let unpin_distance = scale(45, self.screen.dpi);
+        if y < self.layout.pill.y - unpin_distance {
+            return None;
+        }
+        let (app_count, _, _) = count_entries(&base);
+        let first_pin = base[..app_count].iter().position(is_reorderable)?;
+        let last_pin = base[..app_count].iter().rposition(is_reorderable)?;
+        let Some(slot) = self.layout.reorder_slot_index(x, app_count) else {
+            return self.drag.hover_idx;
+        };
+        if base.get(slot).is_some_and(is_reorderable) {
+            Some(slot)
+        } else if slot < first_pin {
+            Some(first_pin)
+        } else if source_reorderable && slot > last_pin {
+            Some(last_pin)
+        } else {
+            None
         }
     }
 
@@ -1123,6 +1280,7 @@ impl Dock {
         let idx = self.layout.hit_test(x, y, gap_pad);
         self.drag = DragState {
             start_idx: idx,
+            hover_idx: None,
             start_pos: (x, y),
             current_pos: (x, y),
             is_dragging: false,
@@ -1141,13 +1299,20 @@ impl Dock {
         };
         let _ = release_capture_if_owned(self.hwnd);
         if drag.is_dragging {
-            self.on_drop(runtime, start_idx, x, y);
+            self.on_drop(runtime, start_idx, drag.hover_idx, x, y);
         } else {
             self.on_left_click(runtime, drag.start_pos.0, drag.start_pos.1);
         }
     }
 
-    fn on_drop(&mut self, runtime: &RuntimeContext, start_idx: usize, x: i32, y: i32) {
+    fn on_drop(
+        &mut self,
+        runtime: &RuntimeContext,
+        start_idx: usize,
+        hover_idx: Option<usize>,
+        x: i32,
+        y: i32,
+    ) {
         let all = self.combined_entries();
         let Some(entry) = all.get(start_idx).cloned() else {
             return;
@@ -1158,11 +1323,12 @@ impl Dock {
         let reorderable = |candidate: &DockEntry| {
             candidate.pinned && matches!(candidate.kind, DockItemKind::App { .. })
         };
-        let target = self.layout.hit_test(x, y, gap_pad);
+        let target = self.layout.hit_test(x, y, gap_pad).or(hover_idx);
         let target_entry = target.and_then(|index| all.get(index));
         let effect = dock_drop_effect(DockDropInput {
             source: start_idx,
             source_reorderable: reorderable(&entry),
+            source_pinnable: !entry.pinned && matches!(entry.kind, DockItemKind::App { .. }),
             beyond_unpin_line: y < self.layout.pill.y - unpin_distance,
             target,
             target_reorderable: target_entry.is_some_and(reorderable),
@@ -1171,10 +1337,16 @@ impl Dock {
             DockDropEffect::Unpin => remove_pinned_app(&entry.key),
             DockDropEffect::Reorder { .. } => target_entry
                 .is_some_and(|target_entry| reorder_pinned_apps(&entry.key, &target_entry.key)),
+            DockDropEffect::PinAt { .. } => {
+                target_entry.is_some_and(|target_entry| entry.pin_at_target(&target_entry.key))
+            }
             DockDropEffect::Nothing => false,
         };
         if applied {
             self.refresh_entries(runtime);
+        } else if hover_idx.is_some() {
+            self.recompute_layout();
+            self.present(runtime);
         }
     }
 
@@ -1275,21 +1447,11 @@ impl Dock {
             return;
         }
         if self.motion.allows_motion()
-            && (!entry.running
-                || matches!(
-                    entry.kind,
-                    DockItemKind::Finder
-                        | DockItemKind::Launchpad
-                        | DockItemKind::Downloads
-                        | DockItemKind::Trash { .. }
-                ))
+            && !entry.running
+            && matches!(entry.kind, DockItemKind::App { .. })
         {
             self.anim.bounce_key = Some(entry.key.clone());
             self.anim.bounce_phase = 0.01;
-            self.ensure_animating();
-        } else if self.motion.allows_motion() {
-            self.anim.bounce_key = Some(entry.key.clone());
-            self.anim.bounce_phase = 0.45;
             self.ensure_animating();
         }
         let target = self.target_for_entry(&entry);
@@ -1331,6 +1493,7 @@ impl Dock {
 
     fn ensure_animating(&mut self) {
         if !self.anim.timer_running {
+            otto_platform::begin_fine_timing();
             self.anim.timer_running = true;
             self.anim.last_tick = Instant::now();
             unsafe {
@@ -1350,6 +1513,7 @@ impl Dock {
             unsafe {
                 let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), DOCK_ANIM_TIMER);
             }
+            otto_platform::end_fine_timing();
         }
     }
 
@@ -1494,13 +1658,26 @@ fn entry_notification_count(counts: &HashMap<String, u32>, entry: &DockEntry) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{LPARAM, LRESULT, RuntimeContext, WM_CLOSE, WPARAM, handle_message};
+    use super::{
+        LPARAM, LRESULT, RuntimeContext, WM_CLOSE, WM_MOUSEMOVE, WPARAM, handle_message,
+        wake_timer_only,
+    };
 
     #[test]
     fn wm_close_is_absorbed_without_destroying_surface() {
         let runtime = RuntimeContext::new(false);
         assert_eq!(
             handle_message(&runtime, 0, WM_CLOSE, WPARAM(0), LPARAM(0)),
+            Some(LRESULT(0))
+        );
+    }
+
+    #[test]
+    fn mouse_move_and_wake_timer_only_handle_unmounted_runtime() {
+        let runtime = RuntimeContext::new(false);
+        wake_timer_only(&runtime);
+        assert_eq!(
+            handle_message(&runtime, 0, WM_MOUSEMOVE, WPARAM(0), LPARAM(0)),
             Some(LRESULT(0))
         );
     }

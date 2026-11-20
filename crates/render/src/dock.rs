@@ -50,9 +50,6 @@ const ICON_RIM: D2D1_COLOR_F = D2D1_COLOR_F {
 };
 
 struct CachedDockIcon {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
     bitmap: ID2D1Bitmap,
 }
 
@@ -147,10 +144,6 @@ impl DockRenderer {
         self.glass.set_backdrop(capture, origin);
     }
 
-    pub fn set_pointer(&self, pointer: Option<(f32, f32)>) {
-        self.glass.set_pointer(pointer);
-    }
-
     pub fn clear_backdrop(&self) {
         self.glass.clear_backdrop();
     }
@@ -168,15 +161,7 @@ impl DockRenderer {
     pub fn set_icon(&mut self, key: String, width: u32, height: u32, pixels: &[u8]) -> Result<()> {
         self.surface.bind(&self.target, self.surface.size())?;
         let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
-        self.icons.insert(
-            key,
-            CachedDockIcon {
-                width,
-                height,
-                pixels: pixels.to_vec(),
-                bitmap,
-            },
-        );
+        self.icons.insert(key, CachedDockIcon { bitmap });
         Ok(())
     }
 
@@ -188,19 +173,7 @@ impl DockRenderer {
         let target = create_dc_render_target(&self.factory)?;
         let brushes = BrushPalette::new(&target)?;
         self.surface.bind(&target, self.surface.size())?;
-        let mut reuploaded = Vec::with_capacity(self.icons.len());
-        for icon in self.icons.values() {
-            reuploaded.push(upload_bgra_bitmap(
-                &target,
-                icon.width,
-                icon.height,
-                &icon.pixels,
-                PixelLimits::ICON,
-            )?);
-        }
-        for (icon, bitmap) in self.icons.values_mut().zip(reuploaded) {
-            icon.bitmap = bitmap;
-        }
+        self.icons.clear();
         self.target = target;
         self.brushes = brushes;
         self.glass.invalidate_gpu();

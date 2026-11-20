@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -5,7 +6,7 @@ use std::time::Duration;
 
 use otto_core::{PixelLimits, RgbBuffer, bgra_layout};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, SRCCOPY};
+use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, ROP_CODE, SRCCOPY};
 use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
@@ -82,11 +83,30 @@ impl BackdropGrabber {
     }
 
     fn matches(&self, request: &BackdropRequest) -> bool {
+        self.matches_size(request.width, request.height)
+    }
+
+    fn matches_size(&self, width: u32, height: u32) -> bool {
         let layout = self.canvas.layout();
-        layout.width == request.width && layout.height == request.height
+        layout.width == width && layout.height == height
     }
 
     fn grab(&self, request: &BackdropRequest) -> Option<BackdropFrame> {
+        let (bytes, pixels) = self.grab_pixels(request.origin, SRCCOPY | CAPTUREBLT)?;
+        Some(BackdropFrame {
+            id: request.id,
+            origin: request.origin,
+            signature: pixel_signature(&bytes),
+            pixels,
+        })
+    }
+
+    fn grab_fast(&self, origin: (i32, i32)) -> Option<RgbBuffer> {
+        let (_, pixels) = self.grab_pixels(origin, SRCCOPY)?;
+        Some(pixels)
+    }
+
+    fn grab_pixels(&self, origin: (i32, i32), rop: ROP_CODE) -> Option<(Vec<u8>, RgbBuffer)> {
         let layout = self.canvas.layout();
         unsafe {
             BitBlt(
@@ -96,21 +116,33 @@ impl BackdropGrabber {
                 i32::try_from(layout.width).ok()?,
                 i32::try_from(layout.height).ok()?,
                 Some(self.screen.handle()),
-                request.origin.0,
-                request.origin.1,
-                SRCCOPY | CAPTUREBLT,
+                origin.0,
+                origin.1,
+                rop,
             )
         }
         .ok()?;
         let bytes = self.canvas.copy_pixels();
         let pixels = RgbBuffer::from_bgra(layout.width, layout.height, &bytes).ok()?;
-        Some(BackdropFrame {
-            id: request.id,
-            origin: request.origin,
-            signature: pixel_signature(&bytes),
-            pixels,
-        })
+        Some((bytes, pixels))
     }
+}
+
+#[must_use]
+pub fn capture_backdrop_now(origin: (i32, i32), width: u32, height: u32) -> Option<RgbBuffer> {
+    thread_local! {
+        static CAPTURE_GRABBER: RefCell<Option<BackdropGrabber>> = const { RefCell::new(None) };
+    }
+    CAPTURE_GRABBER.with(|slot| {
+        let mut grabber = slot.borrow_mut();
+        if !grabber
+            .as_ref()
+            .is_some_and(|held| held.matches_size(width, height))
+        {
+            *grabber = BackdropGrabber::new(width, height);
+        }
+        grabber.as_ref()?.grab_fast(origin)
+    })
 }
 
 fn screen_grab() -> impl FnMut(&BackdropRequest) -> Option<BackdropFrame> {
@@ -127,6 +159,7 @@ fn screen_grab() -> impl FnMut(&BackdropRequest) -> Option<BackdropFrame> {
 struct Mailbox {
     request: Option<BackdropRequest>,
     frame: Option<BackdropFrame>,
+    capturing: bool,
     stopping: bool,
 }
 
@@ -147,6 +180,7 @@ impl Shared {
                 return None;
             }
             if let Some(request) = mailbox.request.take() {
+                mailbox.capturing = true;
                 return Some(request);
             }
             mailbox = self
@@ -183,10 +217,14 @@ impl BackdropWorker {
         let handle = thread::spawn(move || {
             let mut grab = make_grab();
             while let Some(request) = worker_shared.next_request() {
-                if let Some(frame) = grab(&request) {
-                    worker_shared.lock().frame = Some(frame);
-                    notify();
+                let frame = grab(&request);
+                let mut mailbox = worker_shared.lock();
+                if let Some(frame) = frame {
+                    mailbox.frame = Some(frame);
                 }
+                mailbox.capturing = mailbox.request.is_some();
+                drop(mailbox);
+                notify();
             }
         });
         Self {
@@ -203,6 +241,12 @@ impl BackdropWorker {
     #[must_use]
     pub fn take_frame(&self) -> Option<BackdropFrame> {
         self.shared.lock().frame.take()
+    }
+
+    #[must_use]
+    pub fn is_capturing(&self) -> bool {
+        let mailbox = self.shared.lock();
+        mailbox.capturing || mailbox.request.is_some()
     }
 }
 
@@ -225,7 +269,10 @@ mod tests {
 
     use otto_core::RgbBuffer;
 
-    use super::{BackdropFrame, BackdropGrabber, BackdropRequest, BackdropWorker, pixel_signature};
+    use super::{
+        BackdropFrame, BackdropGrabber, BackdropRequest, BackdropWorker, capture_backdrop_now,
+        pixel_signature,
+    };
 
     #[test]
     fn the_signature_tracks_every_byte_including_the_unaligned_tail() {
@@ -387,6 +434,13 @@ mod tests {
         assert!(BackdropGrabber::new(0, 10).is_none());
         assert!(BackdropGrabber::new(10, 0).is_none());
         assert!(BackdropGrabber::new(9_000, 10).is_none());
+    }
+
+    #[test]
+    fn capture_backdrop_now_rejects_empty_and_oversized_regions() {
+        assert!(capture_backdrop_now((0, 0), 0, 10).is_none());
+        assert!(capture_backdrop_now((0, 0), 10, 0).is_none());
+        assert!(capture_backdrop_now((0, 0), 9_000, 10).is_none());
     }
 
     mod native {

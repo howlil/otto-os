@@ -11,19 +11,25 @@ use windows::Win32::Graphics::DirectWrite::{DWRITE_TEXT_METRICS, IDWriteTextForm
 use windows::core::Result;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::glow::draw_rounded_glow;
-use crate::palette::{AMBIENT_PEAK_ALPHA, TonePalette, with_alpha};
+use crate::palette::{TonePalette, muted};
 use crate::{
-    BLACK, CoverArt, DISABLED_CONTROL_ALPHA, EQUALIZER_GREEN, FOREGROUND, MUSIC_ACCENT, Renderer,
-    brighten, rect_to_d2d, rgb, shared_dwrite_factory, translate_rect,
+    BLACK, CoverArt, DISABLED_CONTROL_ALPHA, FOREGROUND, MUSIC_ACCENT, Renderer, brighten,
+    rect_to_d2d, rgb, shared_dwrite_factory, translate_rect,
 };
 
-const PALETTE_LIFT: f32 = 0.22;
+const ART_TINT_MUTING: f32 = 0.25;
 const PAUSED_COVER_FADE: f32 = 0.45;
 const LIVE_RED: D2D1_COLOR_F = rgb(255, 69, 58, 1.0);
 
 pub(crate) fn media_palette(accent: Option<D2D1_COLOR_F>, dim: f32) -> TonePalette {
-    TonePalette::from_base(accent.unwrap_or(MUSIC_ACCENT), PALETTE_LIFT).dimmed(dim)
+    let accent = muted(accent.unwrap_or(MUSIC_ACCENT), ART_TINT_MUTING);
+    TonePalette {
+        from: accent,
+        to: accent,
+        accent,
+        text: accent,
+    }
+    .dimmed(dim)
 }
 
 fn center_of(rect: Rect) -> Vector2 {
@@ -125,9 +131,17 @@ impl Renderer {
         (Self::text_width(text, &self.text_leading) * 96.0 / self.dpi.max(1) as f32).ceil()
     }
 
-    fn draw_equalizer_or_dots(&self, cx: f32, cy: f32, playing: bool, anim_phase: f32, alpha: f32) {
+    fn draw_equalizer_or_dots(
+        &self,
+        cx: f32,
+        cy: f32,
+        playing: bool,
+        anim_phase: f32,
+        accent: D2D1_COLOR_F,
+        alpha: f32,
+    ) {
         if playing {
-            let brush = self.brushes.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha);
+            let brush = self.brushes.alpha_brush(accent, 0.88 * alpha);
             self.draw_audio_equalizer(cx, cy, anim_phase, &brush);
             return;
         }
@@ -170,7 +184,7 @@ impl Renderer {
         let view = scene.view(None);
         let bar_cy = layout.bar.height as f32 * 0.5;
 
-        let size = scale(18, self.dpi);
+        let size = scale(20, self.dpi);
         let center = center_of(layout.compact_ring);
         let tile = Rect {
             x: (center.X - size as f32 * 0.5).round() as i32,
@@ -178,16 +192,7 @@ impl Renderer {
             width: size,
             height: size,
         };
-        let radius = scale(5, self.dpi) as f32;
-        let live_strength = 1.0 - scene.dim;
-        draw_rounded_glow(
-            &self.target,
-            &self.brushes,
-            rect_to_d2d(tile),
-            radius,
-            palette.accent,
-            0.9 * alpha * live_strength,
-        );
+        let radius = scale(6, self.dpi) as f32;
         self.draw_cover_tile(
             tile,
             radius,
@@ -252,6 +257,7 @@ impl Renderer {
                 bar_cy,
                 !view.paused,
                 anim_phase,
+                palette.accent,
                 alpha,
             );
         }
@@ -261,7 +267,7 @@ impl Renderer {
         &self,
         layout: &Layout,
         scene: &MediaScene,
-        anim_phase: f32,
+        _anim_phase: f32,
         alpha_scale: f32,
     ) -> Result<()> {
         let alpha = ((layout.secondary_expansion - 0.15) / 0.85).clamp(0.0, 1.0)
@@ -286,15 +292,6 @@ impl Renderer {
             height: size,
         };
         let radius = size as f32 * 0.5;
-        let live_strength = 1.0 - scene.dim;
-        draw_rounded_glow(
-            &self.target,
-            &self.brushes,
-            rect_to_d2d(tile),
-            radius,
-            palette.accent,
-            0.85 * alpha * live_strength,
-        );
         self.draw_cover_tile(
             tile,
             radius,
@@ -321,22 +318,6 @@ impl Renderer {
             &active_brush,
             &track_brush,
         )?;
-
-        if !view.paused {
-            let scrim = self.brushes.alpha_brush(BLACK, 0.36 * alpha);
-            unsafe {
-                self.target.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: center,
-                        radiusX: radius * 0.72,
-                        radiusY: radius * 0.72,
-                    },
-                    &scrim,
-                );
-            }
-            let eq_brush = self.brushes.alpha_brush(EQUALIZER_GREEN, 0.96 * alpha);
-            self.draw_audio_equalizer(center.X, center.Y, anim_phase, &eq_brush);
-        }
         Ok(())
     }
 
@@ -392,32 +373,7 @@ impl Renderer {
             .sheet
             .and_then(|sheet| sheet.active_line(media.position_ms));
         let view = MediaView::resolve(media, engaged_unsupported, lyric_line);
-        let live_strength = 1.0 - scene.dim;
-
-        let clip = D2D_RECT_F {
-            left: (layout.notch.x - offset_x) as f32,
-            top: layout.notch.y as f32,
-            right: (layout.notch.right() - offset_x) as f32,
-            bottom: layout.notch.bottom() as f32,
-        };
-        self.fill_ambient_glow(
-            center_of(cover),
-            with_alpha(
-                palette.accent,
-                AMBIENT_PEAK_ALPHA * alpha * (1.0 - scene.dim * 0.9),
-            ),
-            clip,
-        );
-
         let radius = scale(12, self.dpi) as f32;
-        draw_rounded_glow(
-            &self.target,
-            &self.brushes,
-            rect_to_d2d(cover),
-            radius,
-            palette.accent,
-            0.8 * alpha * live_strength,
-        );
         self.draw_cover_tile(
             cover,
             radius,
@@ -464,6 +420,7 @@ impl Renderer {
                 eq.y as f32 + eq.height as f32 * 0.5,
                 !view.paused,
                 anim_phase,
+                palette.accent,
                 alpha,
             );
         }
@@ -581,9 +538,9 @@ impl Renderer {
             *palette
         };
         if view.live {
-            self.draw_drifting_lip(track, scene.live_phase, &lit, 0.0, alpha);
+            self.draw_drifting_lip(track, scene.live_phase, &lit, alpha);
         } else {
-            self.draw_progress_lip(track, view.progress, &lit, 0.0, alpha);
+            self.draw_progress_lip(track, view.progress, &lit, alpha);
             if engaged && view.seekable {
                 let thumb_x = track.x as f32 + track.width as f32 * view.progress.clamp(0.0, 1.0);
                 let thumb = self.brushes.alpha_brush(FOREGROUND, 0.98 * alpha);
@@ -603,7 +560,7 @@ impl Renderer {
         let label_top = (track.bottom() + scale(4, self.dpi)) as f32;
         let label_bottom = label_top + scale(14, self.dpi) as f32;
         let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
-        self.draw_text(
+        self.draw_tabular_text(
             &view.elapsed,
             &self.text_pomodoro_sub,
             D2D_RECT_F {
@@ -619,7 +576,7 @@ impl Renderer {
         } else {
             muted
         };
-        self.draw_text(
+        self.draw_tabular_text(
             &view.remaining,
             &self.text_pomodoro_sub_trailing,
             D2D_RECT_F {
@@ -679,21 +636,17 @@ impl Renderer {
         let play = translate_rect(layout.media_play_button, -offset_x);
         let play_centre = center_of(play);
         let enabled = capabilities.play_pause;
-        let lit = if hovered == Some(HitTarget::MediaPlayPause) && enabled {
-            TonePalette {
-                from: brighten(palette.from, 0.12),
-                to: brighten(palette.to, 0.12),
-                ..*palette
-            }
+        let play_color = if hovered == Some(HitTarget::MediaPlayPause) && enabled {
+            brighten(palette.accent, 0.12)
         } else {
-            *palette
+            palette.accent
         };
         let play_alpha = if enabled {
             alpha
         } else {
             DISABLED_CONTROL_ALPHA * alpha
         };
-        self.fill_gradient_circle(play_centre, play.width as f32 * 0.5, &lit, play_alpha);
+        self.fill_solid_circle(play_centre, play.width as f32 * 0.5, play_color, play_alpha);
         let ink = self
             .brushes
             .alpha_brush(BLACK, (0.92 - scene.dim * 0.2) * alpha);
@@ -727,8 +680,8 @@ mod tests {
     #[test]
     fn a_missing_accent_falls_back_to_the_music_pink() {
         let palette = media_palette(None, 0.0);
-        assert!((palette.accent.r - MUSIC_ACCENT.r).abs() < f32::EPSILON);
-        assert!((palette.accent.g - MUSIC_ACCENT.g).abs() < f32::EPSILON);
+        assert!(palette.accent.r > palette.accent.g);
+        assert!(saturation(palette.accent) < saturation(MUSIC_ACCENT));
     }
 
     #[test]
@@ -736,8 +689,10 @@ mod tests {
         let blue = rgb(70, 110, 230, 1.0);
         let palette = media_palette(Some(blue), 0.0);
         assert!(palette.accent.b > palette.accent.r);
-        assert!(palette.from.r > palette.to.r);
-        assert!((palette.to.b - blue.b).abs() < f32::EPSILON);
+        assert!(saturation(palette.accent) < saturation(blue));
+        assert!((palette.from.r - palette.to.r).abs() < f32::EPSILON);
+        assert!((palette.from.g - palette.to.g).abs() < f32::EPSILON);
+        assert!((palette.from.b - palette.to.b).abs() < f32::EPSILON);
     }
 
     #[test]

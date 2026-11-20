@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::Shell::{
-    ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE,
+    ABE_BOTTOM, ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE,
     ABN_FULLSCREENAPP, ABN_POSCHANGED, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,6 +18,7 @@ type WorkArea = [i32; 4];
 type ScreenSize = (i32, i32);
 
 pub const APPBAR_CALLBACK_MESSAGE: u32 = 0x8000 + 30;
+pub const DOCK_APPBAR_CALLBACK_MESSAGE: u32 = 0x8000 + 31;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellNotification {
@@ -38,9 +39,10 @@ pub fn classify_shell_notification(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Reservation {
+enum TopReservation {
+    None,
     Shell,
-    WorkArea,
+    WorkArea { written: bool },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,8 +163,7 @@ pub struct AppBar {
     original_work_area: RECT,
     screen: ScreenSize,
     taskbar_hidden: bool,
-    reservation: Reservation,
-    work_area_written: bool,
+    top: TopReservation,
 }
 
 impl AppBar {
@@ -176,21 +177,13 @@ impl AppBar {
         let screen = (primary.width, primary.height);
         let (original_area, original_state) =
             choose_original(read_recovery(), live_work_area, live_state, screen);
-        let mut registration = Self::data(hwnd);
-        registration.uCallbackMessage = APPBAR_CALLBACK_MESSAGE;
-        let reservation = if unsafe { SHAppBarMessage(ABM_NEW, &mut registration) } != 0 {
-            Reservation::Shell
-        } else {
-            Reservation::WorkArea
-        };
         let appbar = Self {
             hwnd,
             original_state,
             original_work_area: area_to_rect(original_area),
             screen,
             taskbar_hidden: false,
-            reservation,
-            work_area_written: false,
+            top: TopReservation::None,
         };
         write_recovery(appbar.recovery());
         appbar
@@ -198,14 +191,40 @@ impl AppBar {
 
     #[must_use]
     pub const fn is_shell_owned(&self) -> bool {
-        matches!(self.reservation, Reservation::Shell)
+        matches!(self.top, TopReservation::Shell)
     }
 
     pub fn reserve_top(&mut self, screen_width: i32, screen_height: i32, bar_height: i32) {
-        match self.reservation {
-            Reservation::Shell => self.reserve_shell_edge(screen_width, bar_height),
-            Reservation::WorkArea => {
+        if matches!(self.top, TopReservation::None) {
+            let mut registration = Self::data(self.hwnd);
+            registration.uCallbackMessage = APPBAR_CALLBACK_MESSAGE;
+            self.top = if unsafe { SHAppBarMessage(ABM_NEW, &mut registration) } != 0 {
+                TopReservation::Shell
+            } else {
+                TopReservation::WorkArea { written: false }
+            };
+        }
+        match self.top {
+            TopReservation::Shell => self.reserve_shell_edge(screen_width, bar_height),
+            TopReservation::WorkArea { .. } => {
                 self.write_work_area(screen_width, screen_height, bar_height);
+            }
+            TopReservation::None => {}
+        }
+    }
+
+    pub fn release_top(&mut self) {
+        match std::mem::replace(&mut self.top, TopReservation::None) {
+            TopReservation::None | TopReservation::WorkArea { written: false } => {}
+            TopReservation::Shell => {
+                let mut data = Self::data(self.hwnd);
+                unsafe {
+                    SHAppBarMessage(ABM_REMOVE, &mut data);
+                }
+            }
+            TopReservation::WorkArea { written: true } => {
+                Self::set_work_area(self.original_work_area);
+                write_recovery(self.recovery());
             }
         }
     }
@@ -236,8 +255,8 @@ impl AppBar {
         if Self::get_work_area() == desired {
             return;
         }
-        if !self.work_area_written {
-            self.work_area_written = true;
+        if !matches!(self.top, TopReservation::WorkArea { written: true }) {
+            self.top = TopReservation::WorkArea { written: true };
             write_recovery(self.recovery());
         }
         Self::set_work_area(desired);
@@ -275,7 +294,7 @@ impl AppBar {
         if self.taskbar_hidden {
             Self::set_tray_visibility(SW_HIDE);
         }
-        if self.reservation == Reservation::WorkArea {
+        if matches!(self.top, TopReservation::WorkArea { .. }) {
             self.reserve_top(screen_width, screen_height, bar_height);
         }
     }
@@ -286,7 +305,7 @@ impl AppBar {
             taskbar_state: self.original_state,
             taskbar_hidden: self.taskbar_hidden,
             screen: Some(self.screen),
-            work_area_written: self.work_area_written,
+            work_area_written: matches!(self.top, TopReservation::WorkArea { written: true }),
         }
     }
 
@@ -337,6 +356,55 @@ impl AppBar {
             cbSize: size_of::<APPBARDATA>() as u32,
             hWnd: hwnd,
             ..APPBARDATA::default()
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DockReservation {
+    hwnd: HWND,
+    applied: Option<(i32, i32, i32)>,
+}
+
+impl DockReservation {
+    #[must_use]
+    pub fn register(hwnd: isize) -> Option<Self> {
+        let hwnd = HWND(hwnd as *mut _);
+        let mut data = AppBar::data(hwnd);
+        data.uCallbackMessage = DOCK_APPBAR_CALLBACK_MESSAGE;
+        (unsafe { SHAppBarMessage(ABM_NEW, &mut data) } != 0).then_some(Self {
+            hwnd,
+            applied: None,
+        })
+    }
+
+    pub fn reserve(&mut self, screen_width: i32, screen_height: i32, height: i32) {
+        let request = (screen_width, screen_height, height);
+        if self.applied == Some(request) || height <= 0 || height >= screen_height {
+            return;
+        }
+        let mut data = AppBar::data(self.hwnd);
+        data.uEdge = ABE_BOTTOM;
+        data.rc = RECT {
+            left: 0,
+            top: screen_height - height,
+            right: screen_width,
+            bottom: screen_height,
+        };
+        unsafe {
+            SHAppBarMessage(ABM_QUERYPOS, &mut data);
+            data.rc.top = data.rc.bottom - height;
+            SHAppBarMessage(ABM_SETPOS, &mut data);
+        }
+        self.applied = Some(request);
+    }
+}
+
+impl Drop for DockReservation {
+    fn drop(&mut self) {
+        let mut data = AppBar::data(self.hwnd);
+        unsafe {
+            SHAppBarMessage(ABM_REMOVE, &mut data);
         }
     }
 }
@@ -423,15 +491,7 @@ pub fn restore_shell_from_recovery() -> bool {
 
 impl Drop for AppBar {
     fn drop(&mut self) {
-        if self.reservation == Reservation::Shell {
-            let mut data = Self::data(self.hwnd);
-            unsafe {
-                SHAppBarMessage(ABM_REMOVE, &mut data);
-            }
-        }
-        if self.work_area_written {
-            Self::set_work_area(self.original_work_area);
-        }
+        self.release_top();
         if self.taskbar_hidden {
             Self::set_tray_visibility(SW_SHOW);
             self.set_taskbar_state(self.original_state);
@@ -613,5 +673,68 @@ mod tests {
         let plan = restore_plan(recovery(None), (1280, 720));
         assert_eq!(plan.work_area, None);
         assert_eq!(plan.taskbar_state, Some(2));
+    }
+
+    #[test]
+    #[ignore = "changes the live desktop work area for a moment"]
+    fn the_dock_reservation_shrinks_the_work_area_until_it_is_dropped() {
+        use std::time::{Duration, Instant};
+
+        use windows::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_EX_TOOLWINDOW, WS_POPUP,
+        };
+        use windows::core::w;
+
+        use super::{AppBar, DockReservation};
+        use crate::screen::primary_screen;
+
+        fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if condition() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            condition()
+        }
+
+        let previous_awareness =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("otto-dock-reserve-test"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("create probe window");
+        let screen = primary_screen();
+        let before = AppBar::get_work_area();
+        let mut reservation = DockReservation::register(hwnd.0 as isize).expect("register app bar");
+        reservation.reserve(screen.width, screen.height, 100);
+        let shrank = wait_for(|| AppBar::get_work_area().bottom == before.bottom - 100);
+        let during = AppBar::get_work_area();
+        drop(reservation);
+        let restored = wait_for(|| AppBar::get_work_area() == before);
+        let _ = unsafe { DestroyWindow(hwnd) };
+        unsafe { SetThreadDpiAwarenessContext(previous_awareness) };
+        assert!(
+            shrank,
+            "work area during reservation: {during:?}, before: {before:?}"
+        );
+        assert!(restored, "work area was not restored to {before:?}");
     }
 }
