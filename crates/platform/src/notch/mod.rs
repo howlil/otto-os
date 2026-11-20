@@ -1,0 +1,10 @@
+pub(crate) mod capture_input;
+pub(crate) mod clipboard;
+pub(crate) mod lyrics;
+pub(crate) mod media;
+pub(crate) mod notch_rect;
+pub(crate) mod notifications;
+pub(crate) mod port;
+pub(crate) mod privacy;
+pub(crate) mod shelf;
+pub(crate) mod tasks;

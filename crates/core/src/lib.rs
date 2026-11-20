@@ -1,104 +1,82 @@
-mod app_model;
-mod bar_focus;
-mod bar_visibility;
-mod calendar;
-mod call_activity;
-mod capture_plan;
-mod change_gate;
-mod clipboard;
+mod appearance;
+mod bar;
 mod control_center;
-mod cover_color;
 mod dock;
-mod dock_focus;
-mod effects;
-mod genie;
-mod glass;
-mod hud;
-mod island;
 mod layout;
-mod lyrics;
-mod material;
-mod media;
-mod media_view;
 mod menu;
-mod menu_bar;
-mod motion;
-mod notch_notification;
-mod notch_rect;
-mod pixels;
-mod pointer_edge;
-mod pomodoro;
-mod pomodoro_view;
-mod ports;
-mod preferences;
-mod privacy;
-mod process_hog;
-mod shelf;
-mod snapshot_cache;
+mod notch;
+mod runtime;
+mod settings;
 mod spotlight;
-mod stack;
-mod status;
-mod tasks;
-mod theme;
-mod tick_cadence;
-mod uia;
-mod window_controls;
+mod window;
+
+pub(crate) use appearance::{capture_plan, cover_color, glass, material, pixels, theme};
+pub(crate) use runtime::{
+    change_gate, motion, pointer_edge, ports, process_hog, tick_cadence, uia,
+};
+pub(crate) use settings::{preferences, settings_content, settings_window};
+pub(crate) use window::controls as window_controls;
+pub(crate) use window::{app_model, genie, snapshot_cache};
 
 pub use app_model::{
     Activation, AppCommand, AppIdentity, AppInfo, Capability, CommandOutcome, StableOrder,
     WindowCommand, WindowIdentity, WindowInfo, WindowPresence, WindowRole, WindowTraits,
     decide_activation, group_windows,
 };
-pub use bar_focus::{BarFocus, BarFocusOutcome, BarKey};
-pub use bar_visibility::{BarPointer, BarVisibility};
-pub use calendar::{
+pub use bar::bar_focus::{BarFocus, BarFocusOutcome, BarKey};
+pub use bar::bar_visibility::{BarPointer, BarVisibility};
+pub use bar::calendar::{
     CALENDAR_POPUP_WIDTH, CalendarCell, CalendarControl, CalendarDay, CalendarLayout,
     calendar_row_height, compute_calendar_layout, days_in_month, month_grid, month_name,
     shift_month, weekday_of,
 };
-pub use call_activity::{
-    CALL_DEBOUNCE_MS, CallActivity, CallScene, CallTracker, detect_call_activity,
-    format_call_duration,
+pub use bar::menu_bar::{BarHideMode, BarItem, BarItemSet, MenuBarPreferences};
+pub use bar::status::{
+    BatteryStatus, BluetoothConnectTracker, ClockTime, HudDeviceLabel, InputLangCode, NotchHudKind,
+    NotchHudState, PowerMode, SystemStatus, detect_hud_event,
 };
 pub use capture_plan::{
     BACKDROP_PADDING_PT, CaptureGate, CaptureRegion, capture_interval_for, capture_interval_ms,
     capture_wanted,
 };
 pub use change_gate::ChangeGate;
-pub use clipboard::{
-    CLIPBOARD_PAGE_SIZE, ClipboardItem, ClipboardItemId, ClipboardKind, ClipboardLayoutInput,
-    ClipboardPayload, ClipboardState, MAX_CLIPBOARD_FILES, MAX_CLIPBOARD_ITEMS,
-    MAX_CLIPBOARD_TEXT_BYTES,
-};
+pub use control_center::effects::{ControlCenterEffect, ThemeChange, control_center_effect};
 pub use control_center::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState,
     ControlCenterClickOutcome, ControlCenterCommand, ControlCenterFocus, ControlCenterFocusOutcome,
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterMetrics, ControlCenterPage,
     ControlCenterPlacement, ControlCenterSnapshot, OttoSettingItem, OttoSettingKind,
-    OttoSettingSection, OttoSettingsArea, OttoSettingsSnapshot, PluginSettingsState,
-    SLIDER_KEY_STEP_PERCENT, SubPanelGroupLayout, SubPanelGroupSpec, SystemSettingsState,
-    UPDATE_CHECKING_LABEL, WifiNetwork, WifiState, area_card_scene, compute_control_center_layout,
+    OttoSettingSection, OttoSettingsSnapshot, PluginSettingsState, SLIDER_KEY_STEP_PERCENT,
+    SubPanelGroupLayout, SubPanelGroupSpec, SystemSettingsState, UPDATE_CHECKING_LABEL,
+    WifiNetwork, WifiState, compute_control_center_layout,
     compute_control_center_layout_for_snapshot, control_center_action,
     control_center_focus_targets, focus_row_subtitle, format_update_status,
     is_update_available_status, next_dock_icon_size, parse_latest_release_tag, power_mode_label,
     scroll_offset_for_item, step_slider_percent, subpanel_opener_target,
 };
 pub use cover_color::cover_accent;
-pub use dock::{
+pub use dock::effects::{
+    CMD_DOCK_OVERFLOW_BASE, CMD_DOCK_SIZE_LARGE, CMD_DOCK_SIZE_MEDIUM, CMD_DOCK_SIZE_SMALL,
+    CMD_DOCK_TOGGLE_HIDING, CMD_DOCK_TOGGLE_MAGNIFICATION, CMD_DOWNLOADS_ITEM_BASE,
+    CMD_DOWNLOADS_OPEN_FOLDER, DockDropEffect, DockDropInput, DockEffect, DownloadsEffect,
+    dock_activation_effect, dock_command_effect, dock_drop_effect, dock_overflow_choice,
+    dock_settings_effect, dock_settings_rows, downloads_effect,
+};
+pub use dock::entry::{
+    DockEntry, DockEntryOptions, DockItemKind, IconBitmap, StackItem, other_applications_visible,
+};
+pub use dock::focus::{DockFocus, DockFocusOutcome};
+pub use dock::layout::{
     AppleIconKind, DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL, DockInput, DockItemLayout,
     DockLayout, DockMetrics, DockOverflow, DockPosition, DockPreferences, DockSettingsChange,
     compute_dock_layout, dock_capacity, dock_entry_badge, dock_entry_progress, dock_rest_zone,
     dock_should_hide, parse_title_badge_count, parse_title_progress, select_dock_click_window,
     smooth_damp, split_dock_overflow, step_toward,
 };
-pub use dock_focus::{DockFocus, DockFocusOutcome};
-pub use effects::{
-    CMD_DOCK_OVERFLOW_BASE, CMD_DOCK_SIZE_LARGE, CMD_DOCK_SIZE_MEDIUM, CMD_DOCK_SIZE_SMALL,
-    CMD_DOCK_TOGGLE_HIDING, CMD_DOCK_TOGGLE_MAGNIFICATION, CMD_DOWNLOADS_ITEM_BASE,
-    CMD_DOWNLOADS_OPEN_FOLDER, ControlCenterEffect, DockDropEffect, DockDropInput, DockEffect,
-    DownloadsEffect, ThemeChange, WindowMenuEffect, control_center_effect, dock_activation_effect,
-    dock_command_effect, dock_drop_effect, dock_overflow_choice, dock_settings_effect,
-    dock_settings_rows, downloads_effect, window_menu_effect,
+pub use dock::stack::{
+    DOWNLOADS_STACK_MAX_ITEMS, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
+    DownloadsStackTile, compute_downloads_stack_layout, downloads_stack_hit_test,
+    next_downloads_stack_focus,
 };
 pub use genie::{
     GenieBoundary, GenieClip, GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry,
@@ -108,97 +86,108 @@ pub use glass::{
     GlassBackdrop, GlassBitmap, GlassParams, GlassShape, LIGHT_DIRECTION, Rgb, RgbBuffer,
     compose_glass, compose_glass_lit, glass_color, soften_backdrop,
 };
-pub use hud::{
-    HudGeometry, HudGlyph, HudLabel, HudPresentation, HudTone, HudValue, compute_hud_geometry,
-    hud_content_alpha, present_hud,
-};
-pub use island::{
-    CompactContent, CompactSlotKind, IslandInputs, IslandMode, IslandTargets, island_targets,
-    resolve_island,
-};
 pub use layout::{
     HitTarget, Layout, Metrics, NOTIFICATION_BANNER_HEIGHT_POINTS, NOTIFICATION_RING_HEIGHT_POINTS,
     NotchLayoutInput, NotificationLayout, NotificationLayoutInput, PrivacyLayoutState, Rect,
-    ShelfLayoutInput, compute_layout, compute_layout_for_app, compute_layout_with_hud,
+    ShelfLayoutInput, TargetScope, compute_layout, compute_layout_for_app, compute_layout_with_hud,
     compute_layout_with_notch, scale,
-};
-pub use lyrics::{
-    LyricLine, LyricsSheet, LyricsStatus, LyricsView, MAX_LRC_LINES, MAX_LRC_TIMESTAMPS_PER_LINE,
-    MAX_LRC_TOTAL_TEXT_BYTES, parse_lrc,
 };
 pub use material::{
     Appearance, ContrastColors, InteractionState, MaterialVariant, SemanticColors, ShapeTokens,
     SystemAppearance,
 };
-pub use media::{
+pub use menu::*;
+pub use motion::{
+    MotionMetrics, MotionPreference, SpringState, advance_bounce_phase, advance_genie_progress,
+    animate_value, bounce_offset, step_spring,
+};
+pub use notch::call_activity::{
+    CALL_DEBOUNCE_MS, CallActivity, CallScene, CallTracker, detect_call_activity,
+    format_call_duration,
+};
+pub use notch::clipboard::{
+    CLIPBOARD_PAGE_SIZE, ClipboardItem, ClipboardItemId, ClipboardKind, ClipboardLayoutInput,
+    ClipboardPayload, ClipboardState, MAX_CLIPBOARD_FILES, MAX_CLIPBOARD_ITEMS,
+    MAX_CLIPBOARD_TEXT_BYTES,
+};
+pub use notch::hud::{
+    HudGeometry, HudGlyph, HudLabel, HudPresentation, HudTone, HudValue, compute_hud_geometry,
+    hud_content_alpha, present_hud,
+};
+pub use notch::island::{
+    CompactContent, CompactSlotKind, IslandInputs, IslandMode, IslandTargets, island_targets,
+    resolve_island,
+};
+pub use notch::lyrics::{
+    LyricLine, LyricsSheet, LyricsStatus, LyricsView, MAX_LRC_LINES, MAX_LRC_TIMESTAMPS_PER_LINE,
+    MAX_LRC_TOTAL_TEXT_BYTES, parse_lrc,
+};
+pub use notch::media::{
     KEYBOARD_SEEK_STEP_MS, LYRIC_DRIFT_TOLERANCE_MS, MediaCapabilities, MediaCommand,
     MediaSubtitle, NORMAL_PLAYBACK_RATE_PERMILLE, NotchExpandedTab, NowPlaying,
     POSITION_DRIFT_TOLERANCE_MS, PendingSeek, SEEK_CONFIRM_TOLERANCE_MS, SEEK_READBACK_TIMEOUT_MS,
     SeekReadback, TrackKey, expanded_media_subtitle, reconcile_seek, seek_target_ms,
     unsupported_reason,
 };
-pub use media_view::{
+pub use notch::media_view::{
     LIVE_LABEL, MediaPeek, MediaPeekFrame, MediaScene, MediaView, source_label, unsupported_command,
 };
-pub use menu::*;
-pub use menu_bar::{BarHideMode, BarItem, BarItemSet, MenuBarPreferences};
-pub use motion::{
-    MotionMetrics, MotionPreference, SpringState, advance_bounce_phase, advance_genie_progress,
-    animate_value, bounce_offset, step_spring,
-};
-pub use notch_notification::{
+pub use notch::notch_notification::{
     CALL_RING_TIMEOUT_MS, NOTIFICATION_BASE_HOLD_MS, NOTIFICATION_COALESCE_MS,
     NOTIFICATION_HOVER_GRACE_MS, NOTIFICATION_MAX_HOLD_MS, NOTIFICATION_PEEK_MS,
     NOTIFICATION_QUEUE_LIMIT, NotchNotification, NotificationKind, NotificationPresentation,
     NotificationQueue, NotificationStage, classify_notification, notification_hold_ms,
     present_notification,
 };
-pub use notch_rect::{NOTCH_RECT_PROPERTY, pack_notch_rect, unpack_notch_rect};
-pub use pixels::{
-    BgraLayout, CropRegion, PixelBufferError, PixelLimits, bgra_layout, crop_bgra,
-    downsample_bgra_half, downsample_bgra_to_fit, resize_bgra, scale_dimension,
-    validate_bgra_buffer,
-};
-pub use pointer_edge::PointerEdgeWatch;
-pub use pomodoro::{
+pub use notch::notch_rect::{NOTCH_RECT_PROPERTY, pack_notch_rect, unpack_notch_rect};
+pub use notch::pomodoro::{
     FocusSubMode, POMODORO_EXTEND_LABEL, POMODORO_LAST_MINUTE_SECONDS, POMODORO_MAX_MINUTES,
     POMODORO_PRESETS_MINUTES, POMODORO_SUSPEND_GAP_MS, POMODORO_WARNING_SECONDS, PomodoroAlert,
     PomodoroClock, PomodoroPhase, PomodoroState, PomodoroStatus, PomodoroTick, QuickTimerState,
     StopwatchClock, StopwatchState, TIMER_PRESETS_MINUTES, format_duration_ms, format_mm_ss,
     warning_threshold_crossed,
 };
-pub use pomodoro_view::{
+pub use notch::pomodoro_view::{
     POMODORO_SESSIONS_PER_CYCLE, PomodoroPeek, PomodoroPeekFrame, PomodoroProgress, PomodoroScene,
     PomodoroSurface, PomodoroTone, PomodoroView, format_minute_of_day,
 };
-pub use ports::{ControlCenterAction, ControlCenterPort, NotchAction, NotchPort};
-pub use preferences::{AppPreferences, BrandIcon, NotchStyle};
-pub use privacy::{MicState, PRIVACY_COMPACT_EXTRA_POINTS, PRIVACY_DOT_POINTS, PrivacyState};
-pub use process_hog::{HOG_SAMPLE_INTERVAL_SECS, HogDecision, HogTracker, ProcessSample};
-pub use shelf::{
+pub use notch::privacy::{
+    MicState, PRIVACY_COMPACT_EXTRA_POINTS, PRIVACY_DOT_POINTS, PrivacyState,
+};
+pub use notch::shelf::{
     MAX_SHELF_ITEMS, MAX_SHELF_PATH_LEN, MAX_SHELF_TEXT_BYTES, SHELF_HOVER_LEAVE_MS,
     SHELF_PAGE_SIZE, SHELF_THUMBNAIL_MAX_PX, ShelfItem, ShelfItemId, ShelfKindTag, ShelfPayload,
     ShelfState, ShelfThumbnail, classify_payload, decode_dropped_text, is_openable_shelf_url,
     is_unc_shelf_path, is_valid_shelf_file_path,
+};
+pub use notch::tasks::{
+    MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskId, TaskItem,
+    TasksLayoutInput, TasksState, normalize_task_text,
+};
+pub use pixels::{
+    BgraLayout, CropRegion, PixelBufferError, PixelLimits, bgra_layout, crop_bgra,
+    downsample_bgra_half, downsample_bgra_to_fit, resize_bgra, scale_dimension,
+    validate_bgra_buffer,
+};
+pub use pointer_edge::PointerEdgeWatch;
+pub use ports::{ControlCenterAction, ControlCenterPort, DockPort, NotchAction, NotchPort};
+pub use preferences::{AppPreferences, BrandIcon, NotchStyle};
+pub use process_hog::{HOG_SAMPLE_INTERVAL_SECS, HogDecision, HogTracker, ProcessSample};
+pub use settings_content::{
+    BadgeTone, CardLayout, ContentLayout, SettingsAction, SettingsContent, SettingsHero,
+    SettingsRow, SettingsRowValue, SettingsSection, build_content, compute_content_layout,
+};
+pub use settings_window::{
+    MODULE_COUNT, ModuleGroup, ModuleId, ModuleRow, ModuleStatus, SETTINGS_PAGE_COUNT,
+    SettingsGroup, SettingsGroupHeading, SettingsHit, SettingsLayout, SettingsMetrics,
+    SettingsPage, SettingsPageSlot, compute_settings_layout, compute_settings_layout_with,
+    module_enabled, modules_running, resolve_modules, settings_background, settings_text,
 };
 pub use snapshot_cache::{SnapshotBudget, SnapshotCache};
 pub use spotlight::{
     SPOTLIGHT_DEFAULT_HEIGHT_POINTS, SPOTLIGHT_DEFAULT_WIDTH_POINTS, SpotlightHit, SpotlightLayout,
     SpotlightMode, SpotlightMove, SpotlightResultLayout, SpotlightView, compute_spotlight_layout,
     move_spotlight_selection, rank_spotlight_results,
-};
-pub use stack::{
-    DOWNLOADS_STACK_MAX_ITEMS, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
-    DownloadsStackTile, compute_downloads_stack_layout, downloads_stack_hit_test,
-    next_downloads_stack_focus,
-};
-pub use status::{
-    BatteryStatus, BluetoothConnectTracker, ClockTime, HudDeviceLabel, InputLangCode, NotchHudKind,
-    NotchHudState, PowerMode, SystemStatus, detect_hud_event,
-};
-pub use tasks::{
-    MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskId, TaskItem,
-    TasksLayoutInput, TasksState, normalize_task_text,
 };
 pub use theme::{ResolvedTheme, Rgba, ThemeMode};
 pub use tick_cadence::TickCadence;
@@ -207,6 +196,7 @@ pub use uia::{
     build_control_center_accessible_tree, build_dock_accessible_tree, decode_bar_hit_target,
     decode_control_center_target, encode_bar_hit_target, encode_control_center_target,
 };
+pub use window::effects::{WindowMenuEffect, window_menu_effect};
 pub use window_controls::{
     COVER_FEATHER_DIP, COVER_RIGHT_MARGIN_DIP, COVER_SAMPLE_GAP_DIP, COVER_SAMPLE_WIDTH_DIP,
     CommandScope, CoverBand, CoverStyle, NATIVE_CAPTION_BUTTON_DIP, NATIVE_CORNER_RADIUS_DIP,

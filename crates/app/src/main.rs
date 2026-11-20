@@ -1,17 +1,22 @@
 #![windows_subsystem = "windows"]
 
-mod backdrop_feed;
+mod appearance;
 mod bar;
-mod bar_controls;
 mod control_center;
 mod dock;
 mod genie;
 mod host;
 mod menu;
 mod notch;
+mod settings;
 mod spotlight;
-mod theme_state;
 mod window_controls;
+
+pub(crate) use appearance::{backdrop_feed, theme_state};
+pub(crate) use bar::controls as bar_controls;
+pub(crate) use bar::notch_io;
+pub(crate) use host::win_msg;
+pub(crate) use settings as settings_window;
 
 use windows::core::Result;
 

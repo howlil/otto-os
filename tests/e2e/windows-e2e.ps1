@@ -605,10 +605,7 @@ function Get-BarMetrics($process) {
     if ($script:dpi -eq 0) {
         $script:dpi = 96
     }
-    $script:coordinateDpi = [int][Math]::Round(($bar.Height / 32.0) * 96)
-    if ($script:coordinateDpi -lt 96) {
-        $script:coordinateDpi = 96
-    }
+    $script:coordinateDpi = $script:dpi
     $script:screenWidth = $bar.Width
     $script:screenHeight = [OttoE2ENative]::ScreenHeight()
     return $bar
