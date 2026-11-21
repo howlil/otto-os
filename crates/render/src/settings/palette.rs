@@ -144,6 +144,7 @@ pub(super) const fn tint(page: SettingsPage) -> D2D1_COLOR_F {
         SettingsPage::Modules => 0xAF_52DE,
         SettingsPage::TopBar => 0x32_ADE6,
         SettingsPage::Notch => 0x3A_3A3C,
+        SettingsPage::Focus => 0x58_56D6,
         SettingsPage::Dock => 0x5E_5CE6,
         SettingsPage::WindowControls => 0xFF_9F0A,
         SettingsPage::Spotlight | SettingsPage::General => 0x8E_8E93,

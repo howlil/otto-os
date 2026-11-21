@@ -37,7 +37,8 @@ impl SpotlightSurface {
         if !capture_wanted(
             &crate::theme_state::appearance(runtime),
             runtime.glass_enabled.get(),
-        ) {
+        ) || (runtime.capture_visible.get() && otto_platform::is_surface_visible(self.hwnd))
+        {
             return;
         }
         let Some(renderer) = self.renderer.as_ref() else {
@@ -47,8 +48,13 @@ impl SpotlightSurface {
             return;
         }
         let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let capture_rect = if self.morph_progress.is_some() {
+            self.target_window
+        } else {
+            self.window
+        };
         let Some(region) = CaptureRegion::padded_to_screen(
-            self.window,
+            capture_rect,
             pad,
             self.screen.width,
             self.screen.height,
@@ -58,7 +64,10 @@ impl SpotlightSurface {
         if let Some(pixels) =
             otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
         {
-            renderer.set_backdrop(pixels, (region.x - self.window.x, region.y - self.window.y));
+            renderer.set_backdrop(
+                pixels,
+                (region.x - capture_rect.x, region.y - capture_rect.y),
+            );
         }
     }
 

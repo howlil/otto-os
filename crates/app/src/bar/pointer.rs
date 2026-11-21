@@ -194,6 +194,7 @@ impl Bar {
                 | HitTarget::TasksPager
                 | HitTarget::TaskItem(_)
                 | HitTarget::TaskCheck(_)
+                | HitTarget::TaskEdit(_)
                 | HitTarget::TaskRemove(_)),
             ) = hit
         {
@@ -286,6 +287,16 @@ impl Bar {
             return self.run_notch_target(runtime, HitTarget::ShelfAdd);
         }
 
+        if target == HitTarget::Notch
+            && self.notch.panel_expansion() > 0.55
+            && self.notch.active_tab() == NotchExpandedTab::Tasks
+            && self.notch.tasks_state().items.is_empty()
+            && !self.notch.is_task_editor_open()
+            && self.layout.tasks.body.contains(x, y)
+        {
+            return self.run_notch_target(runtime, HitTarget::TasksAdd);
+        }
+
         if is_notch_target(target) {
             return self.run_notch_target(runtime, target);
         }
@@ -309,6 +320,10 @@ impl Bar {
             if let Some(HitTarget::ShelfItem(slot)) = self.layout.hit_test(x, y) {
                 let update = self.notch.handle_shelf_right_click(slot);
                 self.apply_notch_update(runtime, update);
+                return;
+            }
+            if let Some(HitTarget::TaskItem(slot)) = self.layout.hit_test(x, y) {
+                let _ = self.run_notch_target(runtime, HitTarget::TaskEdit(slot));
                 return;
             }
             if self.layout.secondary_expansion > 0.25 && self.layout.notch_secondary.contains(x, y)

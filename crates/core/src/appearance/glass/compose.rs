@@ -26,15 +26,6 @@ pub fn soften_backdrop(
 }
 
 #[must_use]
-pub fn compose_glass(
-    params: &GlassParams,
-    shape: &GlassShape,
-    backdrop: &GlassBackdrop<'_>,
-) -> GlassBitmap {
-    compose_glass_lit(params, shape, backdrop, LIGHT_DIRECTION)
-}
-
-#[must_use]
 pub fn compose_glass_lit(
     params: &GlassParams,
     shape: &GlassShape,

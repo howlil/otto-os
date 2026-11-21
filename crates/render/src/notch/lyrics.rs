@@ -65,6 +65,13 @@ pub(crate) struct LyricLayoutCache {
     entries: HashMap<String, Rc<LyricLayout>>,
 }
 
+impl LyricLayoutCache {
+    pub(crate) fn clear(&mut self) {
+        self.width_bits = 0;
+        self.entries.clear();
+    }
+}
+
 struct LyricRow {
     index: usize,
     layout: Option<Rc<LyricLayout>>,

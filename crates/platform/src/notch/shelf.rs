@@ -457,13 +457,19 @@ fn formatetc_hglobal(cf_format: u16) -> FORMATETC {
 }
 
 fn url_wide_clipboard_format() -> u16 {
-    let id = unsafe { RegisterClipboardFormatW(w!("UniformResourceLocatorW")) };
-    u16::try_from(id).unwrap_or(0)
+    static FORMAT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| {
+        let id = unsafe { RegisterClipboardFormatW(w!("UniformResourceLocatorW")) };
+        u16::try_from(id).unwrap_or(0)
+    })
 }
 
 fn url_ansi_clipboard_format() -> u16 {
-    let id = unsafe { RegisterClipboardFormatW(w!("UniformResourceLocator")) };
-    u16::try_from(id).unwrap_or(0)
+    static FORMAT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| {
+        let id = unsafe { RegisterClipboardFormatW(w!("UniformResourceLocator")) };
+        u16::try_from(id).unwrap_or(0)
+    })
 }
 
 fn extract_hdrop_payloads(data_obj: &IDataObject) -> Vec<ShelfPayload> {
@@ -538,21 +544,16 @@ fn extract_text_or_url_payloads(data_obj: &IDataObject) -> Vec<ShelfPayload> {
 }
 
 fn data_object_has_supported_format(data_obj: &IDataObject) -> bool {
-    let mut formats = vec![
-        formatetc_hglobal(CF_HDROP.0),
-        formatetc_hglobal(CF_UNICODETEXT.0),
+    let candidates = [
+        CF_HDROP.0,
+        CF_UNICODETEXT.0,
+        url_wide_clipboard_format(),
+        url_ansi_clipboard_format(),
     ];
-    let url_wide_cf = url_wide_clipboard_format();
-    if url_wide_cf != 0 {
-        formats.push(formatetc_hglobal(url_wide_cf));
-    }
-    let url_ansi_cf = url_ansi_clipboard_format();
-    if url_ansi_cf != 0 {
-        formats.push(formatetc_hglobal(url_ansi_cf));
-    }
-    formats
-        .iter()
-        .any(|fmt| unsafe { data_obj.QueryGetData(fmt) } == S_OK)
+    candidates.into_iter().filter(|&cf| cf != 0).any(|cf| {
+        let fmt = formatetc_hglobal(cf);
+        unsafe { data_obj.QueryGetData(&raw const fmt) == S_OK }
+    })
 }
 
 fn extract_drop_payloads(data_obj: &IDataObject) -> Vec<ShelfPayload> {

@@ -1220,6 +1220,7 @@ fn tasks_header_rows_and_buttons_stay_non_overlapping_across_dpis() {
                     has_pager: true,
                     has_items: true,
                     has_done: true,
+                    editing: false,
                 },
                 ..NotchLayoutInput::default()
             },
@@ -1238,19 +1239,25 @@ fn tasks_header_rows_and_buttons_stay_non_overlapping_across_dpis() {
                 assert!(rect.right() + gap <= next.x);
             }
         }
+        assert!(layout.tasks.editor.is_empty());
+        assert!(layout.tasks.editor_input.is_empty());
         for (index, row) in layout.tasks.rows.iter().enumerate() {
             assert!(layout.tasks.body.contains_rect(row));
             let active = layout.tasks.check_buttons[index];
+            let edit = layout.tasks.edit_buttons[index];
             let remove = layout.tasks.remove_buttons[index];
             assert!(row.contains_rect(&active));
+            assert!(row.contains_rect(&edit));
             assert!(row.contains_rect(&remove));
-            assert!(active.right() < remove.x);
+            assert!(active.right() < edit.x);
+            assert!(edit.right() < remove.x);
             if let Some(next) = layout.tasks.rows.get(index + 1) {
                 assert!(row.bottom() < next.y);
             }
         }
         for (hit, rect) in [
             (HitTarget::TaskRemove(2), layout.tasks.remove_buttons[2]),
+            (HitTarget::TaskEdit(2), layout.tasks.edit_buttons[2]),
             (HitTarget::TaskCheck(2), layout.tasks.check_buttons[2]),
             (HitTarget::TaskItem(2), layout.tasks.rows[2]),
             (HitTarget::TasksAdd, layout.tasks.add_button),
@@ -1264,6 +1271,65 @@ fn tasks_header_rows_and_buttons_stay_non_overlapping_across_dpis() {
             };
             assert_eq!(layout.hit_test(probe.0, probe.1), Some(hit));
             assert_eq!(layout.notch_control_rect(hit), Some(rect));
+        }
+    }
+}
+
+#[test]
+fn tasks_inline_editor_expands_notch_and_keeps_rows_clear_across_dpis() {
+    for dpi in [96, 120, 144, 192] {
+        let closed = compute_layout_with_notch(
+            &M,
+            1920,
+            dpi,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Tasks,
+                tasks: TasksLayoutInput {
+                    visible_count: 4,
+                    has_pager: false,
+                    has_items: true,
+                    has_done: false,
+                    editing: false,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        let editing = compute_layout_with_notch(
+            &M,
+            1920,
+            dpi,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Tasks,
+                tasks: TasksLayoutInput {
+                    visible_count: 4,
+                    has_pager: false,
+                    has_items: true,
+                    has_done: false,
+                    editing: true,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        assert!(editing.notch.height > closed.notch.height);
+        assert!(editing.panel_window.height > closed.panel_window.height);
+        assert!(editing.notch.contains_rect(&editing.tasks.editor));
+        assert!(
+            editing
+                .tasks
+                .editor
+                .contains_rect(&editing.tasks.editor_input)
+        );
+        assert!(editing.tasks.editor.bottom() < editing.tasks.body.y);
+        assert!(editing.notch.contains_rect(&editing.tasks.body));
+        for (index, row) in editing.tasks.rows.iter().enumerate() {
+            assert!(editing.tasks.body.contains_rect(row));
+            assert!(row.contains_rect(&editing.tasks.check_buttons[index]));
+            assert!(row.contains_rect(&editing.tasks.edit_buttons[index]));
+            assert!(row.contains_rect(&editing.tasks.remove_buttons[index]));
         }
     }
 }
@@ -1283,10 +1349,14 @@ fn empty_tasks_expose_no_row_or_header_controls_beyond_add() {
     );
     assert!(layout.tasks.rows.iter().all(Rect::is_empty));
     assert!(layout.tasks.check_buttons.iter().all(Rect::is_empty));
+    assert!(layout.tasks.edit_buttons.iter().all(Rect::is_empty));
+    assert!(layout.tasks.editor.is_empty());
+    assert!(layout.tasks.editor_input.is_empty());
     assert!(layout.tasks.clear_button.is_empty());
     assert!(layout.tasks.pager_button.is_empty());
     assert!(!layout.tasks.add_button.is_empty());
     assert_eq!(layout.notch_control_rect(HitTarget::TaskItem(0)), None);
+    assert_eq!(layout.notch_control_rect(HitTarget::TaskEdit(0)), None);
 }
 
 #[test]

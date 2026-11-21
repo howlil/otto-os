@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-22
+
+### Added
+
+- Standalone **Otto Settings** window (`OttoSettings`) consolidating module toggles, configuration pages, and update checks in a dedicated native Direct2D window.
+- **Focus Mode, Screen Time & Distraction Blocking**: local Today and 7-day rolling app, website, and search query analytics with zero-extension browser address-bar inspection, configurable app/website blocklist with auto-minimize and Notch HUD alert while Focus is active, notification and Dock badge suppression, and a dedicated **Focus** dashboard page in Otto Settings.
+- **Inline Quick Note Add & Edit in Notch**: `Ctrl+Alt+Q`, `+ Add`, or clicking the empty `Tasks` card now opens an inline composer directly inside the Notch `Tasks` tab instead of a separate floating popup, with in-place editing of existing notes via the per-row pencil button or right-click.
+
+### Changed
+
+- Isolated debug/local development data to `%LOCALAPPDATA%\otto-os-dev` while production/installed builds keep `%LOCALAPPDATA%\otto-os`, and preserved the installed `%LOCALAPPDATA%\Programs\Otto OS\otto-os.exe` path when toggling Launch at Login from Cargo target directories.
+- Reduced idle memory and GPU footprint via lazy Notch panel surface allocation, idle background worker teardown, and backdrop capture cache release.
+- Updated release packaging manifests and installer metadata for `v1.1.0` (`otto-os-setup-1.1.0-x64.exe`).
+
+### Fixed
+
+- Eliminated Top Bar and glass surface flickering/disappearing during screen recording and screen sharing (Cap, OBS, Discord, Windows Graphics Capture) when **Visible in Screenshots / Screen Share** is enabled, while preserving Clear Liquid Glass appearance without self-capture feedback loops.
+
 ## [1.0.0] - 2026-11-21
 
 ### Added
@@ -20,5 +38,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Single low-power GPU **Clear Liquid Glass** composition with opaque and Windows High Contrast accessibility fallbacks, UI Automation (`WM_GETOBJECT`) providers, full Bar/Dock/Control Center keyboard traversal, and opt-in **Background Cleanup** throttling.
 - Production Windows 11 22H2+ (build 22621+) packaging: `--quit` and `--restore-shell` lifecycle CLI, crash-safe shell recovery (`shell_recovery.json`), rolling zero-telemetry local logs, per-user Inno Setup installer (`otto-os-setup-1.0.0-x64.exe`), portable ZIP archive, SHA-256 checksums, and WinGet manifests.
 
-[Unreleased]: https://github.com/howlil/otto-os/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/howlil/otto-os/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/howlil/otto-os/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/howlil/otto-os/releases/tag/v1.0.0

@@ -95,6 +95,7 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::TaskItem(i) => 800 + i as i32,
         HitTarget::TaskCheck(i) => 900 + i as i32,
         HitTarget::TaskRemove(i) => 1000 + i as i32,
+        HitTarget::TaskEdit(i) => 1100 + i as i32,
     }
 }
 
@@ -162,6 +163,7 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         800..=899 => Some(HitTarget::TaskItem((tag - 800) as u8)),
         900..=999 => Some(HitTarget::TaskCheck((tag - 900) as u8)),
         1000..=1099 => Some(HitTarget::TaskRemove((tag - 1000) as u8)),
+        1100..=1199 => Some(HitTarget::TaskEdit((tag - 1100) as u8)),
         _ => None,
     }
 }
@@ -314,6 +316,10 @@ fn bar_shelf_clipboard_metadata(target: HitTarget) -> Option<(String, String)> {
         HitTarget::TaskCheck(i) => (
             format!("otto.notch.tasks.check.{i}"),
             format!("Toggle Task {} Done", i + 1),
+        ),
+        HitTarget::TaskEdit(i) => (
+            format!("otto.notch.tasks.edit.{i}"),
+            format!("Edit Task {}", i + 1),
         ),
         HitTarget::TaskRemove(i) => (
             format!("otto.notch.tasks.remove.{i}"),
@@ -746,7 +752,7 @@ mod tests {
     };
     use crate::control_center::{
         ControlCenterHitTarget, ControlCenterMetrics, ControlCenterPage, ControlCenterPlacement,
-        ControlCenterSnapshot, compute_control_center_layout,
+        ControlCenterSnapshot, compute_control_center_layout_for_snapshot,
     };
     use crate::dock::layout::{DockInput, DockMetrics, compute_dock_layout};
     use crate::layout::{HitTarget, Metrics, Rect, compute_layout_for_app};
@@ -819,7 +825,7 @@ mod tests {
         assert_eq!(dock_tree.nodes[1].role, AccessibleRole::Button);
 
         let snapshot = ControlCenterSnapshot::default();
-        let cc_layout = compute_control_center_layout(
+        let cc_layout = compute_control_center_layout_for_snapshot(
             &ControlCenterMetrics::DEFAULT,
             ControlCenterPlacement {
                 bounds: Rect {
@@ -835,6 +841,7 @@ mod tests {
                 item_count: 0,
                 scroll_offset: 0,
             },
+            &snapshot,
         );
         let cc_tree = build_control_center_accessible_tree(&cc_layout, &snapshot);
         assert!(!cc_tree.nodes.is_empty());

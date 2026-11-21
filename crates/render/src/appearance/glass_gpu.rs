@@ -85,8 +85,12 @@ thread_local! {
     static SHARED_GPU: RefCell<Weak<SharedGpu>> = const { RefCell::new(Weak::new()) };
 }
 
-pub(crate) fn release_shared_gpu() {
-    let _ = SHARED_GPU.try_with(|cell| *cell.borrow_mut() = Weak::new());
+pub fn release_shared_gpu() {
+    let _ = SHARED_GPU.try_with(|cell| {
+        if let Ok(mut slot) = cell.try_borrow_mut() {
+            *slot = Weak::new();
+        }
+    });
 }
 
 fn low_power_adapter() -> Option<IDXGIAdapter> {
@@ -162,9 +166,12 @@ fn create_shared_gpu() -> Option<SharedGpu> {
 
 fn shared_gpu() -> Option<Rc<SharedGpu>> {
     SHARED_GPU.with(|cell| {
-        let mut slot = cell.borrow_mut();
+        let mut slot = cell.try_borrow_mut().ok()?;
         if let Some(live) = slot.upgrade() {
-            return Some(live);
+            if unsafe { live.device.GetDeviceRemovedReason() }.is_ok() {
+                return Some(live);
+            }
+            *slot = Weak::new();
         }
         let created = Rc::new(create_shared_gpu()?);
         *slot = Rc::downgrade(&created);
@@ -177,6 +184,7 @@ pub(crate) struct GpuGlassComposer {
     sharp_cache: Option<TextureSlot<u64>>,
     soft_cache: Option<TextureSlot<SoftCacheKey>>,
     target: Option<RenderTarget>,
+    upload_scratch: Vec<u8>,
 }
 
 impl GpuGlassComposer {
@@ -186,7 +194,21 @@ impl GpuGlassComposer {
             sharp_cache: None,
             soft_cache: None,
             target: None,
+            upload_scratch: Vec::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_caches(&mut self) {
+        self.sharp_cache = None;
+        self.soft_cache = None;
+        self.target = None;
+        self.upload_scratch.clear();
+        self.upload_scratch.shrink_to_fit();
+    }
+
+    pub(crate) fn is_device_lost(&self) -> bool {
+        unsafe { self.shared.device.GetDeviceRemovedReason() }.is_err()
     }
 
     pub(crate) fn compose(
@@ -291,14 +313,26 @@ impl GpuGlassComposer {
         {
             return Some(());
         }
-        upload_texture(&self.shared, &mut self.sharp_cache, generation, buffer)
+        upload_texture(
+            &self.shared,
+            &mut self.sharp_cache,
+            &mut self.upload_scratch,
+            generation,
+            buffer,
+        )
     }
 
     fn ensure_soft_srv(&mut self, key: SoftCacheKey, buffer: &RgbBuffer) -> Option<()> {
         if self.soft_cache.as_ref().is_some_and(|slot| slot.key == key) {
             return Some(());
         }
-        upload_texture(&self.shared, &mut self.soft_cache, key, buffer)
+        upload_texture(
+            &self.shared,
+            &mut self.soft_cache,
+            &mut self.upload_scratch,
+            key,
+            buffer,
+        )
     }
 
     fn ensure_target(&mut self, width: u32, height: u32) -> Option<()> {
@@ -415,9 +449,13 @@ impl GpuGlassComposer {
                 .ok()?;
             let pitch = mapped.RowPitch as usize;
             let base = mapped.pData.cast::<u8>();
-            for row in 0..height as usize {
-                let src = std::slice::from_raw_parts(base.add(row * pitch), row_bytes);
-                pixels.extend_from_slice(src);
+            if pitch == row_bytes {
+                pixels.extend_from_slice(std::slice::from_raw_parts(base, total));
+            } else {
+                for row in 0..height as usize {
+                    let src = std::slice::from_raw_parts(base.add(row * pitch), row_bytes);
+                    pixels.extend_from_slice(src);
+                }
             }
             self.shared.context.Unmap(&target.staging, 0);
         }
@@ -428,12 +466,13 @@ impl GpuGlassComposer {
 fn upload_texture<K>(
     shared: &SharedGpu,
     slot: &mut Option<TextureSlot<K>>,
+    scratch: &mut Vec<u8>,
     key: K,
     buffer: &RgbBuffer,
 ) -> Option<()> {
     let width = u32::try_from(buffer.width()).ok()?;
     let height = u32::try_from(buffer.height()).ok()?;
-    let rgba = buffer.to_rgba_u8();
+    buffer.write_rgba_u8(scratch);
     let pitch = width.checked_mul(4)?;
 
     if let Some(held) = slot.as_mut()
@@ -445,7 +484,7 @@ fn upload_texture<K>(
                 &held.texture,
                 0,
                 None,
-                rgba.as_ptr().cast(),
+                scratch.as_ptr().cast(),
                 pitch,
                 0,
             );
@@ -470,7 +509,7 @@ fn upload_texture<K>(
         MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
     };
     let subresource = D3D11_SUBRESOURCE_DATA {
-        pSysMem: rgba.as_ptr().cast(),
+        pSysMem: scratch.as_ptr().cast(),
         SysMemPitch: pitch,
         SysMemSlicePitch: 0,
     };
@@ -806,5 +845,10 @@ mod tests {
                 initial_ptr = Some(tex_ptr);
             }
         }
+        gpu.clear_caches();
+        assert!(gpu.sharp_cache.is_none());
+        assert!(gpu.soft_cache.is_none());
+        assert!(gpu.target.is_none());
+        assert!(gpu.upload_scratch.is_empty());
     }
 }

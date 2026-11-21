@@ -1,5 +1,5 @@
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows::Win32::System::Registry::{
@@ -15,6 +15,41 @@ const STARTUP_VALUE_NAME: PCWSTR = w!("OttoOS");
 #[must_use]
 pub fn format_startup_command(exe_path: &Path) -> String {
     format!("\"{}\"", exe_path.display())
+}
+
+#[must_use]
+pub fn is_cargo_target_exe(exe_path: &Path) -> bool {
+    let mut components = exe_path.components().rev();
+    let Some(_exe_name) = components.next() else {
+        return false;
+    };
+    let Some(profile) = components.next().and_then(|c| c.as_os_str().to_str()) else {
+        return false;
+    };
+    let Some(target) = components.next().and_then(|c| c.as_os_str().to_str()) else {
+        return false;
+    };
+    target.eq_ignore_ascii_case("target")
+        && (profile.eq_ignore_ascii_case("debug") || profile.eq_ignore_ascii_case("release"))
+}
+
+#[must_use]
+pub fn select_startup_exe<'a>(current_exe: &'a Path, installed_exe: Option<&'a Path>) -> &'a Path {
+    if is_cargo_target_exe(current_exe)
+        && let Some(installed) = installed_exe
+    {
+        return installed;
+    }
+    current_exe
+}
+
+fn installed_program_exe() -> Option<PathBuf> {
+    let root = std::env::var_os("LOCALAPPDATA")?;
+    let candidate = PathBuf::from(root)
+        .join("Programs")
+        .join("Otto OS")
+        .join("otto-os.exe");
+    candidate.is_file().then_some(candidate)
 }
 
 #[must_use]
@@ -81,10 +116,12 @@ pub fn read_launch_at_login() -> bool {
 #[must_use]
 pub fn set_launch_at_login(enabled: bool) -> bool {
     if enabled {
-        let Ok(exe) = std::env::current_exe() else {
+        let Ok(current) = std::env::current_exe() else {
             return false;
         };
-        let command = format_startup_command(&exe);
+        let installed = installed_program_exe();
+        let exe = select_startup_exe(&current, installed.as_deref());
+        let command = format_startup_command(exe);
         let wide: Vec<u16> = std::ffi::OsStr::new(&command)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -161,7 +198,9 @@ pub fn set_launch_at_login(enabled: bool) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{format_startup_command, is_startup_entry_enabled};
+    use super::{
+        format_startup_command, is_cargo_target_exe, is_startup_entry_enabled, select_startup_exe,
+    };
 
     #[test]
     fn startup_command_quotes_executable_path() {
@@ -180,5 +219,24 @@ mod tests {
         assert!(!is_startup_entry_enabled(Some("")));
         assert!(!is_startup_entry_enabled(Some("   ")));
         assert!(is_startup_entry_enabled(Some("\"C:\\Otto\\otto-os.exe\"")));
+    }
+
+    #[test]
+    fn cargo_target_binaries_prefer_installed_production_exe_when_present() {
+        let debug_exe = Path::new(r"C:\Projects\otto-os\target\debug\otto-os.exe");
+        let release_exe = Path::new(r"C:\Projects\otto-os\target\release\otto-os.exe");
+        let installed_exe = Path::new(r"C:\Users\Demo\AppData\Local\Programs\Otto OS\otto-os.exe");
+        assert!(is_cargo_target_exe(debug_exe));
+        assert!(is_cargo_target_exe(release_exe));
+        assert!(!is_cargo_target_exe(installed_exe));
+        assert_eq!(
+            select_startup_exe(debug_exe, Some(installed_exe)),
+            installed_exe
+        );
+        assert_eq!(select_startup_exe(debug_exe, None), debug_exe);
+        assert_eq!(
+            select_startup_exe(installed_exe, Some(installed_exe)),
+            installed_exe
+        );
     }
 }

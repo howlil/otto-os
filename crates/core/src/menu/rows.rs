@@ -11,11 +11,6 @@ pub enum MenuRow {
         checked: bool,
         enabled: bool,
     },
-    Slider {
-        id: usize,
-        label: String,
-        value: u8,
-    },
     Calendar {
         year: u16,
         month: u8,

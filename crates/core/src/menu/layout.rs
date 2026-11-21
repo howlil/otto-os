@@ -28,8 +28,6 @@ pub struct PopupMenuMetrics {
     pub check_col_width: i32,
     pub shortcut_gap: i32,
     pub right_pad: i32,
-    pub slider_height: i32,
-    pub slider_inset: i32,
     pub screen_margin: i32,
     pub max_height: i32,
 }
@@ -47,8 +45,6 @@ impl PopupMenuMetrics {
         check_col_width: 20,
         shortcut_gap: 24,
         right_pad: 12,
-        slider_height: 46,
-        slider_inset: 14,
         screen_margin: 6,
         max_height: 520,
     };
@@ -81,14 +77,12 @@ impl MenuTextMeasure for EstimatedMenuText {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PopupMenuRowLayout {
     pub index: usize,
     pub id: usize,
     pub rect: Rect,
     pub is_separator: bool,
-    pub is_slider: bool,
     pub is_calendar: bool,
     pub enabled: bool,
 }
@@ -105,7 +99,6 @@ pub struct PopupMenuLayout {
     pub check_col_width: f32,
     pub shortcut_col_width: f32,
     pub right_pad: f32,
-    pub slider_inset: i32,
     pub rows: Vec<PopupMenuRowLayout>,
 }
 
@@ -176,18 +169,6 @@ impl PopupMenuLayout {
             return None;
         };
         compute_calendar_layout(row.rect, self.dpi, *year, *month).control_at(local_x, local_y)
-    }
-
-    #[must_use]
-    pub fn slider_value_at(&self, row_index: usize, local_x: i32) -> Option<u8> {
-        let row = self
-            .rows
-            .iter()
-            .find(|row| row.index == row_index && row.is_slider)?;
-        let left = row.rect.x + self.slider_inset;
-        let span = (row.rect.width - self.slider_inset * 2).max(1);
-        let ratio = (local_x - left) as f32 / span as f32;
-        Some((ratio.clamp(0.0, 1.0) * 100.0).round() as u8)
     }
 
     #[must_use]
@@ -324,7 +305,7 @@ pub(super) fn measure_columns(
             MenuRow::Calendar { .. } => {
                 calendar_width = scale(CALENDAR_POPUP_WIDTH, dpi);
             }
-            MenuRow::Slider { .. } | MenuRow::Separator => {}
+            MenuRow::Separator => {}
         }
     }
     let gap = if shortcut > 0 {
@@ -359,28 +340,15 @@ pub fn compute_popup_menu_layout(
         .width
         .min((bounds.width - margin * 2).max(pad_x * 2 + 1));
 
-    let heights: Vec<(usize, i32, bool, bool, bool)> = rows
+    let heights: Vec<(usize, i32, bool, bool)> = rows
         .iter()
         .map(|row| match row {
-            MenuRow::Item { id, enabled, .. } => (*id, row_h, false, false, *enabled),
-            MenuRow::Slider { id, .. } => {
-                (*id, scale(metrics.slider_height, dpi), false, true, true)
+            MenuRow::Item { id, enabled, .. } => (*id, row_h, false, *enabled),
+            MenuRow::Calendar { .. } => (CMD_NONE, calendar_row_height(dpi), true, false),
+            MenuRow::Notification { id, .. } => {
+                (*id, scale(NOTIFICATION_CARD_HEIGHT, dpi), false, true)
             }
-            MenuRow::Calendar { .. } => (CMD_NONE, calendar_row_height(dpi), true, false, false),
-            MenuRow::Notification { id, .. } => (
-                *id,
-                scale(NOTIFICATION_CARD_HEIGHT, dpi),
-                false,
-                false,
-                true,
-            ),
-            MenuRow::Separator => (
-                CMD_NONE,
-                scale(metrics.separator_height, dpi),
-                true,
-                false,
-                false,
-            ),
+            MenuRow::Separator => (CMD_NONE, scale(metrics.separator_height, dpi), true, false),
         })
         .collect();
     let content_height: i32 = heights.iter().map(|entry| entry.1).sum::<i32>().max(row_h);
@@ -397,9 +365,7 @@ pub fn compute_popup_menu_layout(
 
     let mut y = pad_y - scroll_offset;
     let mut row_layouts = Vec::with_capacity(rows.len());
-    for (index, (id, row_height, is_separator, is_slider, enabled)) in
-        heights.into_iter().enumerate()
-    {
+    for (index, (id, row_height, is_separator, enabled)) in heights.into_iter().enumerate() {
         row_layouts.push(PopupMenuRowLayout {
             index,
             id,
@@ -410,7 +376,6 @@ pub fn compute_popup_menu_layout(
                 height: row_height,
             },
             is_separator,
-            is_slider,
             is_calendar: matches!(rows[index], MenuRow::Calendar { .. }),
             enabled,
         });
@@ -447,7 +412,6 @@ pub fn compute_popup_menu_layout(
         check_col_width: scale(metrics.check_col_width, dpi) as f32,
         shortcut_col_width: columns.shortcut as f32,
         right_pad: scale(metrics.right_pad, dpi) as f32,
-        slider_inset: scale(metrics.slider_inset, dpi),
         rows: row_layouts,
     }
 }

@@ -101,9 +101,12 @@ pub struct TasksPanelLayout {
     pub add_button: Rect,
     pub clear_button: Rect,
     pub pager_button: Rect,
+    pub editor: Rect,
+    pub editor_input: Rect,
     pub body: Rect,
     pub rows: [Rect; TASKS_PAGE_SIZE],
     pub check_buttons: [Rect; TASKS_PAGE_SIZE],
+    pub edit_buttons: [Rect; TASKS_PAGE_SIZE],
     pub remove_buttons: [Rect; TASKS_PAGE_SIZE],
 }
 
@@ -318,6 +321,9 @@ impl Layout {
             if self.tasks.remove_buttons[index].contains(x, y) {
                 return HitTarget::TaskRemove(index as u8);
             }
+            if self.tasks.edit_buttons[index].contains(x, y) {
+                return HitTarget::TaskEdit(index as u8);
+            }
             if self.tasks.check_buttons[index].contains(x, y) {
                 return HitTarget::TaskCheck(index as u8);
             }
@@ -421,6 +427,7 @@ impl Layout {
             | HitTarget::TasksPager
             | HitTarget::TaskItem(_)
             | HitTarget::TaskCheck(_)
+            | HitTarget::TaskEdit(_)
             | HitTarget::TaskRemove(_)
             | HitTarget::PrivacyIndicator
             | HitTarget::PrivacyMicMute
@@ -534,6 +541,9 @@ impl Layout {
             }
             HitTarget::TaskCheck(index) if self.active_tab == NotchExpandedTab::Tasks => {
                 *self.tasks.check_buttons.get(usize::from(index))?
+            }
+            HitTarget::TaskEdit(index) if self.active_tab == NotchExpandedTab::Tasks => {
+                *self.tasks.edit_buttons.get(usize::from(index))?
             }
             HitTarget::TaskRemove(index) if self.active_tab == NotchExpandedTab::Tasks => {
                 *self.tasks.remove_buttons.get(usize::from(index))?

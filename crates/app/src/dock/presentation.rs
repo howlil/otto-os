@@ -16,6 +16,9 @@ use super::entry_notification_count;
 
 impl Dock {
     pub(super) fn rebuild(&mut self, runtime: &RuntimeContext) {
+        let previous_screen = self.screen;
+        let old_origin = self.window_origin();
+        let carried_backdrop = self.renderer.take_backdrop();
         self.screen = primary_screen();
         self.recompute_layout();
         self.refresh_cover();
@@ -27,6 +30,20 @@ impl Dock {
             self.screen.dpi,
         ) {
             sync_icons(&mut renderer, &all);
+            if self.screen.width == previous_screen.width
+                && self.screen.height == previous_screen.height
+                && let Some((pixels, local)) = carried_backdrop
+            {
+                let new_origin = self.window_origin();
+                let screen_origin = (old_origin.0 + local.0, old_origin.1 + local.1);
+                renderer.set_backdrop(
+                    pixels,
+                    (
+                        screen_origin.0 - new_origin.0,
+                        screen_origin.1 - new_origin.1,
+                    ),
+                );
+            }
             self.renderer = renderer;
             if let Some(feed) = self.backdrop.as_mut() {
                 feed.reset();
@@ -69,15 +86,28 @@ impl Dock {
             return;
         }
         if let Some(region) = region {
-            if !self.renderer.has_backdrop()
-                && let Some(pixels) = otto_platform::capture_backdrop_now(
-                    region.origin(),
-                    region.width,
-                    region.height,
-                )
-            {
-                self.renderer
-                    .set_backdrop(pixels, (region.x - origin_x, region.y - origin_y));
+            let capture_visible = runtime.capture_visible.get();
+            let can_prime_now = !capture_visible || !otto_platform::is_surface_visible(self.hwnd);
+            if can_prime_now && !self.renderer.has_backdrop() {
+                let full_strip = (capture_visible && self.screen.width > 0).then(|| {
+                    otto_platform::capture_backdrop_now(
+                        (0, region.y),
+                        self.screen.width as u32,
+                        region.height,
+                    )
+                    .map(|pixels| (pixels, (-origin_x, region.y - origin_y)))
+                });
+                let primed = full_strip.flatten().or_else(|| {
+                    otto_platform::capture_backdrop_now(
+                        region.origin(),
+                        region.width,
+                        region.height,
+                    )
+                    .map(|pixels| (pixels, (region.x - origin_x, region.y - origin_y)))
+                });
+                if let Some((pixels, local)) = primed {
+                    self.renderer.set_backdrop(pixels, local);
+                }
             }
             feed.request(
                 region,
@@ -149,12 +179,34 @@ impl Dock {
 
     pub(super) fn present(&mut self, runtime: &RuntimeContext) {
         let all = self.combined_entries();
+        let focus_blocklist = runtime
+            .focus_active
+            .get()
+            .then(|| {
+                runtime
+                    .focus_activity
+                    .try_borrow()
+                    .ok()
+                    .map(|fa| fa.blocklist.clone())
+            })
+            .flatten();
         let render_items: Vec<DockRenderItem<'_>> = all
             .iter()
             .enumerate()
             .map(|(index, e)| {
-                let notif_count = entry_notification_count(&self.notification_counts, e);
-                let badge_count = dock_entry_badge(&e.window_titles, notif_count);
+                let suppress_badge = focus_blocklist.as_ref().is_some_and(|bl| {
+                    bl.block_notifications || bl.is_app_blocked(&e.key, &e.title)
+                });
+                let notif_count = if suppress_badge {
+                    None
+                } else {
+                    entry_notification_count(&self.notification_counts, e)
+                };
+                let badge_count = if suppress_badge {
+                    None
+                } else {
+                    dock_entry_badge(&e.window_titles, notif_count)
+                };
                 let progress = if matches!(e.kind, DockItemKind::Downloads) {
                     self.downloads_progress
                 } else {

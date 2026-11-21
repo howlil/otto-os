@@ -16,8 +16,6 @@ pub enum ResizeEdge {
     Right,
 }
 
-pub type TrafficLightAction = WindowControlAction;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowControlsMetrics {
     pub width: i32,
@@ -29,8 +27,6 @@ pub struct WindowControlsMetrics {
     pub left_margin: i32,
     pub hit_slop: i32,
 }
-
-pub type TrafficLightMetrics = WindowControlsMetrics;
 
 impl WindowControlsMetrics {
     pub const MACOS_SONOMA: Self = Self {
@@ -65,8 +61,6 @@ pub struct WindowControlsLayout {
     pub slots: usize,
     pub cell_width: f32,
 }
-
-pub type TrafficLightLayout = WindowControlsLayout;
 
 impl WindowControlsLayout {
     #[must_use]
@@ -155,52 +149,26 @@ impl WindowControlsLayout {
     }
 }
 
-pub(super) const LEFT_ACTIONS: [WindowControlAction; 3] = [
-    WindowControlAction::Close,
-    WindowControlAction::Minimize,
-    WindowControlAction::ToggleMaximize,
-];
-
 pub(super) const COVER_ACTIONS: [WindowControlAction; 3] = [
     WindowControlAction::Minimize,
     WindowControlAction::ToggleMaximize,
     WindowControlAction::Close,
 ];
 
-#[must_use]
-pub fn compute_window_controls_layout(
-    metrics: &WindowControlsMetrics,
-    dpi: u32,
-) -> WindowControlsLayout {
-    let width = scale(metrics.width, dpi);
-    let height = scale(metrics.height, dpi);
-    let offset_x = scale(metrics.offset_x, dpi);
-    let offset_y = scale(metrics.offset_y, dpi);
-    let radius = scale(metrics.button_radius, dpi) as f32;
-    let spacing = scale(metrics.button_spacing, dpi) as f32;
-    let hit_radius = radius + scale(metrics.hit_slop, dpi) as f32;
-    let left_margin = scale(metrics.left_margin, dpi) as f32;
-    let close_x = left_margin;
-    let min_x = close_x + spacing;
-    let max_x = min_x + spacing;
-    let center_y = height as f32 * 0.5;
-
-    WindowControlsLayout {
-        width,
-        height,
-        offset_x,
-        offset_y,
-        radius,
-        hit_radius,
-        center_y,
-        centers_x: [close_x, min_x, max_x],
-        actions: LEFT_ACTIONS,
-        slots: 3,
-        cell_width: 0.0,
+impl Default for WindowControlsLayout {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            offset_x: 0,
+            offset_y: 0,
+            radius: 0.0,
+            hit_radius: 0.0,
+            center_y: 0.0,
+            centers_x: [0.0; 3],
+            actions: COVER_ACTIONS,
+            slots: 0,
+            cell_width: 0.0,
+        }
     }
-}
-
-#[must_use]
-pub fn compute_traffic_light_layout(metrics: &TrafficLightMetrics, dpi: u32) -> TrafficLightLayout {
-    compute_window_controls_layout(metrics, dpi)
 }

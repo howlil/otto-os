@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use crate::win_msg::CC_POLL_TIMER;
-use otto_core::{ControlCenterPage, MotionMetrics, MotionPreference, animate_value};
+use otto_core::{
+    BluetoothState, ControlCenterPage, MotionMetrics, MotionPreference, WifiState, animate_value,
+};
 use otto_platform::{
     MenuNavEvent, cursor_position, poll_menu_events, primary_screen, release_capture_if_owned,
     routes_keys_to,
@@ -79,6 +81,10 @@ impl ControlCenterSurface {
             let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
         }
         self.renderer = None;
+        self.snapshot.media = None;
+        self.snapshot.wifi = WifiState::default();
+        self.snapshot.bluetooth = BluetoothState::default();
+        self.snapshot.audio_outputs.clear();
         otto_platform::trim_working_set();
     }
 

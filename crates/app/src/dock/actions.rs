@@ -6,7 +6,10 @@ use otto_core::{
     DockPreferences, Rect, WindowCommand, WindowIdentity, dock_activation_effect,
     dock_command_effect,
 };
-use otto_platform::{WindowsDockPort, current_process_id, signal_command_failure};
+use otto_platform::{
+    WindowsDockPort, current_process_id, resume_recycle_bin_task, shutdown_recycle_bin_task,
+    signal_command_failure,
+};
 use otto_render::DockRenderer;
 
 use super::with_dock;
@@ -31,10 +34,21 @@ pub(super) fn show_window(runtime: &RuntimeContext, window: WindowIdentity, targ
 
 pub fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences) {
     with_dock(runtime, |dock| {
-        let entries_changed = dock.preferences.show_downloads != preferences.show_downloads
-            || dock.preferences.show_trash != preferences.show_trash;
+        let trash_changed = dock.preferences.show_trash != preferences.show_trash;
+        let entries_changed =
+            dock.preferences.show_downloads != preferences.show_downloads || trash_changed;
         dock.preferences = preferences;
         dock.metrics = preferences.metrics();
+        if trash_changed {
+            if preferences.show_trash {
+                resume_recycle_bin_task();
+            } else {
+                shutdown_recycle_bin_task();
+            }
+        }
+        if !preferences.show_downloads {
+            dock.downloads_progress = None;
+        }
         dock.ensure_animating();
         if entries_changed {
             dock.refresh_entries(runtime);

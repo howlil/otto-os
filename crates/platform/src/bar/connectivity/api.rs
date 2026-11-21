@@ -5,6 +5,7 @@ use otto_core::{BluetoothState, WifiState};
 
 use crate::worker::join_within;
 
+use super::types::CACHE;
 use super::types::ConnectivityTask;
 use super::types::SHUTDOWN_TIMEOUT;
 use super::types::SHUTTING_DOWN;
@@ -105,12 +106,19 @@ pub fn toggle_bluetooth_device(id: &str, connect: bool) -> bool {
     })
 }
 
-pub fn shutdown_connectivity_task() {
-    SHUTTING_DOWN.store(true, Ordering::Release);
+pub fn stop_idle_connectivity_task() {
     let runtime = WORKER.lock().ok().and_then(|mut guard| guard.take());
     if let Some(runtime) = runtime {
         let _ = runtime.sender.try_send(ConnectivityTask::Shutdown);
         drop(runtime.sender);
         let _ = join_within(runtime.handle, SHUTDOWN_TIMEOUT);
     }
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = None;
+    }
+}
+
+pub fn shutdown_connectivity_task() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+    stop_idle_connectivity_task();
 }

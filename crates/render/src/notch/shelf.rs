@@ -611,7 +611,7 @@ impl Renderer {
         }
     }
 
-    fn draw_plus_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
+    pub(crate) fn draw_plus_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
         let stroke = (r * 0.34).max(1.2);
         unsafe {
             self.target.DrawLine(

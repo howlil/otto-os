@@ -44,7 +44,7 @@ pub fn control_center_action(
                 }
             }
             ControlCenterHitTarget::FocusOpenSettings => dismiss(
-                ControlCenterCommand::OpenSettings(ControlCenterAction::OpenFocus),
+                ControlCenterCommand::OpenSettingsWindow(SettingsPage::Focus),
             ),
             ControlCenterHitTarget::BatteryTile => dismiss(ControlCenterCommand::OpenSettings(
                 ControlCenterAction::OpenPowerSettings,

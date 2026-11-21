@@ -166,7 +166,7 @@ The popup menu and Spotlight remain required host surfaces. The Top Bar, Notch, 
 
 ## Project status
 
-Otto OS `v1.0.0` is released for Windows 11 22H2+ (x64) via GitHub Releases (per-user installer, portable ZIP, SHA-256 checksums, and WinGet manifests). Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md), and architecture contracts live in [`.agents/engineering.md`](.agents/engineering.md).
+Otto OS `v1.1.0` is released for Windows 11 22H2+ (x64) via GitHub Releases (per-user installer, portable ZIP, SHA-256 checksums, and WinGet manifests). Release history is tracked in [`CHANGELOG.md`](CHANGELOG.md), and architecture contracts live in [`.agents/engineering.md`](.agents/engineering.md).
 
 ## Contributing
 

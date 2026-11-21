@@ -17,20 +17,6 @@ pub enum AppleIconKind {
     Folder,
 }
 
-#[must_use]
-pub fn select_dock_click_window(hwnds: &[isize], foreground_hwnd: Option<isize>) -> Option<isize> {
-    let first = *hwnds.first()?;
-    if hwnds.len() <= 1 {
-        return Some(first);
-    }
-    if let Some(fg) = foreground_hwnd
-        && let Some(idx) = hwnds.iter().position(|&h| h == fg)
-    {
-        return Some(hwnds[(idx + 1) % hwnds.len()]);
-    }
-    Some(first)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DockMetrics {
     pub base_icon_size: i32,
@@ -801,16 +787,6 @@ mod tests {
             Some(0)
         );
         assert_eq!(layout.hit_test(10, 10, 4.0), None);
-    }
-
-    #[test]
-    fn select_dock_click_window_cycles_when_multi_window_app_is_active() {
-        let windows = [101_isize, 202, 303];
-        assert_eq!(select_dock_click_window(&windows, None), Some(101));
-        assert_eq!(select_dock_click_window(&windows, Some(101)), Some(202));
-        assert_eq!(select_dock_click_window(&windows, Some(202)), Some(303));
-        assert_eq!(select_dock_click_window(&windows, Some(303)), Some(101));
-        assert_eq!(select_dock_click_window(&[101], Some(101)), Some(101));
     }
 
     #[test]

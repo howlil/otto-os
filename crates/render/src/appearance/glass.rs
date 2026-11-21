@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::core::Result;
 
-use crate::appearance::surface::upload_bgra_bitmap;
+use crate::appearance::surface::{update_bgra_bitmap, upload_bgra_bitmap};
 
 const BASE_SOFT_FACTOR: usize = 2;
 const MIN_SOFT_FACTOR: usize = 2;
@@ -42,7 +42,7 @@ fn quantize_light(light: (f32, f32)) -> (i16, i16) {
     )
 }
 
-use crate::appearance::glass_gpu::{GpuGlassComposer, SoftCacheKey};
+use crate::appearance::glass_gpu::{GpuGlassComposer, SoftCacheKey, release_shared_gpu};
 
 struct Capture {
     sharp: RgbBuffer,
@@ -69,6 +69,11 @@ impl GpuBackend {
             Self::Ready(gpu) => Some(gpu),
             Self::Uninitialized | Self::Unavailable => None,
         }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::Uninitialized;
+        release_shared_gpu();
     }
 }
 
@@ -97,6 +102,20 @@ impl GlassComposer {
         self.capture = None;
         self.soft = None;
         self.composed = None;
+        self.gpu = GpuBackend::Uninitialized;
+    }
+
+    pub(crate) fn take_backdrop(&mut self) -> Option<(RgbBuffer, (i32, i32))> {
+        let capture = self.capture.take()?;
+        self.soft = None;
+        self.composed = None;
+        Some((
+            capture.sharp,
+            (
+                capture.origin.0.round() as i32,
+                capture.origin.1.round() as i32,
+            ),
+        ))
     }
 
     pub(crate) const fn has_backdrop(&self) -> bool {
@@ -160,20 +179,39 @@ impl GlassComposer {
                 origin: capture.origin,
             };
             self.revision += 1;
-            let gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
-                gpu.compose(
+            let gpu_soft_key = SoftCacheKey {
+                generation: self.generation,
+                dpi,
+                theme: appearance.theme,
+            };
+            let mut lost = false;
+            let mut gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
+                let result = gpu.compose(
                     self.generation,
-                    SoftCacheKey {
-                        generation: self.generation,
-                        dpi,
-                        theme: appearance.theme,
-                    },
+                    gpu_soft_key,
                     &params,
                     &shape,
                     &backdrop,
                     light_dir,
-                )
+                );
+                if result.is_none() && gpu.is_device_lost() {
+                    lost = true;
+                }
+                result
             });
+            if lost {
+                self.gpu.reset();
+                gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
+                    gpu.compose(
+                        self.generation,
+                        gpu_soft_key,
+                        &params,
+                        &shape,
+                        &backdrop,
+                        light_dir,
+                    )
+                });
+            }
             let bitmap = gpu_bitmap
                 .unwrap_or_else(|| compose_glass_lit(&params, &shape, &backdrop, light_dir));
             self.composed = Some((key, bitmap));
@@ -210,21 +248,40 @@ impl GlassPainter {
     }
 
     pub(crate) fn set_backdrop(&self, sharp: RgbBuffer, origin: (i32, i32)) {
-        self.composer.borrow_mut().set_backdrop(sharp, origin);
-        self.invalidate_gpu();
+        if let Ok(mut composer) = self.composer.try_borrow_mut() {
+            composer.set_backdrop(sharp, origin);
+        }
     }
 
     pub(crate) fn clear_backdrop(&self) {
-        self.composer.borrow_mut().clear();
+        if let Ok(mut composer) = self.composer.try_borrow_mut() {
+            composer.clear();
+        }
         self.invalidate_gpu();
     }
 
+    pub(crate) fn take_backdrop(&self) -> Option<(RgbBuffer, (i32, i32))> {
+        let taken = self
+            .composer
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut composer| composer.take_backdrop());
+        if taken.is_some() {
+            self.invalidate_gpu();
+        }
+        taken
+    }
+
     pub(crate) fn invalidate_gpu(&self) {
-        self.uploaded.borrow_mut().take();
+        if let Ok(mut uploaded) = self.uploaded.try_borrow_mut() {
+            uploaded.take();
+        }
     }
 
     pub(crate) fn has_backdrop(&self) -> bool {
-        self.composer.borrow().has_backdrop()
+        self.composer
+            .try_borrow()
+            .is_ok_and(|composer| composer.has_backdrop())
     }
 
     pub(crate) fn draw(
@@ -235,22 +292,41 @@ impl GlassPainter {
         shape: GlassShape,
         lens: bool,
     ) -> Result<bool> {
-        let mut composer = self.composer.borrow_mut();
+        let Ok(mut composer) = self.composer.try_borrow_mut() else {
+            return Ok(false);
+        };
         let Some((revision, bitmap)) =
             composer.compose_lit(appearance, dpi, shape, lens, LIGHT_DIRECTION)
         else {
             return Ok(false);
         };
-        let mut uploaded = self.uploaded.borrow_mut();
+        let Ok(mut uploaded) = self.uploaded.try_borrow_mut() else {
+            return Ok(false);
+        };
         if uploaded.as_ref().is_none_or(|(held, _)| *held != revision) {
-            let gpu = upload_bgra_bitmap(
-                target,
-                bitmap.width,
-                bitmap.height,
-                &bitmap.pixels,
-                PixelLimits::BACKDROP,
-            )?;
-            *uploaded = Some((revision, gpu));
+            let reused = if let Some((held, gpu)) = uploaded.as_mut()
+                && update_bgra_bitmap(
+                    gpu,
+                    bitmap.width,
+                    bitmap.height,
+                    &bitmap.pixels,
+                    PixelLimits::BACKDROP,
+                )? {
+                *held = revision;
+                true
+            } else {
+                false
+            };
+            if !reused {
+                let gpu = upload_bgra_bitmap(
+                    target,
+                    bitmap.width,
+                    bitmap.height,
+                    &bitmap.pixels,
+                    PixelLimits::BACKDROP,
+                )?;
+                *uploaded = Some((revision, gpu));
+            }
         }
         let Some((_, gpu)) = uploaded.as_ref() else {
             return Ok(false);
@@ -524,6 +600,9 @@ mod tests {
 
         #[test]
         fn drawn_glass_lands_in_the_surface_exactly_where_the_core_composed_it() {
+            let _serial = crate::resource_tests::SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let target = target();
             let surface = DibSurface::new(320, 120).unwrap();
             let painter = GlassPainter::default();
@@ -571,6 +650,9 @@ mod tests {
 
         #[test]
         fn drawing_uploads_once_per_revision_and_reports_whether_glass_was_drawn() {
+            let _serial = crate::resource_tests::SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let target = target();
             let surface = DibSurface::new(320, 120).unwrap();
             let painter = GlassPainter::default();
@@ -598,6 +680,25 @@ mod tests {
                 .as_ref()
                 .map(|(revision, _)| *revision);
             assert_eq!(first, second);
+            let bitmap_ptr = painter
+                .uploaded
+                .borrow()
+                .as_ref()
+                .map(|(_, bitmap)| windows::core::Interface::as_raw(bitmap));
+            painter.set_backdrop(capture(), (4, 0));
+            assert!(drawn(&painter));
+            let third = painter
+                .uploaded
+                .borrow()
+                .as_ref()
+                .map(|(revision, _)| *revision);
+            let reused_ptr = painter
+                .uploaded
+                .borrow()
+                .as_ref()
+                .map(|(_, bitmap)| windows::core::Interface::as_raw(bitmap));
+            assert!(third > second);
+            assert_eq!(reused_ptr, bitmap_ptr);
             painter.clear_backdrop();
             assert!(!drawn(&painter));
             assert!(painter.uploaded.borrow().is_none());
@@ -606,5 +707,18 @@ mod tests {
             drop(surface);
             crate::release_shared_factories();
         }
+    }
+
+    #[test]
+    fn take_backdrop_returns_capture_and_resets_state() {
+        let painter = GlassPainter::default();
+        assert!(painter.take_backdrop().is_none());
+        let pixels = RgbBuffer::filled(4, 3, [0.25, 0.5, 0.75]);
+        painter.set_backdrop(pixels.clone(), (-12, 8));
+        assert!(painter.has_backdrop());
+        let taken = painter.take_backdrop();
+        assert_eq!(taken, Some((pixels, (-12, 8))));
+        assert!(!painter.has_backdrop());
+        assert!(painter.take_backdrop().is_none());
     }
 }

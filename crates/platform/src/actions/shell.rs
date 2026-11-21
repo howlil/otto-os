@@ -13,16 +13,8 @@ pub fn open_start_menu() {
     send_key_chord(&[VK_LWIN]);
 }
 
-pub fn open_quick_settings() {
-    send_key_chord(&[VK_LWIN, vk_char(b'A')]);
-}
-
 pub fn open_calendar_notifications() {
     send_key_chord(&[VK_LWIN, vk_char(b'N')]);
-}
-
-pub fn open_spotlight_search() {
-    send_key_chord(&[VK_LWIN, vk_char(b'S')]);
 }
 
 pub fn open_task_view() {

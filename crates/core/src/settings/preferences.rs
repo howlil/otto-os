@@ -1,5 +1,4 @@
 use crate::bar::menu_bar::{BarHideMode, BarItemSet, MenuBarPreferences};
-use crate::theme::ThemeMode;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BrandIcon {
@@ -18,7 +17,6 @@ pub enum NotchStyle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppPreferences {
-    pub theme_mode: ThemeMode,
     pub capture_visible: bool,
     pub hotkeys_enabled: bool,
     pub classic_logo: bool,
@@ -26,7 +24,6 @@ pub struct AppPreferences {
     pub dynamic_island: bool,
     pub onboarding_seen: bool,
     pub privacy_indicators: bool,
-    pub liquid_glass: bool,
     pub clipboard_history: bool,
     pub drop_shelf: bool,
     pub notch_hud: bool,
@@ -40,7 +37,6 @@ pub struct AppPreferences {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
-            theme_mode: ThemeMode::Auto,
             capture_visible: false,
             hotkeys_enabled: true,
             classic_logo: false,
@@ -48,7 +44,6 @@ impl Default for AppPreferences {
             dynamic_island: false,
             onboarding_seen: false,
             privacy_indicators: true,
-            liquid_glass: true,
             clipboard_history: true,
             drop_shelf: true,
             notch_hud: true,
@@ -67,11 +62,7 @@ impl AppPreferences {
         let mut prefs = Self::default();
         for line in contents.lines() {
             let trimmed = line.trim();
-            if let Some(value) = trimmed.strip_prefix("theme_mode=") {
-                if let Some(mode) = ThemeMode::parse_config(value) {
-                    prefs.theme_mode = mode;
-                }
-            } else if let Some(value) = trimmed.strip_prefix("capture_visible=") {
+            if let Some(value) = trimmed.strip_prefix("capture_visible=") {
                 if let Some(parsed) = parse_bool(value) {
                     prefs.capture_visible = parsed;
                 }
@@ -98,10 +89,6 @@ impl AppPreferences {
             } else if let Some(value) = trimmed.strip_prefix("privacy_indicators=") {
                 if let Some(parsed) = parse_bool(value) {
                     prefs.privacy_indicators = parsed;
-                }
-            } else if let Some(value) = trimmed.strip_prefix("liquid_glass=") {
-                if let Some(parsed) = parse_bool(value) {
-                    prefs.liquid_glass = parsed;
                 }
             } else if let Some(value) = trimmed.strip_prefix("clipboard_history=") {
                 if let Some(parsed) = parse_bool(value) {
@@ -153,8 +140,7 @@ impl AppPreferences {
     #[must_use]
     pub fn config_lines(&self) -> String {
         format!(
-            "theme_mode={}\ncapture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\nnotch_enabled={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nliquid_glass={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}\nbackground_cleanup={}\nmenu_bar_hide={}\nmenu_bar_hidden={}\nmenu_bar_background={}\nmenu_bar_keep_notch={}\nquick_capture={}",
-            self.theme_mode.config_value(),
+            "capture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\nnotch_enabled={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}\nbackground_cleanup={}\nmenu_bar_hide={}\nmenu_bar_hidden={}\nmenu_bar_background={}\nmenu_bar_keep_notch={}\nquick_capture={}",
             self.capture_visible,
             self.hotkeys_enabled,
             self.classic_logo,
@@ -162,7 +148,6 @@ impl AppPreferences {
             self.dynamic_island,
             self.onboarding_seen,
             self.privacy_indicators,
-            self.liquid_glass,
             self.clipboard_history,
             self.drop_shelf,
             self.notch_hud,
@@ -211,7 +196,6 @@ mod tests {
     #[test]
     fn defaults_use_otto_logo_classic_notch_and_safe_hotkeys() {
         let prefs = AppPreferences::default();
-        assert_eq!(prefs.theme_mode, ThemeMode::Auto);
         assert!(!prefs.capture_visible);
         assert!(prefs.hotkeys_enabled);
         assert!(!prefs.classic_logo);
@@ -219,7 +203,6 @@ mod tests {
         assert!(!prefs.dynamic_island);
         assert!(!prefs.onboarding_seen);
         assert!(prefs.privacy_indicators);
-        assert!(prefs.liquid_glass);
         assert!(prefs.clipboard_history);
         assert!(prefs.drop_shelf);
         assert!(prefs.notch_hud);
@@ -233,9 +216,8 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trips_and_ignores_invalid_values() {
+    fn config_round_trips_and_ignores_invalid_and_legacy_values() {
         let prefs = AppPreferences {
-            theme_mode: ThemeMode::Light,
             capture_visible: true,
             hotkeys_enabled: false,
             classic_logo: true,
@@ -243,7 +225,6 @@ mod tests {
             dynamic_island: true,
             onboarding_seen: true,
             privacy_indicators: false,
-            liquid_glass: false,
             clipboard_history: false,
             drop_shelf: false,
             notch_hud: false,
@@ -264,9 +245,8 @@ mod tests {
         assert_eq!(AppPreferences::parse_config(&text), prefs);
 
         let partial =
-            "theme_mode=bogus\ncapture_visible=maybe\nhotkeys_enabled=false\nliquid_glass=false\n";
+            "theme_mode=light\ncapture_visible=maybe\nhotkeys_enabled=false\nliquid_glass=false\n";
         let parsed = AppPreferences::parse_config(partial);
-        assert_eq!(parsed.theme_mode, ThemeMode::Auto);
         assert!(!parsed.capture_visible);
         assert!(!parsed.hotkeys_enabled);
         assert!(!parsed.classic_logo);
@@ -274,7 +254,6 @@ mod tests {
         assert!(!parsed.dynamic_island);
         assert!(!parsed.onboarding_seen);
         assert!(parsed.privacy_indicators);
-        assert!(!parsed.liquid_glass);
         assert!(parsed.clipboard_history);
         assert!(parsed.drop_shelf);
         assert!(parsed.notch_hud);

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -8,15 +9,39 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::{Error, PCWSTR, Result};
 
 pub const DATA_DIR_OVERRIDE: &str = "OTTO_OS_DATA_DIR";
+pub const PROD_DATA_DIR_NAME: &str = "otto-os";
+pub const DEV_DATA_DIR_NAME: &str = "otto-os-dev";
 
 #[must_use]
-pub fn data_dir() -> Option<PathBuf> {
-    if let Some(overridden) = std::env::var_os(DATA_DIR_OVERRIDE)
+pub const fn default_data_dir_name(is_debug_build: bool) -> &'static str {
+    if is_debug_build {
+        DEV_DATA_DIR_NAME
+    } else {
+        PROD_DATA_DIR_NAME
+    }
+}
+
+#[must_use]
+pub fn resolve_data_dir(
+    override_dir: Option<&OsStr>,
+    local_app_data: Option<&OsStr>,
+    is_debug_build: bool,
+) -> Option<PathBuf> {
+    if let Some(overridden) = override_dir
         && !overridden.is_empty()
     {
         return Some(PathBuf::from(overridden));
     }
-    std::env::var_os("LOCALAPPDATA").map(|root| PathBuf::from(root).join("otto-os"))
+    local_app_data.map(|root| PathBuf::from(root).join(default_data_dir_name(is_debug_build)))
+}
+
+#[must_use]
+pub fn data_dir() -> Option<PathBuf> {
+    resolve_data_dir(
+        std::env::var_os(DATA_DIR_OVERRIDE).as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 pub fn replace_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
@@ -53,9 +78,29 @@ fn io_error(_error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
+    use std::path::PathBuf;
 
-    use super::replace_file_atomically;
+    use super::{replace_file_atomically, resolve_data_dir};
+
+    #[test]
+    fn debug_and_release_resolve_distinct_default_data_dirs_while_honoring_override() {
+        let root = Some(OsStr::new(r"C:\Users\Demo\AppData\Local"));
+        assert_eq!(
+            resolve_data_dir(None, root, true),
+            Some(PathBuf::from(r"C:\Users\Demo\AppData\Local\otto-os-dev"))
+        );
+        assert_eq!(
+            resolve_data_dir(None, root, false),
+            Some(PathBuf::from(r"C:\Users\Demo\AppData\Local\otto-os"))
+        );
+        assert_eq!(
+            resolve_data_dir(Some(OsStr::new(r"D:\CustomOtto")), root, true),
+            Some(PathBuf::from(r"D:\CustomOtto"))
+        );
+        assert_eq!(resolve_data_dir(Some(OsStr::new("")), None, false), None);
+    }
 
     #[test]
     fn replaces_existing_file_contents() {

@@ -24,8 +24,6 @@ pub struct MotionMetrics {
     pub dock_hide_rate: f32,
     pub dock_presence_enter_rate: f32,
     pub dock_presence_exit_rate: f32,
-    pub window_controls_follow_rate: f32,
-    pub traffic_follow_rate: f32,
     pub genie_minimize_duration_seconds: f32,
     pub genie_restore_duration_seconds: f32,
     pub genie_slow_motion_scale: f32,
@@ -77,8 +75,6 @@ impl MotionMetrics {
         dock_hide_rate: 16.0,
         dock_presence_enter_rate: 18.0,
         dock_presence_exit_rate: 20.0,
-        window_controls_follow_rate: 38.0,
-        traffic_follow_rate: 38.0,
         genie_minimize_duration_seconds: 0.42,
         genie_restore_duration_seconds: 0.36,
         genie_slow_motion_scale: 4.0,
@@ -224,19 +220,6 @@ pub fn bounce_offset(phase: f32) -> f32 {
     wave * (1.0 - progress * 0.45)
 }
 
-#[must_use]
-pub fn advance_genie_progress(
-    progress: f32,
-    dt: f32,
-    duration_seconds: f32,
-    preference: MotionPreference,
-) -> f32 {
-    if !preference.allows_motion() {
-        return 1.0;
-    }
-    (progress + dt / duration_seconds.max(0.001)).min(1.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,18 +265,6 @@ mod tests {
             1.0,
         );
         assert_close(bounce_offset(1.0), 0.0);
-    }
-
-    #[test]
-    fn genie_progress_reaches_rest_at_its_duration() {
-        assert_close(
-            advance_genie_progress(0.9, 0.52, 0.52, MotionPreference::Full),
-            1.0,
-        );
-        assert_close(
-            advance_genie_progress(0.4, 0.008, 0.52, MotionPreference::Reduced),
-            1.0,
-        );
     }
 
     #[test]

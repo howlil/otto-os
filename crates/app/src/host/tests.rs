@@ -28,7 +28,6 @@ fn host_with_required_plugins() -> Host {
         instance: HINSTANCE::default(),
         cursor: HCURSOR::default(),
         ex_style: WINDOW_EX_STYLE::default(),
-        blur: false,
         config,
         recovery_hotkeys: true,
         tray_icon: None,
@@ -469,7 +468,6 @@ fn shutdown_order_reverses_start_order() {
 #[test]
 fn preferences_round_trip_through_plugin_config() {
     let mut config = PluginConfig::default();
-    config.preferences.theme_mode = otto_core::ThemeMode::Dark;
     config.preferences.capture_visible = true;
     config.preferences.hotkeys_enabled = false;
     config.preferences.classic_logo = true;

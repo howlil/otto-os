@@ -110,18 +110,3 @@ pub const fn window_controls_visible_under_bar(
         None => true,
     }
 }
-
-#[must_use]
-pub const fn window_controls_top(
-    window_top: i32,
-    offset_y: i32,
-    bar_height: Option<i32>,
-    maximized: bool,
-) -> i32 {
-    let natural = window_top + offset_y;
-    match bar_height {
-        Some(bar) if maximized && natural < bar + offset_y => bar + offset_y,
-        Some(bar) if natural < bar => bar,
-        _ => natural,
-    }
-}

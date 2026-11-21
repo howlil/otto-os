@@ -10,9 +10,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_SIZE, WM_TIMER,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ACTIVATE, WM_CLOSE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED,
 };
 
 use crate::host::RuntimeContext;
@@ -63,6 +63,7 @@ pub(crate) fn handle_message(
                 }
             });
             invalidate_settings_window(hwnd);
+            crate::window_controls::notify_own_window_change(runtime);
             Some(LRESULT(0))
         }
         WM_DPICHANGED => {
@@ -84,7 +85,12 @@ pub(crate) fn handle_message(
                 window.renderer = None;
             });
             invalidate_settings_window(hwnd);
+            crate::window_controls::notify_own_window_change(runtime);
             Some(LRESULT(0))
+        }
+        WM_MOVE | WM_ACTIVATE | WM_WINDOWPOSCHANGED => {
+            crate::window_controls::notify_own_window_change(runtime);
+            None
         }
         WM_MOUSEMOVE => {
             let (x, y) = unpack_point(lparam);

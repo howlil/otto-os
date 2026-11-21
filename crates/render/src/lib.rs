@@ -15,6 +15,7 @@ mod resource_tests;
 use std::cell::{Cell, RefCell};
 use std::f32::consts::PI;
 
+pub use appearance::glass_gpu::release_shared_gpu;
 pub use appearance::theme::{BrushPalette, LiquidGlassPalette};
 pub use control_center::{ControlCenterPaintState, ControlCenterRenderer};
 pub use dock::renderer::{DockRenderItem, DockRenderer};
@@ -23,16 +24,16 @@ pub(crate) use kit::glyphs::{draw_speaker_glyph, draw_wifi_glyph};
 pub use popup::menu::{MenuHover, PopupMenuRenderer};
 pub use settings::{SettingsPaintState, SettingsRenderer};
 pub use spotlight::{SpotlightPaintEntry, SpotlightPaintState, SpotlightRenderer};
-pub use window::controls::{TrafficLightRenderer, WindowControlsRenderer};
+pub use window::controls::WindowControlsRenderer;
 pub use window::genie::{GenieRenderer, build_fallback_card_snapshot};
 
 use appearance::surface::{DibSurface, create_dc_render_target, draw_with_recovery};
 use otto_core::{
     Appearance, BrandIcon, ClipboardState, HitTarget, Layout, LyricsView, MediaScene,
-    NotchHudState, PomodoroScene, PrivacyState, Rect, ShelfState, SystemStatus, TasksState,
-    cover_accent, scale,
+    NotchHudState, PixelLimits, PomodoroScene, PrivacyState, Rect, ShelfState, SystemStatus,
+    TasksState, bgra_layout, cover_accent, scale,
 };
-use windows::Win32::Foundation::E_FAIL;
+use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
@@ -164,7 +165,8 @@ pub struct Renderer {
     lyric_layouts: RefCell<notch::lyrics::LyricLayoutCache>,
     content_offset: Cell<(f32, f32)>,
     bar_surface: DibSurface,
-    panel_surface: DibSurface,
+    panel_surface: RefCell<Option<DibSurface>>,
+    panel_surface_size: (i32, i32),
     dpi: u32,
     brushes: BrushPalette,
     cached_bar_notch: RefCell<Option<CachedNotchGeometry>>,
@@ -206,20 +208,40 @@ thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory>> = const { RefCell::new(None) };
     static DWRITE_FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
     static TABULAR_TYPOGRAPHY: RefCell<Option<IDWriteTypography>> = const { RefCell::new(None) };
+    static APPLE_FONT_FAMILY: Cell<Option<PCWSTR>> = const { Cell::new(None) };
     static SQUIRCLE_CACHE: RefCell<Vec<(SquircleCacheKey, ID2D1PathGeometry)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn release_shared_factories() {
     appearance::glass_gpu::release_shared_gpu();
-    let _ = SQUIRCLE_CACHE.try_with(|cell| cell.borrow_mut().clear());
-    let _ = TABULAR_TYPOGRAPHY.try_with(|cell| cell.borrow_mut().take());
-    let _ = D2D_FACTORY.try_with(|cell| cell.borrow_mut().take());
-    let _ = DWRITE_FACTORY.try_with(|cell| cell.borrow_mut().take());
+    let _ = SQUIRCLE_CACHE.try_with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            guard.clear();
+        }
+    });
+    let _ = TABULAR_TYPOGRAPHY.try_with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            guard.take();
+        }
+    });
+    let _ = APPLE_FONT_FAMILY.try_with(|cell| cell.set(None));
+    let _ = D2D_FACTORY.try_with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            guard.take();
+        }
+    });
+    let _ = DWRITE_FACTORY.try_with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut() {
+            guard.take();
+        }
+    });
 }
 
 pub(crate) fn shared_d2d_factory() -> Result<ID2D1Factory> {
     D2D_FACTORY.with(|cell| {
-        let mut guard = cell.borrow_mut();
+        let mut guard = cell
+            .try_borrow_mut()
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
         if guard.is_none() {
             let factory: ID2D1Factory =
                 unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
@@ -234,7 +256,9 @@ pub(crate) fn shared_d2d_factory() -> Result<ID2D1Factory> {
 
 pub(crate) fn shared_dwrite_factory() -> Result<IDWriteFactory> {
     DWRITE_FACTORY.with(|cell| {
-        let mut guard = cell.borrow_mut();
+        let mut guard = cell
+            .try_borrow_mut()
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
         if guard.is_none() {
             let factory: IDWriteFactory =
                 unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
@@ -249,7 +273,9 @@ pub(crate) fn shared_dwrite_factory() -> Result<IDWriteFactory> {
 
 pub(crate) fn shared_tabular_typography() -> Result<IDWriteTypography> {
     TABULAR_TYPOGRAPHY.with(|cell| {
-        let mut guard = cell.borrow_mut();
+        let mut guard = cell
+            .try_borrow_mut()
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
         if guard.is_none() {
             let dwrite = shared_dwrite_factory()?;
             let typography = unsafe {
@@ -462,8 +488,14 @@ impl Renderer {
                 DWRITE_TEXT_ALIGNMENT_LEADING,
             )?;
 
+            let panel_surface_size = (panel_width.max(1), panel_height.max(1));
+            bgra_layout(
+                panel_surface_size.0 as u32,
+                panel_surface_size.1 as u32,
+                PixelLimits::BACKDROP,
+            )
+            .map_err(|_| windows::core::Error::from_hresult(E_INVALIDARG))?;
             let bar_surface = DibSurface::new(width, height)?;
-            let panel_surface = DibSurface::new(panel_width, panel_height)?;
             let brushes = BrushPalette::new(&target)?;
             let cached_bar_notch = RefCell::new(None);
             let cached_panel_notch = RefCell::new(None);
@@ -492,7 +524,8 @@ impl Renderer {
                 lyric_layouts: RefCell::default(),
                 content_offset: Cell::new((0.0, 0.0)),
                 bar_surface,
-                panel_surface,
+                panel_surface: RefCell::new(None),
+                panel_surface_size,
                 dpi,
                 brushes,
                 cached_bar_notch,
@@ -510,20 +543,26 @@ impl Renderer {
     }
 
     pub fn set_bar_background(&self, shown: bool) {
-        if self.bar_background.replace(shown) != shown {
-            self.last_bar_frame.borrow_mut().take();
+        if self.bar_background.replace(shown) != shown
+            && let Ok(mut frame) = self.last_bar_frame.try_borrow_mut()
+        {
+            frame.take();
         }
     }
 
     pub fn set_bar_chrome_hidden(&self, hidden: bool) {
-        if self.bar_chrome_hidden.replace(hidden) != hidden {
-            self.last_bar_frame.borrow_mut().take();
+        if self.bar_chrome_hidden.replace(hidden) != hidden
+            && let Ok(mut frame) = self.last_bar_frame.try_borrow_mut()
+        {
+            frame.take();
         }
     }
 
     pub fn set_brand_icon(&self, brand_icon: BrandIcon) {
         self.brand_icon.set(brand_icon);
-        self.last_bar_frame.borrow_mut().take();
+        if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+            frame.take();
+        }
     }
 
     fn recreate_target(&mut self) -> Result<()> {
@@ -532,9 +571,15 @@ impl Renderer {
         self.target = target;
         self.brushes = brushes;
         self.glass.invalidate_gpu();
-        self.cached_cover_art.borrow_mut().take();
-        self.cached_shelf_bitmaps.borrow_mut().clear();
-        self.last_bar_frame.borrow_mut().take();
+        if let Ok(mut cover) = self.cached_cover_art.try_borrow_mut() {
+            cover.take();
+        }
+        if let Ok(mut shelf) = self.cached_shelf_bitmaps.try_borrow_mut() {
+            shelf.clear();
+        }
+        if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+            frame.take();
+        }
         self.last_bar_target.set(None);
         Ok(())
     }
@@ -560,11 +605,11 @@ impl Renderer {
         if let Some(fields) =
             self.bar_frame_fields(layout, status, hovered, focused, hud, appearance)
             && self.last_bar_target.get() == Some((hwnd, origin))
-            && self
-                .last_bar_frame
-                .borrow()
-                .as_ref()
-                .is_some_and(|cached| cached.matches(&fields, app_name))
+            && self.last_bar_frame.try_borrow().ok().is_some_and(|guard| {
+                guard
+                    .as_ref()
+                    .is_some_and(|cached| cached.matches(&fields, app_name))
+            })
         {
             return Ok(());
         }
@@ -579,7 +624,9 @@ impl Renderer {
             Self::recreate_target,
         )?;
         if let Err(err) = self.bar_surface.present(hwnd, origin) {
-            self.last_bar_frame.borrow_mut().take();
+            if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+                frame.take();
+            }
             self.last_bar_target.set(None);
             return Err(err);
         }
@@ -589,17 +636,77 @@ impl Renderer {
 
     pub fn set_bar_backdrop(&self, capture: otto_core::RgbBuffer, origin: (i32, i32)) {
         self.glass.set_backdrop(capture, origin);
-        self.last_bar_frame.borrow_mut().take();
+        if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+            frame.take();
+        }
     }
 
     pub fn clear_bar_backdrop(&self) {
         self.glass.clear_backdrop();
-        self.last_bar_frame.borrow_mut().take();
+        if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+            frame.take();
+        }
+    }
+
+    #[must_use]
+    pub fn take_bar_backdrop(&self) -> Option<(otto_core::RgbBuffer, (i32, i32))> {
+        let taken = self.glass.take_backdrop();
+        if taken.is_some()
+            && let Ok(mut frame) = self.last_bar_frame.try_borrow_mut()
+        {
+            frame.take();
+        }
+        taken
     }
 
     #[must_use]
     pub fn has_bar_backdrop(&self) -> bool {
         self.glass.has_backdrop()
+    }
+
+    pub(crate) fn ensure_panel_surface(&self) -> Result<()> {
+        let mut slot = self
+            .panel_surface
+            .try_borrow_mut()
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
+        if slot.is_none() {
+            let (width, height) = self.panel_surface_size;
+            *slot = Some(DibSurface::new(width, height)?);
+        }
+        Ok(())
+    }
+
+    pub fn release_panel_surface(&self) {
+        if let Ok(mut slot) = self.panel_surface.try_borrow_mut() {
+            slot.take();
+        }
+        if let Ok(mut cached) = self.cached_panel_notch.try_borrow_mut() {
+            cached.take();
+        }
+    }
+
+    pub fn clear_media_caches(&self) {
+        if let Ok(mut cover) = self.cached_cover_art.try_borrow_mut() {
+            cover.take();
+        }
+        if let Ok(mut layouts) = self.lyric_layouts.try_borrow_mut() {
+            layouts.clear();
+        }
+    }
+
+    pub fn clear_shelf_caches(&self) {
+        if let Ok(mut shelf) = self.cached_shelf_bitmaps.try_borrow_mut() {
+            shelf.clear();
+        }
+    }
+
+    pub fn release_notch_resources(&self) {
+        self.release_panel_surface();
+        self.clear_media_caches();
+        self.clear_shelf_caches();
+        if let Ok(mut cached) = self.cached_bar_notch.try_borrow_mut() {
+            cached.take();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -639,7 +746,14 @@ impl Renderer {
             },
             Self::recreate_target,
         )?;
-        self.panel_surface.present_sized(
+        let guard = self
+            .panel_surface
+            .try_borrow()
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))?;
+        let surface = guard
+            .as_ref()
+            .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
+        surface.present_sized(
             panel_hwnd,
             (layout.panel_window.x, layout.panel_window.y),
             (layout.panel_window.width, layout.panel_window.height),
@@ -829,7 +943,7 @@ pub(crate) fn build_squircle_path(
 ) -> Result<ID2D1PathGeometry> {
     let key = SquircleCacheKey::new(rect, radius);
     if let Ok(Some(cached)) = SQUIRCLE_CACHE.try_with(|cell| {
-        let mut cache = cell.borrow_mut();
+        let mut cache = cell.try_borrow_mut().ok()?;
         if let Some(pos) = cache.iter().position(|(k, _)| *k == key) {
             if pos + 1 != cache.len() {
                 let entry = cache.remove(pos);
@@ -850,11 +964,12 @@ pub(crate) fn build_squircle_path(
         geometry
     };
     let _ = SQUIRCLE_CACHE.try_with(|cell| {
-        let mut cache = cell.borrow_mut();
-        if cache.len() >= SQUIRCLE_CACHE_CAPACITY {
-            cache.remove(0);
+        if let Ok(mut cache) = cell.try_borrow_mut() {
+            if cache.len() >= SQUIRCLE_CACHE_CAPACITY {
+                cache.remove(0);
+            }
+            cache.push((key, geometry.clone()));
         }
-        cache.push((key, geometry.clone()));
     });
     Ok(geometry)
 }
@@ -946,7 +1061,11 @@ const fn brighten(color: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F {
 }
 
 unsafe fn resolve_apple_font_family(dwrite: &IDWriteFactory) -> PCWSTR {
+    if let Some(cached) = APPLE_FONT_FAMILY.with(Cell::get) {
+        return cached;
+    }
     let candidates = [w!("SF Pro Text"), w!("SF Pro Display"), w!("SF Pro")];
+    let mut resolved = w!("Segoe UI Variable Display");
     unsafe {
         let mut collection: Option<IDWriteFontCollection> = None;
         if dwrite
@@ -962,12 +1081,14 @@ unsafe fn resolve_apple_font_family(dwrite: &IDWriteFactory) -> PCWSTR {
                     .is_ok()
                     && exists.as_bool()
                 {
-                    return family;
+                    resolved = family;
+                    break;
                 }
             }
         }
     }
-    w!("Segoe UI Variable Display")
+    APPLE_FONT_FAMILY.with(|cell| cell.set(Some(resolved)));
+    resolved
 }
 
 pub(crate) fn draw_bluetooth_symbol(

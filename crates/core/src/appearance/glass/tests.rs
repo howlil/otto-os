@@ -272,7 +272,7 @@ fn composed_bitmap_is_premultiplied_and_clipped_to_the_shape() {
     let sharp = stripes(320, 120);
     let soft = soften_backdrop(&sharp, &GlassParams::DARK, 4, 3);
     let backdrop = backdrop_for(&sharp, &soft, 4);
-    let bitmap = compose_glass(&GlassParams::DARK, &pill(), &backdrop);
+    let bitmap = compose_glass_lit(&GlassParams::DARK, &pill(), &backdrop, LIGHT_DIRECTION);
     assert_eq!(
         bitmap.pixels.len(),
         bitmap.width as usize * bitmap.height as usize * 4
@@ -503,4 +503,65 @@ fn to_rgba_u8_packs_clamped_bytes_with_opaque_alpha() {
         255,
     ];
     assert_eq!(rgba, expected);
+    let mut scratch = Vec::with_capacity(64);
+    scratch.extend_from_slice(&[9u8; 20]);
+    buffer.write_rgba_u8(&mut scratch);
+    assert_eq!(scratch, expected);
+    assert_eq!(scratch.capacity(), 64);
+}
+
+#[test]
+fn separable_box_blur_matches_reference_across_narrow_and_wide_dimensions() {
+    fn reference_pass(buf: &RgbBuffer, radius: usize) -> RgbBuffer {
+        let w = buf.width();
+        let h = buf.height();
+        let reach = radius as isize;
+        let window = (2 * radius + 1) as f32;
+        let mut horiz = RgbBuffer::filled(w, h, [0.0; 3]);
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = [0.0f32; 3];
+                for offset in -reach..=reach {
+                    let sx = (x as isize + offset).clamp(0, w as isize - 1) as usize;
+                    let p = buf.pixel(sx, y);
+                    for c in 0..3 {
+                        sum[c] += p[c];
+                    }
+                }
+                horiz.set_pixel(x, y, [sum[0] / window, sum[1] / window, sum[2] / window]);
+            }
+        }
+        let mut out = RgbBuffer::filled(w, h, [0.0; 3]);
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = [0.0f32; 3];
+                for offset in -reach..=reach {
+                    let sy = (y as isize + offset).clamp(0, h as isize - 1) as usize;
+                    let p = horiz.pixel(x, sy);
+                    for c in 0..3 {
+                        sum[c] += p[c];
+                    }
+                }
+                out.set_pixel(x, y, [sum[0] / window, sum[1] / window, sum[2] / window]);
+            }
+        }
+        out
+    }
+
+    for (width, height, radius) in [(1, 1, 3), (3, 5, 3), (7, 4, 2), (25, 17, 4), (40, 21, 6)] {
+        let input = bgra_pattern(width, height);
+        let fast = input.box_blurred(radius);
+        let mut expected = input.clone();
+        for _ in 0..3 {
+            expected = reference_pass(&expected, radius);
+        }
+        for y in 0..height {
+            for x in 0..width {
+                assert!(
+                    rgb_distance(fast.pixel(x, y), expected.pixel(x, y)) < 1e-4,
+                    "blur mismatch at ({x},{y}) for {width}x{height} r={radius}"
+                );
+            }
+        }
+    }
 }

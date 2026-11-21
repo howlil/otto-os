@@ -1,12 +1,12 @@
 use crate::bar::status::SystemStatus;
 use crate::layout::Rect;
 use crate::notch::media::NowPlaying;
+use crate::settings::model::OttoSettingsSnapshot;
 
 use super::model::AudioOutputDevice;
 use super::model::BluetoothState;
 use super::model::ControlCenterPage;
 use super::model::WifiState;
-use super::settings::OttoSettingsSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubPanelGroupSpec {

@@ -29,14 +29,6 @@ pub const fn power_mode_label(mode: PowerMode) -> &'static str {
 }
 
 #[must_use]
-pub fn compute_control_center_layout(
-    metrics: &ControlCenterMetrics,
-    placement: ControlCenterPlacement,
-) -> ControlCenterLayout {
-    compute_control_center_layout_with(metrics, placement, &[])
-}
-
-#[must_use]
 pub fn compute_control_center_layout_for_snapshot(
     metrics: &ControlCenterMetrics,
     placement: ControlCenterPlacement,

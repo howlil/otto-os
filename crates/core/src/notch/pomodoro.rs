@@ -22,15 +22,6 @@ impl PomodoroPhase {
     }
 
     #[must_use]
-    pub const fn badge_label(self) -> &'static str {
-        match self {
-            Self::Focus => "FOCUS",
-            Self::ShortBreak => "SHORT BREAK",
-            Self::LongBreak => "LONG BREAK",
-        }
-    }
-
-    #[must_use]
     pub const fn short_label(self) -> &'static str {
         match self {
             Self::Focus => "Focus",

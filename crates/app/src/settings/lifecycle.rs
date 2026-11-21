@@ -1,4 +1,4 @@
-use otto_core::SettingsPage;
+use otto_core::{ContentLayout, SettingsContent, SettingsPage};
 use otto_platform::{
     apply_settings_chrome, create_settings_window, destroy_settings_window, hide_settings_window,
     invalidate_settings_window, is_settings_window_foreground, is_settings_window_visible,
@@ -49,6 +49,7 @@ pub(crate) fn open(runtime: &RuntimeContext, page: Option<SettingsPage>) {
     });
     present_settings_window(hwnd);
     invalidate_settings_window(hwnd);
+    crate::window_controls::notify_own_window_change(runtime);
 }
 
 pub(crate) fn toggle(runtime: &RuntimeContext) {
@@ -64,7 +65,20 @@ pub(crate) fn toggle(runtime: &RuntimeContext) {
 }
 
 pub(super) fn close(runtime: &RuntimeContext) {
-    with_window(runtime, |window| hide_settings_window(window.hwnd));
+    let closed = with_window(runtime, |window| {
+        hide_settings_window(window.hwnd);
+        window.renderer = None;
+        window.content = SettingsContent::default();
+        window.blocks = ContentLayout::default();
+        window.hovered = None;
+        window.pressed = None;
+        window.tracking_leave = false;
+    })
+    .is_some();
+    if closed {
+        crate::window_controls::notify_own_window_change(runtime);
+        otto_platform::trim_working_set();
+    }
 }
 
 pub(crate) fn repaint(runtime: &RuntimeContext) {
@@ -75,6 +89,16 @@ pub(crate) fn repaint(runtime: &RuntimeContext) {
     }
     refresh_model(runtime);
     with_window(runtime, |window| invalidate_settings_window(window.hwnd));
+}
+
+pub(crate) fn repaint_if_focus_page(runtime: &RuntimeContext) {
+    let on_focus = with_window(runtime, |window| {
+        window.page == SettingsPage::Focus && is_settings_window_visible(window.hwnd)
+    })
+    .unwrap_or(false);
+    if on_focus {
+        repaint(runtime);
+    }
 }
 
 pub(crate) fn take_hwnd(runtime: &RuntimeContext) -> isize {

@@ -15,13 +15,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassLongPtrW, GetMenuState, GetSystemMenu, GetWindow, GetWindowLongW, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindowVisible, IsZoomed,
     MF_BYCOMMAND, MF_DISABLED, MF_GRAYED, SC_CLOSE, WS_CAPTION, WS_DISABLED, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
 use windows::core::BOOL;
 
 use crate::dock::{friendly_app_name, is_explorer_path};
+use crate::window::caption::{effective_caption_style, has_dwm_caption_buttons};
 use crate::window::hidden::{self, Concealment};
-use crate::window::ops::{is_shell_or_desktop_class, visible_window_rect, window_class_name};
+use crate::window::ops::{
+    is_own_settings_utf16, is_shell_or_desktop_utf16, utf16_eq_ascii, visible_window_rect,
+    window_class_is, window_class_utf16,
+};
 
 use super::process::DWM_CLOAKED_SHELL;
 use super::process::FRAME_HOST_CLASS;
@@ -41,17 +45,20 @@ pub(super) fn hosted_process_id(frame: HWND, frame_process_id: u32) -> Option<u3
     struct Search {
         frame_process_id: u32,
         hosted: Option<u32>,
+        fallback: Option<u32>,
     }
 
     unsafe extern "system" fn visit(child: HWND, lparam: LPARAM) -> BOOL {
         let search = unsafe { &mut *(lparam.0 as *mut Search) };
         let (process_id, _) = owner_ids(child);
-        if process_id != 0
-            && process_id != search.frame_process_id
-            && window_class_name(child) == HOSTED_CORE_CLASS
-        {
-            search.hosted = Some(process_id);
-            return BOOL(0);
+        if process_id != 0 && process_id != search.frame_process_id {
+            if window_class_is(child, HOSTED_CORE_CLASS) {
+                search.hosted = Some(process_id);
+                return BOOL(0);
+            }
+            if search.fallback.is_none() {
+                search.fallback = Some(process_id);
+            }
         }
         BOOL(1)
     }
@@ -59,11 +66,12 @@ pub(super) fn hosted_process_id(frame: HWND, frame_process_id: u32) -> Option<u3
     let mut search = Search {
         frame_process_id,
         hosted: None,
+        fallback: None,
     };
     unsafe {
         let _ = EnumChildWindows(Some(frame), Some(visit), LPARAM(&raw mut search as isize));
     }
-    search.hosted
+    search.hosted.or(search.fallback)
 }
 
 pub(super) fn window_title(hwnd: HWND) -> Option<String> {
@@ -100,7 +108,7 @@ pub(super) fn monitor_rects(hwnd: HWND) -> Option<(RECT, RECT)> {
         .then_some((info.rcMonitor, info.rcWork))
 }
 
-pub(super) fn covers_monitor(hwnd: HWND) -> bool {
+pub(crate) fn covers_monitor(hwnd: HWND) -> bool {
     let Some((monitor, _)) = monitor_rects(hwnd) else {
         return false;
     };
@@ -148,17 +156,23 @@ pub(super) fn uses_full_screen_shortcut(executable: &str) -> bool {
         })
 }
 
-pub(super) fn read_traits(hwnd: HWND, style: u32, facts: &ProcessFacts) -> WindowTraits {
+pub(super) fn read_traits(
+    hwnd: HWND,
+    style: u32,
+    facts: &ProcessFacts,
+    full_screen: bool,
+) -> WindowTraits {
+    let effective = effective_caption_style(style, has_dwm_caption_buttons(hwnd), full_screen);
     WindowTraits {
         closable: close_is_enabled(hwnd),
-        minimizable: style & WS_MINIMIZEBOX.0 != 0,
-        maximizable: style & WS_MAXIMIZEBOX.0 != 0,
+        minimizable: effective.can_minimize,
+        maximizable: effective.can_maximize,
         resizable: style & WS_THICKFRAME.0 != 0,
         blocked_by_modal: style & WS_DISABLED.0 != 0,
         elevated: facts.elevated,
         responding: !unsafe { IsHungAppWindow(hwnd) }.as_bool(),
         full_screen_shortcut: uses_full_screen_shortcut(&facts.executable),
-        title_bar: style & WS_CAPTION.0 == WS_CAPTION.0,
+        title_bar: effective.has_caption && effective.has_system_menu,
     }
 }
 
@@ -168,18 +182,28 @@ pub(super) fn is_recorded_hidden(recorded: &[WindowIdentity], candidate: &Window
 
 pub(super) struct Inspection<'a> {
     pub(super) own_process_id: u32,
+    pub(super) allow_own_settings: bool,
     pub(super) foreground: isize,
     pub(super) hidden: &'a [WindowIdentity],
     pub(super) cache: &'a mut ProcessCache,
 }
 
 pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<WindowInfo> {
-    let (process_id, thread_id) = owner_ids(hwnd);
-    if process_id == 0 || process_id == context.own_process_id {
+    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if !visible && context.hidden.is_empty() {
         return None;
     }
-    let class = window_class_name(hwnd);
-    if is_shell_or_desktop_class(&class) {
+    let (process_id, thread_id) = owner_ids(hwnd);
+    if process_id == 0 {
+        return None;
+    }
+    let mut class_buf = [0u16; 128];
+    let class_len = window_class_utf16(hwnd, &mut class_buf);
+    let class = &class_buf[..class_len];
+    let own_settings = process_id == context.own_process_id
+        && context.allow_own_settings
+        && is_own_settings_utf16(class);
+    if process_id == context.own_process_id && !own_settings {
         return None;
     }
     let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
@@ -187,9 +211,11 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     if ex_style & WS_EX_NOACTIVATE.0 != 0 || (ex_style & WS_EX_TOOLWINDOW.0 != 0 && !app_window) {
         return None;
     }
+    if is_shell_or_desktop_utf16(class) {
+        return None;
+    }
     let title = window_title(hwnd)?;
     let handle = hwnd.0 as isize;
-    let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
     if is_shell_cloaked(hwnd) {
         return None;
     }
@@ -203,15 +229,16 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     if !visible && !is_recorded_hidden(context.hidden, &identity) {
         return None;
     }
-    let app_facts = if class == FRAME_HOST_CLASS {
-        let hosted = hosted_process_id(hwnd, process_id)?;
-        cached_process_facts(context.cache, hosted)?
+    let app_facts = if utf16_eq_ascii(class, FRAME_HOST_CLASS) {
+        hosted_process_id(hwnd, process_id)
+            .and_then(|hosted| cached_process_facts(context.cache, hosted))
+            .unwrap_or_else(|| owner_facts.clone())
     } else {
         owner_facts.clone()
     };
     if is_explorer_path(&app_facts.executable)
-        && class != "CabinetWClass"
-        && class != "ExploreWClass"
+        && !utf16_eq_ascii(class, "CabinetWClass")
+        && !utf16_eq_ascii(class, "ExploreWClass")
     {
         return None;
     }
@@ -220,6 +247,7 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
         .is_ok_and(|owner| !owner.0.is_null() && unsafe { IsWindowVisible(owner) }.as_bool());
     let minimized = unsafe { IsIconic(hwnd) }.as_bool();
     let zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
+    let full_screen = !minimized && visible && is_full_screen(covers_monitor(hwnd), zoomed, style);
     let presence = if !visible {
         WindowPresence::Hidden
     } else if minimized {
@@ -231,17 +259,22 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
         || AppIdentity::executable(&app_facts.executable),
         AppIdentity::user_model_id,
     );
+    let app_name = if own_settings {
+        String::from("Otto Settings")
+    } else {
+        friendly_app_name(&app_facts.executable)
+    };
     Some(WindowInfo {
         identity,
         app,
-        app_name: friendly_app_name(&app_facts.executable),
-        traits: read_traits(hwnd, style, &app_facts),
+        app_name,
+        traits: read_traits(hwnd, style, &app_facts, full_screen),
         executable: app_facts.executable,
         title,
         role: window_role(owner_visible, app_window),
         presence,
         zoomed,
-        full_screen: !minimized && visible && is_full_screen(covers_monitor(hwnd), zoomed, style),
+        full_screen,
         active: context.foreground == handle,
     })
 }
@@ -274,6 +307,7 @@ pub fn enumerate_windows(own_process_id: u32) -> Vec<WindowInfo> {
     let mut state = State {
         context: Inspection {
             own_process_id,
+            allow_own_settings: false,
             foreground: foreground_root(),
             hidden: &hidden,
             cache: &mut cache,
@@ -301,6 +335,7 @@ pub fn inspect_window(hwnd: isize, own_process_id: u32) -> Option<WindowInfo> {
     let mut cache = ProcessCache::new();
     let mut context = Inspection {
         own_process_id,
+        allow_own_settings: true,
         foreground: foreground_root(),
         hidden: &hidden,
         cache: &mut cache,
@@ -320,8 +355,10 @@ pub fn foreground_application(own_process_id: u32) -> Option<ForegroundApplicati
     if root == 0 {
         return None;
     }
-    let class = window_class_name(HWND(root as *mut c_void));
-    if matches!(class.as_str(), "Progman" | "WorkerW") {
+    let mut class_buf = [0u16; 128];
+    let class_len = window_class_utf16(HWND(root as *mut c_void), &mut class_buf);
+    let class = &class_buf[..class_len];
+    if utf16_eq_ascii(class, "Progman") || utf16_eq_ascii(class, "WorkerW") {
         return Some(ForegroundApplication {
             name: String::from("Finder"),
             window: None,

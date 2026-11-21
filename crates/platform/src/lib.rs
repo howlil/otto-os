@@ -25,10 +25,10 @@ pub use actions::{
     HOTKEY_TOGGLE_TOP_BAR, MenuCommandResult, MenuNavEvent, TrayOverflowOutcome, adjust_volume,
     close_tray_overflow, execute_control_center_command, execute_top_bar_command, is_escape_down,
     is_shift_down, load_apple_fonts, open_calendar_notifications, open_downloads_folder, open_path,
-    open_quick_settings, open_spotlight_search, open_start_menu, open_task_view,
-    play_pomodoro_chime, poll_menu_events, register_capture_hotkey, register_notch_hotkeys,
-    register_settings_hotkey, register_shell_hotkeys, remove_apple_fonts, signal_command_failure,
-    toggle_tray_overflow, trim_working_set, unregister_capture_hotkey, unregister_notch_hotkeys,
+    open_start_menu, open_task_view, play_pomodoro_chime, poll_menu_events,
+    register_capture_hotkey, register_notch_hotkeys, register_settings_hotkey,
+    register_shell_hotkeys, remove_apple_fonts, signal_command_failure, toggle_tray_overflow,
+    trim_working_set, unregister_capture_hotkey, unregister_notch_hotkeys,
     unregister_settings_hotkey, unregister_shell_hotkeys,
 };
 pub use appbar::{
@@ -37,21 +37,22 @@ pub use appbar::{
 };
 pub use backdrop::{
     BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, exclude_from_capture,
-    include_in_capture,
+    include_in_capture, is_surface_visible, release_backdrop_capture_cache,
 };
 pub use background_cleanup::set_background_cleanup;
 pub use bar::audio::{
-    set_system_mute, set_system_volume, shutdown_audio_task, step_system_volume, toggle_system_mute,
+    set_system_mute, set_system_volume, shutdown_audio_task, step_system_volume,
+    stop_idle_audio_task, toggle_system_mute,
 };
 pub use bar::connectivity::{
     WM_APP_CONTROL_CENTER_REFRESH, notify_bluetooth_hardware_change, register_bluetooth_hud_target,
-    shutdown_connectivity_task, take_bluetooth_hud_event, unregister_bluetooth_hud_target,
+    shutdown_connectivity_task, stop_idle_connectivity_task, take_bluetooth_hud_event,
+    unregister_bluetooth_hud_target,
 };
 pub use bar::status::{
     read_system_status, set_display_brightness, shutdown_status_task, step_display_brightness,
 };
 pub use bar::tray_icon::{TrayIcon, TrayIconEvent, WM_APP_TRAY_ICON, classify_tray_icon_message};
-pub use blur::{BackdropMaterial, apply_backdrop_material, enable_backdrop_blur};
 pub use capture::release_capture_if_owned;
 pub use com::{ComGuard, OleGuard};
 pub use control_center::{WindowsControlCenter, shutdown_update_check_task};
@@ -76,13 +77,17 @@ pub use instance::{InstanceGuard, quit_running_instance};
 pub use keyboard_hook::{
     install_keyboard_hook, is_routing_bar_keys, is_volume_hud_hook_enabled, route_bar_keys,
     routes_keys_to, set_volume_hud_hook_enabled, stop_routing_bar_keys, stop_routing_if_targets,
-    uninstall_keyboard_hook,
+    take_keystroke_count, uninstall_keyboard_hook,
 };
 pub use motion::motion_preference;
-pub use notch::capture_input::{CaptureSubmission, QuickCaptureInput};
+pub use notch::capture_input::{CaptureEvent, CaptureSubmission, QuickCaptureInput};
 pub use notch::clipboard::{
     ClipboardListenerGuard, ClipboardRead, WM_CLIPBOARDUPDATE, clipboard_sequence_number,
     read_clipboard_payload,
+};
+pub use notch::focus_activity::{
+    load_focus_activity, pick_blocked_app_executable, request_browser_url_inspection,
+    save_focus_activity, take_browser_url_inspection, user_idle_ms,
 };
 pub use notch::lyrics::{
     LyricsOutcome, LyricsRequest, LyricsResponse, LyricsService, LyricsSource, clean_track_title,
@@ -95,7 +100,7 @@ pub use notch::notch_rect::{publish_notch_rect, withdraw_notch_rect};
 pub use notch::notifications::{
     clear_notifications, dismiss_notification, read_notification_app_counts,
     read_notifications_snapshot, remove_notification, request_notification_access,
-    shutdown_notifications_task, take_notification_changes,
+    resume_notifications_task, shutdown_notifications_task, take_notification_changes,
 };
 pub use notch::port::WindowsNotchPort;
 pub use notch::privacy::{resume_privacy_task, shutdown_privacy_task};
@@ -105,9 +110,10 @@ pub use notch::shelf::{
 };
 pub use notch::tasks::{load_tasks, save_tasks};
 pub use os_events::{
-    WindowChangeGenerations, acknowledge_window_sync, install_window_event_hooks,
-    install_window_tracking_hook, is_name_change_sync, poll_foreground_change, suppress_native_osd,
-    uninstall_window_event_hooks, uninstall_window_tracking_hook, window_change_generations,
+    WindowChangeGenerations, acknowledge_window_sync, foreground_title_generation,
+    install_window_event_hooks, install_window_tracking_hook, is_name_change_sync,
+    poll_foreground_change, suppress_native_osd, uninstall_window_event_hooks,
+    uninstall_window_tracking_hook, window_change_generations,
 };
 pub use os_version::{
     MIN_WINDOWS_11_BUILD, current_windows_build_label, is_supported_windows_build,
@@ -133,8 +139,7 @@ pub use uia::{WM_APP_UIA_INVOKE, handle_wm_getobject};
 pub use window::caption::{
     activate_window_no_restore, double_click_ms, drag_threshold, drag_threshold_exceeded,
     forward_caption_context_menu, forward_caption_drag, forward_resize_drag, native_caption,
-    place_overlay_above, place_overlay_below, sample_caption_strip, sample_screen_color,
-    window_corner_radius_px,
+    place_overlay_above, place_overlay_below, sample_caption_strip, window_corner_radius_px,
 };
 pub use window::corners::{restore_rounded_corners, round_window_corners};
 pub use window::model::{
@@ -144,7 +149,8 @@ pub use window::model::{
     window_command_capability, window_identity,
 };
 pub use window::native_minimize::{
-    acknowledge_native_minimize, install_native_minimize_hook, uninstall_native_minimize_hook,
+    acknowledge_native_minimize, install_native_minimize_hook, take_mouse_click_count,
+    uninstall_native_minimize_hook,
 };
 pub use window::ops::{
     ActiveWindowTarget, WindowSnapshot, capture_window, current_process_id, cursor_position,
@@ -159,6 +165,7 @@ pub fn resume_background_tasks() {
     bar::audio::resume_audio_task();
     bar::connectivity::resume_connectivity_task();
     control_center::resume_update_check_task();
+    notch::focus_activity::resume_focus_uia_task();
     notch::media::resume_media_task();
     notch::notifications::resume_notifications_task();
     notch::privacy::resume_privacy_task();
@@ -168,6 +175,8 @@ pub fn resume_background_tasks() {
 
 pub fn shutdown_background_tasks() {
     background_cleanup::set_background_cleanup(false);
+    backdrop::release_backdrop_capture_cache();
+    notch::focus_activity::shutdown_focus_uia_task();
     notch::media::shutdown_media_task();
     bar::audio::shutdown_audio_task();
     notch::privacy::shutdown_privacy_task();

@@ -149,6 +149,11 @@ impl DockRenderer {
     }
 
     #[must_use]
+    pub fn take_backdrop(&self) -> Option<(RgbBuffer, (i32, i32))> {
+        self.glass.take_backdrop()
+    }
+
+    #[must_use]
     pub fn has_backdrop(&self) -> bool {
         self.glass.has_backdrop()
     }

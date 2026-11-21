@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 
 use otto_core::{Appearance, MaterialVariant, ResolvedTheme, Rgba};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
@@ -116,6 +117,34 @@ fn brush_key(color: D2D1_COLOR_F) -> u32 {
     (channel(color.r) << 24) | (channel(color.g) << 16) | (channel(color.b) << 8) | channel(color.a)
 }
 
+#[derive(Default)]
+struct BrushCache {
+    map: HashMap<u32, ID2D1SolidColorBrush>,
+    order: VecDeque<u32>,
+}
+
+impl BrushCache {
+    fn get(&self, key: u32) -> Option<ID2D1SolidColorBrush> {
+        self.map.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u32, brush: ID2D1SolidColorBrush) {
+        if let Entry::Occupied(mut entry) = self.map.entry(key) {
+            entry.insert(brush);
+            return;
+        }
+        while self.map.len() >= BRUSH_CACHE_LIMIT {
+            let Some(oldest) = self.order.pop_front() else {
+                self.map.clear();
+                break;
+            };
+            self.map.remove(&oldest);
+        }
+        self.order.push_back(key);
+        self.map.insert(key, brush);
+    }
+}
+
 pub struct BrushPalette {
     pub solid: ID2D1SolidColorBrush,
     pub stroke: ID2D1SolidColorBrush,
@@ -132,7 +161,7 @@ pub struct BrushPalette {
     pub card_fill: ID2D1SolidColorBrush,
     pub on_accent: ID2D1SolidColorBrush,
     target: ID2D1DCRenderTarget,
-    cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
+    cache: RefCell<BrushCache>,
 }
 
 impl BrushPalette {
@@ -267,7 +296,7 @@ impl BrushPalette {
                     None,
                 )?,
                 target: target.clone(),
-                cache: RefCell::new(HashMap::new()),
+                cache: RefCell::new(BrushCache::default()),
             })
         }
     }
@@ -291,8 +320,10 @@ impl BrushPalette {
     #[must_use]
     pub fn color_brush(&self, color: D2D1_COLOR_F) -> ID2D1SolidColorBrush {
         let key = brush_key(color);
-        if let Some(brush) = self.cache.borrow().get(&key) {
-            return brush.clone();
+        if let Ok(cache) = self.cache.try_borrow()
+            && let Some(brush) = cache.get(key)
+        {
+            return brush;
         }
         let Ok(brush) = (unsafe { self.target.CreateSolidColorBrush(&color, None) }) else {
             unsafe {
@@ -300,11 +331,9 @@ impl BrushPalette {
             }
             return self.solid.clone();
         };
-        let mut cache = self.cache.borrow_mut();
-        if cache.len() >= BRUSH_CACHE_LIMIT {
-            cache.clear();
+        if let Ok(mut cache) = self.cache.try_borrow_mut() {
+            cache.insert(key, brush.clone());
         }
-        cache.insert(key, brush.clone());
         brush
     }
 

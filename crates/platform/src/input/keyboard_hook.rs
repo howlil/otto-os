@@ -1,5 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -9,9 +9,9 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_KANA,
-    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RETURN, VK_RIGHT, VK_RMENU,
-    VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
-    VK_VOLUME_UP,
+    VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RCONTROL,
+    VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE, PeekMessageW,
@@ -29,11 +29,43 @@ const WHEEL_UP: i16 = 120;
 const WHEEL_DOWN: i16 = -120;
 const ROUTE_IDLE_LIMIT_MS: u64 = 15_000;
 const KEY_SLOTS: usize = 256;
+const SWALLOWED_WORDS: usize = KEY_SLOTS / 64;
 
 static HOOK_THREAD: Mutex<Option<HookThread>> = Mutex::new(None);
 static ROUTE: Mutex<Route> = Mutex::new(Route::IDLE);
-static SWALLOWED_KEY_DOWNS: Mutex<SwallowedKeys> = Mutex::new(SwallowedKeys::EMPTY);
+static ROUTE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SWALLOWED_KEY_DOWNS: SwallowedKeys = SwallowedKeys::empty();
 static VOLUME_HUD_HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
+static KEYSTROKE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[must_use]
+pub fn take_keystroke_count() -> u64 {
+    KEYSTROKE_COUNT.swap(0, Ordering::AcqRel)
+}
+
+const fn is_typing_key(virtual_key: u32, flags: u32) -> bool {
+    if flags & INJECTED_FLAG != 0 || virtual_key > u16::MAX as u32 {
+        return false;
+    }
+    let vk = virtual_key as u16;
+    !matches!(
+        vk,
+        x if x == VK_SHIFT.0
+            || x == VK_LSHIFT.0
+            || x == VK_RSHIFT.0
+            || x == VK_CONTROL.0
+            || x == VK_LCONTROL.0
+            || x == VK_RCONTROL.0
+            || x == VK_MENU.0
+            || x == VK_LMENU.0
+            || x == VK_RMENU.0
+            || x == VK_LWIN.0
+            || x == VK_RWIN.0
+            || x == VK_VOLUME_UP.0
+            || x == VK_VOLUME_DOWN.0
+            || x == VK_VOLUME_MUTE.0
+    )
+}
 
 pub fn set_volume_hud_hook_enabled(enabled: bool) {
     VOLUME_HUD_HOOK_ENABLED.store(enabled, Ordering::Release);
@@ -95,26 +127,39 @@ impl Route {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SwallowedKeys([bool; KEY_SLOTS]);
+struct SwallowedKeys([AtomicU64; SWALLOWED_WORDS]);
 
 impl SwallowedKeys {
-    const EMPTY: Self = Self([false; KEY_SLOTS]);
+    const fn empty() -> Self {
+        Self([const { AtomicU64::new(0) }; SWALLOWED_WORDS])
+    }
 
-    fn record(&mut self, virtual_key: u32, swallowed: bool) {
-        if let Some(slot) = self.slot(virtual_key) {
-            *slot = swallowed;
+    fn word_and_mask(virtual_key: u32) -> Option<(usize, u64)> {
+        let index = usize::try_from(virtual_key).ok()?;
+        if index >= KEY_SLOTS {
+            return None;
+        }
+        Some((index / 64, 1u64 << (index % 64)))
+    }
+
+    fn record(&self, virtual_key: u32, swallowed: bool) {
+        if let Some((word, mask)) = Self::word_and_mask(virtual_key) {
+            if swallowed {
+                self.0[word].fetch_or(mask, Ordering::AcqRel);
+            } else if self.0[word].load(Ordering::Relaxed) & mask != 0 {
+                self.0[word].fetch_and(!mask, Ordering::AcqRel);
+            }
         }
     }
 
-    fn take(&mut self, virtual_key: u32) -> bool {
-        self.slot(virtual_key).is_some_and(std::mem::take)
-    }
-
-    fn slot(&mut self, virtual_key: u32) -> Option<&mut bool> {
-        usize::try_from(virtual_key)
-            .ok()
-            .and_then(|index| self.0.get_mut(index))
+    fn take(&self, virtual_key: u32) -> bool {
+        let Some((word, mask)) = Self::word_and_mask(virtual_key) else {
+            return false;
+        };
+        if self.0[word].load(Ordering::Acquire) & mask == 0 {
+            return false;
+        }
+        self.0[word].fetch_and(!mask, Ordering::AcqRel) & mask != 0
     }
 }
 
@@ -180,6 +225,9 @@ fn renew_route(now_ms: u64) -> Option<Route> {
     locked(&ROUTE, |route| {
         let renewed = route.renewed(now_ms);
         *route = renewed.unwrap_or(Route::IDLE);
+        if renewed.is_none() {
+            ROUTE_ACTIVE.store(false, Ordering::Release);
+        }
         renewed
     })
 }
@@ -193,34 +241,61 @@ pub fn route_bar_keys(target_hwnd: isize, message: u32) -> bool {
     let now = now_ms();
     locked(&ROUTE, |route| {
         *route = Route::armed(target_hwnd, message, now);
+        ROUTE_ACTIVE.store(target_hwnd != 0, Ordering::Release);
     });
     true
 }
 
 pub fn stop_routing_bar_keys() {
-    locked(&ROUTE, |route| *route = Route::IDLE);
+    locked(&ROUTE, |route| {
+        *route = Route::IDLE;
+        ROUTE_ACTIVE.store(false, Ordering::Release);
+    });
 }
 
 #[must_use]
 pub fn routes_keys_to(target_hwnd: isize) -> bool {
+    if !ROUTE_ACTIVE.load(Ordering::Acquire) {
+        return false;
+    }
     let now = now_ms();
     locked(&ROUTE, |route| {
-        route.targets(target_hwnd) && route.is_live(now)
+        let live = route.is_live(now);
+        if !live {
+            *route = Route::IDLE;
+            ROUTE_ACTIVE.store(false, Ordering::Release);
+            return false;
+        }
+        route.targets(target_hwnd)
     })
 }
 
 pub fn stop_routing_if_targets(target_hwnd: isize) {
+    if !ROUTE_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
     locked(&ROUTE, |route| {
         if route.targets(target_hwnd) {
             *route = Route::IDLE;
+            ROUTE_ACTIVE.store(false, Ordering::Release);
         }
     });
 }
 
 #[must_use]
 pub fn is_routing_bar_keys() -> bool {
+    if !ROUTE_ACTIVE.load(Ordering::Acquire) {
+        return false;
+    }
     let now = now_ms();
-    locked(&ROUTE, |route| route.is_live(now))
+    locked(&ROUTE, |route| {
+        let live = route.is_live(now);
+        if !live {
+            *route = Route::IDLE;
+            ROUTE_ACTIVE.store(false, Ordering::Release);
+        }
+        live
+    })
 }
 
 fn post_bar_key(key: BarKey) -> bool {
@@ -247,13 +322,11 @@ fn is_key_down(message: usize) -> bool {
 }
 
 fn record_key_down(virtual_key: u32, swallowed: bool) {
-    locked(&SWALLOWED_KEY_DOWNS, |keys| {
-        keys.record(virtual_key, swallowed);
-    });
+    SWALLOWED_KEY_DOWNS.record(virtual_key, swallowed);
 }
 
 fn take_key_down(virtual_key: u32) -> bool {
-    locked(&SWALLOWED_KEY_DOWNS, |keys| keys.take(virtual_key))
+    SWALLOWED_KEY_DOWNS.take(virtual_key)
 }
 
 fn apply_volume_key(key: VolumeKey) -> bool {
@@ -265,7 +338,8 @@ fn apply_volume_key(key: VolumeKey) -> bool {
 }
 
 fn swallow_key_down(virtual_key: u32, flags: u32) -> bool {
-    let routed = bar_key(virtual_key, flags, current_modifiers()).is_some_and(post_bar_key);
+    let routed = ROUTE_ACTIVE.load(Ordering::Acquire)
+        && bar_key(virtual_key, flags, current_modifiers()).is_some_and(post_bar_key);
     record_key_down(virtual_key, routed);
     routed
         || (is_volume_hud_hook_enabled()
@@ -279,6 +353,7 @@ fn swallow_key_up(virtual_key: u32, flags: u32) -> bool {
             && is_available())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Default)]
 struct WakeModifiers {
     win: bool,
@@ -286,36 +361,46 @@ struct WakeModifiers {
     alt_or_ctrl: bool,
 }
 
-fn should_wake_status_with(virtual_key: u32, mods: WakeModifiers) -> bool {
+fn should_wake_status_lazy(
+    virtual_key: u32,
+    win: impl FnOnce() -> bool,
+    shift: impl FnOnce() -> bool,
+    alt_or_ctrl: impl FnOnce() -> bool,
+) -> bool {
     let Ok(vk) = u16::try_from(virtual_key) else {
         return false;
     };
     match vk {
         x if x == VK_CAPITAL.0 || x == VK_NUMLOCK.0 || x == VK_KANA.0 => true,
         0x70..=0x7B | 0xAD..=0xB3 => true,
-        x if x == VK_SPACE.0 => mods.win,
-        x if x == VK_SHIFT.0 || x == VK_LSHIFT.0 || x == VK_RSHIFT.0 => mods.alt_or_ctrl,
-        x if x == VK_MENU.0 || x == VK_LMENU.0 || x == VK_RMENU.0 => mods.shift,
+        x if x == VK_SPACE.0 => win(),
+        x if x == VK_SHIFT.0 || x == VK_LSHIFT.0 || x == VK_RSHIFT.0 => alt_or_ctrl(),
+        x if x == VK_MENU.0 || x == VK_LMENU.0 || x == VK_RMENU.0 => shift(),
         _ => false,
     }
 }
 
+#[cfg(test)]
+fn should_wake_status_with(virtual_key: u32, mods: WakeModifiers) -> bool {
+    should_wake_status_lazy(virtual_key, || mods.win, || mods.shift, || mods.alt_or_ctrl)
+}
+
 fn should_wake_status(virtual_key: u32) -> bool {
-    should_wake_status_with(
+    should_wake_status_lazy(
         virtual_key,
-        WakeModifiers {
-            win: key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0),
-            shift: key_is_down(VK_SHIFT.0) || key_is_down(VK_LSHIFT.0) || key_is_down(VK_RSHIFT.0),
-            alt_or_ctrl: key_is_down(VK_MENU.0)
+        || key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0),
+        || key_is_down(VK_SHIFT.0) || key_is_down(VK_LSHIFT.0) || key_is_down(VK_RSHIFT.0),
+        || {
+            key_is_down(VK_MENU.0)
                 || key_is_down(VK_LMENU.0)
                 || key_is_down(VK_RMENU.0)
-                || key_is_down(VK_CONTROL.0),
+                || key_is_down(VK_CONTROL.0)
         },
     )
 }
 
 fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
-    if code < 0 {
+    if code < 0 || lparam.0 == 0 {
         return false;
     }
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
@@ -323,6 +408,9 @@ fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
         crate::idle_wake::request_idle_wake();
     }
     if is_key_down(wparam.0) {
+        if is_typing_key(event.vkCode, event.flags.0) {
+            KEYSTROKE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
         swallow_key_down(event.vkCode, event.flags.0)
     } else {
         swallow_key_up(event.vkCode, event.flags.0)
@@ -501,7 +589,7 @@ mod tests {
 
     #[test]
     fn a_key_up_is_swallowed_only_when_its_key_down_was() {
-        let mut keys = SwallowedKeys::EMPTY;
+        let keys = SwallowedKeys::empty();
         let left = u32::from(VK_LEFT.0);
         let right = u32::from(VK_RIGHT.0);
         assert!(!keys.take(left));
@@ -514,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_passed_key_down_clears_an_earlier_swallow() {
-        let mut keys = SwallowedKeys::EMPTY;
+        let keys = SwallowedKeys::empty();
         let left = u32::from(VK_LEFT.0);
         keys.record(left, true);
         keys.record(left, false);
@@ -523,7 +611,7 @@ mod tests {
 
     #[test]
     fn out_of_range_virtual_keys_are_never_swallowed() {
-        let mut keys = SwallowedKeys::EMPTY;
+        let keys = SwallowedKeys::empty();
         keys.record(u32::MAX, true);
         assert!(!keys.take(u32::MAX));
     }
@@ -574,5 +662,19 @@ mod tests {
         super::set_volume_hud_hook_enabled(true);
         assert!(super::is_volume_hud_hook_enabled());
         super::set_volume_hud_hook_enabled(initial);
+    }
+
+    #[test]
+    fn null_lparam_is_safely_ignored_by_hook_filter() {
+        assert!(!super::swallow(
+            0,
+            super::WPARAM(WM_KEYDOWN as usize),
+            super::LPARAM(0)
+        ));
+        assert!(!super::swallow(
+            -1,
+            super::WPARAM(WM_KEYDOWN as usize),
+            super::LPARAM(0)
+        ));
     }
 }

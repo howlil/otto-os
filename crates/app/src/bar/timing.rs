@@ -1,15 +1,20 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::host::RuntimeContext;
 use crate::win_msg::{
     DEADLINE_TIMER, HUD_ANIM_TIMER, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-    STATUS_TIMER,
+    STATUS_TIMER, WM_APP_IDLE_WAKE,
 };
-use otto_core::{LyricsStatus, detect_hud_event};
+use otto_core::{
+    DayKey, HudDeviceLabel, LyricsStatus, NotchHudKind, detect_hud_event, inspect_browser_context,
+    is_browser_executable,
+};
 use otto_platform::{
-    LyricsOutcome, cursor_position, foreground_application, is_escape_down, motion_preference,
-    notify_bluetooth_hardware_change, read_system_status, suppress_native_osd, watch_top_edge,
-    window_change_generations,
+    LyricsOutcome, cursor_position, foreground_application, foreground_title_generation,
+    is_escape_down, minimize_window_native, motion_preference, notify_bluetooth_hardware_change,
+    read_system_status, register_idle_wake, request_browser_url_inspection, save_focus_activity,
+    suppress_native_osd, take_browser_url_inspection, take_keystroke_count, take_mouse_click_count,
+    unregister_idle_wake, user_idle_ms, watch_top_edge, window_change_generations,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -20,10 +25,43 @@ use super::Bar;
 use super::HUD_ANIM_MS;
 use super::MAINTAIN_EVERY_TICKS;
 use super::MIN_DEADLINE_MS;
+use super::STATUS_POLL_MS;
 use super::periodic_tick_due;
 
 impl Bar {
+    pub(super) fn ensure_status_timer(&mut self) {
+        if self.status_timer_running || (!self.top_bar_enabled && !self.notch_enabled) {
+            return;
+        }
+        unsafe {
+            SetTimer(
+                Some(HWND(self.hwnd as *mut _)),
+                STATUS_TIMER,
+                STATUS_POLL_MS,
+                None,
+            );
+        }
+        register_idle_wake(self.hwnd, WM_APP_IDLE_WAKE);
+        self.status_timer_running = true;
+    }
+
+    pub(super) fn stop_status_timer(&mut self) {
+        if !self.status_timer_running {
+            return;
+        }
+        self.status_timer_running = false;
+        unregister_idle_wake();
+        unsafe {
+            let hwnd = Some(HWND(self.hwnd as *mut _));
+            let _ = KillTimer(hwnd, STATUS_TIMER);
+            let _ = KillTimer(hwnd, DEADLINE_TIMER);
+        }
+    }
+
     pub(super) fn ensure_anim_timer(&mut self) {
+        if !self.top_bar_enabled && !self.notch_enabled {
+            return;
+        }
         if !self.animating {
             let timer = unsafe {
                 SetTimer(
@@ -52,6 +90,9 @@ impl Bar {
     }
 
     pub(super) fn wake(&mut self, runtime: &RuntimeContext) {
+        if !self.status_timer_running {
+            return;
+        }
         if let Some(interval) = self.cadence.wake() {
             self.set_status_interval(interval);
             self.run_tick(runtime, true);
@@ -59,12 +100,18 @@ impl Bar {
     }
 
     pub(super) fn wake_timer_only(&mut self) {
+        if !self.status_timer_running {
+            return;
+        }
         if let Some(interval) = self.cadence.wake() {
             self.set_status_interval(interval);
         }
     }
 
     pub(super) fn idle_wake(&mut self, runtime: &RuntimeContext) {
+        if !self.status_timer_running {
+            return;
+        }
         if let Some(interval) = self.cadence.wake() {
             self.set_status_interval(interval);
         }
@@ -72,6 +119,9 @@ impl Bar {
     }
 
     pub(super) fn set_status_interval(&self, interval: u32) {
+        if !self.status_timer_running {
+            return;
+        }
         unsafe {
             SetTimer(
                 Some(HWND(self.hwnd as *mut _)),
@@ -152,6 +202,7 @@ impl Bar {
                         SWP_NOACTIVATE | SWP_SHOWWINDOW,
                     )
                 };
+                self.io.raise_quick_capture();
             }
         }
         let mut dirty = false;
@@ -180,29 +231,9 @@ impl Bar {
         let foreground_changed = self
             .foreground_gate
             .should_refresh(window_change_generations().map(|changes| changes.geometry));
-        if foreground_changed && let Some(foreground) = foreground_application(self.own_pid) {
-            let change = self
-                .controls
-                .apply_foreground(foreground.name, foreground.window);
-            if change.app {
-                self.recompute_layout();
-                dirty = true;
-            }
-            if change.window {
-                if crate::menu::active_top_bar_target(runtime).is_some()
-                    || crate::menu::is_calendar_open(runtime)
-                    || crate::menu::is_notification_open(runtime)
-                {
-                    crate::menu::close(runtime);
-                    dirty = true;
-                }
-                if self.notch.collapse_from_external_focus_change() {
-                    self.recompute_layout();
-                    self.sync_panel_visibility();
-                    dirty = true;
-                }
-            }
-        }
+        let (active_changed, title_changed, fg_dirty) =
+            self.sync_foreground(runtime, foreground_changed);
+        dirty |= fg_dirty;
         self.sync_full_screen(runtime);
         self.sync_backdrop(runtime, foreground_changed);
         self.sync_keyboard_focus(runtime);
@@ -210,6 +241,9 @@ impl Bar {
             self.release_seek(runtime, false);
         }
         if self.refresh_media(force_media) {
+            dirty = true;
+        }
+        if self.update_focus_activity(runtime, active_changed, title_changed) {
             dirty = true;
         }
         dirty |= self.sync_notification_feed();
@@ -321,15 +355,176 @@ impl Bar {
         let now = Instant::now();
         match event {
             PBT_APMSUSPEND => {
+                if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut() {
+                    fa.reset_sample_clock();
+                    if fa.is_dirty() && save_focus_activity(&fa) {
+                        fa.mark_saved();
+                        self.last_focus_save = now;
+                    }
+                }
                 let update = self.notch.suspend(now);
                 self.apply_notch_update(runtime, update);
             }
             PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => {
+                if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut() {
+                    fa.reset_sample_clock();
+                }
                 self.notch.resume(now);
                 notify_bluetooth_hardware_change();
                 self.schedule_deadline();
             }
             _ => {}
         }
+    }
+
+    fn sync_foreground(
+        &mut self,
+        runtime: &RuntimeContext,
+        foreground_changed: bool,
+    ) -> (bool, bool, bool) {
+        let title_changed = self
+            .title_gate
+            .should_refresh(foreground_title_generation());
+        let mut active_changed = false;
+        let mut dirty = false;
+        if (foreground_changed || title_changed)
+            && let Some(foreground) = foreground_application(self.own_pid)
+        {
+            let change = self
+                .controls
+                .apply_foreground(foreground.name, foreground.window);
+            active_changed = change.app || change.window || title_changed;
+            if change.app {
+                self.recompute_layout();
+                dirty = true;
+            }
+            if change.window {
+                if crate::menu::active_top_bar_target(runtime).is_some()
+                    || crate::menu::is_calendar_open(runtime)
+                    || crate::menu::is_notification_open(runtime)
+                {
+                    crate::menu::close(runtime);
+                    dirty = true;
+                }
+                if self.notch.collapse_from_external_focus_change() {
+                    self.recompute_layout();
+                    self.sync_panel_visibility();
+                    dirty = true;
+                }
+            }
+        }
+        (active_changed, title_changed, dirty)
+    }
+
+    fn update_focus_activity(
+        &mut self,
+        runtime: &RuntimeContext,
+        active_changed: bool,
+        title_changed: bool,
+    ) -> bool {
+        let active_window = self.controls.active_window().cloned();
+        let active_hwnd = active_window.as_ref().map_or(0, |win| win.identity.hwnd);
+        if title_changed
+            && self
+                .last_browser_url
+                .as_ref()
+                .is_some_and(|(hwnd, _)| *hwnd == active_hwnd)
+        {
+            self.last_browser_url = None;
+        }
+        let mut url_arrived = false;
+        if let Some((inspected_hwnd, maybe_url)) = take_browser_url_inspection()
+            && let Some(url) = maybe_url
+        {
+            if inspected_hwnd == active_hwnd {
+                url_arrived = self
+                    .last_browser_url
+                    .as_ref()
+                    .is_none_or(|(h, old)| *h != inspected_hwnd || old != &url);
+            }
+            self.last_browser_url = Some((inspected_hwnd, url));
+        }
+
+        let is_browser = active_window
+            .as_ref()
+            .is_some_and(|win| is_browser_executable(&win.executable));
+        if is_browser && (active_changed || title_changed) {
+            request_browser_url_inspection(active_hwnd);
+        }
+
+        let day = DayKey::from_clock(self.controls.status().clock);
+        let now = Instant::now();
+        let now_ms = u64::try_from(now.saturating_duration_since(self.focus_epoch).as_millis())
+            .unwrap_or(u64::MAX);
+        let idle_ms = user_idle_ms();
+        let clicks = take_mouse_click_count();
+        let keystrokes = take_keystroke_count();
+        let focus_running = self.notch_enabled && self.notch.is_focus_blocking_active();
+
+        let mut blocked_hud: Option<NotchHudKind> = None;
+        let mut block_hwnd: Option<isize> = None;
+        let mut stats_updated = false;
+        if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut() {
+            if active_changed
+                || url_arrived
+                || (fa.current_app_key().is_none() && active_window.is_some())
+            {
+                if let Some(win) = active_window.as_ref() {
+                    let cached_url = self
+                        .last_browser_url
+                        .as_ref()
+                        .filter(|(hwnd, _)| *hwnd == win.identity.hwnd)
+                        .map(|(_, url)| url.as_str());
+                    let browser_info =
+                        is_browser.then(|| inspect_browser_context(cached_url, &win.title));
+                    fa.observe_foreground(day, &win.executable, &win.app_name, browser_info);
+                } else {
+                    fa.observe_foreground(day, "", "", None);
+                }
+            }
+            fa.record_sample(day, now_ms, idle_ms, focus_running, clicks, keystrokes);
+            stats_updated = fa.is_dirty();
+
+            if focus_running
+                && let Some(win) = active_window.as_ref()
+                && self.last_blocked_window.is_none_or(|(hwnd, at)| {
+                    hwnd != win.identity.hwnd
+                        || now.saturating_duration_since(at) >= Duration::from_secs(2)
+                })
+                && let Some(enforcement) = {
+                    let domain = fa.current_domain().map(str::to_owned);
+                    fa.evaluate_block(true, &win.executable, &win.app_name, domain.as_deref())
+                }
+            {
+                self.last_blocked_window = Some((win.identity.hwnd, now));
+                let target = HudDeviceLabel::from_name(enforcement.target_label());
+                blocked_hud = Some(NotchHudKind::FocusBlocked { target });
+                block_hwnd = Some(win.identity.hwnd);
+            }
+
+            if fa.is_dirty()
+                && (blocked_hud.is_some()
+                    || now.saturating_duration_since(self.last_focus_save)
+                        >= Duration::from_secs(30))
+                && save_focus_activity(&fa)
+            {
+                fa.mark_saved();
+                self.last_focus_save = now;
+            }
+        }
+
+        if let Some(hwnd) = block_hwnd {
+            minimize_window_native(hwnd);
+        }
+        if stats_updated && self.periodic_due(MAINTAIN_EVERY_TICKS) {
+            crate::settings_window::repaint_if_focus_page(runtime);
+        }
+        if let Some(kind) = blocked_hud {
+            if self.notch.hud_enabled() {
+                self.notch.trigger_hud(kind);
+            }
+            return true;
+        }
+        false
     }
 }

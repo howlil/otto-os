@@ -204,19 +204,23 @@ pub(crate) fn should_record_sample_occluder(hwnd: HWND, own_pid: u32) -> Option<
         if pid == 0 {
             return None;
         }
-        let class = window_class_name(hwnd);
-        if is_shell_or_desktop_class(&class) {
-            return None;
-        }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         if ex_style & WS_EX_TRANSPARENT.0 != 0 {
             return None;
         }
+        let mut class_buf = [0u16; 128];
+        let class_len = window_class_utf16(hwnd, &mut class_buf);
+        let class = &class_buf[..class_len];
+        if is_shell_or_desktop_utf16(class) {
+            return None;
+        }
+        let own_settings = pid == own_pid && is_own_settings_utf16(class);
         if pid == own_pid
-            && !matches!(
-                class.as_str(),
-                "OttoPopupMenu" | "OttoNotchPanel" | "OttoControlCenter"
-            )
+            && !own_settings
+            && !utf16_eq_ascii(class, "OttoPopupMenu")
+            && !utf16_eq_ascii(class, "OttoNotchPanel")
+            && !utf16_eq_ascii(class, "OttoControlCenter")
+            && !utf16_eq_ascii(class, "OttoSpotlight")
         {
             return None;
         }
@@ -240,7 +244,7 @@ pub(crate) fn should_record_sample_occluder(hwnd: HWND, own_pid: u32) -> Option<
         if bounds.width <= 0 || bounds.height <= 0 {
             return None;
         }
-        let is_normal = pid != own_pid
+        let is_normal = (pid != own_pid || own_settings)
             && !(ex_style & WS_EX_TOOLWINDOW.0 != 0 && ex_style & WS_EX_APPWINDOW.0 == 0)
             && ex_style & WS_EX_NOACTIVATE.0 == 0
             && GetWindowTextLengthW(hwnd) > 0;
@@ -469,14 +473,8 @@ pub(crate) fn copy_from_screen(
         )
     }
     .ok()?;
-    let region = CropRegion {
-        x: 0,
-        y: 0,
-        width: frame_layout.width,
-        height: frame_layout.height,
-    };
-    crop_bgra(&canvas.copy_pixels(), canvas.layout(), region)
-        .filter(|pixels| !is_blank_frame(region.width, region.height, pixels))
+    let bytes = canvas.as_bytes();
+    (!is_blank_frame(frame_layout.width, frame_layout.height, bytes)).then(|| bytes.to_vec())
 }
 
 pub(crate) fn capture_via_print_window(
@@ -513,7 +511,7 @@ pub(crate) fn capture_via_print_window(
     .ok()?;
     unsafe { PrintWindow(hwnd, canvas.dc(), PRINT_WINDOW_FLAGS(2)) }
         .as_bool()
-        .then(|| crop_bgra(&canvas.copy_pixels(), canvas.layout(), printed_region))
+        .then(|| crop_bgra(canvas.as_bytes(), canvas.layout(), printed_region))
         .flatten()
         .filter(|pixels| !is_blank_frame(printed_layout.width, printed_layout.height, pixels))
         .and_then(|pixels| resize_bgra(&pixels, printed_layout, frame_layout))
@@ -758,30 +756,57 @@ pub(crate) fn set_dwm_transition_policy(hwnd: HWND, enabled: bool) -> bool {
     }
 }
 
-pub(crate) fn window_class_name(hwnd: HWND) -> String {
-    let mut buf = [0u16; 128];
-    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+pub(crate) fn window_class_utf16(hwnd: HWND, buf: &mut [u16; 128]) -> usize {
+    let len = unsafe { GetClassNameW(hwnd, buf) };
     if len <= 0 {
-        String::new()
+        0
     } else {
-        String::from_utf16_lossy(&buf[..len as usize])
+        (len as usize).min(buf.len())
     }
 }
 
-pub(crate) fn is_shell_or_desktop_class(class: &str) -> bool {
-    matches!(
-        class,
-        "Progman"
-            | "WorkerW"
-            | "Shell_TrayWnd"
-            | "Shell_SecondaryTrayWnd"
-            | "Windows.UI.Core.CoreWindow"
-            | "XamlExplorerHostIslandWindow"
-            | "ForegroundStaging"
-            | "MultitaskingViewFrame"
-            | "NotifyIconOverflowWindow"
-            | "TopLevelWindowForOverflowXamlIsland"
-    )
+pub(crate) fn utf16_eq_ascii(wide: &[u16], ascii: &str) -> bool {
+    wide.len() == ascii.len()
+        && wide
+            .iter()
+            .zip(ascii.bytes())
+            .all(|(&unit, byte)| unit == u16::from(byte))
+}
+
+pub(crate) fn is_own_settings_utf16(wide: &[u16]) -> bool {
+    utf16_eq_ascii(wide, "OttoSettings")
+}
+
+pub(crate) fn is_own_settings_window(hwnd: HWND) -> bool {
+    window_class_is(hwnd, "OttoSettings")
+}
+
+pub(crate) fn window_class_is(hwnd: HWND, expected: &str) -> bool {
+    let mut buf = [0u16; 128];
+    let len = window_class_utf16(hwnd, &mut buf);
+    utf16_eq_ascii(&buf[..len], expected)
+}
+
+pub(crate) fn is_shell_or_desktop_utf16(wide: &[u16]) -> bool {
+    const CLASSES: [&str; 10] = [
+        "Progman",
+        "WorkerW",
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "Windows.UI.Core.CoreWindow",
+        "XamlExplorerHostIslandWindow",
+        "ForegroundStaging",
+        "MultitaskingViewFrame",
+        "NotifyIconOverflowWindow",
+        "TopLevelWindowForOverflowXamlIsland",
+    ];
+    CLASSES.iter().any(|name| utf16_eq_ascii(wide, name))
+}
+
+pub(crate) fn is_shell_or_desktop_window(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 128];
+    let len = window_class_utf16(hwnd, &mut buf);
+    is_shell_or_desktop_utf16(&buf[..len])
 }
 
 pub(crate) fn visible_window_rect(hwnd: HWND) -> RECT {
@@ -809,11 +834,7 @@ pub(crate) fn is_normal_visible_window(hwnd: HWND, own_pid: u32) -> bool {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
-        if pid == own_pid || pid == 0 {
-            return false;
-        }
-        let class = window_class_name(hwnd);
-        if is_shell_or_desktop_class(&class) {
+        if pid == 0 || (pid == own_pid && !is_own_settings_window(hwnd)) {
             return false;
         }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
@@ -821,6 +842,9 @@ pub(crate) fn is_normal_visible_window(hwnd: HWND, own_pid: u32) -> bool {
             return false;
         }
         if ex_style & WS_EX_NOACTIVATE.0 != 0 {
+            return false;
+        }
+        if is_shell_or_desktop_window(hwnd) {
             return false;
         }
         let mut cloaked = 0u32;

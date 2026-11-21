@@ -40,6 +40,7 @@ pub enum HitTarget {
     TasksPager,
     TaskItem(u8),
     TaskCheck(u8),
+    TaskEdit(u8),
     TaskRemove(u8),
     PrivacyIndicator,
     PrivacyMicMute,
@@ -140,6 +141,7 @@ impl HitTarget {
             | Self::TasksPager
             | Self::TaskItem(_)
             | Self::TaskCheck(_)
+            | Self::TaskEdit(_)
             | Self::TaskRemove(_) => TargetScope::Tasks,
             Self::PrivacyIndicator | Self::PrivacyMicMute => TargetScope::Privacy,
             Self::MediaPlayPause

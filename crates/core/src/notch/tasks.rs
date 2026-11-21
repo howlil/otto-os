@@ -25,12 +25,30 @@ pub enum TaskAddOutcome {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEditOutcome {
+    Updated,
+    Unchanged,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskEditorMode {
+    Add,
+    Edit(TaskId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent tasks layout flags"
+)]
 pub struct TasksLayoutInput {
     pub visible_count: u8,
     pub has_pager: bool,
     pub has_items: bool,
     pub has_done: bool,
+    pub editing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -38,6 +56,7 @@ pub struct TasksState {
     pub items: Vec<TaskItem>,
     pub page: usize,
     pub next_id: u64,
+    pub editor: Option<TaskEditorMode>,
 }
 
 #[must_use]
@@ -84,6 +103,47 @@ impl TasksState {
         TaskAddOutcome::Added(id)
     }
 
+    pub fn edit(&mut self, id: TaskId, raw: &str) -> TaskEditOutcome {
+        let Some(text) = normalize_task_text(raw) else {
+            return TaskEditOutcome::Rejected;
+        };
+        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+            return TaskEditOutcome::Rejected;
+        };
+        if item.text == text {
+            return TaskEditOutcome::Unchanged;
+        }
+        item.text = text;
+        TaskEditOutcome::Updated
+    }
+
+    pub fn begin_add(&mut self) -> bool {
+        self.editor.replace(TaskEditorMode::Add) != Some(TaskEditorMode::Add)
+    }
+
+    pub fn begin_edit(&mut self, id: TaskId) -> Option<&str> {
+        let index = self.items.iter().position(|item| item.id == id)?;
+        self.editor = Some(TaskEditorMode::Edit(id));
+        self.items.get(index).map(|item| item.text.as_str())
+    }
+
+    pub fn cancel_editor(&mut self) -> bool {
+        self.editor.take().is_some()
+    }
+
+    #[must_use]
+    pub const fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    #[must_use]
+    pub const fn editing_id(&self) -> Option<TaskId> {
+        match self.editor {
+            Some(TaskEditorMode::Edit(id)) => Some(id),
+            Some(TaskEditorMode::Add) | None => None,
+        }
+    }
+
     pub fn toggle_done(&mut self, id: TaskId) -> bool {
         let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
             return false;
@@ -114,6 +174,9 @@ impl TasksState {
             return false;
         };
         self.items.remove(index);
+        if self.editor == Some(TaskEditorMode::Edit(id)) {
+            self.editor = None;
+        }
         self.clamp_page();
         true
     }
@@ -123,6 +186,11 @@ impl TasksState {
         self.items.retain(|item| !item.done);
         if self.items.len() == before {
             return false;
+        }
+        if let Some(TaskEditorMode::Edit(id)) = self.editor
+            && self.items.iter().all(|item| item.id != id)
+        {
+            self.editor = None;
         }
         self.clamp_page();
         true
@@ -182,6 +250,7 @@ impl TasksState {
             has_pager: self.page_count() > 1,
             has_items: !self.items.is_empty(),
             has_done: self.items.iter().any(|item| item.done),
+            editing: self.editor.is_some(),
         }
     }
 
@@ -252,8 +321,8 @@ mod tests {
     use std::fmt::Write;
 
     use super::{
-        MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskId, TasksState,
-        normalize_task_text,
+        MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskEditOutcome,
+        TaskEditorMode, TaskId, TasksState, normalize_task_text,
     };
 
     fn added(state: &mut TasksState, text: &str) -> TaskId {
@@ -396,5 +465,67 @@ mod tests {
             writeln!(contents, "0\ttask {index}").expect("write to a string");
         }
         assert_eq!(TasksState::decode(&contents).items.len(), MAX_TASKS);
+    }
+
+    #[test]
+    fn editing_a_task_normalizes_in_place_and_preserves_flags() {
+        let mut state = TasksState::default();
+        let first = added(&mut state, "first");
+        let second = added(&mut state, "second");
+        assert!(state.toggle_active(first));
+        assert!(state.toggle_done(second));
+
+        assert_eq!(
+            state.edit(first, "  first \t updated\r\n "),
+            TaskEditOutcome::Updated
+        );
+        assert_eq!(state.items[1].id, first);
+        assert_eq!(state.items[1].text, "first updated");
+        assert!(state.items[1].active);
+        assert!(!state.items[1].done);
+
+        assert_eq!(
+            state.edit(first, "first updated"),
+            TaskEditOutcome::Unchanged
+        );
+        assert_eq!(state.edit(first, "   \t "), TaskEditOutcome::Rejected);
+        assert_eq!(
+            state.edit(TaskId(999), "missing"),
+            TaskEditOutcome::Rejected
+        );
+        assert_eq!(state.items[1].text, "first updated");
+
+        assert_eq!(
+            state.edit(second, "second updated"),
+            TaskEditOutcome::Updated
+        );
+        assert!(state.items[0].done);
+        assert_eq!(state.items[0].text, "second updated");
+    }
+
+    #[test]
+    fn editor_mode_tracks_add_edit_and_clears_when_target_is_removed() {
+        let mut state = TasksState::default();
+        let a = added(&mut state, "alpha");
+        let b = added(&mut state, "beta");
+
+        assert!(!state.layout_input().editing);
+        assert!(state.begin_add());
+        assert_eq!(state.editor, Some(TaskEditorMode::Add));
+        assert!(state.layout_input().editing);
+        assert_eq!(state.editing_id(), None);
+
+        assert_eq!(state.begin_edit(a), Some("alpha"));
+        assert_eq!(state.editor, Some(TaskEditorMode::Edit(a)));
+        assert_eq!(state.editing_id(), Some(a));
+
+        assert!(state.remove(a));
+        assert_eq!(state.editor, None);
+        assert!(!state.is_editing());
+
+        assert!(state.toggle_done(b));
+        assert_eq!(state.begin_edit(b), Some("beta"));
+        assert!(state.clear_done());
+        assert_eq!(state.editor, None);
     }
 }

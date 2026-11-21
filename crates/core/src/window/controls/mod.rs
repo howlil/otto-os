@@ -13,11 +13,9 @@ pub use self::cover::{
     cover_is_dark, cover_row_bands, extract_cover_rows,
 };
 pub use self::layout::{
-    ResizeEdge, TrafficLightAction, TrafficLightLayout, TrafficLightMetrics, WindowControlAction,
-    WindowControlsLayout, WindowControlsMetrics, compute_traffic_light_layout,
-    compute_window_controls_layout,
+    ResizeEdge, WindowControlAction, WindowControlsLayout, WindowControlsMetrics,
 };
 pub use self::state::{
     CommandScope, WindowControlsState, accepts_window_controls, application_command_targets,
-    window_control_scope, window_controls_top, window_controls_visible_under_bar,
+    window_control_scope, window_controls_visible_under_bar,
 };

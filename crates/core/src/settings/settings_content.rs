@@ -1,9 +1,11 @@
-use crate::control_center::{
-    OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot,
-};
+use super::model::{OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot};
 use crate::control_center::{UPDATE_CHECKING_LABEL, is_update_available_status};
 use crate::dock::layout::{DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL};
 use crate::layout::{Rect, scale};
+use crate::notch::focus_activity::{
+    PRESET_BLOCKED_APPS, PRESET_BLOCKED_WEBSITES, estimated_words, format_compact_count,
+    format_screen_time, normalize_app_key,
+};
 use crate::settings_window::{
     ModuleGroup, ModuleId, ModuleRow, ModuleStatus, SettingsPage, modules_running,
 };
@@ -20,7 +22,7 @@ const HERO_HEIGHT_POINTS: i32 = 168;
 const TOP_PAD_POINTS: i32 = 8;
 const BOTTOM_PAD_POINTS: i32 = 28;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsAction {
     Toggle(OttoSettingKind),
     CycleDockIconSize,
@@ -29,6 +31,13 @@ pub enum SettingsAction {
     OpenLogs,
     CheckForUpdates,
     OpenReleases,
+    ToggleFocusBlockNotifications,
+    ToggleFocusAllowCalls,
+    ToggleBlockedApp(String),
+    ToggleBlockedWebsite(String),
+    PickBlockedAppFile,
+    AddBlockedWebsiteFromClipboard,
+    ResetFocusActivityStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +60,7 @@ pub enum SettingsRowValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettingsRow {
     pub icon: Option<SettingsPage>,
-    pub label: &'static str,
+    pub label: String,
     pub subtitle: String,
     pub value: SettingsRowValue,
     pub badge: Option<(&'static str, BadgeTone)>,
@@ -60,10 +69,10 @@ pub struct SettingsRow {
 }
 
 impl SettingsRow {
-    fn new(label: &'static str, subtitle: impl Into<String>, value: SettingsRowValue) -> Self {
+    fn new(label: impl Into<String>, subtitle: impl Into<String>, value: SettingsRowValue) -> Self {
         Self {
             icon: None,
-            label,
+            label: label.into(),
             subtitle: subtitle.into(),
             value,
             badge: None,
@@ -461,6 +470,330 @@ fn about_page(version: &str, update_status: Option<&str>) -> SettingsContent {
     }
 }
 
+fn focus_summary_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let today = &activity.today;
+    let summary = activity.rolling_summary();
+    vec![
+        SettingsRow::new(
+            "Screen Time Today",
+            format!(
+                "7-day total: {} across {} day(s)",
+                format_screen_time(summary.total_active_ms),
+                summary.days_counted
+            ),
+            SettingsRowValue::Text(format_screen_time(today.total_active_ms)),
+        ),
+        SettingsRow::new(
+            "Focus Session Time",
+            format!(
+                "7-day Focus: {} · {} blocked today ({} in 7d)",
+                format_screen_time(summary.focus_session_ms),
+                today.blocked_attempts,
+                summary.blocked_attempts
+            ),
+            SettingsRowValue::Text(format_screen_time(today.focus_session_ms)),
+        ),
+        SettingsRow::new(
+            "Mouse Clicks",
+            format!(
+                "7-day total: {} clicks",
+                format_compact_count(summary.total_clicks)
+            ),
+            SettingsRowValue::Text(format_compact_count(today.total_clicks)),
+        ),
+        SettingsRow::new(
+            "Typing Activity",
+            format!(
+                "7-day total: {} keys (~{} words)",
+                format_compact_count(summary.total_keystrokes),
+                format_compact_count(estimated_words(summary.total_keystrokes))
+            ),
+            SettingsRowValue::Text(format!(
+                "{} keys (~{}w)",
+                format_compact_count(today.total_keystrokes),
+                format_compact_count(estimated_words(today.total_keystrokes))
+            )),
+        ),
+    ]
+}
+
+fn focus_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let mut rows: Vec<SettingsRow> = activity
+        .today
+        .sorted_apps()
+        .into_iter()
+        .take(10)
+        .map(|app| {
+            let blocked = activity
+                .blocklist
+                .is_app_blocked(&app.app_key, &app.display_name);
+            let words = estimated_words(app.keystroke_count);
+            let mut row = SettingsRow::new(
+                app.display_name,
+                format!(
+                    "{} open · {}x opened · {} clicks · {} keys (~{}w)",
+                    format_screen_time(app.active_ms),
+                    app.open_count,
+                    format_compact_count(app.click_count),
+                    format_compact_count(app.keystroke_count),
+                    format_compact_count(words)
+                ),
+                SettingsRowValue::Toggle(blocked),
+            )
+            .with_action(SettingsAction::ToggleBlockedApp(app.app_key));
+            row.badge = Some(if blocked {
+                ("Blocked", BadgeTone::Warning)
+            } else {
+                ("Allowed", BadgeTone::Good)
+            });
+            row
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(SettingsRow::new(
+            "No app activity recorded yet",
+            "Use your apps normally to see hours, opens, clicks, and typing counts",
+            SettingsRowValue::Text(String::from("Idle")),
+        ));
+    }
+    rows
+}
+
+fn focus_sites_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let mut rows: Vec<SettingsRow> = activity
+        .today
+        .sorted_websites()
+        .into_iter()
+        .take(10)
+        .map(|site| {
+            let blocked = activity.blocklist.is_website_blocked(&site.domain);
+            let mut row = SettingsRow::new(
+                site.domain.clone(),
+                format!(
+                    "{} active · {} visits",
+                    format_screen_time(site.active_ms),
+                    site.visit_count
+                ),
+                SettingsRowValue::Toggle(blocked),
+            )
+            .with_action(SettingsAction::ToggleBlockedWebsite(site.domain));
+            row.badge = Some(if blocked {
+                ("Blocked", BadgeTone::Warning)
+            } else {
+                ("Allowed", BadgeTone::Good)
+            });
+            row
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(SettingsRow::new(
+            "No websites recorded yet",
+            "Visit sites in Chrome, Edge, Brave, Firefox, or Arc to track domains",
+            SettingsRowValue::Text(String::from("Waiting")),
+        ));
+    }
+    rows
+}
+
+fn focus_searches_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let mut rows: Vec<SettingsRow> = activity
+        .today
+        .sorted_searches()
+        .into_iter()
+        .take(8)
+        .map(|search| {
+            SettingsRow::new(
+                search.query,
+                format!("{} search", search.engine),
+                SettingsRowValue::Text(format!("{}x", search.search_count)),
+            )
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(SettingsRow::new(
+            "No searches recorded yet",
+            "Searches on Google, Bing, DuckDuckGo, YouTube, and GitHub appear here",
+            SettingsRowValue::Text(String::from("0")),
+        ));
+    }
+    rows
+}
+
+fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let blocklist = &activity.blocklist;
+    let mut rows = vec![
+        SettingsRow::new(
+            "+ Block App from File...",
+            "Choose an .exe application to auto-minimize during Focus",
+            SettingsRowValue::Detail(""),
+        )
+        .with_action(SettingsAction::PickBlockedAppFile),
+        SettingsRow::new(
+            "+ Block Website from Clipboard",
+            "Paste a copied URL or domain into the Focus blocklist",
+            SettingsRowValue::Detail(""),
+        )
+        .with_action(SettingsAction::AddBlockedWebsiteFromClipboard),
+    ];
+    for custom_app in &blocklist.blocked_apps {
+        if PRESET_BLOCKED_APPS
+            .iter()
+            .any(|(preset_key, _)| *preset_key == custom_app)
+        {
+            continue;
+        }
+        rows.push(
+            SettingsRow::new(
+                format!("App: {custom_app}"),
+                "Custom blocked application during Focus",
+                SettingsRowValue::Toggle(true),
+            )
+            .with_action(SettingsAction::ToggleBlockedApp(custom_app.clone())),
+        );
+    }
+    for (preset_key, preset_label) in PRESET_BLOCKED_APPS {
+        let key = normalize_app_key(preset_key);
+        let blocked = blocklist.is_app_blocked(&key, preset_label);
+        rows.push(
+            SettingsRow::new(
+                format!("App: {preset_label}"),
+                "Auto-minimize this app while Focus Mode runs",
+                SettingsRowValue::Toggle(blocked),
+            )
+            .with_action(SettingsAction::ToggleBlockedApp(key)),
+        );
+    }
+    for custom_site in &blocklist.blocked_websites {
+        if PRESET_BLOCKED_WEBSITES
+            .iter()
+            .any(|(preset_domain, _)| *preset_domain == custom_site)
+        {
+            continue;
+        }
+        rows.push(
+            SettingsRow::new(
+                format!("Site: {custom_site}"),
+                "Custom blocked website during Focus",
+                SettingsRowValue::Toggle(true),
+            )
+            .with_action(SettingsAction::ToggleBlockedWebsite(custom_site.clone())),
+        );
+    }
+    for (preset_domain, preset_label) in PRESET_BLOCKED_WEBSITES {
+        let blocked = blocklist.is_website_blocked(preset_domain);
+        rows.push(
+            SettingsRow::new(
+                format!("{preset_label} ({preset_domain})"),
+                "Block and minimize browser tabs on this domain during Focus",
+                SettingsRowValue::Toggle(blocked),
+            )
+            .with_action(SettingsAction::ToggleBlockedWebsite(String::from(
+                preset_domain,
+            ))),
+        );
+    }
+    rows
+}
+
+fn focus_page(snapshot: &OttoSettingsSnapshot, modules: &[ModuleRow]) -> SettingsContent {
+    let activity = &snapshot.focus_activity;
+    let today = &activity.today;
+    let blocklist = &activity.blocklist;
+
+    let mut focus_toggle = setting_row(
+        snapshot,
+        OttoSettingItem::Toggle(OttoSettingKind::FocusModule),
+        SettingsPage::Focus,
+    );
+    if let Some(module_row) = modules
+        .iter()
+        .find(|row| row.id == ModuleId::Focus)
+        .copied()
+    {
+        focus_toggle.badge = Some(module_badge(module_row));
+        focus_toggle.muted = module_row.paused_by.is_some();
+    }
+
+    SettingsContent {
+        hero: Some(SettingsHero {
+            title: String::from("Focus & Screen Time"),
+            subtitle: format!(
+                "{} active today · {} in Focus · {} clicks · {} keys",
+                format_screen_time(today.total_active_ms),
+                format_screen_time(today.focus_session_ms),
+                format_compact_count(today.total_clicks),
+                format_compact_count(today.total_keystrokes),
+            ),
+        }),
+        sections: vec![
+            SettingsSection {
+                title: "",
+                footer: Some(
+                    "Blocking applies while a Focus session is active. Screen time pauses after 3 minutes of inactivity.",
+                ),
+                rows: vec![
+                    focus_toggle,
+                    SettingsRow::new(
+                        "Block Notifications in Focus",
+                        "Suppress Notch notification banners and Dock badges during Focus",
+                        SettingsRowValue::Toggle(blocklist.block_notifications),
+                    )
+                    .with_action(SettingsAction::ToggleFocusBlockNotifications),
+                    SettingsRow::new(
+                        "Allow Incoming Calls in Focus",
+                        "Let ringing calls through unless the calling app is blocked",
+                        SettingsRowValue::Toggle(blocklist.allow_calls_during_focus),
+                    )
+                    .with_action(SettingsAction::ToggleFocusAllowCalls),
+                ],
+            },
+            SettingsSection {
+                title: "Today & 7-Day Activity",
+                footer: Some(
+                    "Clicks and keystrokes count totals only. Typed characters and passwords are never recorded.",
+                ),
+                rows: focus_summary_rows(activity),
+            },
+            SettingsSection {
+                title: "Most Used & Most Opened Apps",
+                footer: Some("Toggle any app switch to block and auto-minimize it during Focus."),
+                rows: focus_apps_rows(activity),
+            },
+            SettingsSection {
+                title: "Top Websites",
+                footer: Some(
+                    "Detected natively from browser tabs and address bars with zero extensions.",
+                ),
+                rows: focus_sites_rows(activity),
+            },
+            SettingsSection {
+                title: "Most Searched Topics",
+                footer: None,
+                rows: focus_searches_rows(activity),
+            },
+            SettingsSection {
+                title: "Focus Blocklist & Distraction Presets",
+                footer: Some(
+                    "Blocked apps and websites minimize automatically without closing unsaved work.",
+                ),
+                rows: focus_blocklist_rows(activity),
+            },
+            SettingsSection {
+                title: "Activity Data",
+                footer: Some("Saved locally in %LOCALAPPDATA%\\otto-os\\focus_activity.txt."),
+                rows: vec![
+                    SettingsRow::new(
+                        "Reset Activity & Screen Time Stats",
+                        "Clear Today and 7-day history while keeping your blocklist",
+                        SettingsRowValue::Detail("Clear"),
+                    )
+                    .with_action(SettingsAction::ResetFocusActivityStats),
+                ],
+            },
+        ],
+    }
+}
+
 #[must_use]
 pub fn build_content(
     snapshot: &OttoSettingsSnapshot,
@@ -472,6 +805,7 @@ pub fn build_content(
     match page {
         SettingsPage::Overview => overview(modules, version),
         SettingsPage::Modules => modules_page(modules),
+        SettingsPage::Focus => focus_page(snapshot, modules),
         SettingsPage::Shortcuts => shortcuts_page(snapshot),
         SettingsPage::About => about_page(version, update_status),
         SettingsPage::Spotlight => surface_page(
@@ -613,11 +947,11 @@ pub fn compute_content_layout(
 #[cfg(test)]
 mod tests {
     use super::{SettingsAction, SettingsRowValue, build_content, compute_content_layout};
-    use crate::control_center::{
-        OttoSettingKind, OttoSettingsSnapshot, PluginSettingsState, SystemSettingsState,
-    };
     use crate::dock::layout::DOCK_ICON_LARGE;
     use crate::layout::Rect;
+    use crate::settings::model::{
+        OttoSettingKind, OttoSettingsSnapshot, PluginSettingsState, SystemSettingsState,
+    };
     use crate::settings_window::{ModuleId, SettingsPage, resolve_modules};
 
     fn snapshot() -> OttoSettingsSnapshot {
@@ -785,7 +1119,7 @@ mod tests {
             .iter()
             .flat_map(|section| &section.rows)
             .find(|row| row.label == "Check for Updates")
-            .and_then(|row| row.action)
+            .and_then(|row| row.action.clone())
     }
 
     #[test]
@@ -866,5 +1200,43 @@ mod tests {
         let layout = compute_content_layout(viewport(), &content, 96, 0);
         assert!(layout.hero.height > 0);
         assert!(layout.cards[0].header.y >= layout.hero.bottom());
+    }
+
+    #[test]
+    fn focus_page_renders_analytics_and_blocklist_controls() {
+        use crate::notch::focus_activity::{DayKey, inspect_browser_context};
+
+        let mut snap = snapshot();
+        let day = DayKey {
+            year: 2026,
+            month: 11,
+            day: 22,
+        };
+        let site = inspect_browser_context(
+            Some("https://www.google.com/search?q=otto+focus"),
+            "otto focus - Google Search - Google Chrome",
+        );
+        snap.focus_activity
+            .observe_foreground(day, "chrome.exe", "Google Chrome", Some(site));
+        snap.focus_activity
+            .record_sample(day, 1_000, 0, true, 12, 60);
+        snap.focus_activity
+            .record_sample(day, 6_000, 0, true, 4, 25);
+        assert!(snap.focus_activity.blocklist.add_website("reddit.com"));
+
+        let page = content(&snap, SettingsPage::Focus);
+        let hero = page.hero.as_ref().expect("focus hero");
+        assert_eq!(hero.title, "Focus & Screen Time");
+        assert!(hero.subtitle.contains("16 clicks"));
+        assert!(hero.subtitle.contains("85 keys"));
+        let labels: Vec<&str> = page
+            .sections
+            .iter()
+            .flat_map(|section| section.rows.iter().map(|row| row.label.as_str()))
+            .collect();
+        assert!(labels.contains(&"Google Chrome"));
+        assert!(labels.contains(&"google.com"));
+        assert!(labels.contains(&"otto focus"));
+        assert!(labels.contains(&"Reset Activity & Screen Time Stats"));
     }
 }

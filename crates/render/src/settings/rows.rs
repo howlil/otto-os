@@ -103,7 +103,7 @@ impl SettingsRenderer {
         let label_width = (trailing - text_x - self.px(12)).max(0);
         if row.subtitle.is_empty() {
             self.text(
-                row.label,
+                &row.label,
                 &self.formats.label,
                 Rect {
                     x: text_x,
@@ -116,7 +116,7 @@ impl SettingsRenderer {
         } else {
             let half = rect.height / 2;
             self.text(
-                row.label,
+                &row.label,
                 &self.formats.label,
                 Rect {
                     x: text_x,

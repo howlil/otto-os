@@ -6,17 +6,15 @@ use crate::win_msg::{
     WM_MOUSELEAVE,
 };
 use otto_core::{
-    Appearance, Capability, Metrics, MotionMetrics, MotionPreference, NativeCaption, NotchStyle,
-    WindowCommand, WindowControlAction, WindowControlsLayout, WindowControlsMetrics,
-    WindowControlsState, WindowInfo, compute_window_controls_layout,
+    Appearance, Capability, Metrics, NativeCaption, NotchStyle, WindowCommand, WindowControlAction,
+    WindowControlsLayout, WindowControlsMetrics, WindowControlsState, WindowInfo,
 };
 use otto_platform::{
     ActiveWindowTarget, acknowledge_native_minimize, acknowledge_window_sync, current_process_id,
     drag_threshold_exceeded, inspect_window, install_native_minimize_hook,
-    install_window_tracking_hook, is_name_change_sync, minimize_window_native, motion_preference,
-    place_overlay_above, poll_foreground_change, primary_screen, restore_rounded_corners,
-    round_window_corners, uninstall_native_minimize_hook, uninstall_window_tracking_hook,
-    visible_window_targets,
+    install_window_tracking_hook, is_name_change_sync, minimize_window_native, place_overlay_above,
+    poll_foreground_change, restore_rounded_corners, round_window_corners,
+    uninstall_native_minimize_hook, uninstall_window_tracking_hook, visible_window_targets,
 };
 use otto_render::WindowControlsRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -138,9 +136,6 @@ struct Overlay {
     visible: bool,
     tracking_mouse: bool,
     animating: bool,
-    motion: MotionPreference,
-    motion_metrics: MotionMetrics,
-    last_tick: Instant,
     last_caption_click: Option<(Instant, (i32, i32))>,
 }
 
@@ -193,7 +188,11 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
     let _ = install_native_minimize_hook(hwnd, WM_APP_NATIVE_MINIMIZE);
     controls.sync();
-    *runtime.window_controls.borrow_mut() = Some(controls);
+    let mut slot = runtime
+        .window_controls
+        .try_borrow_mut()
+        .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+    *slot = Some(controls);
     Ok(())
 }
 
@@ -234,8 +233,7 @@ pub fn handle_message(
             }
         }
         WM_APP_WINDOW_SYNC => {
-            acknowledge_window_sync();
-            let settle_active = is_name_change_sync(lparam.0 as u32);
+            let settle_active = acknowledge_window_sync() || is_name_change_sync(lparam.0 as u32);
             with_window_controls(runtime, |controls| controls.sync_internal(settle_active));
             Some(LRESULT(0))
         }
@@ -350,6 +348,11 @@ pub fn poll_foreground(runtime: &RuntimeContext) {
     if poll_foreground_change() {
         with_window_controls(runtime, WindowControls::sync);
     }
+}
+
+pub fn notify_own_window_change(runtime: &RuntimeContext) {
+    let _ = poll_foreground_change();
+    with_window_controls(runtime, |controls| controls.sync_internal(true));
 }
 
 fn with_window_controls(runtime: &RuntimeContext, action: impl FnOnce(&mut WindowControls)) {
@@ -488,16 +491,14 @@ impl WindowControls {
 
 impl Overlay {
     fn new(hwnd: isize, own_pid: u32, appearance: Appearance, bar_height: i32) -> Self {
-        let metrics = WindowControlsMetrics::default();
-        let layout = compute_window_controls_layout(&metrics, primary_screen().dpi);
         Self {
             hwnd,
             own_pid,
             appearance,
             bar_height,
             renderer: None,
-            metrics,
-            layout,
+            metrics: WindowControlsMetrics::default(),
+            layout: WindowControlsLayout::default(),
             target: None,
             window: None,
             state: WindowControlsState::default(),
@@ -512,9 +513,6 @@ impl Overlay {
             visible: false,
             tracking_mouse: false,
             animating: false,
-            motion: motion_preference(),
-            motion_metrics: MotionMetrics::default(),
-            last_tick: Instant::now(),
             last_caption_click: None,
         }
     }

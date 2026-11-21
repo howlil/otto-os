@@ -140,12 +140,12 @@ pub(crate) fn is_window_uipi_blocked(hwnd: HWND) -> bool {
     let Some(process) = ProcessHandle::open(process_id) else {
         return true;
     };
-    token_is_elevated(process.0).unwrap_or(true)
+    token_is_elevated(process.0).unwrap_or(false)
 }
 
 pub(super) fn read_process_facts(process_id: u32) -> Option<ProcessFacts> {
     let process = ProcessHandle::open(process_id)?;
-    let target_elevated = token_is_elevated(process.0).unwrap_or(true);
+    let target_elevated = token_is_elevated(process.0).unwrap_or(false);
     Some(ProcessFacts {
         generation: process_generation(&process)?,
         executable: process_executable(&process)?,

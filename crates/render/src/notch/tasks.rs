@@ -1,12 +1,14 @@
-use otto_core::{HitTarget, Layout, Rect, TaskItem, TasksState, scale};
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use otto_core::{HitTarget, Layout, Rect, TaskEditorMode, TaskItem, TasksState, scale};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush};
 use windows_numerics::Vector2;
 
 use crate::notch::shelf::{SHELF_CLEAR_RED, SHELF_URL_INDIGO, center_of};
-use crate::{CHARGING_GREEN, FOREGROUND, Renderer, rect_to_d2d, translate_rect};
+use crate::{CHARGING_GREEN, FOREGROUND, Renderer, rect_to_d2d, rgb, translate_rect};
 
-const TASKS_HINT: &str = "Press Ctrl+Alt+Q to capture one";
+const TASKS_HINT: &str = "Click + Add or press Ctrl+Alt+Q";
+const TASKS_EDITING_HINT: &str = "Enter to save · Shift+Enter for next · Esc to cancel";
+const EDITOR_FILL: D2D1_COLOR_F = rgb(20, 21, 26, 1.0);
 
 impl Renderer {
     pub(crate) fn draw_expanded_tasks(
@@ -18,10 +20,14 @@ impl Renderer {
         tasks_state: &TasksState,
     ) {
         self.draw_tasks_header_controls(layout, offset_x, alpha, hovered, tasks_state);
+        if let Some(mode) = tasks_state.editor {
+            self.draw_tasks_editor(layout, offset_x, alpha, mode);
+        }
         if tasks_state.items.is_empty() {
-            self.draw_tasks_empty_state(layout, offset_x, alpha);
+            self.draw_tasks_empty_state(layout, offset_x, alpha, tasks_state.is_editing());
             return;
         }
+        let editing_id = tasks_state.editing_id();
         for (slot, item) in tasks_state.visible_items().iter().enumerate() {
             let Some(&raw_row) = layout.tasks.rows.get(slot) else {
                 break;
@@ -31,8 +37,69 @@ impl Renderer {
             }
             let row = translate_rect(raw_row, -offset_x);
             let check = translate_rect(layout.tasks.check_buttons[slot], -offset_x);
+            let edit = translate_rect(layout.tasks.edit_buttons[slot], -offset_x);
             let remove = translate_rect(layout.tasks.remove_buttons[slot], -offset_x);
-            self.draw_task_row(row, check, remove, slot, item, alpha, hovered);
+            let is_editing = editing_id == Some(item.id);
+            self.draw_task_row(
+                row, check, edit, remove, slot, item, is_editing, alpha, hovered,
+            );
+        }
+    }
+
+    fn draw_tasks_editor(&self, layout: &Layout, offset_x: i32, alpha: f32, mode: TaskEditorMode) {
+        if layout.tasks.editor.is_empty() {
+            return;
+        }
+        let editor = translate_rect(layout.tasks.editor, -offset_x);
+        let input = translate_rect(layout.tasks.editor_input, -offset_x);
+        let radius = scale(8, self.dpi) as f32;
+        let shape = D2D1_ROUNDED_RECT {
+            rect: rect_to_d2d(editor),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let fill = self.brushes.alpha_brush(EDITOR_FILL, alpha);
+        let border = self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.72 * alpha);
+        unsafe {
+            self.target.FillRoundedRectangle(&shape, &fill);
+            self.target.DrawRoundedRectangle(&shape, &border, 1.2, None);
+        }
+
+        let icon_brush = self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.94 * alpha);
+        let icon_cx = (editor.x + input.x) as f32 * 0.5;
+        let cy = editor.y as f32 + editor.height as f32 * 0.5;
+        let icon_r = scale(4, self.dpi) as f32;
+        match mode {
+            TaskEditorMode::Add => self.draw_plus_glyph(icon_cx, cy, icon_r, &icon_brush),
+            TaskEditorMode::Edit(_) => {
+                self.draw_pencil_glyph(icon_cx, cy, icon_r * 1.1, &icon_brush);
+            }
+        }
+
+        let hint_left = input.right() + scale(4, self.dpi);
+        let hint_right = editor.right() - scale(6, self.dpi);
+        if hint_right > hint_left {
+            let hint_h = scale(16, self.dpi);
+            let hint_rect = Rect {
+                x: hint_left,
+                y: editor.y + (editor.height - hint_h) / 2,
+                width: hint_right - hint_left,
+                height: hint_h,
+            };
+            let hint_bg = self.brushes.alpha_brush(FOREGROUND, 0.10 * alpha);
+            let hint_border = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+            let pill = D2D1_ROUNDED_RECT {
+                rect: rect_to_d2d(hint_rect),
+                radiusX: scale(4, self.dpi) as f32,
+                radiusY: scale(4, self.dpi) as f32,
+            };
+            unsafe {
+                self.target.FillRoundedRectangle(&pill, &hint_bg);
+                self.target
+                    .DrawRoundedRectangle(&pill, &hint_border, 1.0, None);
+            }
+            let glyph_brush = self.brushes.alpha_brush(FOREGROUND, 0.80 * alpha);
+            self.draw_text("↵", &self.text_tab, rect_to_d2d(hint_rect), &glyph_brush);
         }
     }
 
@@ -64,17 +131,19 @@ impl Renderer {
         if !layout.tasks.add_button.is_empty() {
             let add = translate_rect(layout.tasks.add_button, -offset_x);
             let is_hovered = hovered == Some(HitTarget::TasksAdd);
+            let is_adding = tasks_state.editor == Some(TaskEditorMode::Add);
             let fill = self.brushes.alpha_brush(
                 SHELF_URL_INDIGO,
-                if is_hovered { 0.30 } else { 0.18 } * alpha,
+                if is_hovered || is_adding { 0.30 } else { 0.18 } * alpha,
             );
             let border = self.brushes.alpha_brush(
                 SHELF_URL_INDIGO,
-                if is_hovered { 0.62 } else { 0.40 } * alpha,
+                if is_hovered || is_adding { 0.68 } else { 0.40 } * alpha,
             );
             self.draw_shelf_pill(add, &fill, Some(&border));
             let fg = self.brushes.alpha_brush(FOREGROUND, 0.94 * alpha);
-            self.draw_text("+ Add", &self.text_tab, rect_to_d2d(add), &fg);
+            let label = if is_adding { "Close" } else { "+ Add" };
+            self.draw_text(label, &self.text_tab, rect_to_d2d(add), &fg);
         }
 
         if !layout.tasks.clear_button.is_empty() {
@@ -99,7 +168,7 @@ impl Renderer {
         }
     }
 
-    fn draw_tasks_empty_state(&self, layout: &Layout, offset_x: i32, alpha: f32) {
+    fn draw_tasks_empty_state(&self, layout: &Layout, offset_x: i32, alpha: f32, editing: bool) {
         let body = translate_rect(layout.tasks.body, -offset_x);
         if body.width <= 0 || body.height <= 0 {
             return;
@@ -131,7 +200,12 @@ impl Renderer {
             right: body.right() as f32 - scale(12, self.dpi) as f32,
             bottom: body.y as f32 + scale(61, self.dpi) as f32,
         };
-        self.draw_text("No tasks yet", &self.text_tab, title_rect, &title_brush);
+        let title = if editing {
+            "Type a note above"
+        } else {
+            "No tasks yet"
+        };
+        self.draw_text(title, &self.text_tab, title_rect, &title_brush);
         let hint_brush = self.brushes.alpha_brush(FOREGROUND, 0.56 * alpha);
         let hint_rect = D2D_RECT_F {
             left: body.x as f32 + scale(16, self.dpi) as f32,
@@ -139,12 +213,12 @@ impl Renderer {
             right: body.right() as f32 - scale(16, self.dpi) as f32,
             bottom: body.bottom() as f32 - scale(6, self.dpi) as f32,
         };
-        self.draw_text(
-            TASKS_HINT,
-            &self.text_caption_center,
-            hint_rect,
-            &hint_brush,
-        );
+        let hint = if editing {
+            TASKS_EDITING_HINT
+        } else {
+            TASKS_HINT
+        };
+        self.draw_text(hint, &self.text_caption_center, hint_rect, &hint_brush);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -152,9 +226,11 @@ impl Renderer {
         &self,
         row: Rect,
         check: Rect,
+        edit: Rect,
         remove: Rect,
         slot: usize,
         item: &TaskItem,
+        is_editing: bool,
         alpha: f32,
         hovered: Option<HitTarget>,
     ) {
@@ -162,10 +238,15 @@ impl Renderer {
         let row_hovered = slot_index.is_some_and(|idx| {
             matches!(
                 hovered,
-                Some(HitTarget::TaskItem(s) | HitTarget::TaskRemove(s) | HitTarget::TaskCheck(s))
-                    if s == idx
+                Some(
+                    HitTarget::TaskItem(s)
+                        | HitTarget::TaskEdit(s)
+                        | HitTarget::TaskRemove(s)
+                        | HitTarget::TaskCheck(s)
+                ) if s == idx
             )
         });
+        let edit_hovered = slot_index.is_some_and(|idx| hovered == Some(HitTarget::TaskEdit(idx)));
         let remove_hovered =
             slot_index.is_some_and(|idx| hovered == Some(HitTarget::TaskRemove(idx)));
         let check_hovered =
@@ -177,7 +258,12 @@ impl Renderer {
             radiusX: radius,
             radiusY: radius,
         };
-        let (fill, border) = if item.active {
+        let (fill, border) = if is_editing {
+            (
+                self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.24 * alpha),
+                self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.78 * alpha),
+            )
+        } else if item.active {
             (
                 self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.22 * alpha),
                 self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.62 * alpha),
@@ -201,10 +287,12 @@ impl Renderer {
         self.draw_task_check(check, item.done, check_hovered, alpha);
 
         let text_left = check.right() + scale(7, self.dpi);
-        let text_right = if remove.is_empty() {
-            row.right() - scale(8, self.dpi)
-        } else {
+        let text_right = if !edit.is_empty() {
+            edit.x - scale(6, self.dpi)
+        } else if !remove.is_empty() {
             remove.x - scale(6, self.dpi)
+        } else {
+            row.right() - scale(8, self.dpi)
         };
         if text_right > text_left {
             let text_rect = D2D_RECT_F {
@@ -215,7 +303,7 @@ impl Renderer {
             };
             let text_alpha = if item.done {
                 0.42
-            } else if row_hovered || item.active {
+            } else if row_hovered || item.active || is_editing {
                 0.96
             } else {
                 0.88
@@ -223,8 +311,65 @@ impl Renderer {
             let brush = self.brushes.alpha_brush(FOREGROUND, text_alpha * alpha);
             self.draw_text(&item.text, &self.text_pomodoro_sub, text_rect, &brush);
         }
+        if !edit.is_empty() {
+            self.draw_mini_edit_button(edit, edit_hovered || is_editing, row_hovered, alpha);
+        }
         if !remove.is_empty() {
             self.draw_mini_remove_button(remove, remove_hovered, row_hovered, alpha);
+        }
+    }
+
+    fn draw_mini_edit_button(&self, rect: Rect, active: bool, row_hovered: bool, alpha: f32) {
+        let radius = (rect.height as f32 * 0.5).max(4.0);
+        let pill = D2D1_ROUNDED_RECT {
+            rect: rect_to_d2d(rect),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        if active {
+            let bg = self.brushes.alpha_brush(SHELF_URL_INDIGO, 0.28 * alpha);
+            unsafe {
+                self.target.FillRoundedRectangle(&pill, &bg);
+            }
+        } else if row_hovered {
+            let bg = self.brushes.alpha_brush(FOREGROUND, 0.08 * alpha);
+            unsafe {
+                self.target.FillRoundedRectangle(&pill, &bg);
+            }
+        }
+        let color = if active { SHELF_URL_INDIGO } else { FOREGROUND };
+        let icon_alpha = if active {
+            0.96
+        } else if row_hovered {
+            0.76
+        } else {
+            0.42
+        };
+        let fg = self.brushes.alpha_brush(color, icon_alpha * alpha);
+        let c = center_of(rect);
+        let r = (rect.width as f32 * 0.25).max(3.0);
+        self.draw_pencil_glyph(c.X, c.Y, r, &fg);
+    }
+
+    fn draw_pencil_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
+        let stroke = (r * 0.34).max(1.1);
+        let tip = Vector2::new(cx - r * 0.92, cy + r * 0.92);
+        let body_start = Vector2::new(cx - r * 0.42, cy + r * 0.42);
+        let body_end = Vector2::new(cx + r * 0.72, cy - r * 0.72);
+        let cap_left = Vector2::new(cx + r * 0.34, cy - r * 0.88);
+        let cap_right = Vector2::new(cx + r * 0.88, cy - r * 0.34);
+        unsafe {
+            self.target.DrawLine(
+                body_start,
+                body_end,
+                brush,
+                stroke * 1.35,
+                &self.stroke_style,
+            );
+            self.target
+                .DrawLine(tip, body_start, brush, stroke * 0.9, &self.stroke_style);
+            self.target
+                .DrawLine(cap_left, cap_right, brush, stroke, &self.stroke_style);
         }
     }
 

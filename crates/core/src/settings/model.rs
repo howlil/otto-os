@@ -36,7 +36,6 @@ pub enum OttoSettingKind {
     Dock,
     WindowControls,
     Genie,
-    LiquidGlass,
     PrivacyIndicators,
     ClipboardHistory,
     DropShelf,
@@ -67,13 +66,12 @@ pub enum OttoSettingKind {
 }
 
 impl OttoSettingKind {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 32] = [
         Self::TopBar,
         Self::Notch,
         Self::Dock,
         Self::WindowControls,
         Self::Genie,
-        Self::LiquidGlass,
         Self::PrivacyIndicators,
         Self::ClipboardHistory,
         Self::DropShelf,
@@ -131,7 +129,6 @@ impl OttoSettingKind {
             Self::Dock => "Otto Dock",
             Self::WindowControls => "Traffic Lights",
             Self::Genie => "Genie Minimize",
-            Self::LiquidGlass => "Liquid Glass",
             Self::PrivacyIndicators => "Privacy Dots",
             Self::ClipboardHistory => "Clipboard History",
             Self::DropShelf => "Drop Shelf (Pocket)",
@@ -170,7 +167,6 @@ impl OttoSettingKind {
             Self::Dock => "App switcher, running dots & Dock",
             Self::WindowControls => "macOS-style window titlebar buttons",
             Self::Genie => "Smooth warp minimize animation",
-            Self::LiquidGlass => "Live wallpaper blur & refraction",
             Self::PrivacyIndicators => "Mic & camera activity indicator",
             Self::ClipboardHistory => "Track copies in Notch Clippings",
             Self::DropShelf => "Drag & drop pocket inside Notch",
@@ -285,7 +281,6 @@ pub struct SystemSettingsState {
     pub classic_logo: bool,
     pub dynamic_island: bool,
     pub privacy_indicators: bool,
-    pub liquid_glass: bool,
     pub clipboard_history: bool,
     pub drop_shelf: bool,
     pub notch_hud: bool,
@@ -302,6 +297,7 @@ pub struct OttoSettingsSnapshot {
     pub online_lyrics: bool,
     pub system: SystemSettingsState,
     pub menu_bar: MenuBarPreferences,
+    pub focus_activity: crate::FocusActivityState,
 }
 
 impl OttoSettingsSnapshot {
@@ -313,7 +309,6 @@ impl OttoSettingsSnapshot {
             OttoSettingKind::Dock => self.plugins.dock,
             OttoSettingKind::WindowControls => self.plugins.window_controls,
             OttoSettingKind::Genie => self.plugins.genie,
-            OttoSettingKind::LiquidGlass => self.system.liquid_glass,
             OttoSettingKind::PrivacyIndicators => self.system.privacy_indicators,
             OttoSettingKind::ClipboardHistory => self.system.clipboard_history,
             OttoSettingKind::DropShelf => self.system.drop_shelf,

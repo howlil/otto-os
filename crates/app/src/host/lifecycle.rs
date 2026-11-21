@@ -117,7 +117,6 @@ impl Host {
             &self.runtime,
             surface(self, SurfaceSlot::Bar)?.0 as isize,
             surface(self, SurfaceSlot::Panel)?.0 as isize,
-            self.blur,
             self.config.is_enabled(PluginId::ControlCenter),
         )?;
 

@@ -5,11 +5,10 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{MENU_POLL_TIMER, WM_APP_MENU_BACKDROP};
 use otto_core::{
     BACKDROP_PADDING_PT, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, CalendarControl,
-    CaptureRegion, ControlCenterEffect, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit,
-    DownloadsStackLayout, EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure,
-    PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, ThemeChange, WindowInfo,
-    capture_interval_for, capture_wanted, compute_downloads_stack_layout,
-    compute_popup_menu_layout, control_center_effect, downloads_stack_hit_test,
+    CaptureRegion, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
+    EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure, PopupMenuLayout,
+    PopupMenuMetrics, PopupMenuPlacement, Rect, WindowInfo, capture_interval_for, capture_wanted,
+    compute_downloads_stack_layout, compute_popup_menu_layout, downloads_stack_hit_test,
     next_downloads_stack_focus, scale,
 };
 use otto_core::{DockEntry, StackItem};
@@ -182,7 +181,11 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         last_cursor: (0, 0),
         backdrop: None,
     };
-    *runtime.menu.borrow_mut() = Some(menu);
+    let mut slot = runtime
+        .menu
+        .try_borrow_mut()
+        .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+    *slot = Some(menu);
     Ok(())
 }
 
@@ -793,23 +796,6 @@ impl PopupMenu {
         }
     }
 
-    fn execute_control_center_command(&self, runtime: &RuntimeContext, cmd: usize) {
-        match control_center_effect(cmd) {
-            Some(ControlCenterEffect::ToggleOnlineLyrics) => {
-                let enabled = !runtime.online_lyrics_enabled.get();
-                runtime.pending_online_lyrics.set(Some(enabled));
-            }
-            Some(ControlCenterEffect::Theme(ThemeChange::Cycle)) => {
-                crate::theme_state::cycle_theme_mode(runtime);
-            }
-            Some(ControlCenterEffect::Theme(ThemeChange::Set(mode))) => {
-                crate::theme_state::set_theme_mode(runtime, mode);
-            }
-            Some(ControlCenterEffect::Action(action)) => self.control_center.execute(action),
-            None => {}
-        }
-    }
-
     fn on_click(&mut self, x: i32, y: i32) -> Option<(MenuSource, usize)> {
         if !self.visible {
             return None;
@@ -824,7 +810,9 @@ impl PopupMenu {
 
     fn prime_backdrop(&self, runtime: &RuntimeContext) {
         let appearance = crate::theme_state::appearance(runtime);
-        if !capture_wanted(&appearance, runtime.glass_enabled.get()) {
+        if !capture_wanted(&appearance, runtime.glass_enabled.get())
+            || (runtime.capture_visible.get() && otto_platform::is_surface_visible(self.hwnd))
+        {
             return;
         }
         let needs_backdrop = if self.stack_view.is_some() {

@@ -2,10 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
     CallTracker, ClipboardPayload, ClipboardState, ClockTime, CompactContent, CompactSlotKind,
-    FocusSubMode, LyricsStatus, MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind,
-    NotificationQueue, NowPlaying, PendingSeek, PomodoroClock, PomodoroState, PrivacyState,
-    QuickTimerState, ShelfPayload, ShelfState, StopwatchClock, StopwatchState, TasksState,
-    is_openable_shelf_url, is_valid_shelf_file_path,
+    FocusBlocklist, FocusSubMode, LyricsStatus, MotionPreference, NotchAction, NotchExpandedTab,
+    NotchHudKind, NotificationQueue, NowPlaying, PendingSeek, PomodoroClock, PomodoroState,
+    PrivacyState, QuickTimerState, ShelfPayload, ShelfState, StopwatchClock, StopwatchState,
+    TasksState, is_openable_shelf_url, is_valid_shelf_file_path,
 };
 
 mod alerts;
@@ -68,7 +68,20 @@ pub(crate) enum NotchEffect {
     PickShelfFiles,
     CopyClipboard(ClipboardPayload),
     SaveTasks,
-    OpenQuickCapture,
+    OpenTaskEditor {
+        initial_text: String,
+        allow_keep_open: bool,
+    },
+    CloseTaskEditor {
+        restore_focus: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskSubmitResult {
+    Saved,
+    Unchanged,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +111,7 @@ pub(crate) struct NotchController {
     clipboard: ClipboardState,
     clipboard_copied_until: Option<Instant>,
     tasks: TasksState,
+    opened_by_task_editor: bool,
     shelf_drag_leave_until: Option<Instant>,
     opened_by_shelf_drag: bool,
     modal_picker_open: bool,
@@ -162,6 +176,7 @@ pub(crate) struct NotchController {
     compact_title_points: f32,
     compact_title_target: f32,
     compact_title_measured: Option<(String, f32)>,
+    focus_blocklist: FocusBlocklist,
 }
 
 impl NotchController {
@@ -184,6 +199,7 @@ impl NotchController {
             clipboard: ClipboardState::default(),
             clipboard_copied_until: None,
             tasks: TasksState::default(),
+            opened_by_task_editor: false,
             shelf_drag_leave_until: None,
             opened_by_shelf_drag: false,
             modal_picker_open: false,
@@ -248,6 +264,7 @@ impl NotchController {
             compact_title_points: 0.0,
             compact_title_target: 0.0,
             compact_title_measured: None,
+            focus_blocklist: FocusBlocklist::default(),
         }
     }
 }

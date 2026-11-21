@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use otto_core::{
     Appearance, CoverStyle, ResolvedTheme, Rgba, WindowControlAction, WindowControlsLayout,
     WindowControlsState, cover_row_bands,
@@ -8,8 +10,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
     D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    D2D1_SWEEP_DIRECTION_CLOCKWISE, ID2D1DCRenderTarget, ID2D1Factory, ID2D1LinearGradientBrush,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::core::Result;
 use windows_numerics::Vector2;
@@ -164,6 +166,23 @@ impl ControlBrushes {
     }
 }
 
+const FEATHER_BRUSH_CACHE_LIMIT: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CoverPathKey {
+    width: i32,
+    height: i32,
+    top_border_inset: bool,
+    right_border_inset: bool,
+    top_right_radius_bits: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FeatherBrushKey {
+    rgb: [u8; 3],
+    feather_bits: u32,
+}
+
 pub struct WindowControlsRenderer {
     factory: ID2D1Factory,
     target: ID2D1DCRenderTarget,
@@ -180,10 +199,10 @@ pub struct WindowControlsRenderer {
     pressed_border: ID2D1SolidColorBrush,
     glyph_brush: ID2D1SolidColorBrush,
     cover_brush: ID2D1SolidColorBrush,
+    cached_cover_path: RefCell<Option<(CoverPathKey, ID2D1PathGeometry)>>,
+    cached_feather_brushes: RefCell<Vec<(FeatherBrushKey, ID2D1LinearGradientBrush)>>,
     surface: DibSurface,
 }
-
-pub type TrafficLightRenderer = WindowControlsRenderer;
 
 impl WindowControlsRenderer {
     pub fn new(width: i32, height: i32) -> Result<Self> {
@@ -221,6 +240,8 @@ impl WindowControlsRenderer {
                 pressed_border: brushes.pressed_border,
                 glyph_brush: brushes.glyph_brush,
                 cover_brush: brushes.cover_brush,
+                cached_cover_path: RefCell::new(None),
+                cached_feather_brushes: RefCell::new(Vec::new()),
                 surface,
             })
         }
@@ -242,6 +263,9 @@ impl WindowControlsRenderer {
         self.pressed_border = brushes.pressed_border;
         self.glyph_brush = brushes.glyph_brush;
         self.cover_brush = brushes.cover_brush;
+        if let Ok(mut cache) = self.cached_feather_brushes.try_borrow_mut() {
+            cache.clear();
+        }
         Ok(())
     }
 
@@ -455,26 +479,21 @@ impl WindowControlsRenderer {
         }
     }
 
-    unsafe fn draw_cover(
+    fn cover_path(
         &self,
-        layout: &WindowControlsLayout,
-        style: &CoverStyle,
-        contrast_fill: Option<D2D1_COLOR_F>,
-    ) -> Result<()> {
-        unsafe {
-            let top = if style.top_border_inset { 1.0 } else { 0.0 };
-            let right_inset = if style.right_border_inset { 1.0 } else { 0.0 };
-            let right = (layout.width as f32 - right_inset).max(1.0);
-            let height = layout.height as f32;
-            if height <= top {
-                return Ok(());
-            }
-            let corner_inset = if style.top_border_inset || style.right_border_inset {
-                1.0
-            } else {
-                0.0
-            };
-            let r = (style.top_right_radius - corner_inset).max(0.0);
+        key: CoverPathKey,
+        top: f32,
+        right: f32,
+        height: f32,
+        r: f32,
+    ) -> Result<ID2D1PathGeometry> {
+        if let Ok(cached) = self.cached_cover_path.try_borrow()
+            && let Some((held, path)) = cached.as_ref()
+            && *held == key
+        {
+            return Ok(path.clone());
+        }
+        let path = unsafe {
             let path = self.factory.CreatePathGeometry()?;
             let sink = path.Open()?;
             sink.BeginFigure(Vector2::new(0.0, top), D2D1_FIGURE_BEGIN_FILLED);
@@ -497,6 +516,81 @@ impl WindowControlsRenderer {
             sink.AddLine(Vector2::new(0.0, height));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
+            path
+        };
+        if let Ok(mut slot) = self.cached_cover_path.try_borrow_mut() {
+            *slot = Some((key, path.clone()));
+        }
+        Ok(path)
+    }
+
+    fn feather_brush(
+        &self,
+        rgb: [u8; 3],
+        color: D2D1_COLOR_F,
+        feather: f32,
+    ) -> Result<ID2D1LinearGradientBrush> {
+        let key = FeatherBrushKey {
+            rgb,
+            feather_bits: feather.to_bits(),
+        };
+        if let Ok(cache) = self.cached_feather_brushes.try_borrow()
+            && let Some((_, brush)) = cache.iter().find(|(k, _)| *k == key)
+        {
+            return Ok(brush.clone());
+        }
+        let brush = linear_gradient(
+            &self.target,
+            Vector2::new(0.0, 0.0),
+            Vector2::new(feather, 0.0),
+            D2D1_COLOR_F {
+                a: 1.0 / 255.0,
+                ..color
+            },
+            color,
+        )?;
+        if let Ok(mut cache) = self.cached_feather_brushes.try_borrow_mut() {
+            if cache.len() >= FEATHER_BRUSH_CACHE_LIMIT {
+                cache.remove(0);
+            }
+            cache.push((key, brush.clone()));
+        }
+        Ok(brush)
+    }
+
+    unsafe fn draw_cover(
+        &self,
+        layout: &WindowControlsLayout,
+        style: &CoverStyle,
+        contrast_fill: Option<D2D1_COLOR_F>,
+    ) -> Result<()> {
+        unsafe {
+            let top = if style.top_border_inset { 1.0 } else { 0.0 };
+            let right_inset = if style.right_border_inset { 1.0 } else { 0.0 };
+            let right = (layout.width as f32 - right_inset).max(1.0);
+            let height = layout.height as f32;
+            if height <= top {
+                return Ok(());
+            }
+            let corner_inset = if style.top_border_inset || style.right_border_inset {
+                1.0
+            } else {
+                0.0
+            };
+            let r = (style.top_right_radius - corner_inset).max(0.0);
+            let path = self.cover_path(
+                CoverPathKey {
+                    width: layout.width,
+                    height: layout.height,
+                    top_border_inset: style.top_border_inset,
+                    right_border_inset: style.right_border_inset,
+                    top_right_radius_bits: style.top_right_radius.to_bits(),
+                },
+                top,
+                right,
+                height,
+                r,
+            )?;
 
             if let Some(color) = contrast_fill {
                 self.cover_brush.SetColor(&raw const color);
@@ -516,13 +610,7 @@ impl WindowControlsRenderer {
                 let rect_top = band.top as f32;
                 let rect_bottom = band.bottom as f32;
                 if feather > 0.0 {
-                    let fade = linear_gradient(
-                        &self.target,
-                        Vector2::new(0.0, rect_top),
-                        Vector2::new(feather, rect_top),
-                        D2D1_COLOR_F { a: 0.0, ..color },
-                        color,
-                    )?;
+                    let fade = self.feather_brush(band.rgb, color, feather)?;
                     let fade_rect = D2D_RECT_F {
                         left: 0.0,
                         top: rect_top,

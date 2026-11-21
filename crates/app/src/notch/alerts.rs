@@ -12,8 +12,27 @@ use super::NotchUpdate;
 impl NotchController {
     pub(super) fn notification_stage(&self, now: Instant) -> Option<NotificationStage> {
         let (notification, stage) = self.notifications.current(self.millis(now))?;
-        if !notification.kind.is_call() && self.has_compact_focus() {
-            return None;
+        let focus_active = self.is_focus_blocking_active() || self.has_compact_focus();
+        if focus_active {
+            let blocked_app = self
+                .focus_blocklist
+                .is_app_blocked(&notification.app_id, &notification.app_name)
+                || self
+                    .focus_blocklist
+                    .blocked_apps
+                    .iter()
+                    .any(|blocked| notification.app_id.to_ascii_lowercase().contains(blocked));
+            if blocked_app {
+                return None;
+            }
+            if notification.kind.is_call() {
+                if self.is_focus_blocking_active() && !self.focus_blocklist.allow_calls_during_focus
+                {
+                    return None;
+                }
+            } else if self.focus_blocklist.block_notifications {
+                return None;
+            }
         }
         Some(match stage {
             NotificationStage::Ringing => NotificationStage::Ringing,

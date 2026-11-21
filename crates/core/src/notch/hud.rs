@@ -132,6 +132,17 @@ pub fn present_hud(kind: NotchHudKind) -> HudPresentation {
             kind,
             battery_percent,
         } => bluetooth_hud(name, kind, battery_percent),
+        NotchHudKind::FocusBlocked { target } => HudPresentation {
+            tone: HudTone::Warning,
+            glyph: HudGlyph::Moon,
+            label: if target.is_empty() {
+                HudLabel::Static("Focus Block")
+            } else {
+                HudLabel::Custom(target)
+            },
+            value: HudValue::Badge("Blocked"),
+            level: None,
+        },
         NotchHudKind::Welcome => HudPresentation {
             tone: HudTone::Positive,
             glyph: HudGlyph::Otto,

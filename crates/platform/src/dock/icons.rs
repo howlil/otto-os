@@ -239,15 +239,18 @@ pub(super) fn normalize_to_macos_squircle(src: &IconBitmap) -> IconBitmap {
             let fx = x as f32 + 0.5;
             let idx = (y * OUT + x) * 4;
 
-            let shadow_d = rounded_box_sdf(fx, fy - 4.0, TILE_MIN + 2.0, TILE_MAX - 2.0, RADIUS);
-            let mut dst = [0.0_f32; 4];
-            if shadow_d < 8.0 {
-                let sa = ((8.0 - shadow_d) / 10.0).clamp(0.0, 1.0).powi(2) * 0.34;
-                dst = [0.0, 0.0, 0.0, sa];
-            }
-
             let d = rounded_box_sdf(fx, fy, TILE_MIN, TILE_MAX, RADIUS);
             let tile_cov = (0.75 - d).clamp(0.0, 1.0);
+
+            let mut dst = [0.0_f32; 4];
+            if is_full_bleed || tile_cov < 1.0 {
+                let shadow_d =
+                    rounded_box_sdf(fx, fy - 4.0, TILE_MIN + 2.0, TILE_MAX - 2.0, RADIUS);
+                if shadow_d < 8.0 {
+                    let sa = ((8.0 - shadow_d) / 10.0).clamp(0.0, 1.0).powi(2) * 0.34;
+                    dst = [0.0, 0.0, 0.0, sa];
+                }
+            }
 
             if tile_cov > 0.0 {
                 let mut px = if is_full_bleed {
@@ -382,12 +385,13 @@ pub(super) fn sample_bilinear(bmp: &IconBitmap, sx: f32, sy: f32) -> [f32; 4] {
 }
 
 pub(super) fn read_px(bmp: &IconBitmap, x: u32, y: u32) -> [f32; 4] {
+    const INV_255: f32 = 1.0 / 255.0;
     let i = ((y * bmp.width + x) * 4) as usize;
     [
-        f32::from(bmp.pixels[i]) / 255.0,
-        f32::from(bmp.pixels[i + 1]) / 255.0,
-        f32::from(bmp.pixels[i + 2]) / 255.0,
-        f32::from(bmp.pixels[i + 3]) / 255.0,
+        f32::from(bmp.pixels[i]) * INV_255,
+        f32::from(bmp.pixels[i + 1]) * INV_255,
+        f32::from(bmp.pixels[i + 2]) * INV_255,
+        f32::from(bmp.pixels[i + 3]) * INV_255,
     ]
 }
 

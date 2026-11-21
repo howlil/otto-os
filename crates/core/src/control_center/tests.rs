@@ -1,5 +1,6 @@
 use crate::bar::menu_bar::BarItem;
 use crate::layout::{Rect, scale};
+use crate::settings::model::*;
 use crate::settings_window::SettingsPage;
 
 use super::actions::*;
@@ -7,7 +8,6 @@ use super::commands::*;
 use super::layout::*;
 use super::layout_types::*;
 use super::model::*;
-use super::settings::*;
 use super::snapshot::*;
 use super::update::*;
 
@@ -36,7 +36,7 @@ fn wifi_list_snapshot() -> ControlCenterSnapshot {
 }
 
 fn main_layout(dpi: u32) -> ControlCenterLayout {
-    compute_control_center_layout(
+    compute_control_center_layout_for_snapshot(
         &ControlCenterMetrics::DEFAULT,
         ControlCenterPlacement {
             bounds: bounds(),
@@ -47,6 +47,7 @@ fn main_layout(dpi: u32) -> ControlCenterLayout {
             item_count: 0,
             scroll_offset: 0,
         },
+        &ControlCenterSnapshot::default(),
     )
 }
 
@@ -281,7 +282,7 @@ fn update_status_reports_newer_matching_unreleased_and_errors() {
 #[test]
 fn focus_targets_respect_page_and_capabilities() {
     let mut snap = ControlCenterSnapshot::default();
-    let layout = compute_control_center_layout(
+    let layout = compute_control_center_layout_for_snapshot(
         &ControlCenterMetrics::DEFAULT,
         ControlCenterPlacement {
             bounds: bounds(),
@@ -292,6 +293,7 @@ fn focus_targets_respect_page_and_capabilities() {
             item_count: 0,
             scroll_offset: 0,
         },
+        &snap,
     );
     let limited = super::control_center_focus_targets(&layout, &snap);
     assert!(!limited.contains(&ControlCenterHitTarget::WifiToggle));
@@ -309,7 +311,7 @@ fn focus_targets_respect_page_and_capabilities() {
     assert!(full.contains(&ControlCenterHitTarget::DisplaySlider));
 
     snap.page = ControlCenterPage::Display;
-    let display_layout = compute_control_center_layout(
+    let display_layout = compute_control_center_layout_for_snapshot(
         &ControlCenterMetrics::DEFAULT,
         ControlCenterPlacement {
             bounds: bounds(),
@@ -320,6 +322,7 @@ fn focus_targets_respect_page_and_capabilities() {
             item_count: 0,
             scroll_offset: 0,
         },
+        &snap,
     );
     let display_targets = super::control_center_focus_targets(&display_layout, &snap);
     assert_eq!(

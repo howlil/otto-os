@@ -2,7 +2,6 @@ use crate::bar::bar_focus::BarKey;
 use crate::notch::media::MediaCommand;
 use crate::ports::ControlCenterAction;
 use crate::settings_window::SettingsPage;
-use crate::theme::ThemeMode;
 
 use super::layout_types::ControlCenterHitTarget;
 use super::model::ControlCenterPage;
@@ -18,8 +17,6 @@ pub enum ControlCenterCommand {
     ToggleBluetooth,
     ToggleBluetoothDevice(String, bool),
     ToggleFocus,
-    CycleTheme,
-    SetThemeMode(ThemeMode),
     SetBrightness(u8),
     SetVolume(u8),
     ToggleMute,

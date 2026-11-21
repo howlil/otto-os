@@ -1,5 +1,6 @@
 use crate::bar::menu_bar::BarItem;
 use crate::notch::hud::compute_hud_geometry;
+use crate::notch::media::NotchExpandedTab;
 use crate::notch::privacy::PRIVACY_COMPACT_EXTRA_POINTS;
 
 use super::compact::CompactNotchGeometry;
@@ -27,6 +28,7 @@ use super::slots::SlotRow;
 use super::slots::estimate_app_slot_points;
 use super::slots::resolve_left_slots;
 use super::slots::resolve_right_slots;
+use super::tasks::TASK_EDITOR_EXTRA_HEIGHT_POINTS;
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -85,11 +87,18 @@ pub fn compute_layout_with_notch(
     let target_expanded_h = match notch_input.notification {
         Some(card) if card.ringing => NOTIFICATION_RING_HEIGHT_POINTS,
         Some(_) => NOTIFICATION_BANNER_HEIGHT_POINTS,
-        None => lerp_points(
-            metrics.notch_expanded_height,
-            metrics.notch_lyrics_height,
-            lyrics_t,
-        ),
+        None => {
+            let base = lerp_points(
+                metrics.notch_expanded_height,
+                metrics.notch_lyrics_height,
+                lyrics_t,
+            );
+            if notch_input.active_tab == NotchExpandedTab::Tasks && notch_input.tasks.editing {
+                base.max(metrics.notch_expanded_height + TASK_EDITOR_EXTRA_HEIGHT_POINTS)
+            } else {
+                base
+            }
+        }
     };
     let notch_pts_w = lerp_points(collapsed_pts, metrics.notch_expanded_width, panel_t);
     let notch_pts_h = lerp_points(compact_height_pts, target_expanded_h, panel_t);
@@ -400,9 +409,12 @@ pub fn compute_layout_with_notch(
             add_button: controls.tasks_add_button,
             clear_button: controls.tasks_clear_button,
             pager_button: controls.tasks_pager_button,
+            editor: controls.tasks_editor,
+            editor_input: controls.tasks_editor_input,
             body: controls.tasks_body,
             rows: controls.tasks_rows,
             check_buttons: controls.tasks_check_buttons,
+            edit_buttons: controls.tasks_edit_buttons,
             remove_buttons: controls.tasks_remove_buttons,
         },
         media: MediaPanelLayout {

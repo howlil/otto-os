@@ -281,18 +281,8 @@ fn lookup_urls(title: &str, artist: &str, duration_ms: u64) -> Vec<String> {
     urls
 }
 
-fn fetch_lyrics_online(
-    title: &str,
-    artist: &str,
-    duration_ms: u64,
-    cancelled: &dyn Fn() -> bool,
-) -> LyricsLookup {
-    if title.trim().is_empty() {
-        return LyricsLookup::NotFound;
-    }
-    let Ok(client) = HttpClient::new() else {
-        return LyricsLookup::Failed;
-    };
+fn create_http_client() -> Option<HttpClient> {
+    let client = HttpClient::new().ok()?;
     if let Ok(headers) = client.DefaultRequestHeaders() {
         let _ = headers.TryAppendWithoutValidation(
             &HSTRING::from("User-Agent"),
@@ -303,10 +293,32 @@ fn fetch_lyrics_online(
             )),
         );
     }
+    Some(client)
+}
+
+fn fetch_lyrics_online_with(
+    client: &mut Option<HttpClient>,
+    title: &str,
+    artist: &str,
+    duration_ms: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> LyricsLookup {
+    if title.trim().is_empty() {
+        return LyricsLookup::NotFound;
+    }
+    if cancelled() {
+        return LyricsLookup::Failed;
+    }
+    if client.is_none() {
+        *client = create_http_client();
+    }
+    let Some(active_client) = client.as_ref() else {
+        return LyricsLookup::Failed;
+    };
     let deadline = Instant::now() + LYRICS_REQUEST_TIMEOUT;
     let mut answered = false;
     for url in lookup_urls(title, artist, duration_ms) {
-        let Some(body) = request_url(&client, &url, deadline, cancelled) else {
+        let Some(body) = request_url(active_client, &url, deadline, cancelled) else {
             continue;
         };
         answered = true;
@@ -324,6 +336,17 @@ fn fetch_lyrics_online(
     }
 }
 
+#[cfg(test)]
+fn fetch_lyrics_online(
+    title: &str,
+    artist: &str,
+    duration_ms: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> LyricsLookup {
+    let mut client = None;
+    fetch_lyrics_online_with(&mut client, title, artist, duration_ms, cancelled)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LyricsSource {
     Cache,
@@ -338,6 +361,7 @@ enum LyricsLookup {
 }
 
 fn lookup_lyrics(
+    client: &mut Option<HttpClient>,
     request: &LyricsRequest,
     online: bool,
     cancelled: &dyn Fn() -> bool,
@@ -353,7 +377,8 @@ fn lookup_lyrics(
     if !online {
         return LyricsLookup::NotFound;
     }
-    let found = fetch_lyrics_online(
+    let found = fetch_lyrics_online_with(
+        client,
         &request.title,
         &request.artist,
         request.duration_ms,
@@ -485,6 +510,7 @@ fn lyrics_worker(
     shared: &LyricsShared,
 ) {
     let com = crate::com::ComGuard::multithreaded();
+    let mut http_client: Option<HttpClient> = None;
     while let Ok(request) = requests.recv() {
         if shared.is_superseded(request.generation) {
             continue;
@@ -492,7 +518,10 @@ fn lyrics_worker(
         let generation = request.generation;
         let cancelled = || shared.is_superseded(generation);
         let online = request.allow_online && com.is_some();
-        let outcome = match lookup_lyrics(&request, online, &cancelled) {
+        if !online {
+            http_client = None;
+        }
+        let outcome = match lookup_lyrics(&mut http_client, &request, online, &cancelled) {
             LyricsLookup::Found { lrc, source } => LyricsOutcome::Found {
                 sheet: parse_lrc(&lrc),
                 source,
@@ -563,8 +592,9 @@ mod tests {
     #[test]
     fn offline_lookup_reports_not_found_without_touching_the_network() {
         let never = || false;
+        let mut client = None;
         assert_eq!(
-            lookup_lyrics(&request(1), false, &never),
+            lookup_lyrics(&mut client, &request(1), false, &never),
             LyricsLookup::NotFound
         );
     }

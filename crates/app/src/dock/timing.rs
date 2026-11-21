@@ -15,6 +15,43 @@ use super::Dock;
 use super::actions::sync_icons;
 
 impl Dock {
+    fn refresh_badges(&mut self, _runtime: &RuntimeContext, force: bool) -> bool {
+        self.badge_poll_tick = self.badge_poll_tick.wrapping_add(1);
+        if !force
+            && !self
+                .badge_poll_tick
+                .is_multiple_of(DOCK_ENTRIES_FALLBACK_TICKS)
+        {
+            return false;
+        }
+        let next_counts = self.port.notification_counts();
+        let next_progress = if self.preferences.show_downloads {
+            self.port.downloads_progress()
+        } else {
+            None
+        };
+        if next_counts != self.notification_counts || next_progress != self.downloads_progress {
+            self.notification_counts = next_counts;
+            self.downloads_progress = next_progress;
+            return true;
+        }
+        false
+    }
+
+    fn sync_focus_badge_suppression(&mut self, runtime: &RuntimeContext) -> bool {
+        let suppressed = runtime.focus_active.get()
+            && runtime
+                .focus_activity
+                .try_borrow()
+                .ok()
+                .is_some_and(|fa| fa.blocklist.block_notifications);
+        if suppressed != self.last_focus_badge_suppressed {
+            self.last_focus_badge_suppressed = suppressed;
+            return true;
+        }
+        false
+    }
+
     pub(super) fn refresh_motion(&mut self) {
         let next_motion = motion_preference();
         if next_motion != self.motion {
@@ -36,20 +73,7 @@ impl Dock {
             self.refresh_cover();
         }
         self.sync_reservation();
-        self.badge_poll_tick = self.badge_poll_tick.wrapping_add(1);
-        if dirty
-            || self
-                .badge_poll_tick
-                .is_multiple_of(DOCK_ENTRIES_FALLBACK_TICKS)
-        {
-            let next_counts = self.port.notification_counts();
-            let next_progress = self.port.downloads_progress();
-            if next_counts != self.notification_counts || next_progress != self.downloads_progress {
-                self.notification_counts = next_counts;
-                self.downloads_progress = next_progress;
-                dirty = true;
-            }
-        }
+        dirty |= self.refresh_badges(runtime, dirty);
 
         let (gx, gy) = cursor_position();
         let (_, win_top) = self.window_origin();
@@ -93,6 +117,9 @@ impl Dock {
             }
         }
 
+        if self.sync_focus_badge_suppression(runtime) {
+            dirty = true;
+        }
         if dirty && !self.anim.timer_running {
             self.present(runtime);
         }
@@ -248,16 +275,18 @@ impl Dock {
 
     pub(super) fn ensure_animating(&mut self) {
         if !self.anim.timer_running {
-            otto_platform::begin_fine_timing();
-            self.anim.timer_running = true;
-            self.anim.last_tick = Instant::now();
-            unsafe {
+            let timer = unsafe {
                 SetTimer(
                     Some(HWND(self.hwnd as *mut _)),
                     DOCK_ANIM_TIMER,
                     self.motion_metrics.animation_tick_ms,
                     None,
-                );
+                )
+            };
+            if timer != 0 {
+                otto_platform::begin_fine_timing();
+                self.anim.timer_running = true;
+                self.anim.last_tick = Instant::now();
             }
         }
     }

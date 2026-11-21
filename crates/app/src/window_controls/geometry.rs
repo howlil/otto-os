@@ -1,13 +1,10 @@
-use std::time::Instant;
-
 use otto_core::{
     COVER_FEATHER_DIP, CoverStyle, NativeCaption, ResolvedTheme, WindowControlsLayout,
-    WindowControlsState, accepts_window_controls, animate_value, compute_cover_layout,
-    cover_is_dark, scale, window_controls_visible_under_bar,
+    WindowControlsState, accepts_window_controls, compute_cover_layout, cover_is_dark, scale,
+    window_controls_visible_under_bar,
 };
 use otto_platform::{
-    ActiveWindowTarget, inspect_window, motion_preference, release_capture_if_owned,
-    sample_caption_strip,
+    ActiveWindowTarget, inspect_window, release_capture_if_owned, sample_caption_strip,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
@@ -78,9 +75,23 @@ impl Overlay {
         {
             return existing.rows.clone();
         }
-        let fallback = match self.appearance.theme {
-            ResolvedTheme::Dark => FALLBACK_DARK_FILL,
-            ResolvedTheme::Light => FALLBACK_LIGHT_FILL,
+        let own_settings = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.identity.process_id == self.own_pid);
+        let fallback = if own_settings {
+            let color =
+                otto_core::settings_background(self.appearance.theme == ResolvedTheme::Dark);
+            [
+                ((color >> 16) & 0xFF) as u8,
+                ((color >> 8) & 0xFF) as u8,
+                (color & 0xFF) as u8,
+            ]
+        } else {
+            match self.appearance.theme {
+                ResolvedTheme::Dark => FALLBACK_DARK_FILL,
+                ResolvedTheme::Light => FALLBACK_LIGHT_FILL,
+            }
         };
         vec![fallback; caption.height.max(1) as usize]
     }
@@ -158,13 +169,6 @@ impl Overlay {
     }
 
     pub(super) fn sync_target(&mut self, target: Option<ActiveWindowTarget>, settle_active: bool) {
-        let now = Instant::now();
-        let dt = now
-            .duration_since(self.last_tick)
-            .as_secs_f32()
-            .clamp(0.001, 0.050);
-        self.last_tick = now;
-        self.motion = motion_preference();
         let Some(target) = target else {
             self.hide();
             return;
@@ -211,21 +215,17 @@ impl Overlay {
         let desired_origin = self.target_origin();
         self.target = Some(target);
         let was_invisible = !self.visible;
-        if was_invisible || window_changed || self.cover.is_some() {
-            if was_invisible || window_changed {
-                self.cancel_green_hover();
-            }
-            self.render_origin = desired_origin;
-            if was_invisible {
-                self.visible = true;
-                unsafe {
-                    let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
-                }
-            }
-        } else {
-            self.follow(desired_origin, dt);
+        if was_invisible || window_changed {
+            self.cancel_green_hover();
         }
         let origin_changed = self.render_origin != desired_origin;
+        self.render_origin = desired_origin;
+        if was_invisible {
+            self.visible = true;
+            unsafe {
+                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
+            }
+        }
         if target_changed {
             self.settle_ticks = 20;
         } else if settle_active {
@@ -234,31 +234,10 @@ impl Overlay {
         if target_changed || origin_changed || was_invisible {
             self.present();
         }
-        if origin_changed || self.settle_ticks > 0 || self.hovered {
+        if self.settle_ticks > 0 || self.hovered {
             self.ensure_anim_timer();
         } else {
             self.stop_anim_timer();
         }
-    }
-
-    pub(super) fn follow(&mut self, desired_origin: (f32, f32), dt: f32) {
-        if self.cover.is_some() {
-            self.render_origin = desired_origin;
-            return;
-        }
-        self.render_origin.0 = animate_value(
-            self.render_origin.0,
-            desired_origin.0,
-            self.motion_metrics.window_controls_follow_rate,
-            dt,
-            self.motion,
-        );
-        self.render_origin.1 = animate_value(
-            self.render_origin.1,
-            desired_origin.1,
-            self.motion_metrics.window_controls_follow_rate,
-            dt,
-            self.motion,
-        );
     }
 }

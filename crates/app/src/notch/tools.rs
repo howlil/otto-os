@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use otto_core::{
     ClipboardPayload, ClipboardState, HitTarget, NotchAction, NotchExpandedTab,
-    SHELF_HOVER_LEAVE_MS, ShelfPayload, ShelfState, ShelfThumbnail,
+    SHELF_HOVER_LEAVE_MS, ShelfPayload, ShelfState, ShelfThumbnail, TaskEditorMode,
 };
 
 use super::CLIPBOARD_COPIED_BADGE_MS;
@@ -284,10 +284,26 @@ impl NotchController {
             effect: changed.then_some(NotchEffect::SaveTasks),
         };
         match target {
-            HitTarget::TasksAdd => NotchUpdate {
-                changed: false,
-                effect: Some(NotchEffect::OpenQuickCapture),
-            },
+            HitTarget::TasksAdd => {
+                if self.tasks.editor == Some(TaskEditorMode::Add) {
+                    let changed = self.cancel_task_editor();
+                    NotchUpdate {
+                        changed,
+                        effect: Some(NotchEffect::CloseTaskEditor {
+                            restore_focus: true,
+                        }),
+                    }
+                } else {
+                    let _ = self.tasks.begin_add();
+                    NotchUpdate {
+                        changed: true,
+                        effect: Some(NotchEffect::OpenTaskEditor {
+                            initial_text: String::new(),
+                            allow_keep_open: true,
+                        }),
+                    }
+                }
+            }
             HitTarget::TasksClearDone => saved(self.tasks.clear_done()),
             HitTarget::TasksPager => NotchUpdate {
                 changed: self.tasks.step_page(1),
@@ -300,6 +316,33 @@ impl NotchController {
             HitTarget::TaskCheck(slot) => {
                 let id = self.tasks.visible_item_at(slot).map(|item| item.id);
                 saved(id.is_some_and(|id| self.tasks.toggle_done(id)))
+            }
+            HitTarget::TaskEdit(slot) => {
+                let Some((id, text)) = self
+                    .tasks
+                    .visible_item_at(slot)
+                    .map(|item| (item.id, item.text.clone()))
+                else {
+                    return NotchUpdate::default();
+                };
+                if self.tasks.editor == Some(TaskEditorMode::Edit(id)) {
+                    let changed = self.cancel_task_editor();
+                    NotchUpdate {
+                        changed,
+                        effect: Some(NotchEffect::CloseTaskEditor {
+                            restore_focus: true,
+                        }),
+                    }
+                } else {
+                    let _ = self.tasks.begin_edit(id);
+                    NotchUpdate {
+                        changed: true,
+                        effect: Some(NotchEffect::OpenTaskEditor {
+                            initial_text: text,
+                            allow_keep_open: false,
+                        }),
+                    }
+                }
             }
             HitTarget::TaskRemove(slot) => {
                 let id = self.tasks.visible_item_at(slot).map(|item| item.id);

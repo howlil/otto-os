@@ -204,7 +204,7 @@ impl Bar {
             return;
         }
         if hotkey_id == otto_platform::HOTKEY_QUICK_CAPTURE {
-            self.open_quick_capture();
+            self.open_inline_task_capture(runtime);
             return;
         }
         self.ensure_anim_timer();

@@ -1,7 +1,6 @@
-use crate::backdrop_feed::BackdropFeed;
 use crate::bar_controls::BarControlsController;
 use crate::host::RuntimeContext;
-use crate::win_msg::{WM_APP_BAR_BACKDROP, WM_APP_BAR_BLUETOOTH_HUD, WM_APP_BAR_CAPTURE};
+use crate::win_msg::{WM_APP_BAR_BLUETOOTH_HUD, WM_APP_BAR_CAPTURE};
 use otto_core::Rect;
 use otto_core::{
     Appearance, BarHideMode, BrandIcon, HitTarget, MenuBarPreferences, Metrics, MotionPreference,
@@ -9,7 +8,8 @@ use otto_core::{
 };
 use otto_platform::{
     QuickCaptureInput, load_tasks, register_bluetooth_hud_target, register_capture_hotkey,
-    unregister_bluetooth_hud_target, unregister_capture_hotkey, watch_top_edge,
+    stop_idle_connectivity_task, unregister_bluetooth_hud_target, unregister_capture_hotkey,
+    watch_top_edge,
 };
 
 use super::is_notch_target;
@@ -44,8 +44,12 @@ pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.io.online_lyrics_enabled = enabled;
         bar.notch
             .set_lyrics_in_compact(enabled && bar.notch.media_enabled());
-        bar.io.forget_lyrics_track();
-        if bar.notch.media_enabled() {
+        if enabled {
+            bar.io.forget_lyrics_track();
+        } else {
+            bar.io.stop_lyrics();
+        }
+        if bar.notch_enabled && bar.notch.media_enabled() {
             bar.request_lyrics_for_current_track();
         }
         bar.recompute_layout();
@@ -56,18 +60,11 @@ pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
 
 pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
-        if enabled {
-            if bar.backdrop.is_none() {
-                bar.backdrop = Some(BackdropFeed::start(
-                    bar.hwnd,
-                    WM_APP_BAR_BACKDROP,
-                    vec![bar.hwnd, bar.panel_hwnd],
-                    runtime.capture_visible.get(),
-                ));
-            }
-        } else {
+        if !enabled {
             bar.backdrop = None;
-            bar.renderer.clear_bar_backdrop();
+            if let Some(renderer) = bar.renderer.as_ref() {
+                renderer.clear_bar_backdrop();
+            }
             bar.present(runtime);
         }
         bar.sync_backdrop(runtime, true);
@@ -81,6 +78,8 @@ pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
         }
         bar.top_bar_enabled = enabled;
         if enabled {
+            bar.ensure_status_timer();
+            let _ = bar.ensure_renderer(runtime);
             bar.appbar
                 .reserve_top(bar.screen.width, bar.screen.height, bar.layout.bar.height);
             let _ = bar.visibility.set_mode(bar.menu_prefs.hide_mode);
@@ -109,6 +108,9 @@ pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
             bar.present(runtime);
         }
         bar.schedule_deadline();
+        if !enabled {
+            bar.release_renderer_if_unused(runtime);
+        }
     });
 }
 
@@ -119,6 +121,8 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
         }
         bar.notch_enabled = enabled;
         if enabled {
+            bar.ensure_status_timer();
+            let _ = bar.ensure_renderer(runtime);
             if bar.notch.shelf_enabled() {
                 bar.ensure_shelf_drop_targets();
             }
@@ -129,29 +133,43 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
                 register_bluetooth_hud_target(bar.hwnd, WM_APP_BAR_BLUETOOTH_HUD);
             }
             if runtime.quick_capture_enabled.get() {
+                bar.notch.replace_tasks(load_tasks());
                 bar.io.enable_quick_capture(bar.hwnd);
                 if runtime.hotkeys_enabled.get() && bar.io.quick_capture.is_some() {
                     register_capture_hotkey(bar.hwnd);
                 }
+                bar.notch.set_tasks_enabled(bar.io.quick_capture.is_some());
             }
             if bar.notch.privacy_enabled() {
                 let _ = bar
                     .notch
                     .sync_privacy_state(bar.notch_port.read_privacy_state());
             }
+            if bar.notch.media_enabled() {
+                let latest_media = bar.notch_port.read_now_playing();
+                let _ = bar.notch.set_media(latest_media);
+                bar.request_lyrics_for_current_track();
+            }
         } else {
             bar.io.release_shelf();
             bar.io.stop_clipboard();
+            bar.io.stop_lyrics();
             unregister_bluetooth_hud_target();
             unregister_capture_hotkey(bar.hwnd);
             bar.io.disable_quick_capture();
             bar.io.seek_drag_hwnd = None;
             bar.touch_swipe = None;
-            bar.notch.collapse_immediately();
+            bar.notch.release_all_resources();
+            if let Some(renderer) = bar.renderer.as_ref() {
+                renderer.release_notch_resources();
+            }
             if bar.hovered.is_some_and(is_notch_target) {
                 bar.hovered = None;
             }
             otto_platform::withdraw_notch_rect(bar.hwnd);
+            if !crate::control_center::is_open(runtime) {
+                stop_idle_connectivity_task();
+            }
         }
         bar.recompute_layout();
         bar.apply_visibility(runtime);
@@ -165,6 +183,9 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
             bar.present(runtime);
         }
         bar.schedule_deadline();
+        if !enabled {
+            bar.release_renderer_if_unused(runtime);
+        }
     });
 }
 
@@ -226,7 +247,9 @@ pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.recompute_layout();
         bar.sync_panel_visibility();
         bar.present(runtime);
-        bar.ensure_anim_timer();
+        if bar.shown() && (enabled || bar.panel_visible || bar.animating) {
+            bar.ensure_anim_timer();
+        }
     });
 }
 
@@ -237,11 +260,16 @@ pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
             bar.ensure_shelf_drop_targets();
         } else {
             bar.io.release_shelf();
+            if let Some(renderer) = bar.renderer.as_ref() {
+                renderer.clear_shelf_caches();
+            }
         }
         bar.recompute_layout();
         bar.sync_panel_visibility();
         bar.present(runtime);
-        bar.ensure_anim_timer();
+        if bar.shown() && (enabled || bar.panel_visible || bar.animating) {
+            bar.ensure_anim_timer();
+        }
     });
 }
 
@@ -282,6 +310,9 @@ pub fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
             register_bluetooth_hud_target(bar.hwnd, WM_APP_BAR_BLUETOOTH_HUD);
         } else {
             unregister_bluetooth_hud_target();
+            if !crate::control_center::is_open(runtime) {
+                stop_idle_connectivity_task();
+            }
         }
         bar.recompute_layout();
         bar.present(runtime);
@@ -294,16 +325,23 @@ pub fn set_media_module_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.notch.set_media_enabled(enabled);
         bar.notch
             .set_lyrics_in_compact(enabled && bar.io.online_lyrics_enabled);
-        bar.io.invalidate_lyrics();
-        if enabled {
+        if enabled && bar.notch_enabled {
+            bar.io.invalidate_lyrics();
             let latest_media = bar.notch_port.read_now_playing();
             let _ = bar.notch.set_media(latest_media);
             bar.request_lyrics_for_current_track();
+        } else {
+            bar.io.stop_lyrics();
+            if let Some(renderer) = bar.renderer.as_ref() {
+                renderer.clear_media_caches();
+            }
         }
         bar.recompute_layout();
         bar.sync_panel_visibility();
         bar.present(runtime);
-        bar.ensure_anim_timer();
+        if bar.shown() && (enabled || bar.panel_visible || bar.animating) {
+            bar.ensure_anim_timer();
+        }
         bar.schedule_deadline();
     });
 }
@@ -315,9 +353,25 @@ pub fn set_focus_module_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.recompute_layout();
         bar.sync_panel_visibility();
         bar.present(runtime);
-        bar.ensure_anim_timer();
+        if bar.shown() && (enabled || bar.panel_visible || bar.animating) {
+            bar.ensure_anim_timer();
+        }
         bar.schedule_deadline();
     });
+}
+
+pub fn sync_focus_blocklist(runtime: &RuntimeContext) {
+    let blocklist = runtime
+        .focus_activity
+        .try_borrow()
+        .ok()
+        .map(|fa| fa.blocklist.clone());
+    if let Some(blocklist) = blocklist {
+        with_bar(runtime, |bar| {
+            bar.notch.set_focus_blocklist(blocklist);
+            bar.present(runtime);
+        });
+    }
 }
 
 pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
@@ -363,7 +417,9 @@ pub fn set_quick_capture_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.recompute_layout();
         bar.sync_panel_visibility();
         bar.present(runtime);
-        bar.ensure_anim_timer();
+        if bar.shown() && (enabled || bar.panel_visible || bar.animating) {
+            bar.ensure_anim_timer();
+        }
     });
 }
 
@@ -379,7 +435,9 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
 
 pub fn set_brand_icon(runtime: &RuntimeContext, brand_icon: BrandIcon) {
     with_bar(runtime, |bar| {
-        bar.renderer.set_brand_icon(brand_icon);
+        if let Some(renderer) = bar.renderer.as_ref() {
+            renderer.set_brand_icon(brand_icon);
+        }
         bar.present(runtime);
     });
 }

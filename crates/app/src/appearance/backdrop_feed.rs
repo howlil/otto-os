@@ -13,6 +13,44 @@ pub(crate) struct BackdropUpdate {
     pub(crate) origin: (i32, i32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureAffinityPolicy {
+    capture_visible: bool,
+    hiding: bool,
+}
+
+impl CaptureAffinityPolicy {
+    fn new(capture_visible: bool) -> (Self, Option<bool>) {
+        let mut policy = Self {
+            capture_visible,
+            hiding: false,
+        };
+        let transition = policy.sync_hiding(!capture_visible);
+        (policy, transition)
+    }
+
+    fn sync_hiding(&mut self, hide: bool) -> Option<bool> {
+        if self.hiding == hide {
+            return None;
+        }
+        self.hiding = hide;
+        Some(hide)
+    }
+
+    fn set_capture_visible(&mut self, visible: bool) -> Option<bool> {
+        self.capture_visible = visible;
+        self.sync_hiding(!visible)
+    }
+
+    const fn allows_live_capture(self) -> bool {
+        !self.capture_visible
+    }
+
+    fn release(&mut self) -> Option<bool> {
+        self.sync_hiding(false)
+    }
+}
+
 pub(crate) struct BackdropFeed {
     worker: BackdropWorker,
     gate: CaptureGate,
@@ -20,8 +58,7 @@ pub(crate) struct BackdropFeed {
     next_id: u64,
     last_change_ms: Option<u64>,
     hidden_windows: Vec<isize>,
-    hiding: bool,
-    capture_visible: bool,
+    policy: CaptureAffinityPolicy,
 }
 
 impl BackdropFeed {
@@ -39,23 +76,23 @@ impl BackdropFeed {
                 LPARAM(0),
             );
         });
-        Self {
+        let (policy, initial_hide) = CaptureAffinityPolicy::new(capture_visible);
+        let feed = Self {
             worker,
             gate: CaptureGate::new(),
             epoch: Instant::now(),
             next_id: 0,
             last_change_ms: None,
             hidden_windows,
-            hiding: false,
-            capture_visible,
+            policy,
+        };
+        if let Some(hide) = initial_hide {
+            feed.apply_affinity(hide);
         }
+        feed
     }
 
-    fn set_hiding(&mut self, hide: bool) {
-        if self.hiding == hide {
-            return;
-        }
-        self.hiding = hide;
+    fn apply_affinity(&self, hide: bool) {
         for hwnd in &self.hidden_windows {
             let _ = if hide {
                 otto_platform::exclude_from_capture(*hwnd)
@@ -70,10 +107,11 @@ impl BackdropFeed {
     }
 
     pub(crate) fn set_capture_visible(&mut self, visible: bool) {
-        self.capture_visible = visible;
-        if !visible && self.gate.is_active() {
-            self.set_hiding(true);
+        if let Some(hide) = self.policy.set_capture_visible(visible) {
+            self.apply_affinity(hide);
         }
+        self.gate.reset();
+        self.last_change_ms = None;
     }
 
     pub(crate) fn recently_changed(&self) -> bool {
@@ -83,11 +121,16 @@ impl BackdropFeed {
     }
 
     pub(crate) fn request(&mut self, region: CaptureRegion, interval_ms: u32, force: bool) {
+        if !self.policy.allows_live_capture() {
+            return;
+        }
         let now_ms = self.epoch.elapsed().as_millis() as u64;
         if !self.gate.should_request(region, now_ms, interval_ms, force) {
             return;
         }
-        self.set_hiding(true);
+        if let Some(hide) = self.policy.sync_hiding(true) {
+            self.apply_affinity(hide);
+        }
         self.next_id += 1;
         self.worker.request(BackdropRequest {
             id: self.next_id,
@@ -98,11 +141,10 @@ impl BackdropFeed {
     }
 
     pub(crate) fn poll(&mut self) -> Option<BackdropUpdate> {
-        let frame = self.worker.take_frame();
-        if self.capture_visible && !self.worker.is_capturing() {
-            self.set_hiding(false);
+        let frame = self.worker.take_frame()?;
+        if !self.policy.allows_live_capture() {
+            return None;
         }
-        let frame = frame?;
         let width = u32::try_from(frame.pixels.width()).ok()?;
         let height = u32::try_from(frame.pixels.height()).ok()?;
         let accepted = self
@@ -120,12 +162,41 @@ impl BackdropFeed {
     pub(crate) fn reset(&mut self) {
         self.gate.reset();
         self.last_change_ms = None;
-        self.set_hiding(false);
     }
 }
 
 impl Drop for BackdropFeed {
     fn drop(&mut self) {
-        self.set_hiding(false);
+        if let Some(hide) = self.policy.release() {
+            self.apply_affinity(hide);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CaptureAffinityPolicy;
+
+    #[test]
+    fn capture_visible_never_excludes_and_blocks_live_capture() {
+        let (mut policy, initial) = CaptureAffinityPolicy::new(true);
+        assert_eq!(initial, None);
+        assert!(!policy.allows_live_capture());
+        assert_eq!(policy.set_capture_visible(true), None);
+        assert_eq!(policy.release(), None);
+    }
+
+    #[test]
+    fn capture_hidden_excludes_immediately_and_stays_steady_until_toggle_or_drop() {
+        let (mut policy, initial) = CaptureAffinityPolicy::new(false);
+        assert_eq!(initial, Some(true));
+        assert!(policy.allows_live_capture());
+        assert_eq!(policy.sync_hiding(true), None);
+        assert_eq!(policy.set_capture_visible(true), Some(false));
+        assert!(!policy.allows_live_capture());
+        assert_eq!(policy.set_capture_visible(false), Some(true));
+        assert!(policy.allows_live_capture());
+        assert_eq!(policy.release(), Some(false));
+        assert_eq!(policy.release(), None);
     }
 }

@@ -93,6 +93,13 @@ impl Layout {
                     | HitTarget::ClipboardRemoveItem(_) => {
                         self.active_tab == NotchExpandedTab::Clipboard
                     }
+                    HitTarget::TasksPager
+                    | HitTarget::TasksAdd
+                    | HitTarget::TasksClearDone
+                    | HitTarget::TaskCheck(_)
+                    | HitTarget::TaskItem(_)
+                    | HitTarget::TaskEdit(_)
+                    | HitTarget::TaskRemove(_) => self.active_tab == NotchExpandedTab::Tasks,
                     _ => showing_media,
                 }),
         );
@@ -100,7 +107,7 @@ impl Layout {
     }
 }
 
-const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 54] = [
+const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 73] = [
     HitTarget::NotchTabPomodoro,
     HitTarget::NotchTabShelf,
     HitTarget::NotchTabClipboard,
@@ -150,6 +157,25 @@ const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 54] = [
     HitTarget::ClipboardRemoveItem(2),
     HitTarget::ClipboardItem(3),
     HitTarget::ClipboardRemoveItem(3),
+    HitTarget::TasksPager,
+    HitTarget::TasksAdd,
+    HitTarget::TasksClearDone,
+    HitTarget::TaskCheck(0),
+    HitTarget::TaskItem(0),
+    HitTarget::TaskEdit(0),
+    HitTarget::TaskRemove(0),
+    HitTarget::TaskCheck(1),
+    HitTarget::TaskItem(1),
+    HitTarget::TaskEdit(1),
+    HitTarget::TaskRemove(1),
+    HitTarget::TaskCheck(2),
+    HitTarget::TaskItem(2),
+    HitTarget::TaskEdit(2),
+    HitTarget::TaskRemove(2),
+    HitTarget::TaskCheck(3),
+    HitTarget::TaskItem(3),
+    HitTarget::TaskEdit(3),
+    HitTarget::TaskRemove(3),
     HitTarget::MediaLyricsToggle,
     HitTarget::MediaPrevious,
     HitTarget::MediaPlayPause,
@@ -755,5 +781,37 @@ mod tests {
         assert!(shelf_targets.contains(&HitTarget::ShelfCopyItem(1)));
         assert!(shelf_targets.contains(&HitTarget::ShelfRemoveItem(1)));
         assert!(!shelf_targets.contains(&HitTarget::ShelfItem(2)));
+    }
+
+    #[test]
+    fn tasks_keyboard_order_includes_edit_and_row_controls() {
+        let layout = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                active_tab: NotchExpandedTab::Tasks,
+                tasks: crate::TasksLayoutInput {
+                    visible_count: 2,
+                    has_pager: true,
+                    has_items: true,
+                    has_done: true,
+                    editing: false,
+                },
+                ..NotchLayoutInput::default()
+            },
+        );
+        let targets = layout.keyboard_targets_with_media(false);
+        assert!(targets.contains(&HitTarget::TasksPager));
+        assert!(targets.contains(&HitTarget::TasksAdd));
+        assert!(targets.contains(&HitTarget::TasksClearDone));
+        assert!(targets.contains(&HitTarget::TaskCheck(0)));
+        assert!(targets.contains(&HitTarget::TaskItem(0)));
+        assert!(targets.contains(&HitTarget::TaskEdit(0)));
+        assert!(targets.contains(&HitTarget::TaskRemove(0)));
+        assert!(targets.contains(&HitTarget::TaskEdit(1)));
+        assert!(!targets.contains(&HitTarget::TaskEdit(2)));
     }
 }

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
     SetWindowPos, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_SYSMENU,
+    WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::BOOL;
 
@@ -58,10 +58,17 @@ struct ScreenCaptionBounds {
 }
 
 fn screen_caption_bounds(frame: RECT, window: RECT, buttons: RECT) -> ScreenCaptionBounds {
+    let buttons_top = (window.top + buttons.top).max(frame.top);
+    let buttons_height = (buttons.bottom - buttons.top).max(0);
+    let height = if buttons_height > 0 {
+        (buttons_top - frame.top) + buttons_height
+    } else {
+        0
+    };
     ScreenCaptionBounds {
         frame_right: frame.right,
-        top: (window.top + buttons.top).max(frame.top),
-        height: buttons.bottom - buttons.top,
+        top: frame.top,
+        height,
         measured_width: buttons.right - buttons.left,
     }
 }
@@ -72,6 +79,30 @@ pub(crate) fn caption_style(style: u32) -> NativeCaptionStyle {
         has_system_menu: style & WS_SYSMENU.0 != 0,
         can_minimize: style & WS_MINIMIZEBOX.0 != 0,
         can_maximize: style & WS_MAXIMIZEBOX.0 != 0,
+    }
+}
+
+pub(crate) fn effective_caption_style(
+    raw_style: u32,
+    has_dwm_buttons: bool,
+    full_screen: bool,
+) -> NativeCaptionStyle {
+    let base = caption_style(raw_style);
+    if full_screen {
+        return base;
+    }
+    let custom_chrome = !base.has_caption
+        && (has_dwm_buttons
+            || raw_style & (WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0)
+                != 0);
+    let custom_resizable = custom_chrome && (raw_style & WS_THICKFRAME.0 != 0);
+    NativeCaptionStyle {
+        has_caption: base.has_caption || custom_chrome,
+        has_system_menu: base.has_system_menu
+            || custom_chrome
+            || (base.has_caption && has_dwm_buttons),
+        can_minimize: base.can_minimize || custom_resizable,
+        can_maximize: base.can_maximize || custom_resizable,
     }
 }
 
@@ -111,12 +142,18 @@ fn caption_dpi(window: HWND) -> u32 {
     }
 }
 
-#[must_use]
-pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
-    let style = caption_style(unsafe { GetWindowLongW(window, GWL_STYLE) } as u32);
-    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+pub(crate) fn has_dwm_caption_buttons(window: HWND) -> bool {
+    dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)
+        .is_some_and(|buttons| buttons.right > buttons.left && buttons.bottom > buttons.top)
+}
+
+fn native_caption_with_buttons(
+    window: HWND,
+    style: NativeCaptionStyle,
+    frame: RECT,
+    buttons: RECT,
+) -> Option<NativeCaption> {
     let window_rect = window_screen_rect(window)?;
-    let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)?;
     let bounds = screen_caption_bounds(frame, window_rect, buttons);
     if bounds.measured_width <= 0 || bounds.height <= 0 {
         return None;
@@ -134,17 +171,33 @@ pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
     .map(|caption| {
         caption
             .measured(bounds.measured_width)
-            .with_top_border_inset(top_border_inset_for(rounded_top_right, buttons.top))
+            .with_top_border_inset(top_border_inset_for(rounded_top_right))
     })
 }
 
-const fn top_border_inset_for(rounded_top_right: bool, buttons_top: i32) -> bool {
-    rounded_top_right && buttons_top <= 0
+#[must_use]
+pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
+    let raw_style = unsafe { GetWindowLongW(window, GWL_STYLE) } as u32;
+    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+    let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)
+        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)?;
+    let zoomed = unsafe { IsZoomed(window) }.as_bool();
+    let full_screen = !zoomed
+        && (raw_style & WS_CAPTION.0 != WS_CAPTION.0)
+        && crate::window::model::covers_monitor(window);
+    let style = effective_caption_style(raw_style, true, full_screen);
+    native_caption_with_buttons(window, style, frame, buttons)
 }
 
-fn standard_caption_of(window: HWND) -> Option<NativeCaption> {
-    let style = caption_style(unsafe { GetWindowLongW(window, GWL_STYLE) } as u32);
-    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+const fn top_border_inset_for(rounded_top_right: bool) -> bool {
+    rounded_top_right
+}
+
+fn standard_caption_of_with_frame(
+    window: HWND,
+    style: NativeCaptionStyle,
+    frame: RECT,
+) -> Option<NativeCaption> {
     let maximized = unsafe { IsZoomed(window) }.as_bool();
     NativeCaption::standard(
         style,
@@ -156,8 +209,28 @@ fn standard_caption_of(window: HWND) -> Option<NativeCaption> {
 }
 
 #[must_use]
+pub(crate) fn covering_caption_of_with_frame(
+    window: HWND,
+    raw_style: u32,
+    frame: RECT,
+) -> Option<NativeCaption> {
+    let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)
+        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top);
+    let zoomed = unsafe { IsZoomed(window) }.as_bool();
+    let full_screen = !zoomed
+        && (raw_style & WS_CAPTION.0 != WS_CAPTION.0)
+        && crate::window::model::covers_monitor(window);
+    let style = effective_caption_style(raw_style, buttons.is_some(), full_screen);
+    buttons
+        .and_then(|buttons| native_caption_with_buttons(window, style, frame, buttons))
+        .or_else(|| standard_caption_of_with_frame(window, style, frame))
+}
+
+#[must_use]
 pub(crate) fn covering_caption_of(window: HWND) -> Option<NativeCaption> {
-    native_caption_of(window).or_else(|| standard_caption_of(window))
+    let raw_style = unsafe { GetWindowLongW(window, GWL_STYLE) } as u32;
+    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
+    covering_caption_of_with_frame(window, raw_style, frame)
 }
 
 #[must_use]
@@ -179,7 +252,7 @@ pub fn window_corner_radius_px(window_hwnd: isize) -> f32 {
 }
 
 #[must_use]
-pub fn sample_screen_color(x: i32, y: i32) -> Option<[u8; 3]> {
+fn sample_screen_color(x: i32, y: i32) -> Option<[u8; 3]> {
     unsafe {
         let screen = GetDC(None);
         if screen.is_invalid() {
@@ -221,8 +294,7 @@ pub fn sample_caption_strip(
     };
     let top_skip = (rect.y - caption.top).max(0) as usize;
     if copied.is_ok()
-        && let Some(rows) =
-            extract_cover_rows(&canvas.copy_pixels(), width as usize, height as usize)
+        && let Some(rows) = extract_cover_rows(canvas.as_bytes(), width as usize, height as usize)
     {
         return Some(pad_skipped_top_rows(rows, top_skip));
     }
@@ -579,11 +651,20 @@ mod tests {
     }
 
     #[test]
-    fn top_border_inset_is_cleared_when_caption_buttons_are_already_offset() {
-        assert!(top_border_inset_for(true, 0));
-        assert!(top_border_inset_for(true, -1));
-        assert!(!top_border_inset_for(true, 2));
-        assert!(!top_border_inset_for(false, 0));
+    fn top_border_inset_follows_rounded_top_right() {
+        assert!(top_border_inset_for(true));
+        assert!(!top_border_inset_for(false));
+    }
+
+    #[test]
+    fn effective_caption_style_enables_custom_chrome_until_fullscreen() {
+        use super::{WS_THICKFRAME, effective_caption_style};
+        let custom = effective_caption_style(WS_THICKFRAME.0, true, false);
+        assert!(custom.has_caption && custom.has_system_menu);
+        assert!(custom.can_minimize && custom.can_maximize);
+
+        let fullscreen = effective_caption_style(WS_THICKFRAME.0, true, true);
+        assert!(!fullscreen.has_caption);
     }
 
     #[test]
@@ -611,8 +692,8 @@ mod tests {
             bounds,
             ScreenCaptionBounds {
                 frame_right: 900,
-                top: 112,
-                height: 36,
+                top: 108,
+                height: 40,
                 measured_width: 144,
             }
         );

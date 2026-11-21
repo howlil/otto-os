@@ -325,7 +325,7 @@ impl NotchController {
         self.lyrics = sheet.filter(|found| !found.is_empty());
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_lyrics(&mut self, lyrics: Option<otto_core::LyricsSheet>) {
         self.lyrics_status = if lyrics.is_some() {
             LyricsStatus::Ready
@@ -335,12 +335,11 @@ impl NotchController {
         self.lyrics = lyrics;
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn lyrics_expanded(&self) -> bool {
         self.lyrics_expanded
     }
 
-    #[allow(dead_code)]
     pub(crate) fn toggle_lyrics(&mut self) -> NotchUpdate {
         self.lyrics_expanded = !self.lyrics_expanded;
         NotchUpdate {

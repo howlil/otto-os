@@ -7,8 +7,9 @@ use otto_core::{
 use otto_platform::MenuNavEvent;
 
 use crate::host::RuntimeContext;
+use crate::settings::toggle_setting;
 
-use super::{ControlCenterSurface, PostClickAction, poll_dismiss_action, toggle_setting};
+use super::{ControlCenterSurface, PostClickAction, poll_dismiss_action};
 
 #[derive(Default)]
 struct MockControlCenterState {
@@ -145,7 +146,6 @@ fn keyboard_navigation_steps_sliders_scrolls_list_and_clears_on_pointer_hover() 
 #[test]
 fn module_toggles_queue_expected_runtime_updates() {
     let runtime = RuntimeContext::new(false);
-    runtime.liquid_glass_pref.set(true);
     runtime.glass_enabled.set(false);
     let mut surface = ControlCenterSurface::new(0);
     surface.port = Box::new(MockControlCenterPort(Arc::new(Mutex::new(
@@ -154,11 +154,9 @@ fn module_toggles_queue_expected_runtime_updates() {
     surface.snapshot.page = ControlCenterPage::Main;
     surface.visible = true;
     surface.sync_snapshot(&runtime);
-    assert!(surface.snapshot.settings.system.liquid_glass);
     surface.relayout();
     *runtime.control_center.borrow_mut() = Some(surface);
 
-    toggle_setting(&runtime, OttoSettingKind::LiquidGlass);
     toggle_setting(&runtime, OttoSettingKind::Notch);
     toggle_setting(&runtime, OttoSettingKind::Dock);
     toggle_setting(&runtime, OttoSettingKind::Genie);
@@ -171,7 +169,6 @@ fn module_toggles_queue_expected_runtime_updates() {
     toggle_setting(&runtime, OttoSettingKind::QuickCapture);
     toggle_setting(&runtime, OttoSettingKind::DockHideTaskbar);
 
-    assert_eq!(runtime.pending_liquid_glass.take(), Some(false));
     assert_eq!(runtime.pending_notch_enabled.take(), Some(false));
     assert_eq!(
         runtime.take_plugin_toggles(),
@@ -236,4 +233,28 @@ fn press_capture_cancels_on_slide_out_and_triggers_on_release_inside() {
         ) => {}
         _ => panic!("expected power settings when released inside"),
     }
+}
+
+#[test]
+fn hide_clears_cached_snapshot_and_notch_off_suppresses_media() {
+    let runtime = RuntimeContext::new(false);
+    let mut surface = ControlCenterSurface::new(0);
+    surface.port = Box::new(MockControlCenterPort(Arc::new(Mutex::new(
+        MockControlCenterState::default(),
+    ))));
+    surface.visible = true;
+    surface.snapshot.media = Some(NowPlaying {
+        title: String::from("Track"),
+        artist: String::from("Artist"),
+        playing: true,
+        ..NowPlaying::default()
+    });
+    surface.hide();
+    assert!(surface.snapshot.media.is_none());
+    assert!(surface.snapshot.audio_outputs.is_empty());
+
+    runtime.notch_enabled.set(false);
+    runtime.media_module_enabled.set(true);
+    surface.sync_snapshot(&runtime);
+    assert!(surface.snapshot.media.is_none());
 }

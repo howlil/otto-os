@@ -12,9 +12,13 @@ use crate::host::{RuntimeContext, module_status};
 mod actions;
 mod input;
 mod lifecycle;
+mod state;
 
 pub(crate) use self::input::handle_message;
-pub(crate) use self::lifecycle::{open, repaint, take_hwnd, toggle};
+pub(crate) use self::lifecycle::{open, repaint, repaint_if_focus_page, take_hwnd, toggle};
+pub(crate) use self::state::settings_snapshot;
+#[cfg(test)]
+pub(crate) use self::state::toggle_setting;
 
 pub(crate) struct SettingsWindow {
     pub(super) hwnd: isize,
@@ -96,7 +100,7 @@ fn modules_for(
     runtime: &RuntimeContext,
     launch_at_login: bool,
 ) -> (Vec<ModuleRow>, OttoSettingsSnapshot) {
-    let snapshot = crate::control_center::settings_snapshot(runtime, launch_at_login);
+    let snapshot = settings_snapshot(runtime, launch_at_login);
     let modules = resolve_modules(&snapshot, module_status);
     (modules, snapshot)
 }

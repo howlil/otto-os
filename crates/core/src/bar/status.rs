@@ -300,6 +300,9 @@ pub enum NotchHudKind {
         kind: crate::BluetoothDeviceKind,
         battery_percent: Option<u8>,
     },
+    FocusBlocked {
+        target: HudDeviceLabel,
+    },
     Welcome,
 }
 
@@ -336,6 +339,7 @@ impl NotchHudKind {
                 battery_percent: None,
                 ..
             }
+            | Self::FocusBlocked { .. }
             | Self::Welcome => 1.0,
         }
     }

@@ -58,6 +58,10 @@ impl SettingsRenderer {
                 );
                 self.fill_round_f(rect_f(px(3.2), py(1.2), u * 3.6, u * 2.2), u * 1.0, WHITE);
             }
+            SettingsPage::Focus => {
+                self.fill_circle(px(4.8), py(5.2), u * 3.9, WHITE);
+                self.fill_circle(px(6.7), py(3.9), u * 3.1, tint(page));
+            }
             SettingsPage::Dock => {
                 self.stroke_round_f(
                     rect_f(px(0.4), py(1.2), u * 9.2, u * 7.6),

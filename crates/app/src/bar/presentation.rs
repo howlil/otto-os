@@ -2,10 +2,11 @@ use std::time::Instant;
 
 use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
+use crate::win_msg::WM_APP_BAR_BACKDROP;
 use otto_core::{BACKDROP_PADDING_PT, CaptureRegion, Rect, capture_interval_for, capture_wanted};
 use otto_core::{BarPointer, HitTarget, Metrics, compute_layout_with_notch, scale};
 use otto_platform::is_running_on_battery;
-use otto_platform::{cursor_position, primary_screen, window_bounds};
+use otto_platform::{cursor_position, primary_screen, watch_top_edge, window_bounds};
 use otto_render::Renderer;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -16,9 +17,53 @@ use super::Bar;
 use super::max_panel_surface_size;
 
 impl Bar {
+    pub(super) fn ensure_renderer(&mut self, runtime: &RuntimeContext) -> bool {
+        if self.renderer.is_some() {
+            return true;
+        }
+        if !self.top_bar_enabled && !self.notch_enabled {
+            return false;
+        }
+        let (max_panel_w, max_panel_h) = max_panel_surface_size(self.screen.dpi);
+        if let Ok(renderer) = Renderer::new(
+            self.layout.bar.width,
+            self.layout.bar.height,
+            max_panel_w,
+            max_panel_h,
+            self.screen.dpi,
+            0.0,
+        ) {
+            renderer.set_brand_icon(runtime.brand_icon());
+            self.renderer = Some(renderer);
+        }
+        self.renderer.is_some()
+    }
+
+    pub(super) fn release_renderer_if_unused(&mut self, runtime: &RuntimeContext) {
+        if self.top_bar_enabled || self.notch_enabled {
+            return;
+        }
+        self.stop_anim_timer();
+        self.stop_status_timer();
+        watch_top_edge(false, self.screen.width, self.screen.height);
+        self.backdrop = None;
+        self.io.stop_lyrics();
+        self.renderer = None;
+        self.panel_visible = false;
+        self.last_panel_rect = None;
+        unsafe {
+            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
+            let _ = ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE);
+        }
+        if !crate::control_center::is_open(runtime) {
+            otto_platform::stop_idle_audio_task();
+            otto_platform::stop_idle_connectivity_task();
+        }
+    }
+
     pub(super) fn recompute_layout(&mut self) {
-        let renderer = &self.renderer;
         if self.notch_enabled
+            && let Some(renderer) = self.renderer.as_ref()
             && self.notch.sync_compact_title_width(
                 Instant::now(),
                 crate::notch::unix_now_ms(),
@@ -123,6 +168,8 @@ impl Bar {
             return;
         }
         self.schedule_deadline();
+        self.notch.cancel_task_editor();
+        self.io.hide_quick_capture(false);
         crate::menu::close(runtime);
         unsafe {
             let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
@@ -180,10 +227,17 @@ impl Bar {
                 self.last_panel_rect = Some(self.layout.panel_window);
             }
             self.panel_visible = true;
+            self.sync_quick_capture_overlay();
         } else if self.panel_visible {
+            self.io.hide_quick_capture(false);
             let _ = unsafe { ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE) };
             self.panel_visible = false;
             self.last_panel_rect = None;
+            if let Some(renderer) = self.renderer.as_ref() {
+                renderer.release_panel_surface();
+            }
+        } else if self.io.is_quick_capture_visible() {
+            self.io.hide_quick_capture(false);
         }
     }
 
@@ -193,23 +247,35 @@ impl Bar {
 
     pub(super) fn rebuild_with_metrics(&mut self, runtime: &RuntimeContext, metrics: Metrics) {
         self.last_panel_rect = None;
+        let previous_screen = self.screen;
+        let carried_backdrop = self.renderer.as_ref().and_then(Renderer::take_bar_backdrop);
         self.screen = primary_screen();
         self.metrics = metrics;
         self.recompute_layout();
-        let (max_panel_w, max_panel_h) = max_panel_surface_size(self.screen.dpi);
-        if let Ok(renderer) = Renderer::new(
-            self.layout.bar.width,
-            self.layout.bar.height,
-            max_panel_w,
-            max_panel_h,
-            self.screen.dpi,
-            0.0,
-        ) {
-            renderer.set_brand_icon(runtime.brand_icon());
-            self.renderer = renderer;
-            if let Some(feed) = self.backdrop.as_mut() {
-                feed.reset();
+        if self.top_bar_enabled || self.notch_enabled {
+            let (max_panel_w, max_panel_h) = max_panel_surface_size(self.screen.dpi);
+            if let Ok(renderer) = Renderer::new(
+                self.layout.bar.width,
+                self.layout.bar.height,
+                max_panel_w,
+                max_panel_h,
+                self.screen.dpi,
+                0.0,
+            ) {
+                renderer.set_brand_icon(runtime.brand_icon());
+                if self.screen.width == previous_screen.width
+                    && self.screen.height == previous_screen.height
+                    && let Some((pixels, origin)) = carried_backdrop
+                {
+                    renderer.set_bar_backdrop(pixels, origin);
+                }
+                self.renderer = Some(renderer);
+                if let Some(feed) = self.backdrop.as_mut() {
+                    feed.reset();
+                }
             }
+        } else {
+            self.renderer = None;
         }
         self.appbar.rebase(self.screen.width, self.screen.height);
         if self.top_bar_enabled {
@@ -222,22 +288,27 @@ impl Bar {
         self.sync_backdrop(runtime, true);
         self.place();
         self.present(runtime);
-        self.ensure_anim_timer();
+        if self.top_bar_enabled || self.notch_enabled {
+            self.ensure_anim_timer();
+        }
     }
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted = capture_wanted(&appearance, self.backdrop.is_some())
+        let wanted = capture_wanted(&appearance, runtime.glass_enabled.get())
             && self.top_bar_enabled
             && self.menu_prefs.show_background;
         let visible = self.top_bar_chrome_visible();
-        let Some(feed) = self.backdrop.as_mut() else {
-            return;
-        };
         if !wanted {
-            if feed.is_active() {
-                feed.reset();
-                self.renderer.clear_bar_backdrop();
+            let had_feed = self.backdrop.take().is_some();
+            let had_backdrop = self
+                .renderer
+                .as_ref()
+                .is_some_and(Renderer::has_bar_backdrop);
+            if let Some(renderer) = self.renderer.as_ref() {
+                renderer.clear_bar_backdrop();
+            }
+            if (had_feed || had_backdrop) && self.shown() {
                 self.present(runtime);
             }
             return;
@@ -245,6 +316,17 @@ impl Bar {
         if !visible {
             return;
         }
+        if self.backdrop.is_none() {
+            self.backdrop = Some(BackdropFeed::start(
+                self.hwnd,
+                WM_APP_BAR_BACKDROP,
+                vec![self.hwnd, self.panel_hwnd],
+                runtime.capture_visible.get(),
+            ));
+        }
+        let Some(feed) = self.backdrop.as_mut() else {
+            return;
+        };
         let bar_rect = Rect {
             x: 0,
             y: 0,
@@ -257,11 +339,15 @@ impl Bar {
         else {
             return;
         };
-        if !self.renderer.has_bar_backdrop()
+        let can_prime_now =
+            !runtime.capture_visible.get() || !otto_platform::is_surface_visible(self.hwnd);
+        if can_prime_now
+            && let Some(renderer) = self.renderer.as_ref()
+            && !renderer.has_bar_backdrop()
             && let Some(pixels) =
                 otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
         {
-            self.renderer.set_bar_backdrop(pixels, region.origin());
+            renderer.set_bar_backdrop(pixels, region.origin());
         }
         let active = (self.panel_visible || self.hovered.is_some()) && feed.recently_changed();
         let interval = capture_interval_for(is_running_on_battery(), active);
@@ -272,15 +358,17 @@ impl Bar {
         let Some(update) = self.backdrop.as_mut().and_then(BackdropFeed::poll) else {
             return;
         };
-        self.renderer.set_bar_backdrop(update.pixels, update.origin);
-        self.present(runtime);
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.set_bar_backdrop(update.pixels, update.origin);
+            self.present(runtime);
+        }
     }
 
     pub(super) fn present(&mut self, runtime: &RuntimeContext) {
         runtime
             .focus_active
             .set(self.notch_enabled && self.notch.focus_active());
-        if !self.shown() {
+        if !self.shown() || !self.ensure_renderer(runtime) {
             return;
         }
         let hovered = self
@@ -290,10 +378,6 @@ impl Bar {
                 crate::menu::is_notification_open(runtime).then_some(HitTarget::Notifications)
             })
             .or_else(|| crate::menu::is_calendar_open(runtime).then_some(HitTarget::Clock));
-        self.renderer
-            .set_bar_background(self.top_bar_enabled && self.menu_prefs.show_background);
-        self.renderer
-            .set_bar_chrome_hidden(!self.top_bar_chrome_visible());
         let appearance = crate::theme_state::appearance(runtime);
         let media = self
             .notch
@@ -301,9 +385,18 @@ impl Bar {
         let status = self.controls.status();
         let pomodoro = self.notch.pomodoro_scene(Instant::now());
         let privacy = self.notch.privacy_state();
+        let call = self.notch.call_scene(Instant::now());
+        let notification = self.notch.notification_presentation(Instant::now());
+        let show_bg = self.top_bar_enabled && self.menu_prefs.show_background;
+        let hide_chrome = !self.top_bar_chrome_visible();
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        renderer.set_bar_background(show_bg);
+        renderer.set_bar_chrome_hidden(hide_chrome);
         crate::host::log_present_error(
             "bar",
-            self.renderer.present(
+            renderer.present(
                 self.hwnd,
                 (0, 0),
                 &self.layout,
@@ -317,13 +410,13 @@ impl Bar {
                 self.notch.anim_phase(),
                 appearance,
                 privacy,
-                self.notch.call_scene(Instant::now()).as_ref(),
+                call.as_ref(),
             ),
         );
         if self.panel_visible {
             crate::host::log_present_error(
                 "bar-panel",
-                self.renderer.present_panel(
+                renderer.present_panel(
                     self.panel_hwnd,
                     &self.layout,
                     hovered,
@@ -336,9 +429,7 @@ impl Bar {
                     self.notch.clipboard_state(),
                     self.notch.tasks_state(),
                     privacy,
-                    self.notch
-                        .notification_presentation(Instant::now())
-                        .as_ref(),
+                    notification.as_ref(),
                 ),
             );
         }

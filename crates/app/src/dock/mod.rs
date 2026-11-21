@@ -117,14 +117,19 @@ pub(crate) struct Dock {
     notification_counts: HashMap<String, u32>,
     downloads_progress: Option<f32>,
     badge_poll_tick: u32,
+    last_focus_badge_suppressed: bool,
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
-    resume_recycle_bin_task();
+    let preferences = runtime.dock_preferences.get();
+    if preferences.show_trash {
+        resume_recycle_bin_task();
+    } else {
+        shutdown_recycle_bin_task();
+    }
     enable_drag_accept_files(hwnd);
     let own_pid = current_process_id();
     let screen = primary_screen();
-    let preferences = runtime.dock_preferences.get();
     let metrics = preferences.metrics();
     let motion = motion_preference();
     let motion_metrics = MotionMetrics::default();
@@ -190,8 +195,12 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         backdrop_gate: ChangeGate::new(DOCK_BACKDROP_FALLBACK_TICKS),
         port: WindowsDockPort,
         notification_counts: WindowsDockPort.notification_counts(),
-        downloads_progress: WindowsDockPort.downloads_progress(),
+        downloads_progress: preferences
+            .show_downloads
+            .then(|| WindowsDockPort.downloads_progress())
+            .flatten(),
         badge_poll_tick: 0,
+        last_focus_badge_suppressed: false,
     };
     dock.refresh_cover();
     dock.sync_reservation();
@@ -208,18 +217,24 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         );
     }
 
-    *runtime.dock.borrow_mut() = Some(dock);
+    let mut slot = runtime
+        .dock
+        .try_borrow_mut()
+        .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+    *slot = Some(dock);
     Ok(())
 }
 
 pub fn stop(runtime: &RuntimeContext) {
     shutdown_recycle_bin_task();
     if let Ok(mut guard) = runtime.dock.try_borrow_mut()
-        && let Some(dock) = guard.take()
+        && let Some(mut dock) = guard.take()
     {
+        dock.stop_animating();
+        otto_platform::watch_bottom_edge(None, dock.screen.width, dock.screen.height);
+        otto_platform::stop_routing_if_targets(dock.hwnd);
         unsafe {
             let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_POLL_TIMER);
-            let _ = KillTimer(Some(HWND(dock.hwnd as *mut _)), DOCK_ANIM_TIMER);
             let _ = ShowWindow(HWND(dock.hwnd as *mut _), SW_HIDE);
         }
     }

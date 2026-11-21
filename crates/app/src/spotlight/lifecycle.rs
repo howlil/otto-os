@@ -219,6 +219,10 @@ impl SpotlightSurface {
         }
         self.restore_focus_on_close = false;
         self.renderer = None;
+        self.query.clear();
+        self.math_result = None;
+        self.filtered.clear();
+        self.layout = None;
         otto_platform::trim_working_set();
     }
 

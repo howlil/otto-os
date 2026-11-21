@@ -250,9 +250,11 @@ impl Renderer {
             }
             Ok(())
         })?;
-        *self.last_bar_frame.borrow_mut() = frame_fields
-            .as_ref()
-            .map(|fields| BarFrameKey::new(fields, app_name));
+        if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
+            *frame = frame_fields
+                .as_ref()
+                .map(|fields| BarFrameKey::new(fields, app_name));
+        }
         Ok(())
     }
 
@@ -373,7 +375,16 @@ impl Renderer {
             height: layout.notch.height,
         };
 
-        draw_on(&self.target, &self.panel_surface, draw_size, || unsafe {
+        self.ensure_panel_surface()?;
+        let surface_guard = self
+            .panel_surface
+            .try_borrow()
+            .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+        let panel_surface = surface_guard.as_ref().ok_or_else(|| {
+            windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL)
+        })?;
+
+        draw_on(&self.target, panel_surface, draw_size, || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
 

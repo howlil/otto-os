@@ -16,6 +16,8 @@ use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 
 const WINDOWS_TO_UNIX_EPOCH_SECS: i64 = 11_644_473_600;
 const NOTIF_CACHE_TTL: Duration = Duration::from_millis(1500);
+const NOTIF_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
+const NOTIF_ACCESS_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FETCHED_NOTIFICATIONS: usize = 24;
 const MAX_TITLE_CHARS: usize = 96;
 const MAX_BODY_CHARS: usize = 160;
@@ -214,10 +216,10 @@ fn query_notifications_live() -> NotificationCenterSnapshot {
     }
 
     ensure_listener_subscribed(&listener);
-    let Ok(list) = listener
-        .GetNotificationsAsync(NotificationKinds::Toast)
-        .and_then(|op| op.join())
-    else {
+    let Some(list) = crate::winrt_io::await_until!(
+        listener.GetNotificationsAsync(NotificationKinds::Toast),
+        Instant::now() + NOTIF_QUERY_TIMEOUT
+    ) else {
         return NotificationCenterSnapshot {
             access: NotificationAccess::Allowed,
             items: Vec::new(),
@@ -384,11 +386,11 @@ pub fn request_notification_access() -> NotificationAccess {
     let Ok(listener) = UserNotificationListener::Current() else {
         return classify_listener_access(None, packaged);
     };
-    let status = listener
-        .RequestAccessAsync()
-        .and_then(|op| op.join())
-        .ok()
-        .or_else(|| listener.GetAccessStatus().ok());
+    let status = crate::winrt_io::await_until!(
+        listener.RequestAccessAsync(),
+        Instant::now() + NOTIF_ACCESS_TIMEOUT
+    )
+    .or_else(|| listener.GetAccessStatus().ok());
     let access = classify_listener_access(status, packaged);
     NOTIF_DIRTY.store(true, Ordering::Release);
     access
@@ -419,17 +421,23 @@ pub fn read_notification_app_counts() -> HashMap<String, u32> {
     aggregate_app_counts(&snapshot.items)
 }
 
-pub(crate) fn resume_notifications_task() {
+pub fn resume_notifications_task() {
     NOTIF_SHUTTING_DOWN.store(false, Ordering::Release);
     NOTIF_DIRTY.store(true, Ordering::Release);
 }
 
 pub fn shutdown_notifications_task() {
     NOTIF_SHUTTING_DOWN.store(true, Ordering::Release);
+    NOTIF_PRIMED.store(false, Ordering::Release);
     if let Ok(mut guard) = listener_sub_lock().lock()
         && let Some((listener, token)) = guard.take()
     {
         let _ = listener.RemoveNotificationChanged(token);
+    }
+    if let Some(cache) = NOTIF_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        *guard = NotifCacheState::default();
     }
 }
 

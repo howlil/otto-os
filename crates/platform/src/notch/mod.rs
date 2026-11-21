@@ -1,5 +1,6 @@
 pub(crate) mod capture_input;
 pub(crate) mod clipboard;
+pub(crate) mod focus_activity;
 pub(crate) mod lyrics;
 pub(crate) mod media;
 pub(crate) mod notch_rect;

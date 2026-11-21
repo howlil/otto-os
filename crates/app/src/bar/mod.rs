@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::backdrop_feed::BackdropFeed;
 use crate::bar_controls::BarControlsController;
 use crate::host::RuntimeContext;
@@ -23,18 +25,18 @@ use otto_platform::{
     WM_APP_UIA_INVOKE, WM_CLIPBOARDUPDATE, WindowsNotchPort, acknowledge_idle_wake,
     current_process_id, foreground_application, load_tasks, motion_preference,
     notify_bluetooth_hardware_change, primary_screen, read_system_status,
-    register_bluetooth_hud_target, register_capture_hotkey, register_idle_wake,
+    register_bluetooth_hud_target, register_capture_hotkey, save_focus_activity,
     stop_routing_bar_keys, take_bluetooth_hud_event, unregister_bluetooth_hud_target,
     unregister_capture_hotkey, unregister_idle_wake, watch_top_edge,
 };
 use otto_render::Renderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, MA_NOACTIVATE, PostQuitMessage, SW_HIDE, SetTimer, ShowWindow, WM_CAPTURECHANGED,
-    WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION,
-    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCDESTROY, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER,
+    KillTimer, MA_NOACTIVATE, PostQuitMessage, SW_HIDE, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER,
 };
 use windows::core::Result;
 
@@ -79,6 +81,7 @@ pub use self::settings::set_online_lyrics_enabled;
 pub use self::settings::set_privacy_indicators_enabled;
 pub use self::settings::set_quick_capture_enabled;
 pub use self::settings::set_top_bar_enabled;
+pub use self::settings::sync_focus_blocklist;
 
 const SWIPE_COLLAPSE_THRESHOLD_PT: i32 = 24;
 const MIN_DEADLINE_MS: u128 = 10;
@@ -98,7 +101,7 @@ pub(crate) struct Bar {
     last_panel_rect: Option<Rect>,
     own_pid: u32,
     appbar: AppBar,
-    renderer: Renderer,
+    renderer: Option<Renderer>,
     screen: PrimaryScreen,
     metrics: Metrics,
     layout: Layout,
@@ -113,10 +116,12 @@ pub(crate) struct Bar {
     tracking_panel_mouse: bool,
     maintain_ticks: u8,
     foreground_gate: ChangeGate,
+    title_gate: ChangeGate,
     cadence: TickCadence,
     focus: BarFocus,
     focus_notch_tab_on_expand: bool,
     animating: bool,
+    status_timer_running: bool,
     settle_ticks: u32,
     top_bar_enabled: bool,
     notch_enabled: bool,
@@ -126,6 +131,10 @@ pub(crate) struct Bar {
     visibility: BarVisibility,
     shell_full_screen: bool,
     backdrop: Option<BackdropFeed>,
+    focus_epoch: Instant,
+    last_focus_save: Instant,
+    last_blocked_window: Option<(isize, Instant)>,
+    last_browser_url: Option<(isize, String)>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -133,7 +142,6 @@ pub fn start(
     runtime: &RuntimeContext,
     hwnd: isize,
     panel_hwnd: isize,
-    _blur: bool,
     control_center_enabled: bool,
 ) -> Result<()> {
     let mut appbar = AppBar::register(hwnd);
@@ -155,7 +163,7 @@ pub fn start(
     let clipboard_enabled = runtime.clipboard_history_enabled.get();
     let quick_capture_enabled = runtime.quick_capture_enabled.get();
     let hud_enabled = runtime.notch_hud_enabled.get();
-    let media = if media_enabled {
+    let media = if notch_enabled && media_enabled {
         notch_port.read_now_playing()
     } else {
         None
@@ -171,16 +179,26 @@ pub fn start(
     };
     let mut notch = NotchController::new(media, notch_tab);
     notch.set_focus_enabled(focus_enabled);
+    if let Ok(fa) = runtime.focus_activity.try_borrow() {
+        notch.set_focus_blocklist(fa.blocklist.clone());
+    }
     notch.set_shelf_enabled(shelf_enabled);
     notch.set_clipboard_enabled(clipboard_enabled);
     if quick_capture_enabled {
-        notch.replace_tasks(load_tasks());
+        if notch_enabled {
+            notch.replace_tasks(load_tasks());
+        }
         notch.set_tasks_enabled(true);
     }
     notch.set_media_enabled(media_enabled);
     notch.set_privacy_enabled(privacy_enabled);
     notch.set_hud_enabled(hud_enabled);
-    let status = read_system_status();
+    let any_surface_enabled = top_bar_enabled || notch_enabled;
+    let status = if any_surface_enabled {
+        read_system_status()
+    } else {
+        otto_core::SystemStatus::default()
+    };
     if notch_enabled && privacy_enabled {
         let _ = notch.sync_privacy_state(notch_port.read_privacy_state());
     }
@@ -197,16 +215,21 @@ pub fn start(
             ..notch.layout_input(control_center_enabled)
         },
     );
-    let (max_panel_w, max_panel_h) = max_panel_surface_size(screen.dpi);
-    let renderer = Renderer::new(
-        layout.bar.width,
-        layout.bar.height,
-        max_panel_w,
-        max_panel_h,
-        screen.dpi,
-        0.0,
-    )?;
-    renderer.set_brand_icon(runtime.brand_icon());
+    let renderer = if any_surface_enabled {
+        let (max_panel_w, max_panel_h) = max_panel_surface_size(screen.dpi);
+        let renderer = Renderer::new(
+            layout.bar.width,
+            layout.bar.height,
+            max_panel_w,
+            max_panel_h,
+            screen.dpi,
+            0.0,
+        )?;
+        renderer.set_brand_icon(runtime.brand_icon());
+        Some(renderer)
+    } else {
+        None
+    };
 
     if runtime.dock_enabled.get() && runtime.dock_preferences.get().hide_taskbar {
         appbar.hide_system_taskbar();
@@ -258,10 +281,12 @@ pub fn start(
         tracking_panel_mouse: false,
         maintain_ticks: 0,
         foreground_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
+        title_gate: ChangeGate::new(FOREGROUND_FALLBACK_TICKS),
         cadence: TickCadence::new(STATUS_POLL_MS, STATUS_IDLE_MS, STATUS_IDLE_AFTER_TICKS),
         focus: BarFocus::default(),
         focus_notch_tab_on_expand: false,
         animating: false,
+        status_timer_running: false,
         settle_ticks: 0,
         top_bar_enabled,
         notch_enabled,
@@ -270,14 +295,19 @@ pub fn start(
         motion: motion_preference(),
         visibility: initial_visibility(menu_bar, top_bar_enabled),
         shell_full_screen: false,
-        backdrop: runtime.glass_enabled.get().then(|| {
-            BackdropFeed::start(
-                hwnd,
-                WM_APP_BAR_BACKDROP,
-                vec![hwnd, panel_hwnd],
-                runtime.capture_visible.get(),
-            )
-        }),
+        backdrop: (runtime.glass_enabled.get() && top_bar_enabled && menu_bar.show_background)
+            .then(|| {
+                BackdropFeed::start(
+                    hwnd,
+                    WM_APP_BAR_BACKDROP,
+                    vec![hwnd, panel_hwnd],
+                    runtime.capture_visible.get(),
+                )
+            }),
+        focus_epoch: Instant::now(),
+        last_focus_save: Instant::now(),
+        last_blocked_window: None,
+        last_browser_url: None,
     };
     bar.notch.set_clock(status.clock);
     bar.notch
@@ -298,27 +328,31 @@ pub fn start(
     }
     bar.schedule_deadline();
 
-    unsafe {
-        SetTimer(
-            Some(HWND(hwnd as *mut _)),
-            STATUS_TIMER,
-            STATUS_POLL_MS,
-            None,
-        );
+    if any_surface_enabled {
+        bar.ensure_status_timer();
+        bar.ensure_anim_timer();
     }
-    bar.ensure_anim_timer();
-    register_idle_wake(hwnd, WM_APP_IDLE_WAKE);
     if notch_enabled && hud_enabled {
         register_bluetooth_hud_target(hwnd, WM_APP_BAR_BLUETOOTH_HUD);
     }
 
-    *runtime.bar.borrow_mut() = Some(bar);
+    let mut slot = runtime
+        .bar
+        .try_borrow_mut()
+        .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+    *slot = Some(bar);
     Ok(())
 }
 
 pub fn stop(runtime: &RuntimeContext) {
     unregister_idle_wake();
     unregister_bluetooth_hud_target();
+    if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut()
+        && fa.is_dirty()
+        && save_focus_activity(&fa)
+    {
+        fa.mark_saved();
+    }
     if let Ok(mut guard) = runtime.bar.try_borrow_mut()
         && let Some(mut bar) = guard.take()
     {
@@ -378,7 +412,7 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_APP_BAR_CAPTURE => {
-            with_bar(runtime, |bar| bar.on_quick_capture_submitted(runtime));
+            with_bar(runtime, |bar| bar.on_quick_capture_event(runtime));
             Some(LRESULT(0))
         }
         WM_NCDESTROY => {

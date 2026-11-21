@@ -2041,6 +2041,52 @@ fn a_focus_session_holds_back_message_banners_but_not_ringing_calls() {
 }
 
 #[test]
+fn focus_blocklist_controls_message_call_and_blocked_app_suppression() {
+    let (mut notch_messages, start_messages) = notch_with_baseline();
+    assert!(!notch_messages.is_focus_blocking_active());
+    let _ = notch_messages.handle_hotkey(NotchHotkey::TogglePomodoro);
+    assert!(notch_messages.is_focus_blocking_active());
+    notch_messages.set_focus_blocklist(otto_core::FocusBlocklist {
+        block_notifications: false,
+        allow_calls_during_focus: true,
+        ..Default::default()
+    });
+    notch_messages.ingest_notifications(
+        &[toast(1, "Mail", "Ayu", "Lunch?")],
+        start_messages + Duration::from_millis(100),
+    );
+    assert!(notch_messages.layout_input(true).notification.is_some());
+
+    let (mut notch_blocked_app, start_blocked_app) = notch_with_baseline();
+    let _ = notch_blocked_app.handle_hotkey(NotchHotkey::TogglePomodoro);
+    let mut blocked_zoom = otto_core::FocusBlocklist {
+        block_notifications: false,
+        allow_calls_during_focus: true,
+        ..Default::default()
+    };
+    assert!(blocked_zoom.add_app("zoom"));
+    notch_blocked_app.set_focus_blocklist(blocked_zoom);
+    notch_blocked_app.ingest_notifications(
+        &[toast(2, "Zoom", "Budi", "is calling you")],
+        start_blocked_app + Duration::from_millis(100),
+    );
+    assert!(notch_blocked_app.layout_input(true).notification.is_none());
+
+    let (mut notch_no_calls, start_no_calls) = notch_with_baseline();
+    let _ = notch_no_calls.handle_hotkey(NotchHotkey::TogglePomodoro);
+    notch_no_calls.set_focus_blocklist(otto_core::FocusBlocklist {
+        block_notifications: true,
+        allow_calls_during_focus: false,
+        ..Default::default()
+    });
+    notch_no_calls.ingest_notifications(
+        &[toast(3, "Zoom", "Budi", "is calling you")],
+        start_no_calls + Duration::from_millis(100),
+    );
+    assert!(notch_no_calls.layout_input(true).notification.is_none());
+}
+
+#[test]
 fn hovering_the_banner_does_not_swap_it_for_the_full_panel() {
     let (mut notch, start) = notch_with_baseline();
     let now = start + Duration::from_millis(100);
@@ -2177,14 +2223,136 @@ fn task_clicks_mutate_the_list_and_request_a_save() {
 }
 
 #[test]
-fn add_opens_capture_and_blank_text_is_rejected() {
+fn add_opens_inline_editor_and_blank_text_is_rejected() {
     let mut notch = notch_with_tasks(&[]);
     let update = notch.handle_click(HitTarget::TasksAdd);
-    assert!(!update.changed);
-    assert_eq!(update.effect, Some(NotchEffect::OpenQuickCapture));
-    assert!(!notch.add_task("   	 "));
-    assert!(notch.add_task("  write release notes  "));
+    assert!(update.changed);
+    assert_eq!(
+        update.effect,
+        Some(NotchEffect::OpenTaskEditor {
+            initial_text: String::new(),
+            allow_keep_open: true,
+        })
+    );
+    assert!(notch.is_task_editor_open());
+    assert!(notch.layout_input(true).tasks.editing);
+
+    assert_eq!(
+        notch.submit_task_editor("   \t ", true),
+        crate::notch::TaskSubmitResult::Rejected
+    );
+    assert!(notch.is_task_editor_open());
+
+    assert_eq!(
+        notch.submit_task_editor("  write release notes  ", false),
+        crate::notch::TaskSubmitResult::Saved
+    );
+    assert!(!notch.is_task_editor_open());
     assert_eq!(notch.tasks_state().items[0].text, "write release notes");
+}
+
+#[test]
+fn editing_a_task_inline_updates_in_place_and_holds_panel_open() {
+    let mut notch = notch_with_tasks(&["first", "second"]);
+    let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+    let _ = notch.handle_click(HitTarget::NotchTabTasks);
+    let now = settle(&mut notch, Instant::now());
+    let _ = notch.handle_click(HitTarget::TaskItem(1));
+    assert_eq!(
+        notch.tasks_state().active_task().map(|t| t.text.as_str()),
+        Some("second")
+    );
+
+    let edit = notch.handle_click(HitTarget::TaskEdit(1));
+    assert!(edit.changed);
+    assert_eq!(
+        edit.effect,
+        Some(NotchEffect::OpenTaskEditor {
+            initial_text: String::from("second"),
+            allow_keep_open: false,
+        })
+    );
+    assert!(notch.is_task_editor_open());
+    assert!(!notch.handle_pointer_leave(false));
+    assert!(!notch.collapse_from_gesture().changed);
+    assert!(!notch.collapse_from_external_focus_change());
+    assert_eq!(notch.island_mode(now), IslandMode::Expanded);
+
+    assert_eq!(
+        notch.submit_task_editor("second revised", false),
+        crate::notch::TaskSubmitResult::Saved
+    );
+    assert!(!notch.is_task_editor_open());
+    assert_eq!(notch.tasks_state().items[1].text, "second revised");
+    assert_eq!(
+        notch.tasks_state().active_task().map(|t| t.text.as_str()),
+        Some("second revised")
+    );
+    assert_eq!(notch.island_mode(now), IslandMode::Expanded);
+
+    let _ = notch.handle_click(HitTarget::TaskEdit(0));
+    assert_eq!(
+        notch.submit_task_editor("first", false),
+        crate::notch::TaskSubmitResult::Unchanged
+    );
+    assert!(!notch.is_task_editor_open());
+
+    let reopen = notch.handle_click(HitTarget::TaskEdit(0));
+    assert!(reopen.changed);
+    let toggle_close = notch.handle_click(HitTarget::TaskEdit(0));
+    assert!(toggle_close.changed);
+    assert_eq!(
+        toggle_close.effect,
+        Some(NotchEffect::CloseTaskEditor {
+            restore_focus: true,
+        })
+    );
+    assert!(!notch.is_task_editor_open());
+}
+
+#[test]
+fn hotkey_quick_capture_opens_notch_inline_and_collapses_on_finish_if_it_was_closed() {
+    let mut notch = notch_with_tasks(&[]);
+    let t0 = Instant::now();
+    assert_eq!(notch.island_mode(t0), IslandMode::Collapsed);
+
+    let open = notch.open_quick_capture_add();
+    assert!(open.changed);
+    assert_eq!(notch.active_tab(), NotchExpandedTab::Tasks);
+    assert!(notch.is_task_editor_open());
+    assert!((notch.panel_expansion() - 1.0).abs() < f32::EPSILON);
+    assert_eq!(
+        open.effect,
+        Some(NotchEffect::OpenTaskEditor {
+            initial_text: String::new(),
+            allow_keep_open: true,
+        })
+    );
+    assert_eq!(notch.island_mode(t0), IslandMode::Expanded);
+
+    assert_eq!(
+        notch.submit_task_editor("quick note 1", true),
+        crate::notch::TaskSubmitResult::Saved
+    );
+    assert!(notch.is_task_editor_open());
+    assert_eq!(notch.island_mode(t0), IslandMode::Expanded);
+
+    assert_eq!(
+        notch.submit_task_editor("quick note 2", false),
+        crate::notch::TaskSubmitResult::Saved
+    );
+    assert!(!notch.is_task_editor_open());
+    assert_eq!(notch.tasks_state().items.len(), 2);
+    assert_eq!(notch.island_mode(t0), IslandMode::Collapsed);
+}
+
+#[test]
+fn switching_tabs_cancels_active_task_editor() {
+    let mut notch = notch_with_tasks(&["item"]);
+    let _ = notch.open_quick_capture_add();
+    assert!(notch.is_task_editor_open());
+    assert!(notch.handle_click(HitTarget::NotchTabPomodoro).changed);
+    assert!(!notch.is_task_editor_open());
 }
 
 #[test]
@@ -2197,4 +2365,49 @@ fn the_pager_steps_through_pages_without_saving() {
     assert!(update.changed);
     assert_eq!(update.effect, None);
     assert_eq!(notch.layout_input(true).tasks.visible_count, 2);
+}
+
+#[test]
+fn disabling_notch_and_submodules_clears_cached_payloads_and_state() {
+    let mut notch = NotchController::new(Some(playing("Song")), NotchExpandedTab::Media);
+    let _ = notch.handle_shelf_drop(vec![(
+        otto_core::ShelfPayload::File(String::from(r"C:\Temp\photo.png")),
+        false,
+        Some(otto_core::ShelfThumbnail {
+            width: 2,
+            height: 2,
+            bgra: vec![0xFF; 16],
+        }),
+    )]);
+    assert!(!notch.shelf_state().items.is_empty());
+    notch.set_shelf_enabled(false);
+    assert!(notch.shelf_state().items.is_empty());
+
+    assert!(
+        notch.sync_clipboard_capture(otto_core::ClipboardPayload::Text(String::from("secret")))
+    );
+    assert!(!notch.clipboard_state().items.is_empty());
+    notch.set_clipboard_enabled(false);
+    assert!(notch.clipboard_state().items.is_empty());
+
+    notch.set_shelf_enabled(true);
+    notch.set_clipboard_enabled(true);
+    notch.set_tasks_enabled(true);
+    assert!(notch.add_task("cached task"));
+    let _ = notch.handle_shelf_drop(vec![(
+        otto_core::ShelfPayload::Text(String::from("note")),
+        false,
+        None,
+    )]);
+    assert!(
+        notch.sync_clipboard_capture(otto_core::ClipboardPayload::Text(String::from("copied")))
+    );
+    notch.release_all_resources();
+    assert!(notch.media().is_none());
+    assert!(notch.shelf_state().items.is_empty());
+    assert!(notch.clipboard_state().items.is_empty());
+    assert!(notch.tasks_state().items.is_empty());
+    assert!(notch.shelf_enabled());
+    assert!(notch.clipboard_enabled());
+    assert!(notch.media_enabled());
 }

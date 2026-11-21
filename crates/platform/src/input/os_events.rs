@@ -29,9 +29,11 @@ static HOOKS: [AtomicPtr<c_void>; HOOKED_EVENT_RANGES.len()] =
 static HOOKS_LIVE: AtomicBool = AtomicBool::new(false);
 static TOPOLOGY_GENERATION: AtomicU64 = AtomicU64::new(0);
 static GEOMETRY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static TITLE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WIN_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
 static WIN_EVENT_MSG: AtomicU32 = AtomicU32::new(0);
 static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
+static SETTLE_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 static LAST_POLLED_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 
@@ -97,6 +99,13 @@ pub fn window_change_generations() -> Option<WindowChangeGenerations> {
 }
 
 #[must_use]
+pub fn foreground_title_generation() -> Option<u64> {
+    HOOKS_LIVE
+        .load(Ordering::Acquire)
+        .then(|| TITLE_GENERATION.load(Ordering::Acquire))
+}
+
+#[must_use]
 pub fn poll_foreground_change() -> bool {
     let current = unsafe { GetForegroundWindow() }.0 as isize;
     if current == 0 || LAST_POLLED_FOREGROUND.swap(current, Ordering::AcqRel) == current {
@@ -132,7 +141,19 @@ fn install_hook(slot: &AtomicPtr<c_void>, (first, last): (u32, u32)) -> bool {
     if hook.0.is_null() {
         return false;
     }
-    slot.store(hook.0, Ordering::SeqCst);
+    if slot
+        .compare_exchange(
+            std::ptr::null_mut(),
+            hook.0,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        unsafe {
+            let _ = UnhookWinEvent(hook);
+        }
+    }
     true
 }
 
@@ -174,6 +195,7 @@ pub fn install_window_tracking_hook(target_hwnd: isize, message: u32) -> bool {
     WIN_EVENT_TARGET.store(target_hwnd, Ordering::SeqCst);
     WIN_EVENT_MSG.store(message, Ordering::SeqCst);
     SYNC_PENDING.store(false, Ordering::SeqCst);
+    SETTLE_PENDING.store(false, Ordering::SeqCst);
     let installed = install_window_event_hooks();
     if !installed {
         uninstall_window_tracking_hook();
@@ -185,11 +207,13 @@ pub fn uninstall_window_tracking_hook() {
     WIN_EVENT_TARGET.store(0, Ordering::SeqCst);
     WIN_EVENT_MSG.store(0, Ordering::SeqCst);
     SYNC_PENDING.store(false, Ordering::SeqCst);
+    SETTLE_PENDING.store(false, Ordering::SeqCst);
     LAST_POLLED_FOREGROUND.store(0, Ordering::SeqCst);
 }
 
-pub fn acknowledge_window_sync() {
+pub fn acknowledge_window_sync() -> bool {
     SYNC_PENDING.store(false, Ordering::Release);
+    SETTLE_PENDING.swap(false, Ordering::AcqRel)
 }
 
 fn post_window_sync(source: HWND, event: u32) {
@@ -233,13 +257,25 @@ unsafe extern "system" fn win_event_proc(
         if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.0.is_null() {
             return;
         }
-        let is_foreground = event == EVENT_OBJECT_NAMECHANGE && hwnd == current_foreground();
+        let is_foreground = if event == EVENT_OBJECT_NAMECHANGE {
+            if hwnd != current_foreground() {
+                return;
+            }
+            true
+        } else {
+            false
+        };
         let change = classify_window_event(event, is_top_level_or_gone(hwnd), is_foreground);
         if let Some(change) = change {
             record_window_change(change);
         }
         if event == EVENT_SYSTEM_FOREGROUND {
             LAST_FOREGROUND.store(hwnd.0 as isize, Ordering::Release);
+            TITLE_GENERATION.fetch_add(1, Ordering::AcqRel);
+            SETTLE_PENDING.store(true, Ordering::Release);
+        } else if event == EVENT_OBJECT_NAMECHANGE && is_foreground {
+            TITLE_GENERATION.fetch_add(1, Ordering::AcqRel);
+            SETTLE_PENDING.store(true, Ordering::Release);
         }
         let relevant = event == EVENT_SYSTEM_FOREGROUND || change.is_some();
         if relevant {

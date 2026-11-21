@@ -128,11 +128,16 @@ impl CaptureCanvas {
         self.layout
     }
 
-    pub(crate) fn copy_pixels(&self) -> Vec<u8> {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         unsafe {
             let _ = GdiFlush();
-            std::slice::from_raw_parts(self.dib.bits.cast::<u8>(), self.layout.byte_len).to_vec()
+            std::slice::from_raw_parts(self.dib.bits.cast::<u8>(), self.layout.byte_len)
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn copy_pixels(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
     }
 }
 

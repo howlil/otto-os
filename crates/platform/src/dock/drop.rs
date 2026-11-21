@@ -9,6 +9,9 @@ use windows::core::{PCWSTR, w};
 
 use super::{DockEntry, DockItemKind, to_wide};
 
+const MAX_DROPPED_FILES: u32 = 64;
+const MAX_DROPPED_PATH_LEN: usize = 4096;
+
 pub fn enable_drag_accept_files(hwnd_val: isize) {
     let hwnd = HWND(hwnd_val as *mut c_void);
     unsafe {
@@ -18,17 +21,24 @@ pub fn enable_drag_accept_files(hwnd_val: isize) {
 
 #[must_use]
 pub fn extract_dropped_files(hdrop_val: usize) -> ((i32, i32), Vec<String>) {
+    if hdrop_val == 0 {
+        return ((0, 0), Vec::new());
+    }
     let hdrop = HDROP(hdrop_val as *mut c_void);
     let mut pt = POINT::default();
     unsafe {
         let _ = DragQueryPoint(hdrop, &raw mut pt);
-        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+        let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None).min(MAX_DROPPED_FILES);
         let mut files = Vec::with_capacity(count as usize);
+        let mut buf: Vec<u16> = Vec::new();
         for i in 0..count {
             let len = DragQueryFileW(hdrop, i, None) as usize;
-            let mut buf = vec![0u16; len + 1];
-            DragQueryFileW(hdrop, i, Some(&mut buf));
-            let s = String::from_utf16_lossy(&buf[..len]);
+            if len == 0 || len > MAX_DROPPED_PATH_LEN {
+                continue;
+            }
+            buf.resize(len + 1, 0);
+            let copied = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+            let s = String::from_utf16_lossy(&buf[..copied.min(len)]);
             if !s.is_empty() {
                 files.push(s);
             }
@@ -71,5 +81,15 @@ pub fn open_file_with_dock_entry(entry: &DockEntry, file_path: &str) {
             }
         }
         DockItemKind::Apps | DockItemKind::Overflow { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_dropped_files;
+
+    #[test]
+    fn null_hdrop_returns_empty_without_touching_shell() {
+        assert_eq!(extract_dropped_files(0), ((0, 0), Vec::new()));
     }
 }

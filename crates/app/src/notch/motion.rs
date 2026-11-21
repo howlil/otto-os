@@ -410,7 +410,7 @@ impl NotchController {
                 self.panel_trigger = PanelTrigger::Hovered;
             }
         } else {
-            if self.is_shelf_hold_open() {
+            if self.is_panel_held_open() {
                 return;
             }
             self.hover_since = None;

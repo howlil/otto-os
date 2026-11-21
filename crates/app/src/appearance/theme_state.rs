@@ -1,25 +1,9 @@
 use crate::host::RuntimeContext;
 use otto_core::{Appearance, ResolvedTheme, ThemeMode};
 
-pub fn theme_mode(runtime: &RuntimeContext) -> ThemeMode {
-    runtime.theme_mode.get()
-}
-
-pub fn set_theme_mode(runtime: &RuntimeContext, mode: ThemeMode) {
-    runtime.theme_mode.set(mode);
-    runtime.pending_theme_mode.set(Some(mode));
-    refresh_theme(runtime);
-}
-
-pub fn cycle_theme_mode(runtime: &RuntimeContext) -> ThemeMode {
-    let next = theme_mode(runtime).next();
-    set_theme_mode(runtime, next);
-    next
-}
-
 pub fn appearance(runtime: &RuntimeContext) -> Appearance {
     let system = runtime.system_appearance.get();
-    if system.contrast.is_none() && runtime.liquid_glass_pref.get() {
+    if system.contrast.is_none() {
         Appearance::glass(ResolvedTheme::Dark)
     } else {
         Appearance {
@@ -39,9 +23,8 @@ pub fn refresh_system_appearance(runtime: &RuntimeContext) {
 }
 
 pub fn sync_effective_glass(runtime: &RuntimeContext) {
-    let effective = runtime.blur_supported.get()
-        && runtime.liquid_glass_pref.get()
-        && runtime.system_appearance.get().contrast.is_none();
+    let effective =
+        runtime.blur_supported.get() && runtime.system_appearance.get().contrast.is_none();
     if effective != runtime.glass_enabled.get() {
         runtime.glass_enabled.set(effective);
         crate::bar::set_glass_enabled(runtime, effective);
@@ -68,47 +51,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theme_mode_cycles_and_stores() {
-        let runtime = RuntimeContext::new(false);
-        set_theme_mode(&runtime, ThemeMode::Auto);
-        assert_eq!(theme_mode(&runtime), ThemeMode::Auto);
-        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Dark);
-        assert_eq!(theme_mode(&runtime), ThemeMode::Dark);
-        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Light);
-        assert_eq!(theme_mode(&runtime), ThemeMode::Light);
-        assert_eq!(cycle_theme_mode(&runtime), ThemeMode::Auto);
-        assert_eq!(theme_mode(&runtime), ThemeMode::Auto);
-    }
-
-    #[test]
-    fn appearance_uses_clear_dark_glass_when_liquid_glass_pref_enabled_without_contrast() {
+    fn appearance_uses_clear_dark_glass_without_high_contrast() {
         let runtime = RuntimeContext::new(false);
         runtime.system_appearance.set(otto_core::SystemAppearance {
             dark: false,
             transparency: false,
             contrast: None,
         });
-        runtime.liquid_glass_pref.set(true);
-        set_theme_mode(&runtime, ThemeMode::Light);
         let resolved = appearance(&runtime);
         assert_eq!(resolved.theme, ResolvedTheme::Dark);
         assert_eq!(resolved.variant(), otto_core::MaterialVariant::Glass);
     }
 
     #[test]
-    fn appearance_falls_back_to_opaque_or_high_contrast_when_disabled_or_high_contrast() {
+    fn appearance_falls_back_to_high_contrast_when_contrast_theme_is_active() {
         let runtime = RuntimeContext::new(false);
-        runtime.system_appearance.set(otto_core::SystemAppearance {
-            dark: false,
-            transparency: true,
-            contrast: None,
-        });
-        runtime.liquid_glass_pref.set(false);
-        let opaque = appearance(&runtime);
-        assert_eq!(opaque.theme, ResolvedTheme::Light);
-        assert_eq!(opaque.variant(), otto_core::MaterialVariant::Opaque);
-
-        runtime.liquid_glass_pref.set(true);
         runtime.system_appearance.set(otto_core::SystemAppearance {
             dark: true,
             transparency: true,
@@ -119,10 +76,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_effective_glass_tracks_blur_pref_and_contrast_ignoring_system_transparency() {
+    fn sync_effective_glass_tracks_blur_support_and_contrast_ignoring_system_transparency() {
         let runtime = RuntimeContext::new(false);
         runtime.blur_supported.set(true);
-        runtime.liquid_glass_pref.set(true);
         runtime.system_appearance.set(otto_core::SystemAppearance {
             dark: false,
             transparency: false,
@@ -131,11 +87,6 @@ mod tests {
         sync_effective_glass(&runtime);
         assert!(runtime.glass_enabled.get());
 
-        runtime.liquid_glass_pref.set(false);
-        sync_effective_glass(&runtime);
-        assert!(!runtime.glass_enabled.get());
-
-        runtime.liquid_glass_pref.set(true);
         runtime.system_appearance.set(otto_core::SystemAppearance {
             dark: true,
             transparency: true,

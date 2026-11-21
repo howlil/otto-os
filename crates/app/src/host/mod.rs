@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Error, PCWSTR, Result};
 
 use crate::{bar, control_center, dock, genie, menu, spotlight, window_controls};
-use otto_core::{AppPreferences, DockPreferences};
+use otto_core::{AppPreferences, BarItem, DockPreferences};
 use otto_platform::resume_background_tasks;
 
 #[cfg(test)]
@@ -38,7 +38,6 @@ struct Host {
     instance: HINSTANCE,
     cursor: HCURSOR,
     ex_style: WINDOW_EX_STYLE,
-    blur: bool,
     config: PluginConfig,
     recovery_hotkeys: bool,
     tray_icon: Option<otto_platform::TrayIcon>,
@@ -115,7 +114,6 @@ pub fn start(blur: bool) -> Result<()> {
         instance,
         cursor,
         ex_style: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-        blur,
         config,
         recovery_hotkeys: false,
         tray_icon: None,
@@ -135,16 +133,10 @@ pub fn start(blur: bool) -> Result<()> {
     host.runtime.dock_preferences.set(host.config.dock);
     host.runtime.apply_preferences(host.config.preferences);
     host.runtime.blur_supported.set(blur);
-    host.runtime.glass_enabled.set(
-        blur && host.config.preferences.liquid_glass
-            && host.runtime.system_appearance.get().contrast.is_none(),
-    );
-    if !host.config.preferences.media_module {
-        otto_platform::shutdown_media_task();
-    }
-    if !host.config.preferences.notch_enabled || !host.config.preferences.privacy_indicators {
-        otto_platform::shutdown_privacy_task();
-    }
+    host.runtime
+        .glass_enabled
+        .set(blur && host.runtime.system_appearance.get().contrast.is_none());
+    sync_platform_tasks(&host.config);
     otto_platform::set_volume_hud_hook_enabled(
         host.config.preferences.notch_enabled && host.config.preferences.notch_hud,
     );
@@ -172,7 +164,7 @@ pub fn start(blur: bool) -> Result<()> {
 pub fn run_message_loop() {
     unsafe {
         let mut message = MSG::default();
-        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+        while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -208,6 +200,7 @@ pub fn stop() {
             .and_then(|mut guard| guard.take())
     });
     drop(host);
+    otto_platform::release_backdrop_capture_cache();
     otto_render::release_shared_factories();
 }
 
@@ -260,8 +253,52 @@ pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
             }
             _ => {}
         }
+        with_host_read(|host| {
+            sync_platform_tasks(&host.config);
+            if !enabled {
+                reclaim_disabled_memory(host);
+            }
+        });
     }
     result
+}
+
+fn sync_platform_tasks(config: &PluginConfig) {
+    let prefs = &config.preferences;
+    if prefs.notch_enabled && prefs.media_module {
+        otto_platform::resume_media_task();
+    } else {
+        otto_platform::shutdown_media_task();
+    }
+    if prefs.notch_enabled && prefs.privacy_indicators {
+        otto_platform::resume_privacy_task();
+    } else {
+        otto_platform::shutdown_privacy_task();
+    }
+    let top_bar_notifications = config.is_enabled(PluginId::TopBar)
+        && !prefs.menu_bar.hidden_items.contains(BarItem::Notifications);
+    if prefs.notch_enabled || config.is_enabled(PluginId::Dock) || top_bar_notifications {
+        otto_platform::resume_notifications_task();
+    } else {
+        otto_platform::shutdown_notifications_task();
+    }
+    if config.is_enabled(PluginId::Dock) && config.dock.show_trash {
+        otto_platform::resume_recycle_bin_task();
+    } else {
+        otto_platform::shutdown_recycle_bin_task();
+    }
+}
+
+fn reclaim_disabled_memory(host: &Host) {
+    let glass_surface_active = host.runtime.glass_enabled.get()
+        && (host.config.is_enabled(PluginId::Dock)
+            || (host.config.is_enabled(PluginId::TopBar)
+                && host.config.preferences.menu_bar.show_background));
+    if !glass_surface_active && !control_center::is_open(&host.runtime) {
+        otto_platform::release_backdrop_capture_cache();
+        otto_render::release_shared_gpu();
+    }
+    otto_platform::trim_working_set();
 }
 
 pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
@@ -324,11 +361,17 @@ fn io_error(_error: std::io::Error) -> Error {
     )
 }
 
-fn descriptor(plugin: PluginId) -> &'static PluginDescriptor {
-    PLUGIN_DESCRIPTORS
-        .iter()
-        .find(|descriptor| descriptor.id == plugin)
-        .expect("every PluginId must have a descriptor")
+const fn descriptor(plugin: PluginId) -> &'static PluginDescriptor {
+    let index = match plugin {
+        PluginId::PopupMenu => 0,
+        PluginId::TopBar => 1,
+        PluginId::Spotlight => 2,
+        PluginId::Genie => 3,
+        PluginId::Dock => 4,
+        PluginId::WindowControls => 5,
+        PluginId::ControlCenter => 6,
+    };
+    &PLUGIN_DESCRIPTORS[index]
 }
 
 fn dependencies_running(started: &[PluginId], dependencies: &[PluginId]) -> bool {

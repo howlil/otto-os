@@ -1,8 +1,7 @@
-use crate::menu::{CMD_CC_THEME_TOGGLE, CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_WIN_MINIMIZE};
+use crate::menu::{CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_WIN_MINIMIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMenuEffect {
-    CycleTheme,
     GenieMinimize,
     OpenOttoSettings,
     OpenLogs,
@@ -12,7 +11,6 @@ pub enum WindowMenuEffect {
 #[must_use]
 pub fn window_menu_effect(cmd: usize, minimize_available: bool) -> WindowMenuEffect {
     match cmd {
-        CMD_CC_THEME_TOGGLE => WindowMenuEffect::CycleTheme,
         CMD_OTTO_SETTINGS => WindowMenuEffect::OpenOttoSettings,
         CMD_OPEN_LOGS => WindowMenuEffect::OpenLogs,
         CMD_WIN_MINIMIZE if minimize_available => WindowMenuEffect::GenieMinimize,
@@ -38,10 +36,6 @@ mod tests {
         assert_eq!(
             window_menu_effect(CMD_WIN_CLOSE, true),
             WindowMenuEffect::Native(CMD_WIN_CLOSE)
-        );
-        assert_eq!(
-            window_menu_effect(CMD_CC_THEME_TOGGLE, false),
-            WindowMenuEffect::CycleTheme
         );
     }
 }

@@ -6,7 +6,7 @@ use otto_core::{AccessibleNode, AccessibleRole, AccessibleTree, Rect};
 use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayUnaccessData,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_I4};
 use windows::Win32::UI::Accessibility::{
@@ -130,21 +130,55 @@ fn control_type_id(role: AccessibleRole) -> i32 {
     }
 }
 
+struct OwnedSafeArray {
+    ptr: *mut SAFEARRAY,
+    accessed: bool,
+}
+
+impl OwnedSafeArray {
+    fn into_raw(mut self) -> *mut SAFEARRAY {
+        let ptr = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        self.accessed = false;
+        ptr
+    }
+}
+
+impl Drop for OwnedSafeArray {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                if self.accessed {
+                    let _ = SafeArrayUnaccessData(self.ptr);
+                }
+                let _ = SafeArrayDestroy(self.ptr);
+            }
+        }
+    }
+}
+
 fn create_i4_safearray(values: &[i32]) -> Result<*mut SAFEARRAY> {
-    let array = unsafe { SafeArrayCreateVector(VT_I4, 0, values.len() as u32) };
+    let count = u32::try_from(values.len()).map_err(|_| windows_core::Error::from(E_INVALIDARG))?;
+    let array = unsafe { SafeArrayCreateVector(VT_I4, 0, count) };
     if array.is_null() {
         return Err(E_INVALIDARG.into());
     }
+    let mut guard = OwnedSafeArray {
+        ptr: array,
+        accessed: false,
+    };
     let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let access = unsafe { SafeArrayAccessData(array, &raw mut data) };
-    if access.is_err() || data.is_null() {
-        return Err(access.err().unwrap_or_else(|| E_INVALIDARG.into()));
+    unsafe { SafeArrayAccessData(guard.ptr, &raw mut data)? };
+    guard.accessed = true;
+    if data.is_null() {
+        return Err(E_INVALIDARG.into());
     }
     unsafe {
         std::ptr::copy_nonoverlapping(values.as_ptr(), data.cast::<i32>(), values.len());
-        SafeArrayUnaccessData(array)?;
     }
-    Ok(array)
+    guard.accessed = false;
+    unsafe { SafeArrayUnaccessData(guard.ptr)? };
+    Ok(guard.into_raw())
 }
 
 #[allow(non_upper_case_globals)]

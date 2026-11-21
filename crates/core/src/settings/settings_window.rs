@@ -1,8 +1,8 @@
-use crate::control_center::{OttoSettingItem, OttoSettingKind, OttoSettingsSnapshot};
+use super::model::{OttoSettingItem, OttoSettingKind, OttoSettingsSnapshot};
 use crate::layout::{Rect, scale};
 use crate::settings_content::ContentLayout;
 
-pub const SETTINGS_PAGE_COUNT: usize = 12;
+pub const SETTINGS_PAGE_COUNT: usize = 13;
 
 #[must_use]
 pub const fn settings_background(dark: bool) -> u32 {
@@ -40,6 +40,7 @@ pub enum SettingsPage {
     Modules,
     TopBar,
     Notch,
+    Focus,
     Dock,
     WindowControls,
     Spotlight,
@@ -56,6 +57,7 @@ impl SettingsPage {
         Self::Modules,
         Self::TopBar,
         Self::Notch,
+        Self::Focus,
         Self::Dock,
         Self::WindowControls,
         Self::Spotlight,
@@ -73,6 +75,7 @@ impl SettingsPage {
             Self::Modules => "Modules",
             Self::TopBar => "Top Bar",
             Self::Notch => "Notch",
+            Self::Focus => "Focus",
             Self::Dock => "Dock",
             Self::WindowControls => "Window Controls",
             Self::Spotlight => "Spotlight",
@@ -90,6 +93,7 @@ impl SettingsPage {
             Self::Overview | Self::Modules => SettingsGroup::Home,
             Self::TopBar
             | Self::Notch
+            | Self::Focus
             | Self::Dock
             | Self::WindowControls
             | Self::Spotlight
@@ -105,14 +109,15 @@ impl SettingsPage {
             Self::Modules => 1,
             Self::TopBar => 2,
             Self::Notch => 3,
-            Self::Dock => 4,
-            Self::WindowControls => 5,
-            Self::Spotlight => 6,
-            Self::ControlCenter => 7,
-            Self::Appearance => 8,
-            Self::Shortcuts => 9,
-            Self::General => 10,
-            Self::About => 11,
+            Self::Focus => 4,
+            Self::Dock => 5,
+            Self::WindowControls => 6,
+            Self::Spotlight => 7,
+            Self::ControlCenter => 8,
+            Self::Appearance => 9,
+            Self::Shortcuts => 10,
+            Self::General => 11,
+            Self::About => 12,
         }
     }
 
@@ -134,10 +139,10 @@ impl SettingsPage {
             | OttoSettingKind::PrivacyIndicators
             | OttoSettingKind::MediaModule
             | OttoSettingKind::OnlineLyrics
-            | OttoSettingKind::FocusModule
             | OttoSettingKind::ClipboardHistory
             | OttoSettingKind::QuickCapture
             | OttoSettingKind::DropShelf => Self::Notch,
+            OttoSettingKind::FocusModule => Self::Focus,
             OttoSettingKind::Dock
             | OttoSettingKind::DockHideTaskbar
             | OttoSettingKind::DockShowDownloads
@@ -146,7 +151,7 @@ impl SettingsPage {
             | OttoSettingKind::DockReserveSpace
             | OttoSettingKind::DockMagnification => Self::Dock,
             OttoSettingKind::WindowControls | OttoSettingKind::Genie => Self::WindowControls,
-            OttoSettingKind::LiquidGlass | OttoSettingKind::CaptureVisible => Self::Appearance,
+            OttoSettingKind::CaptureVisible => Self::Appearance,
             OttoSettingKind::Hotkeys => Self::Shortcuts,
             OttoSettingKind::LaunchAtLogin | OttoSettingKind::BackgroundCleanup => Self::General,
         }
@@ -327,12 +332,10 @@ impl ModuleId {
     pub const fn page(self) -> SettingsPage {
         match self {
             Self::TopBar => SettingsPage::TopBar,
-            Self::Notch
-            | Self::Media
-            | Self::Focus
-            | Self::Clipboard
-            | Self::Pocket
-            | Self::QuickCapture => SettingsPage::Notch,
+            Self::Notch | Self::Media | Self::Clipboard | Self::Pocket | Self::QuickCapture => {
+                SettingsPage::Notch
+            }
+            Self::Focus => SettingsPage::Focus,
             Self::Dock => SettingsPage::Dock,
             Self::WindowControls | Self::Genie => SettingsPage::WindowControls,
             Self::Spotlight => SettingsPage::Spotlight,
@@ -625,7 +628,7 @@ mod tests {
         ModuleId, ModuleStatus, SETTINGS_PAGE_COUNT, SettingsGroup, SettingsHit, SettingsPage,
         compute_settings_layout, modules_running, resolve_modules,
     };
-    use crate::control_center::{
+    use crate::settings::model::{
         OttoSettingItem, OttoSettingKind, OttoSettingsSnapshot, PluginSettingsState,
         SystemSettingsState,
     };

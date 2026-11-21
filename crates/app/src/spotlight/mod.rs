@@ -132,7 +132,9 @@ impl SpotlightSurface {
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) {
-    *runtime.spotlight.borrow_mut() = Some(SpotlightSurface::new(hwnd));
+    if let Ok(mut slot) = runtime.spotlight.try_borrow_mut() {
+        *slot = Some(SpotlightSurface::new(hwnd));
+    }
 }
 
 pub fn stop(runtime: &RuntimeContext) {

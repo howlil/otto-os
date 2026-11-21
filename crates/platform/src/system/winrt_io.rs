@@ -71,11 +71,13 @@ pub(crate) fn read_stream_bounded(
     cancelled: &dyn Fn() -> bool,
 ) -> Option<Vec<u8>> {
     let mut body = BoundedBody::with_limit(limit);
+    let buffer = Buffer::Create(READ_CHUNK_BYTES).ok()?;
+    let mut chunk = Vec::new();
     loop {
         if cancelled() || Instant::now() >= deadline {
             return None;
         }
-        let buffer = Buffer::Create(READ_CHUNK_BYTES).ok()?;
+        let _ = buffer.SetLength(0);
         let filled = await_until!(
             stream.ReadAsync(&buffer, READ_CHUNK_BYTES, InputStreamOptions::Partial),
             deadline
@@ -84,7 +86,7 @@ pub(crate) fn read_stream_bounded(
         if length == 0 {
             return Some(body.into_bytes());
         }
-        let mut chunk = vec![0u8; length];
+        chunk.resize(length, 0);
         DataReader::FromBuffer(&filled)
             .ok()?
             .ReadBytes(&mut chunk)

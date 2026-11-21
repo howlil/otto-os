@@ -1,6 +1,6 @@
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -16,14 +16,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, KillTimer,
     MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SC_MINIMIZE,
     SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SYSCOMMAND, WM_TIMER, WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU,
-    WindowFromPoint,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSCOMMAND, WM_TIMER,
+    WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
 };
 use windows::core::BOOL;
 
 use otto_core::scale;
 
-use crate::window::caption::{covering_caption_of, dwm_rect};
+use crate::window::caption::{covering_caption_of_with_frame, dwm_rect};
 use crate::worker::{HookStartup, HookThread, install_hook_thread, uninstall_hook_thread};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -49,6 +49,12 @@ static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 static TARGET: AtomicIsize = AtomicIsize::new(0);
 static MESSAGE: AtomicU32 = AtomicU32::new(0);
 static SWALLOW_BUTTON_UP: AtomicBool = AtomicBool::new(false);
+static MOUSE_CLICK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[must_use]
+pub fn take_mouse_click_count() -> u64 {
+    MOUSE_CLICK_COUNT.swap(0, Ordering::AcqRel)
+}
 
 fn now_ms() -> u64 {
     unsafe { GetTickCount64() }
@@ -85,7 +91,7 @@ fn is_cloaked(window: HWND) -> bool {
 struct HitSearch {
     x: i32,
     y: i32,
-    found: isize,
+    found: Option<(isize, RECT)>,
 }
 
 const CAPTION_BAND_MAX_DIP: i32 = 96;
@@ -99,9 +105,10 @@ const fn rect_contains(rect: RECT, x: i32, y: i32, margin: i32) -> bool {
 }
 
 const fn has_minimize_caption_style(style: u32) -> bool {
-    style & WS_CAPTION.0 == WS_CAPTION.0
-        && style & WS_SYSMENU.0 != 0
-        && style & WS_MINIMIZEBOX.0 != 0
+    let has_caption = style & WS_CAPTION.0 == WS_CAPTION.0;
+    let custom_resizable_chrome = !has_caption && style & WS_THICKFRAME.0 != 0;
+    (has_caption && style & WS_SYSMENU.0 != 0 && style & WS_MINIMIZEBOX.0 != 0)
+        || custom_resizable_chrome
 }
 
 fn is_within_top_caption_band(x: i32, y: i32, frame: RECT, dpi: u32) -> bool {
@@ -123,14 +130,14 @@ unsafe extern "system" fn visit_window(window: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     };
     if rect_contains(frame, search.x, search.y, 0) && !is_cloaked(window) {
-        search.found = window.0 as isize;
+        search.found = Some((window.0 as isize, frame));
         return BOOL(0);
     }
     BOOL(1)
 }
 
 enum FastHit {
-    Window(HWND),
+    Window(HWND, RECT),
     OwnProcess,
     Fallback,
 }
@@ -155,36 +162,41 @@ fn fast_top_level_window_at(x: i32, y: i32) -> FastHit {
         return FastHit::Fallback;
     };
     if rect_contains(frame, x, y, 0) {
-        FastHit::Window(root)
+        FastHit::Window(root, frame)
     } else {
         FastHit::Fallback
     }
 }
 
-fn top_level_window_at(x: i32, y: i32) -> Option<HWND> {
+fn top_level_window_at(x: i32, y: i32) -> Option<(HWND, RECT)> {
     match fast_top_level_window_at(x, y) {
-        FastHit::Window(window) => return Some(window),
+        FastHit::Window(window, frame) => return Some((window, frame)),
         FastHit::OwnProcess => return None,
         FastHit::Fallback => {}
     }
-    let mut search = HitSearch { x, y, found: 0 };
+    let mut search = HitSearch { x, y, found: None };
     let _ = unsafe {
         EnumWindows(
             Some(visit_window),
             LPARAM(std::ptr::from_mut(&mut search) as isize),
         )
     };
-    (search.found != 0).then_some(HWND(search.found as *mut _))
+    search
+        .found
+        .map(|(hwnd, frame)| (HWND(hwnd as *mut _), frame))
 }
 
 fn belongs_to_this_process(window: HWND) -> bool {
+    if crate::window::ops::is_own_settings_window(window) {
+        return false;
+    }
     let mut process = 0_u32;
     unsafe { GetWindowThreadProcessId(window, Some(&raw mut process)) };
     process == unsafe { GetCurrentProcessId() }
 }
 
 fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
-    let window = top_level_window_at(x, y)?;
+    let (window, frame) = top_level_window_at(x, y)?;
     if belongs_to_this_process(window) {
         return None;
     }
@@ -192,12 +204,11 @@ fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
     if !has_minimize_caption_style(style) {
         return None;
     }
-    let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
     let dpi = unsafe { GetDpiForWindow(window) };
     if !is_within_top_caption_band(x, y, frame, dpi) {
         return None;
     }
-    let hit = covering_caption_of(window)?
+    let hit = covering_caption_of_with_frame(window, style, frame)?
         .minimize_button()?
         .contains(x, y);
     if !hit || crate::window::model::is_window_uipi_blocked(window) {
@@ -246,10 +257,17 @@ fn request_minimize(x: i32, y: i32) -> bool {
 }
 
 fn swallow(code: i32, wparam: WPARAM, lparam: LPARAM) -> bool {
-    if code < 0 {
+    if code < 0 || lparam.0 == 0 {
         return false;
     }
     let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+    if matches!(
+        wparam.0 as u32,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+    ) && event.flags & 0x01 == 0
+    {
+        MOUSE_CLICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
     match wparam.0 as u32 {
         WM_LBUTTONDOWN => request_minimize(event.pt.x, event.pt.y),
         WM_LBUTTONUP => SWALLOW_BUTTON_UP.swap(false, Ordering::AcqRel),
@@ -438,5 +456,14 @@ mod tests {
         assert!(!is_within_top_caption_band(50, 60, frame, 96));
         assert!(is_within_top_caption_band(800, 160, frame, 144));
         assert!(!is_within_top_caption_band(800, 200, frame, 144));
+    }
+
+    #[test]
+    fn null_lparam_is_safely_ignored_by_mouse_hook_filter() {
+        assert!(!super::swallow(
+            0,
+            super::WPARAM(super::WM_LBUTTONDOWN as usize),
+            super::LPARAM(0)
+        ));
     }
 }

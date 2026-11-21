@@ -27,12 +27,8 @@ mod input;
 mod lifecycle;
 mod presentation;
 
-pub(crate) use self::commands::cycle_dock_icon_size;
-pub(crate) use self::commands::cycle_menu_bar_hide;
 use self::commands::execute_command;
 use self::commands::refresh_and_present;
-pub(crate) use self::commands::settings_snapshot;
-pub(crate) use self::commands::toggle_setting;
 
 const CC_POLL_MS: u32 = 16;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
@@ -101,7 +97,9 @@ impl ControlCenterSurface {
 }
 
 pub fn start(runtime: &RuntimeContext, hwnd: isize) {
-    *runtime.control_center.borrow_mut() = Some(ControlCenterSurface::new(hwnd));
+    if let Ok(mut slot) = runtime.control_center.try_borrow_mut() {
+        *slot = Some(ControlCenterSurface::new(hwnd));
+    }
 }
 
 pub fn stop(runtime: &RuntimeContext) {
@@ -372,10 +370,7 @@ fn apply_post_action(runtime: &RuntimeContext, action: PostClickAction) {
         PostClickAction::Command(command, dismiss) => {
             let skip_refresh = matches!(
                 command,
-                ControlCenterCommand::SetThemeMode(_)
-                    | ControlCenterCommand::CycleTheme
-                    | ControlCenterCommand::OpenPage(_)
-                    | ControlCenterCommand::Back
+                ControlCenterCommand::OpenPage(_) | ControlCenterCommand::Back
             );
             execute_command(runtime, command);
             if dismiss {

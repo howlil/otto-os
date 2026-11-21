@@ -111,17 +111,25 @@ pub fn copy_clipboard_payload(payload: &ClipboardPayload) -> Option<u32> {
     write_clipboard_hglobal(format, hglobal)
 }
 
+fn sensitive_clipboard_formats() -> (u32, u32, u32) {
+    static FORMATS: std::sync::OnceLock<(u32, u32, u32)> = std::sync::OnceLock::new();
+    *FORMATS.get_or_init(|| unsafe {
+        (
+            RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")),
+            RegisterClipboardFormatW(w!("Clipboard Viewer Ignore")),
+            RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")),
+        )
+    })
+}
+
 fn clipboard_is_sensitive() -> bool {
-    let exclude_fmt =
-        unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
+    let (exclude_fmt, ignore_fmt, history_fmt) = sensitive_clipboard_formats();
     if exclude_fmt != 0 && is_format_available(exclude_fmt) {
         return true;
     }
-    let ignore_fmt = unsafe { RegisterClipboardFormatW(w!("Clipboard Viewer Ignore")) };
     if ignore_fmt != 0 && is_format_available(ignore_fmt) {
         return true;
     }
-    let history_fmt = unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) };
     if history_fmt != 0 && is_format_available(history_fmt) {
         let Ok(handle) = (unsafe { GetClipboardData(history_fmt) }) else {
             return true;

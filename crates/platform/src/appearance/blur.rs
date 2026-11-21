@@ -8,12 +8,9 @@ use windows::core::{BOOL, s, w};
 
 const DWMWA_SYSTEMBACKDROP_TYPE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(38);
 const DWMSBT_NONE: u32 = 1;
-const DWMSBT_MAINWINDOW: u32 = 2;
 const DWMSBT_TRANSIENTWINDOW: u32 = 3;
-const DWMSBT_TABBEDWINDOW: u32 = 4;
 
 const WCA_ACCENT_POLICY: u32 = 19;
-const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
 const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
 
 #[repr(C)]
@@ -35,15 +32,13 @@ type SetWindowCompositionAttribute =
     unsafe extern "system" fn(HWND, *mut CompositionAttribute) -> BOOL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BackdropMaterial {
+pub(crate) enum BackdropMaterial {
     None,
     Acrylic,
-    Mica,
-    MicaAlt,
 }
 
 #[must_use]
-pub fn apply_backdrop_material(hwnd: isize, material: BackdropMaterial) -> bool {
+pub(crate) fn apply_backdrop_material(hwnd: isize, material: BackdropMaterial) -> bool {
     let handle = HWND(hwnd as *mut c_void);
     if !crate::theme::is_transparency_enabled() && material != BackdropMaterial::None {
         let none_val = DWMSBT_NONE;
@@ -61,8 +56,6 @@ pub fn apply_backdrop_material(hwnd: isize, material: BackdropMaterial) -> bool 
     let dwm_type = match material {
         BackdropMaterial::None => DWMSBT_NONE,
         BackdropMaterial::Acrylic => DWMSBT_TRANSIENTWINDOW,
-        BackdropMaterial::Mica => DWMSBT_MAINWINDOW,
-        BackdropMaterial::MicaAlt => DWMSBT_TABBEDWINDOW,
     };
 
     let dwm_res = unsafe {
@@ -81,7 +74,6 @@ pub fn apply_backdrop_material(hwnd: isize, material: BackdropMaterial) -> bool 
     let accent_state = match material {
         BackdropMaterial::None => 0,
         BackdropMaterial::Acrylic => ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        BackdropMaterial::Mica | BackdropMaterial::MicaAlt => ACCENT_ENABLE_BLURBEHIND,
     };
 
     unsafe {
@@ -105,9 +97,4 @@ pub fn apply_backdrop_material(hwnd: isize, material: BackdropMaterial) -> bool 
         };
         set(handle, &raw mut data).as_bool()
     }
-}
-
-#[must_use]
-pub fn enable_backdrop_blur(hwnd: isize) -> bool {
-    apply_backdrop_material(hwnd, BackdropMaterial::Acrylic)
 }

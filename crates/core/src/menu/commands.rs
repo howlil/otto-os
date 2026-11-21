@@ -48,8 +48,6 @@ pub const CMD_VIEW_AS_DETAILS: usize = 46;
 
 pub const CMD_HELP_F1: usize = 51;
 
-pub const CMD_CC_VOLUME: usize = 60;
-pub const CMD_CC_BRIGHTNESS: usize = 61;
 pub const CMD_CC_MEDIA_TOGGLE: usize = 62;
 pub const CMD_CC_MEDIA_NEXT: usize = 63;
 pub const CMD_CC_MEDIA_PREVIOUS: usize = 64;
@@ -63,11 +61,6 @@ pub const CMD_CAL_PREVIOUS: usize = 71;
 pub const CMD_CAL_NEXT: usize = 72;
 pub const CMD_CAL_TODAY: usize = 73;
 pub const CMD_CAL_SETTINGS: usize = 74;
-pub const CMD_CC_THEME_TOGGLE: usize = 75;
-pub const CMD_CC_THEME_LIGHT: usize = 76;
-pub const CMD_CC_THEME_DARK: usize = 77;
-pub const CMD_CC_THEME_AUTO: usize = 78;
-pub const CMD_CC_LYRICS_ONLINE: usize = 79;
 pub const CMD_OTTO_SETTINGS: usize = 80;
 pub const CMD_OPEN_LOGS: usize = 81;
 pub const CMD_NOTIF_CLEAR_ALL: usize = 82;

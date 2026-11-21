@@ -90,6 +90,8 @@ impl NotchController {
         self.hover_since = None;
         self.panel_trigger = PanelTrigger::Closed;
         self.opened_by_shelf_drag = false;
+        self.opened_by_task_editor = false;
+        self.tasks.cancel_editor();
         self.modal_picker_open = false;
         self.drag_out_active = false;
         self.shelf_drag_leave_until = None;
@@ -136,8 +138,7 @@ impl NotchController {
         IslandInputs {
             alert: self.has_alert() && self.alert_until.is_none_or(|until| now < until),
             panel_requested: self.has_openable_panel()
-                && (self.panel_trigger.is_open()
-                    || (self.shelf_enabled && self.is_shelf_hold_open())),
+                && (self.panel_trigger.is_open() || self.is_panel_held_open()),
             hud: self.hud_enabled && self.hud_until.is_some_and(|until| now < until),
             notification: self.notification_stage(now),
             focus_active: self.has_compact_focus(),
@@ -332,7 +333,7 @@ impl NotchController {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_notch_pressed(&mut self, pressed: bool) -> bool {
         if self.press_active == pressed {
             return false;
@@ -342,7 +343,7 @@ impl NotchController {
     }
 
     pub(crate) fn collapse_from_gesture(&mut self) -> NotchUpdate {
-        if self.is_shelf_hold_open() || !self.panel_trigger.is_open() {
+        if self.is_panel_held_open() || !self.panel_trigger.is_open() {
             return NotchUpdate::default();
         }
         self.panel_trigger = PanelTrigger::Closed;
@@ -355,7 +356,7 @@ impl NotchController {
     }
 
     pub(crate) fn collapse_from_external_focus_change(&mut self) -> bool {
-        if self.is_shelf_hold_open() || self.has_alert() {
+        if self.is_panel_held_open() || self.has_alert() {
             return false;
         }
         if self.panel_trigger != PanelTrigger::Closed {

@@ -88,6 +88,11 @@ pub(super) fn dominant_background_rgb(
     let mut counts = vec![0_u32; 4096];
     let mut saw_smooth = false;
     for y in row_range.clone() {
+        let weight = if height >= 8 && (y <= 2 || y + 3 >= height) {
+            4
+        } else {
+            1
+        };
         let row = &bgra[y * row_bytes..(y + 1) * row_bytes];
         for x in 0..width {
             if is_horizontally_smooth(row, x, width) {
@@ -96,25 +101,30 @@ pub(super) fn dominant_background_rgb(
                 let idx = (usize::from(rgb[0] >> 4) << 8)
                     | (usize::from(rgb[1] >> 4) << 4)
                     | usize::from(rgb[2] >> 4);
-                sum_r[idx] += u64::from(rgb[0]);
-                sum_g[idx] += u64::from(rgb[1]);
-                sum_b[idx] += u64::from(rgb[2]);
-                counts[idx] += 1;
+                sum_r[idx] += u64::from(rgb[0]) * u64::from(weight);
+                sum_g[idx] += u64::from(rgb[1]) * u64::from(weight);
+                sum_b[idx] += u64::from(rgb[2]) * u64::from(weight);
+                counts[idx] += weight;
             }
         }
     }
     if !saw_smooth {
         for y in row_range {
+            let weight = if height >= 8 && (y <= 2 || y + 3 >= height) {
+                4
+            } else {
+                1
+            };
             let row = &bgra[y * row_bytes..(y + 1) * row_bytes];
             for x in 0..width {
                 let rgb = row_pixel_rgb(row, x);
                 let idx = (usize::from(rgb[0] >> 4) << 8)
                     | (usize::from(rgb[1] >> 4) << 4)
                     | usize::from(rgb[2] >> 4);
-                sum_r[idx] += u64::from(rgb[0]);
-                sum_g[idx] += u64::from(rgb[1]);
-                sum_b[idx] += u64::from(rgb[2]);
-                counts[idx] += 1;
+                sum_r[idx] += u64::from(rgb[0]) * u64::from(weight);
+                sum_g[idx] += u64::from(rgb[1]) * u64::from(weight);
+                sum_b[idx] += u64::from(rgb[2]) * u64::from(weight);
+                counts[idx] += weight;
             }
         }
     }
@@ -138,7 +148,7 @@ pub(super) fn dominant_background_rgb(
     let Some(&(best_seed, _)) = bins.iter().max_by_key(|&&(seed_rgb, seed_count)| {
         let cluster_count: u64 = bins
             .iter()
-            .filter(|&&(other_rgb, _)| max_channel_diff(seed_rgb, other_rgb) <= 48)
+            .filter(|&&(other_rgb, _)| max_channel_diff(seed_rgb, other_rgb) <= 18)
             .map(|&(_, other_count)| u64::from(other_count))
             .sum();
         (cluster_count, seed_count)
@@ -150,7 +160,7 @@ pub(super) fn dominant_background_rgb(
     let mut total_b = 0_u64;
     let mut total_count = 0_u64;
     for &(bin_rgb, bin_count) in &bins {
-        if max_channel_diff(best_seed, bin_rgb) <= 48 {
+        if max_channel_diff(best_seed, bin_rgb) <= 18 {
             let w = u64::from(bin_count);
             total_r += u64::from(bin_rgb[0]) * w;
             total_g += u64::from(bin_rgb[1]) * w;
@@ -202,8 +212,10 @@ pub fn extract_cover_rows(bgra: &[u8], width: usize, height: usize) -> Option<Ve
         return None;
     }
     let base_rgb = dominant_background_rgb(bgra, width, height, row_bytes);
+    let min_tight_matches = (width / 6).max(usize::from(width >= 2) * 2);
     let min_cluster_matches = (width / 4).max(usize::from(width >= 2));
     let mut rows = Vec::with_capacity(height);
+    let mut tight_smooth = Vec::with_capacity(width);
     let mut cluster_smooth = Vec::with_capacity(width);
     let mut smooth_only = Vec::with_capacity(width);
     let mut cluster_any = Vec::with_capacity(width);
@@ -213,6 +225,7 @@ pub fn extract_cover_rows(bgra: &[u8], width: usize, height: usize) -> Option<Ve
     let mut blues = Vec::with_capacity(width);
     for y in 0..height {
         let row = &bgra[y * row_bytes..(y + 1) * row_bytes];
+        tight_smooth.clear();
         cluster_smooth.clear();
         smooth_only.clear();
         cluster_any.clear();
@@ -220,18 +233,25 @@ pub fn extract_cover_rows(bgra: &[u8], width: usize, height: usize) -> Option<Ve
         for x in 0..width {
             all_indices.push(x);
             let rgb = row_pixel_rgb(row, x);
-            let in_cluster = max_channel_diff(rgb, base_rgb) <= 48;
+            let diff = max_channel_diff(rgb, base_rgb);
+            let in_tight = diff <= 16;
+            let in_cluster = diff <= 36;
             if in_cluster {
                 cluster_any.push(x);
             }
             if is_horizontally_smooth(row, x, width) {
                 smooth_only.push(x);
+                if in_tight {
+                    tight_smooth.push(x);
+                }
                 if in_cluster {
                     cluster_smooth.push(x);
                 }
             }
         }
-        let chosen = if cluster_smooth.len() >= min_cluster_matches && !cluster_smooth.is_empty() {
+        let chosen = if tight_smooth.len() >= min_tight_matches && !tight_smooth.is_empty() {
+            &tight_smooth
+        } else if cluster_smooth.len() >= min_cluster_matches && !cluster_smooth.is_empty() {
             &cluster_smooth
         } else if smooth_only.len() >= (width / 2).max(2) {
             &smooth_only
@@ -247,6 +267,34 @@ pub fn extract_cover_rows(bgra: &[u8], width: usize, height: usize) -> Option<Ve
             &mut greens,
             &mut blues,
         ));
+    }
+    if height >= 8 {
+        let top_ref = rows[1];
+        let bot_ref = rows[height - 2];
+        if max_channel_diff(top_ref, bot_ref) <= 8 {
+            let span = (height - 3) as u16;
+            for (y, row_rgb) in rows.iter_mut().enumerate().take(height - 2).skip(2) {
+                if max_channel_diff(*row_rgb, top_ref) > 8
+                    && max_channel_diff(*row_rgb, bot_ref) > 8
+                {
+                    let offset = (y - 1) as u16;
+                    *row_rgb = [
+                        ((u16::from(top_ref[0]) * (span - offset)
+                            + u16::from(bot_ref[0]) * offset
+                            + span / 2)
+                            / span) as u8,
+                        ((u16::from(top_ref[1]) * (span - offset)
+                            + u16::from(bot_ref[1]) * offset
+                            + span / 2)
+                            / span) as u8,
+                        ((u16::from(top_ref[2]) * (span - offset)
+                            + u16::from(bot_ref[2]) * offset
+                            + span / 2)
+                            / span) as u8,
+                    ];
+                }
+            }
+        }
     }
     Some(rows)
 }
@@ -285,5 +333,5 @@ pub const NATIVE_CORNER_RADIUS_DIP: i32 = 8;
 pub const COVER_RIGHT_MARGIN_DIP: i32 = 14;
 pub const COVER_FEATHER_DIP: i32 = 6;
 pub const COVER_SAMPLE_GAP_DIP: i32 = 2;
-pub const COVER_SAMPLE_WIDTH_DIP: i32 = 24;
+pub const COVER_SAMPLE_WIDTH_DIP: i32 = 48;
 pub const RESIZE_BORDER_DIP: i32 = 4;

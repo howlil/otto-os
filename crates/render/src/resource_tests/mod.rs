@@ -770,6 +770,8 @@ fn exercise_tasks_tab(
         animated: false,
     };
     let empty = otto_core::TasksState::default();
+    let mut empty_adding = otto_core::TasksState::default();
+    let _ = empty_adding.begin_add();
     let mut populated = otto_core::TasksState::default();
     for index in 0..6 {
         let outcome = populated.add(&format!("render task {index} with a fairly long title"));
@@ -782,11 +784,18 @@ fn exercise_tasks_tab(
             }
         }
     }
+    let mut populated_editing = populated.clone();
+    if let Some(first) = populated_editing.items.first().map(|item| item.id) {
+        let _ = populated_editing.begin_edit(first);
+    }
     for (tasks_state, hover) in [
         (&empty, Some(otto_core::HitTarget::TasksAdd)),
+        (&empty_adding, Some(otto_core::HitTarget::TasksAdd)),
         (&populated, Some(otto_core::HitTarget::TaskItem(0))),
         (&populated, Some(otto_core::HitTarget::TaskCheck(1))),
+        (&populated, Some(otto_core::HitTarget::TaskEdit(1))),
         (&populated, Some(otto_core::HitTarget::TaskRemove(2))),
+        (&populated_editing, Some(otto_core::HitTarget::TaskEdit(0))),
     ] {
         let layout = otto_core::compute_layout_with_notch(
             metrics,
@@ -1950,4 +1959,67 @@ fn bar_frame_key_invalidates_on_backdrop_brand_recreate_closed_and_hud() {
     };
     draw_test_bar(&renderer, &open_layout, Some(active_hud)).expect("active hud resets key");
     assert!(renderer.last_bar_frame.borrow().is_none());
+}
+
+#[test]
+fn panel_surface_allocates_lazily_and_releases_gdi_objects_on_release() {
+    let _serial = SerialResourceTest::begin();
+    let metrics = otto_core::Metrics::default();
+    let layout = otto_core::compute_layout_with_notch(
+        &metrics,
+        1920,
+        96,
+        "Finder",
+        otto_core::NotchLayoutInput {
+            panel_expansion: 1.0,
+            ..otto_core::NotchLayoutInput::default()
+        },
+    );
+    let pomodoro = otto_core::PomodoroScene::steady(
+        otto_core::PomodoroState::new(),
+        otto_core::ClockTime::default(),
+    );
+    let shelf = otto_core::ShelfState::default();
+    let clipboard = otto_core::ClipboardState::default();
+    let tasks = otto_core::TasksState::default();
+    let privacy = otto_core::PrivacyState::default();
+    let renderer = Renderer::new(
+        layout.bar.width,
+        layout.bar.height,
+        layout.panel_window.width,
+        layout.panel_window.height,
+        96,
+        0.0,
+    )
+    .expect("renderer");
+    assert!(renderer.panel_surface.borrow().is_none());
+
+    let baseline = GuiCounts::now();
+    renderer
+        .draw_panel(
+            &layout,
+            None,
+            None,
+            &pomodoro,
+            None,
+            0.0,
+            otto_core::LyricsView {
+                sheet: None,
+                status: otto_core::LyricsStatus::Idle,
+                animated: false,
+            },
+            &shelf,
+            &clipboard,
+            &tasks,
+            &privacy,
+            None,
+        )
+        .expect("draw panel");
+    assert!(renderer.panel_surface.borrow().is_some());
+
+    renderer.release_notch_resources();
+    assert!(renderer.panel_surface.borrow().is_none());
+    assert!(renderer.cached_cover_art.borrow().is_none());
+    assert!(renderer.cached_shelf_bitmaps.borrow().is_empty());
+    baseline.assert_no_growth("panel surface release");
 }

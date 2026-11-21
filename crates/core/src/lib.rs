@@ -40,15 +40,12 @@ pub use capture_plan::{
     capture_wanted,
 };
 pub use change_gate::ChangeGate;
-pub use control_center::effects::{ControlCenterEffect, ThemeChange, control_center_effect};
 pub use control_center::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState,
     ControlCenterClickOutcome, ControlCenterCommand, ControlCenterFocus, ControlCenterFocusOutcome,
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterMetrics, ControlCenterPage,
-    ControlCenterPlacement, ControlCenterSnapshot, OttoSettingItem, OttoSettingKind,
-    OttoSettingSection, OttoSettingsSnapshot, PluginSettingsState, SLIDER_KEY_STEP_PERCENT,
-    SubPanelGroupLayout, SubPanelGroupSpec, SystemSettingsState, UPDATE_CHECKING_LABEL,
-    WifiNetwork, WifiState, compute_control_center_layout,
+    ControlCenterPlacement, ControlCenterSnapshot, SLIDER_KEY_STEP_PERCENT, SubPanelGroupLayout,
+    SubPanelGroupSpec, UPDATE_CHECKING_LABEL, WifiNetwork, WifiState,
     compute_control_center_layout_for_snapshot, control_center_action,
     control_center_focus_targets, focus_row_subtitle, format_update_status,
     is_update_available_status, next_dock_icon_size, parse_latest_release_tag, power_mode_label,
@@ -70,8 +67,8 @@ pub use dock::layout::{
     AppleIconKind, DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL, DockInput, DockItemLayout,
     DockLayout, DockMetrics, DockOverflow, DockPosition, DockPreferences, DockSettingsChange,
     compute_dock_layout, dock_capacity, dock_entry_badge, dock_entry_progress, dock_rest_zone,
-    dock_should_hide, parse_title_badge_count, parse_title_progress, select_dock_click_window,
-    smooth_damp, split_dock_overflow, step_toward,
+    dock_should_hide, parse_title_badge_count, parse_title_progress, smooth_damp,
+    split_dock_overflow, step_toward,
 };
 pub use dock::stack::{
     DOWNLOADS_STACK_MAX_ITEMS, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
@@ -84,7 +81,7 @@ pub use genie::{
 };
 pub use glass::{
     GlassBackdrop, GlassBitmap, GlassParams, GlassShape, LIGHT_DIRECTION, Rgb, RgbBuffer,
-    compose_glass, compose_glass_lit, glass_color, soften_backdrop,
+    compose_glass_lit, glass_color, soften_backdrop,
 };
 pub use layout::{
     HitTarget, Layout, Metrics, NOTIFICATION_BANNER_HEIGHT_POINTS, NOTIFICATION_RING_HEIGHT_POINTS,
@@ -98,8 +95,8 @@ pub use material::{
 };
 pub use menu::*;
 pub use motion::{
-    MotionMetrics, MotionPreference, SpringState, advance_bounce_phase, advance_genie_progress,
-    animate_value, bounce_offset, step_spring,
+    MotionMetrics, MotionPreference, SpringState, advance_bounce_phase, animate_value,
+    bounce_offset, step_spring,
 };
 pub use notch::call_activity::{
     CALL_DEBOUNCE_MS, CallActivity, CallScene, CallTracker, detect_call_activity,
@@ -109,6 +106,15 @@ pub use notch::clipboard::{
     CLIPBOARD_PAGE_SIZE, ClipboardItem, ClipboardItemId, ClipboardKind, ClipboardLayoutInput,
     ClipboardPayload, ClipboardState, MAX_CLIPBOARD_FILES, MAX_CLIPBOARD_ITEMS,
     MAX_CLIPBOARD_TEXT_BYTES,
+};
+pub use notch::focus_activity::{
+    AppUsageEntry, BrowserInspection, DailyActivityRecord, DayKey, FOCUS_HISTORY_DAYS,
+    FOCUS_IDLE_TIMEOUT_MS, FOCUS_MAX_STEP_MS, FocusActivityState, FocusBlockEnforcement,
+    FocusBlocklist, FocusRollingSummary, MAX_BLOCKED_APPS, MAX_BLOCKED_WEBSITES,
+    MAX_SEARCH_QUERY_CHARS, MAX_TRACKED_APPS, MAX_TRACKED_SEARCHES, MAX_TRACKED_WEBSITES,
+    PRESET_BLOCKED_APPS, PRESET_BLOCKED_WEBSITES, SearchQueryEntry, WebsiteUsageEntry,
+    estimated_words, format_compact_count, format_screen_time, inspect_browser_context,
+    is_browser_executable, normalize_app_key, normalize_domain,
 };
 pub use notch::hud::{
     HudGeometry, HudGlyph, HudLabel, HudPresentation, HudTone, HudValue, compute_hud_geometry,
@@ -161,18 +167,21 @@ pub use notch::shelf::{
     is_unc_shelf_path, is_valid_shelf_file_path,
 };
 pub use notch::tasks::{
-    MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskId, TaskItem,
-    TasksLayoutInput, TasksState, normalize_task_text,
+    MAX_TASK_TEXT_BYTES, MAX_TASKS, TASKS_PAGE_SIZE, TaskAddOutcome, TaskEditOutcome,
+    TaskEditorMode, TaskId, TaskItem, TasksLayoutInput, TasksState, normalize_task_text,
 };
 pub use pixels::{
     BgraLayout, CropRegion, PixelBufferError, PixelLimits, bgra_layout, crop_bgra,
-    downsample_bgra_half, downsample_bgra_to_fit, resize_bgra, scale_dimension,
-    validate_bgra_buffer,
+    downsample_bgra_to_fit, resize_bgra, scale_dimension, validate_bgra_buffer,
 };
 pub use pointer_edge::PointerEdgeWatch;
 pub use ports::{ControlCenterAction, ControlCenterPort, DockPort, NotchAction, NotchPort};
 pub use preferences::{AppPreferences, BrandIcon, NotchStyle};
 pub use process_hog::{HOG_SAMPLE_INTERVAL_SECS, HogDecision, HogTracker, ProcessSample};
+pub use settings::model::{
+    OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot,
+    PluginSettingsState, SystemSettingsState,
+};
 pub use settings_content::{
     BadgeTone, CardLayout, ContentLayout, SettingsAction, SettingsContent, SettingsHero,
     SettingsRow, SettingsRowValue, SettingsSection, build_content, compute_content_layout,
@@ -200,10 +209,8 @@ pub use window::effects::{WindowMenuEffect, window_menu_effect};
 pub use window_controls::{
     COVER_FEATHER_DIP, COVER_RIGHT_MARGIN_DIP, COVER_SAMPLE_GAP_DIP, COVER_SAMPLE_WIDTH_DIP,
     CommandScope, CoverBand, CoverStyle, NATIVE_CAPTION_BUTTON_DIP, NATIVE_CORNER_RADIUS_DIP,
-    NativeCaption, NativeCaptionStyle, RESIZE_BORDER_DIP, ResizeEdge, TrafficLightAction,
-    TrafficLightLayout, TrafficLightMetrics, WindowControlAction, WindowControlsLayout,
-    WindowControlsMetrics, WindowControlsState, accepts_window_controls,
-    application_command_targets, compute_cover_layout, compute_traffic_light_layout,
-    compute_window_controls_layout, cover_is_dark, cover_row_bands, extract_cover_rows,
-    window_control_scope, window_controls_top, window_controls_visible_under_bar,
+    NativeCaption, NativeCaptionStyle, RESIZE_BORDER_DIP, ResizeEdge, WindowControlAction,
+    WindowControlsLayout, WindowControlsMetrics, WindowControlsState, accepts_window_controls,
+    application_command_targets, compute_cover_layout, cover_is_dark, cover_row_bands,
+    extract_cover_rows, window_control_scope, window_controls_visible_under_bar,
 };

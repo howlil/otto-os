@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::Result;
 
 use super::ControlCenterSurface;
-use super::commands::settings_snapshot;
+use crate::settings::settings_snapshot;
 
 impl ControlCenterSurface {
     pub(super) fn ensure_renderer(&mut self) -> Result<()> {
@@ -30,7 +30,7 @@ impl ControlCenterSurface {
         self.snapshot.focus_active = runtime.notch_enabled.get()
             && runtime.focus_module_enabled.get()
             && runtime.focus_active.get();
-        self.snapshot.media = if runtime.media_module_enabled.get() {
+        self.snapshot.media = if runtime.notch_enabled.get() && runtime.media_module_enabled.get() {
             self.port.read_now_playing()
         } else {
             None
@@ -122,7 +122,8 @@ impl ControlCenterSurface {
         if !capture_wanted(
             &crate::theme_state::appearance(runtime),
             runtime.glass_enabled.get(),
-        ) {
+        ) || (runtime.capture_visible.get() && otto_platform::is_surface_visible(self.hwnd))
+        {
             return;
         }
         if self.ensure_renderer().is_err() {

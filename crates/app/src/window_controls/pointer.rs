@@ -93,6 +93,9 @@ impl Overlay {
         let group_hovered = self.layout.hits_group(x, y);
         let alt_down = group_hovered && is_alt_pressed();
         if self.hovered != group_hovered || self.alt_down != alt_down {
+            if !self.hovered && group_hovered {
+                let _ = self.resample_cover_fill();
+            }
             self.hovered = group_hovered;
             self.alt_down = alt_down;
             self.present();
@@ -126,7 +129,7 @@ impl Overlay {
         } else {
             self.alt_down = false;
         }
-        if self.settle_ticks == 0 && self.render_origin == self.target_origin() {
+        if self.settle_ticks == 0 {
             self.stop_anim_timer();
         }
     }

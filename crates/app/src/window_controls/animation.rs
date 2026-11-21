@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use crate::host::RuntimeContext;
 use crate::win_msg::{GREEN_HOVER_TIMER, WINDOW_CONTROLS_ANIM_TIMER};
 use otto_core::WindowControlAction;
@@ -19,19 +17,10 @@ impl Overlay {
     }
 
     pub(super) fn tick_animation(&mut self) {
-        let now = Instant::now();
-        let dt = now
-            .duration_since(self.last_tick)
-            .as_secs_f32()
-            .clamp(0.001, 0.050);
-        self.last_tick = now;
         if self.target.is_none() {
             self.stop_anim_timer();
             return;
         }
-        let desired_origin = self.target_origin();
-        self.follow(desired_origin, dt);
-        let origin_changed = self.render_origin != desired_origin;
         let settling = self.settle_ticks > 0;
         self.settle_ticks = self.settle_ticks.saturating_sub(1);
         let fill_changed = settling && self.resample_cover_fill();
@@ -41,10 +30,10 @@ impl Overlay {
             self.alt_down = alt;
             changed
         };
-        if origin_changed || fill_changed || alt_changed {
+        if fill_changed || alt_changed {
             self.present();
         }
-        if !origin_changed && self.settle_ticks == 0 && !self.hovered {
+        if self.settle_ticks == 0 && !self.hovered {
             self.stop_anim_timer();
         }
     }

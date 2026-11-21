@@ -23,8 +23,8 @@ pub use self::menu_commands::{
     MenuCommandResult, execute_control_center_command, execute_top_bar_command,
 };
 pub use self::shell::{
-    adjust_volume, open_calendar_notifications, open_downloads_folder, open_path,
-    open_quick_settings, open_spotlight_search, open_start_menu, open_task_view,
+    adjust_volume, open_calendar_notifications, open_downloads_folder, open_path, open_start_menu,
+    open_task_view,
 };
 pub(crate) use self::shell::{
     open_external_url, open_night_light_settings, open_power_settings, shell_exec_ok,

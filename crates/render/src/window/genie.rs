@@ -323,11 +323,6 @@ impl GenieRenderer {
     }
 
     #[must_use]
-    pub const fn canvas(&self) -> CoreRect {
-        self.canvas
-    }
-
-    #[must_use]
     pub fn wait_for_next_frame(&self, timeout_ms: u32) -> bool {
         self.waitable.wait(timeout_ms)
     }
@@ -856,6 +851,9 @@ mod tests {
 
     #[test]
     fn gpu_genie_renderer_draws_and_retargets_without_error() {
+        let _serial = crate::resource_tests::SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let canvas = CoreRect {
             x: 0,
             y: 0,

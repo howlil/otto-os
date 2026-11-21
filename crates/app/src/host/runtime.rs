@@ -6,7 +6,6 @@ use windows::core::{Error, Result};
 use crate::{bar, control_center, dock, genie, menu, settings_window, spotlight, window_controls};
 use otto_core::{
     AppPreferences, BrandIcon, DockPreferences, MenuBarPreferences, NotchStyle, SystemAppearance,
-    ThemeMode,
 };
 
 use super::plugins::PluginId;
@@ -81,7 +80,6 @@ pub(crate) struct RuntimeContext {
     pub(crate) bar_hwnd: Cell<isize>,
     pub(crate) dock_hwnd: Cell<isize>,
     pub(crate) window_controls_hwnd: Cell<isize>,
-    pub(crate) theme_mode: Cell<ThemeMode>,
     pub(crate) system_appearance: Cell<SystemAppearance>,
     pub(crate) blur_supported: Cell<bool>,
     pub(crate) glass_enabled: Cell<bool>,
@@ -99,7 +97,6 @@ pub(crate) struct RuntimeContext {
     pub(crate) capture_visible: Cell<bool>,
     pub(crate) classic_logo_enabled: Cell<bool>,
     pub(crate) dynamic_island_enabled: Cell<bool>,
-    pub(crate) liquid_glass_pref: Cell<bool>,
     pub(crate) privacy_indicators_enabled: Cell<bool>,
     pub(crate) clipboard_history_enabled: Cell<bool>,
     pub(crate) drop_shelf_enabled: Cell<bool>,
@@ -111,13 +108,11 @@ pub(crate) struct RuntimeContext {
     pub(crate) quick_capture_enabled: Cell<bool>,
     pub(crate) onboarding_seen: Cell<bool>,
     pub(crate) pending_plugin_toggles: [Cell<Option<bool>>; 4],
-    pub(crate) pending_theme_mode: Cell<Option<ThemeMode>>,
     pub(crate) pending_capture_visible: Cell<Option<bool>>,
     pub(crate) pending_hotkeys_enabled: Cell<Option<bool>>,
     pub(crate) pending_classic_logo: Cell<Option<bool>>,
     pub(crate) pending_notch_enabled: Cell<Option<bool>>,
     pub(crate) pending_dynamic_island: Cell<Option<bool>>,
-    pub(crate) pending_liquid_glass: Cell<Option<bool>>,
     pub(crate) pending_privacy_indicators: Cell<Option<bool>>,
     pub(crate) pending_clipboard_history: Cell<Option<bool>>,
     pub(crate) pending_drop_shelf: Cell<Option<bool>>,
@@ -131,6 +126,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) pending_end_session: Cell<bool>,
     pub(crate) pending_modal_action: RefCell<Option<bar::DeferredModalAction>>,
     pub(crate) pending_destroy_hwnds: RefCell<Vec<isize>>,
+    pub(crate) focus_activity: RefCell<otto_core::FocusActivityState>,
 }
 
 impl RuntimeContext {
@@ -147,7 +143,6 @@ impl RuntimeContext {
             bar_hwnd: Cell::new(0),
             dock_hwnd: Cell::new(0),
             window_controls_hwnd: Cell::new(0),
-            theme_mode: Cell::new(ThemeMode::Auto),
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
             blur_supported: Cell::new(false),
             glass_enabled: Cell::new(false),
@@ -165,7 +160,6 @@ impl RuntimeContext {
             capture_visible: Cell::new(false),
             classic_logo_enabled: Cell::new(false),
             dynamic_island_enabled: Cell::new(false),
-            liquid_glass_pref: Cell::new(true),
             privacy_indicators_enabled: Cell::new(true),
             clipboard_history_enabled: Cell::new(true),
             drop_shelf_enabled: Cell::new(true),
@@ -177,13 +171,11 @@ impl RuntimeContext {
             quick_capture_enabled: Cell::new(false),
             onboarding_seen: Cell::new(false),
             pending_plugin_toggles: [const { Cell::new(None) }; 4],
-            pending_theme_mode: Cell::new(None),
             pending_capture_visible: Cell::new(None),
             pending_hotkeys_enabled: Cell::new(None),
             pending_classic_logo: Cell::new(None),
             pending_notch_enabled: Cell::new(None),
             pending_dynamic_island: Cell::new(None),
-            pending_liquid_glass: Cell::new(None),
             pending_privacy_indicators: Cell::new(None),
             pending_clipboard_history: Cell::new(None),
             pending_drop_shelf: Cell::new(None),
@@ -197,6 +189,7 @@ impl RuntimeContext {
             pending_end_session: Cell::new(false),
             pending_modal_action: RefCell::new(None),
             pending_destroy_hwnds: RefCell::new(Vec::new()),
+            focus_activity: RefCell::new(otto_platform::load_focus_activity()),
         }
     }
 
@@ -248,13 +241,11 @@ impl RuntimeContext {
     }
 
     pub(super) fn apply_preferences(&self, preferences: AppPreferences) {
-        self.theme_mode.set(preferences.theme_mode);
         self.capture_visible.set(preferences.capture_visible);
         self.hotkeys_enabled.set(preferences.hotkeys_enabled);
         self.classic_logo_enabled.set(preferences.classic_logo);
         self.notch_enabled.set(preferences.notch_enabled);
         self.dynamic_island_enabled.set(preferences.dynamic_island);
-        self.liquid_glass_pref.set(preferences.liquid_glass);
         self.privacy_indicators_enabled
             .set(preferences.privacy_indicators);
         self.clipboard_history_enabled

@@ -55,7 +55,11 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     unsafe {
         let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
     }
-    *runtime.genie.borrow_mut() = Some(genie);
+    let mut slot = runtime
+        .genie
+        .try_borrow_mut()
+        .map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+    *slot = Some(genie);
     Ok(())
 }
 

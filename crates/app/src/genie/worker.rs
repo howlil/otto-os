@@ -220,15 +220,16 @@ pub(super) fn prepare_renderer(
     bound_hwnd: &mut isize,
     job: &RenderJob,
 ) -> Result<()> {
-    if renderer.is_none() {
+    let active = if let Some(active) = renderer.as_mut() {
+        active
+    } else {
         let mut created = GenieRenderer::new(job.canvas)?;
         if job.notify_hwnd != 0 {
             created.bind_window(job.notify_hwnd)?;
             *bound_hwnd = job.notify_hwnd;
         }
-        *renderer = Some(created);
-    }
-    let active = renderer.as_mut().expect("renderer initialized above");
+        renderer.insert(created)
+    };
     if job.notify_hwnd != 0 && *bound_hwnd != job.notify_hwnd {
         active.bind_window(job.notify_hwnd)?;
         *bound_hwnd = job.notify_hwnd;

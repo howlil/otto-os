@@ -1,6 +1,18 @@
 use super::compose::SRGB_BYTE_TO_LINEAR_LUT;
 use super::params::Rgb;
 
+const fn build_byte_to_f32_lut() -> [f32; 256] {
+    let mut lut = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        lut[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    lut
+}
+
+pub(super) const BYTE_TO_F32_LUT: [f32; 256] = build_byte_to_f32_lut();
+
 pub(super) const fn srgb_byte_to_linear(byte: u8) -> f32 {
     SRGB_BYTE_TO_LINEAR_LUT[byte as usize]
 }
@@ -8,7 +20,7 @@ pub(super) const fn srgb_byte_to_linear(byte: u8) -> f32 {
 pub(super) fn srgb_to_linear_fast(value: f32) -> f32 {
     if (0.0..=1.0).contains(&value) {
         let byte = (value * 255.0 + 0.5) as u8;
-        if (value - f32::from(byte) / 255.0) == 0.0 {
+        if (value - BYTE_TO_F32_LUT[byte as usize]) == 0.0 {
             return srgb_byte_to_linear(byte);
         }
     }

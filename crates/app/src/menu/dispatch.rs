@@ -1,11 +1,11 @@
 use crate::host::RuntimeContext;
 use otto_core::{
-    CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_TODAY, CMD_CONTROL_CENTER, CMD_NOTIF_CLEAR_ALL,
-    CMD_NOTIF_REQUEST_ACCESS, CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK,
-    CMD_TOGGLE_NOTCH, CMD_TOGGLE_TOP_BAR, Capability, CommandOutcome, ControlCenterPage,
-    DownloadsEffect, WindowCommand, WindowInfo, WindowMenuEffect, dock_overflow_choice,
-    dock_settings_effect, downloads_effect, notification_dismiss_index, overflow_menu_target,
-    shift_month, window_menu_effect,
+    CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY, CMD_CC_CALENDAR,
+    CMD_CONTROL_CENTER, CMD_NOTIF_CLEAR_ALL, CMD_NOTIF_REQUEST_ACCESS, CMD_OPEN_LOGS,
+    CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK, CMD_TOGGLE_NOTCH, CMD_TOGGLE_TOP_BAR, Capability,
+    CommandOutcome, ControlCenterAction, ControlCenterPage, DownloadsEffect, WindowCommand,
+    WindowInfo, WindowMenuEffect, dock_overflow_choice, dock_settings_effect, downloads_effect,
+    notification_dismiss_index, overflow_menu_target, shift_month, window_menu_effect,
 };
 use otto_platform::{
     current_process_id, execute_top_bar_command, open_downloads_folder, open_path,
@@ -40,10 +40,6 @@ pub(super) fn execute_window_menu_command(
             == Some(Capability::Available)
     });
     match window_menu_effect(cmd, minimize_available) {
-        WindowMenuEffect::CycleTheme => {
-            crate::theme_state::cycle_theme_mode(runtime);
-            false
-        }
         WindowMenuEffect::GenieMinimize => {
             if let Some(window) = window {
                 let _ = crate::genie::minimize_window(runtime, window.identity.hwnd);
@@ -146,9 +142,11 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
                 open_calendar_month(runtime, next_year, next_month, anchor_right, anchor_y);
             }
             CMD_CAL_TODAY => open_calendar(runtime, anchor_right, anchor_y),
-            _ => with_menu(runtime, |menu| {
-                menu.execute_control_center_command(runtime, cmd);
+            CMD_CAL_SETTINGS => with_menu(runtime, |menu| {
+                menu.control_center
+                    .execute(ControlCenterAction::OpenCalendarSettings);
             }),
+            _ => {}
         },
         MenuSource::Notifications {
             anchor_right,
@@ -167,6 +165,10 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
                 });
                 open_notifications(runtime, anchor_right, anchor_y);
             }
+            CMD_CC_CALENDAR => with_menu(runtime, |menu| {
+                menu.control_center
+                    .execute(ControlCenterAction::OpenCalendar);
+            }),
             _ => {
                 if let Some(index) = notification_dismiss_index(cmd, notification_ids.len()) {
                     let id = notification_ids[index];
@@ -174,10 +176,6 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
                         let _ = menu.control_center.dismiss_notification(id);
                     });
                     open_notifications(runtime, anchor_right, anchor_y);
-                } else {
-                    with_menu(runtime, |menu| {
-                        menu.execute_control_center_command(runtime, cmd);
-                    });
                 }
             }
         },

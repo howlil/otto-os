@@ -380,9 +380,6 @@ impl PopupMenuRenderer {
                         palette,
                     );
                 }
-                MenuRow::Slider { label, value, .. } => {
-                    self.draw_slider(layout, row_layout, label, *value, palette);
-                }
                 MenuRow::Item {
                     label,
                     shortcut,
@@ -635,79 +632,6 @@ impl PopupMenuRenderer {
                 D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
-        }
-    }
-
-    fn draw_slider(
-        &self,
-        layout: &PopupMenuLayout,
-        row: &PopupMenuRowLayout,
-        label: &str,
-        value: u8,
-        palette: &LiquidGlassPalette,
-    ) {
-        let inset = layout.slider_inset as f32;
-        let left = row.rect.x as f32 + inset;
-        let right = row.rect.right() as f32 - inset;
-        let track_h = (scale(10, self.dpi) as f32).max(6.0);
-        let track_top = row.rect.bottom() as f32 - track_h - scale(9, self.dpi) as f32;
-        let fraction = f32::from(value.min(100)) / 100.0;
-        let fill_right = left + (right - left) * fraction;
-        let radius = track_h * 0.5;
-        unsafe {
-            let text = &self.brushes.color_brush(palette.text_primary);
-            let label_rect = D2D_RECT_F {
-                left,
-                top: row.rect.y as f32 + scale(4, self.dpi) as f32,
-                right,
-                bottom: track_top,
-            };
-            let label_wide: Vec<u16> = label.encode_utf16().collect();
-            self.target.DrawText(
-                &label_wide,
-                &self.label_format,
-                &label_rect,
-                text,
-                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-            let percent_wide: Vec<u16> = format!("{value}%").encode_utf16().collect();
-            let percent_brush = &self.brushes.color_brush(palette.text_muted);
-            self.target.DrawText(
-                &percent_wide,
-                &self.shortcut_format,
-                &label_rect,
-                percent_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-
-            let track = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left,
-                    top: track_top,
-                    right,
-                    bottom: track_top + track_h,
-                },
-                radiusX: radius,
-                radiusY: radius,
-            };
-            let track_brush = &self.brushes.color_brush(palette.slider_track);
-            self.target.FillRoundedRectangle(&track, track_brush);
-            if fill_right > left + 0.5 {
-                let fill = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left,
-                        top: track_top,
-                        right: fill_right.max(left + track_h),
-                        bottom: track_top + track_h,
-                    },
-                    radiusX: radius,
-                    radiusY: radius,
-                };
-                let fill_brush = &self.brushes.color_brush(palette.slider_fill);
-                self.target.FillRoundedRectangle(&fill, fill_brush);
-            }
         }
     }
 

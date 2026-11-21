@@ -22,6 +22,7 @@ pub use self::commands::window_identity;
 pub use self::context::ApplicationContext;
 pub use self::context::application_of;
 pub use self::inspect::ForegroundApplication;
+pub(crate) use self::inspect::covers_monitor;
 pub use self::inspect::enumerate_windows;
 pub use self::inspect::foreground_application;
 pub use self::inspect::inspect_window;

@@ -93,7 +93,7 @@ impl NativeCaption {
     #[must_use]
     pub fn measured(self, width: i32) -> Self {
         let standard = self.standard_width();
-        let plausible = width * 4 >= standard * 3 && width * 4 <= standard * 5;
+        let plausible = width * 4 >= standard * 3 && width * 4 <= standard * 7;
         Self {
             measured_width: if plausible { width } else { 0 },
             ..self

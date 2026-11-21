@@ -261,6 +261,25 @@ pub(crate) fn upload_bgra_bitmap(
     }
 }
 
+pub(crate) fn update_bgra_bitmap(
+    bitmap: &ID2D1Bitmap,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    limits: PixelLimits,
+) -> Result<bool> {
+    let layout = validate_bgra_buffer(width, height, pixels.len(), limits)
+        .map_err(|_| Error::from_hresult(E_INVALIDARG))?;
+    let size = unsafe { bitmap.GetPixelSize() };
+    if size.width != layout.width || size.height != layout.height {
+        return Ok(false);
+    }
+    unsafe {
+        bitmap.CopyFromMemory(None, pixels.as_ptr().cast(), layout.stride)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn fnv1a_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for &byte in bytes {

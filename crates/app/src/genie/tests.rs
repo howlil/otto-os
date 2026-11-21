@@ -1,5 +1,9 @@
+use std::sync::{Mutex, PoisonError};
+
 use super::Genie;
 use otto_core::{Rect, WindowIdentity};
+
+static GENIE_GPU_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn missing_window() -> WindowIdentity {
     WindowIdentity {
@@ -25,6 +29,9 @@ fn restore_without_cached_snapshot_or_bounds_falls_back_to_native() {
 
 #[test]
 fn restore_with_fallback_bounds_animates_synthetic_card_without_cache_hit() {
+    let _gpu = GENIE_GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let mut genie = Genie::new(0);
     let dock = Rect {
         x: 920,
@@ -56,6 +63,9 @@ fn restore_with_fallback_bounds_animates_synthetic_card_without_cache_hit() {
 
 #[test]
 fn stale_worker_completion_does_not_clear_newer_animation() {
+    let _gpu = GENIE_GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let mut genie = Genie::new(0);
     let dock = Rect {
         x: 920,

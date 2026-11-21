@@ -9,28 +9,28 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{bar, control_center, dock, genie, menu, settings_window, spotlight, window_controls};
-use otto_core::{DockPreferences, MenuBarPreferences, ThemeMode};
+use otto_core::{DockPreferences, MenuBarPreferences};
 
 use super::ModalActionGuard;
 use super::plugins::PluginId;
 use super::plugins::PluginState;
+use super::reclaim_disabled_memory;
 use super::runtime::RuntimeContext;
 use super::set_dock_preferences;
 use super::set_online_lyrics_enabled;
 use super::set_plugin_enabled;
 use super::should_post_quit;
 use super::shutdown_session;
+use super::sync_platform_tasks;
 use super::update_preferences;
 use super::with_host_read;
 
 pub(super) struct PendingPreferences {
-    pub(super) theme_mode: Option<ThemeMode>,
     pub(super) capture_visible: Option<bool>,
     pub(super) hotkeys_enabled: Option<bool>,
     pub(super) classic_logo: Option<bool>,
     pub(super) notch_enabled: Option<bool>,
     pub(super) dynamic_island: Option<bool>,
-    pub(super) liquid_glass: Option<bool>,
     pub(super) privacy_indicators: Option<bool>,
     pub(super) clipboard_history: Option<bool>,
     pub(super) drop_shelf: Option<bool>,
@@ -46,13 +46,11 @@ pub(super) struct PendingPreferences {
 impl PendingPreferences {
     pub(super) fn take_from(runtime: &RuntimeContext) -> Self {
         Self {
-            theme_mode: runtime.pending_theme_mode.take(),
             capture_visible: runtime.pending_capture_visible.take(),
             hotkeys_enabled: runtime.pending_hotkeys_enabled.take(),
             classic_logo: runtime.pending_classic_logo.take(),
             notch_enabled: runtime.pending_notch_enabled.take(),
             dynamic_island: runtime.pending_dynamic_island.take(),
-            liquid_glass: runtime.pending_liquid_glass.take(),
             privacy_indicators: runtime.pending_privacy_indicators.take(),
             clipboard_history: runtime.pending_clipboard_history.take(),
             drop_shelf: runtime.pending_drop_shelf.take(),
@@ -67,13 +65,11 @@ impl PendingPreferences {
     }
 
     pub(super) fn has_change(&self) -> bool {
-        self.theme_mode.is_some()
-            || self.capture_visible.is_some()
+        self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
             || self.classic_logo.is_some()
             || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
-            || self.liquid_glass.is_some()
             || self.privacy_indicators.is_some()
             || self.clipboard_history.is_some()
             || self.drop_shelf.is_some()
@@ -87,13 +83,11 @@ impl PendingPreferences {
     }
 
     pub(super) fn affects_ui(&self) -> bool {
-        self.theme_mode.is_some()
-            || self.capture_visible.is_some()
+        self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
             || self.classic_logo.is_some()
             || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
-            || self.liquid_glass.is_some()
             || self.privacy_indicators.is_some()
             || self.clipboard_history.is_some()
             || self.drop_shelf.is_some()
@@ -175,11 +169,8 @@ pub(super) fn dispatch_runtime_message(
         }
     }
     let prefs_changed = apply_pending_preference_changes(&pending.preferences);
-    let glass_changed = pending.preferences.liquid_glass.is_some();
-    if had_plugin_toggles || dock_changed || lyrics_changed || (prefs_changed && !glass_changed) {
-        with_host_read(|host| control_center::repaint(&host.runtime));
-    }
     if had_plugin_toggles || dock_changed || lyrics_changed || prefs_changed {
+        with_host_read(|host| control_center::repaint(&host.runtime));
         with_host_read(|host| settings_window::repaint(&host.runtime));
     }
     if let Some(prepared) = pending.modal {
@@ -203,9 +194,6 @@ pub(super) fn dispatch_runtime_message(
 pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> bool {
     if pending.has_change()
         && let Ok(updated) = update_preferences(|prefs| {
-            if let Some(mode) = pending.theme_mode {
-                prefs.theme_mode = mode;
-            }
             if let Some(visible) = pending.capture_visible {
                 prefs.capture_visible = visible;
             }
@@ -220,9 +208,6 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             }
             if let Some(dynamic_island) = pending.dynamic_island {
                 prefs.dynamic_island = dynamic_island;
-            }
-            if let Some(liquid_glass) = pending.liquid_glass {
-                prefs.liquid_glass = liquid_glass;
             }
             if let Some(privacy_indicators) = pending.privacy_indicators {
                 prefs.privacy_indicators = privacy_indicators;
@@ -258,10 +243,6 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
     {
         sync_pending_platform_modules(pending, &updated);
         with_host_read(|host| {
-            if let Some(glass) = pending.liquid_glass {
-                host.runtime.liquid_glass_pref.set(glass);
-                crate::theme_state::sync_effective_glass(&host.runtime);
-            }
             if pending.capture_visible.is_some() {
                 bar::set_capture_visible(&host.runtime, updated.capture_visible);
                 dock::set_capture_visible(&host.runtime, updated.capture_visible);
@@ -316,9 +297,26 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             if pending.quick_capture.is_some() {
                 bar::set_quick_capture_enabled(&host.runtime, updated.quick_capture);
             }
+            sync_platform_tasks(&host.config);
+            if disabled_any_feature(pending) {
+                reclaim_disabled_memory(host);
+            }
         });
     }
     pending.affects_ui()
+}
+
+fn disabled_any_feature(pending: &PendingPreferences) -> bool {
+    pending.notch_enabled == Some(false)
+        || pending.privacy_indicators == Some(false)
+        || pending.clipboard_history == Some(false)
+        || pending.drop_shelf == Some(false)
+        || pending.notch_hud == Some(false)
+        || pending.media_module == Some(false)
+        || pending.focus_module == Some(false)
+        || pending.background_cleanup == Some(false)
+        || pending.quick_capture == Some(false)
+        || pending.menu_bar.is_some_and(|prefs| !prefs.show_background)
 }
 
 pub(super) fn sync_pending_platform_modules(
@@ -332,8 +330,8 @@ pub(super) fn sync_pending_platform_modules(
             otto_platform::shutdown_privacy_task();
         }
     }
-    if pending.media_module.is_some() {
-        if updated.media_module {
+    if pending.notch_enabled.is_some() || pending.media_module.is_some() {
+        if updated.notch_enabled && updated.media_module {
             otto_platform::resume_media_task();
         } else {
             otto_platform::shutdown_media_task();

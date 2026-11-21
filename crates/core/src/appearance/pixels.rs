@@ -179,7 +179,7 @@ pub fn resize_bgra(
 }
 
 #[must_use]
-pub fn downsample_bgra_half(source: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
+fn downsample_bgra_half(source: &[u8], width: u32, height: u32) -> Option<(u32, u32, Vec<u8>)> {
     let layout = bgra_layout(width, height, PixelLimits::WINDOW_SNAPSHOT).ok()?;
     if source.len() < layout.byte_len {
         return None;

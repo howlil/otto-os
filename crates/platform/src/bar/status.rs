@@ -1,6 +1,6 @@
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -160,8 +160,18 @@ fn input_lang_from_lang_id(lang_id: u32) -> InputLangCode {
         return InputLangCode::empty();
     }
     let slice = &buf[..(written as usize - 1).min(buf.len())];
-    let tag = String::from_utf16_lossy(slice);
-    InputLangCode::from_tag(&tag)
+    let mut ascii = [0u8; 16];
+    let mut len = 0usize;
+    for &unit in slice {
+        if unit > 0x7F {
+            let tag = String::from_utf16_lossy(slice);
+            return InputLangCode::from_tag(&tag);
+        }
+        ascii[len] = unit as u8;
+        len += 1;
+    }
+    let tag = std::str::from_utf8(&ascii[..len]).unwrap_or("");
+    InputLangCode::from_tag(tag)
 }
 
 fn read_foreground_input_lang() -> InputLangCode {
@@ -270,6 +280,7 @@ fn read_lcd_brightness() -> Option<u8> {
 const DDC_SUPPORTED_TTL: Duration = Duration::from_secs(15);
 const DDC_UNSUPPORTED_TTL: Duration = Duration::from_mins(1);
 const DDC_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+const LCD_ABSENT_TTL: Duration = Duration::from_mins(1);
 
 #[derive(Default)]
 struct DdcCacheState {
@@ -305,6 +316,25 @@ impl DdcCacheState {
         self.percent = ok.then_some(target);
         self.checked_at = Some(now);
     }
+
+    fn mark_async_set_failed(&mut self, expected_generation: u64, monitor: isize, now: Instant) {
+        if self.generation == expected_generation && self.monitor == monitor {
+            self.supported = Some(false);
+            self.percent = None;
+            self.checked_at = Some(now);
+        }
+    }
+}
+
+#[derive(Default)]
+struct DdcWriteMailbox {
+    pending: Option<(isize, u8, u64)>,
+    stopping: bool,
+}
+
+struct DdcWriteShared {
+    mailbox: Mutex<DdcWriteMailbox>,
+    wake: Condvar,
 }
 
 struct DdcProbeGuard;
@@ -316,24 +346,61 @@ impl Drop for DdcProbeGuard {
 }
 
 static DDC_CACHE: OnceLock<Mutex<DdcCacheState>> = OnceLock::new();
+static LCD_ABSENT_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+static DDC_WRITER_SHARED: OnceLock<DdcWriteShared> = OnceLock::new();
 static DDC_PROBING: AtomicBool = AtomicBool::new(false);
 static DDC_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 static DDC_PROBE_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static DDC_WRITER_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 fn ddc_cache() -> &'static Mutex<DdcCacheState> {
     DDC_CACHE.get_or_init(|| Mutex::new(DdcCacheState::default()))
 }
 
+fn lcd_absent_cache() -> &'static Mutex<Option<Instant>> {
+    LCD_ABSENT_AT.get_or_init(|| Mutex::new(None))
+}
+
+fn ddc_writer_shared() -> &'static DdcWriteShared {
+    DDC_WRITER_SHARED.get_or_init(|| DdcWriteShared {
+        mailbox: Mutex::new(DdcWriteMailbox::default()),
+        wake: Condvar::new(),
+    })
+}
+
 pub fn shutdown_status_task() {
     DDC_SHUTTING_DOWN.store(true, Ordering::Release);
-    let handle = DDC_PROBE_TASK.lock().ok().and_then(|mut task| task.take());
-    if let Some(handle) = handle {
+    if let Some(shared) = DDC_WRITER_SHARED.get() {
+        let mut mailbox = shared
+            .mailbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        mailbox.stopping = true;
+        mailbox.pending = None;
+        shared.wake.notify_all();
+    }
+    let probe_handle = DDC_PROBE_TASK.lock().ok().and_then(|mut task| task.take());
+    if let Some(handle) = probe_handle {
+        let _ = crate::worker::join_within(handle, DDC_SHUTDOWN_TIMEOUT);
+    }
+    let writer_handle = DDC_WRITER_TASK.lock().ok().and_then(|mut task| task.take());
+    if let Some(handle) = writer_handle {
         let _ = crate::worker::join_within(handle, DDC_SHUTDOWN_TIMEOUT);
     }
 }
 
 pub(crate) fn resume_status_task() {
     DDC_SHUTTING_DOWN.store(false, Ordering::Release);
+    if let Ok(mut absent) = lcd_absent_cache().lock() {
+        *absent = None;
+    }
+    if let Some(shared) = DDC_WRITER_SHARED.get() {
+        let mut mailbox = shared
+            .mailbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        mailbox.stopping = false;
+    }
 }
 
 fn primary_monitor() -> Option<HMONITOR> {
@@ -417,14 +484,101 @@ fn read_ddc_brightness_cached() -> Option<u8> {
     cached
 }
 
+fn ensure_ddc_writer_running() -> bool {
+    let Ok(mut slot) = DDC_WRITER_TASK.lock() else {
+        return false;
+    };
+    if DDC_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return false;
+    }
+    if let Some(existing) = slot.take() {
+        if !existing.is_finished() {
+            *slot = Some(existing);
+            return true;
+        }
+        let _ = existing.join();
+    }
+    let shared = ddc_writer_shared();
+    let spawned = thread::Builder::new()
+        .name(String::from("otto-ddc-writer"))
+        .spawn(move || {
+            loop {
+                let job = {
+                    let mut mailbox = shared
+                        .mailbox
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    loop {
+                        if mailbox.stopping || DDC_SHUTTING_DOWN.load(Ordering::Acquire) {
+                            return;
+                        }
+                        if let Some(job) = mailbox.pending.take() {
+                            break job;
+                        }
+                        mailbox = shared
+                            .wake
+                            .wait(mailbox)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    }
+                };
+                let (monitor_key, target, generation) = job;
+                let hmon = HMONITOR(monitor_key as *mut std::ffi::c_void);
+                let ok = set_ddc_brightness_native(hmon, target);
+                if !ok
+                    && !DDC_SHUTTING_DOWN.load(Ordering::Acquire)
+                    && let Ok(mut state) = ddc_cache().lock()
+                {
+                    state.mark_async_set_failed(generation, monitor_key, Instant::now());
+                }
+            }
+        });
+    if let Ok(handle) = spawned {
+        *slot = Some(handle);
+        true
+    } else {
+        false
+    }
+}
+
+fn enqueue_ddc_brightness(monitor_key: isize, target: u8, generation: u64) -> bool {
+    let shared = ddc_writer_shared();
+    {
+        let mut mailbox = shared
+            .mailbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if mailbox.stopping || DDC_SHUTTING_DOWN.load(Ordering::Acquire) {
+            return false;
+        }
+        mailbox.pending = Some((monitor_key, target, generation));
+        shared.wake.notify_one();
+    }
+    ensure_ddc_writer_running()
+}
+
 fn set_ddc_brightness(target: u8) -> Option<u8> {
+    if DDC_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
     let monitor = primary_monitor()?;
     let monitor_key = monitor.0 as isize;
-    if let Ok(state) = ddc_cache().lock()
-        && ddc_cache_is_fresh(&state, monitor_key)
-        && state.supported == Some(false)
+    let async_generation = if let Ok(mut state) = ddc_cache().lock() {
+        if ddc_cache_is_fresh(&state, monitor_key) && state.supported == Some(false) {
+            return None;
+        }
+        if state.monitor == monitor_key && state.supported == Some(true) {
+            state.store_set(monitor_key, target, true, Instant::now());
+            Some(state.generation)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(generation) = async_generation
+        && enqueue_ddc_brightness(monitor_key, target, generation)
     {
-        return None;
+        return Some(target);
     }
     let ok = set_ddc_brightness_native(monitor, target);
     if let Ok(mut state) = ddc_cache().lock() {
@@ -528,7 +682,13 @@ fn ddc_percent_to_raw(percent: u8, min: u32, max: u32) -> Option<u32> {
 }
 
 fn open_lcd_device() -> Option<HANDLE> {
-    unsafe {
+    if let Ok(absent) = lcd_absent_cache().lock()
+        && let Some(since) = *absent
+        && since.elapsed() < LCD_ABSENT_TTL
+    {
+        return None;
+    }
+    let opened = unsafe {
         CreateFileW(
             w!("\\\\.\\LCD"),
             GENERIC_READ.0 | GENERIC_WRITE.0,
@@ -539,7 +699,13 @@ fn open_lcd_device() -> Option<HANDLE> {
             None,
         )
         .ok()
+    };
+    if opened.is_none()
+        && let Ok(mut absent) = lcd_absent_cache().lock()
+    {
+        *absent = Some(Instant::now());
     }
+    opened
 }
 
 fn nearest_brightness_level(levels: &[u8], returned: u32, target: u8) -> u8 {
@@ -612,6 +778,15 @@ mod tests {
         assert_eq!(cache.percent, Some(85));
         assert!(cache.store_probe(cache.generation, 42, Some(60), now + Duration::from_secs(2)));
         assert_eq!(cache.percent, Some(60));
+
+        let stale_gen = cache.generation;
+        cache.store_set(42, 90, true, now + Duration::from_secs(3));
+        cache.mark_async_set_failed(stale_gen, 42, now + Duration::from_secs(4));
+        assert_eq!(cache.supported, Some(true));
+        assert_eq!(cache.percent, Some(90));
+        cache.mark_async_set_failed(cache.generation, 42, now + Duration::from_secs(5));
+        assert_eq!(cache.supported, Some(false));
+        assert_eq!(cache.percent, None);
     }
 
     #[test]

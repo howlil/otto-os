@@ -7,7 +7,6 @@ use crate::app_model::WindowCommand;
 use crate::app_model::WindowInfo;
 use crate::app_model::WindowPresence;
 use crate::app_model::{AppIdentity, WindowIdentity, WindowRole, WindowTraits};
-use crate::layout::scale;
 
 fn window(traits: WindowTraits) -> WindowInfo {
     WindowInfo {
@@ -147,71 +146,6 @@ fn full_screen_capable_window_keeps_the_green_control_without_zoom() {
     browser.maximizable = false;
     browser.full_screen_shortcut = true;
     assert!(WindowControlsState::of(&window(browser)).zoom);
-}
-
-#[test]
-fn top_is_clamped_below_the_bar_only_on_the_bar_monitor() {
-    assert_eq!(window_controls_top(0, 9, Some(48), false), 48);
-    assert_eq!(window_controls_top(48, 9, Some(48), true), 57);
-    assert_eq!(window_controls_top(300, 9, Some(48), false), 309);
-    assert_eq!(window_controls_top(-400, 9, None, false), -391);
-    assert_eq!(window_controls_top(0, 9, None, true), 9);
-}
-
-#[test]
-fn window_controls_hit_test_identifies_red_yellow_green_on_left() {
-    let layout = compute_window_controls_layout(&WindowControlsMetrics::MACOS_SONOMA, 96);
-    let cy = layout.center_y as i32;
-    assert_eq!(
-        layout.hit_test(layout.centers_x[0] as i32, cy),
-        Some(WindowControlAction::Close)
-    );
-    assert_eq!(
-        layout.hit_test(layout.centers_x[1] as i32, cy),
-        Some(WindowControlAction::Minimize)
-    );
-    assert_eq!(
-        layout.hit_test(layout.centers_x[2] as i32, cy),
-        Some(WindowControlAction::ToggleMaximize)
-    );
-    assert!(layout.centers_x[0] < layout.centers_x[1]);
-    assert!(layout.centers_x[1] < layout.centers_x[2]);
-    assert_eq!(layout.hit_test(2, 2), None);
-}
-
-#[test]
-fn hit_slop_scales_with_the_monitor_dpi() {
-    let layout = compute_window_controls_layout(&WindowControlsMetrics::MACOS_SONOMA, 192);
-    let cy = layout.center_y as i32;
-    let just_inside_close = layout.centers_x[0] as i32 + 18;
-    assert_eq!(
-        layout.hit_test(just_inside_close, cy),
-        Some(WindowControlAction::Close)
-    );
-}
-
-#[test]
-fn layout_follows_each_monitor_dpi_so_mixed_dpi_controls_stay_aligned() {
-    let metrics = WindowControlsMetrics::MACOS_SONOMA;
-    for dpi in [96, 120, 144, 192] {
-        let layout = compute_window_controls_layout(&metrics, dpi);
-        assert_eq!(layout.width, scale(metrics.width, dpi));
-        assert_eq!(layout.height, scale(metrics.height, dpi));
-        assert_eq!(layout.offset_y, scale(metrics.offset_y, dpi));
-        let last_edge = layout.centers_x[2] + layout.radius;
-        assert!(last_edge <= layout.width as f32, "dpi {dpi}");
-        assert!(layout.center_y + layout.radius <= layout.height as f32);
-        let cy = layout.center_y as i32;
-        assert_eq!(
-            layout.hit_test(layout.centers_x[2] as i32, cy),
-            Some(WindowControlAction::ToggleMaximize),
-            "dpi {dpi}"
-        );
-    }
-    let standard = compute_window_controls_layout(&metrics, 96);
-    let high = compute_window_controls_layout(&metrics, 192);
-    assert_eq!(high.width, standard.width * 2);
-    assert!((high.radius - standard.radius * 2.0).abs() <= 1.0);
 }
 
 const STANDARD_STYLE: NativeCaptionStyle = NativeCaptionStyle {
@@ -417,20 +351,6 @@ fn cover_row_extraction_filters_stray_columns_and_coalesces_bands_with_border_in
 }
 
 #[test]
-fn the_left_layout_keeps_its_circle_hit_test_and_order() {
-    let layout = compute_window_controls_layout(&WindowControlsMetrics::default(), 96);
-    assert_eq!(layout.actions[0], WindowControlAction::Close);
-    assert_eq!(
-        layout.center_of(WindowControlAction::ToggleMaximize),
-        Some(layout.centers_x[2])
-    );
-    assert_eq!(
-        layout.hit_test(layout.centers_x[1] as i32, layout.center_y as i32),
-        Some(WindowControlAction::Minimize)
-    );
-}
-
-#[test]
 fn extract_cover_rows_ignores_embedded_icon_spikes_and_preserves_gradients() {
     let width = 12;
     let height = 5;
@@ -469,8 +389,8 @@ fn cover_is_dark_distinguishes_dark_and_light_titlebars() {
 fn clipped_sample_rect_clamps_to_frame_left_and_bar_bottom() {
     let wide = NativeCaption::new(STANDARD_STYLE, 500, 10, 30, true, 96).unwrap();
     let clipped = wide.clipped_sample_rect(0, 36);
-    assert_eq!(clipped.x, wide.cover_rect().x - 2 - 24);
-    assert_eq!(clipped.width, 24);
+    assert_eq!(clipped.x, wide.cover_rect().x - 2 - 48);
+    assert_eq!(clipped.width, 48);
     assert_eq!(clipped.y, 36);
     assert_eq!(clipped.height, 4);
 
@@ -481,6 +401,28 @@ fn clipped_sample_rect_clamps_to_frame_left_and_bar_bottom() {
 
     let hidden = wide.clipped_sample_rect(0, 45);
     assert!(hidden.is_empty());
+}
+
+#[test]
+fn extract_cover_rows_rejects_wide_middle_toolbar_pill_on_uniform_titlebar() {
+    let width = 48;
+    let height = 30;
+    let mut bgra = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let (r, g, b) = if (6..=24).contains(&y) && (6..42).contains(&x) {
+                (60, 60, 66)
+            } else {
+                (32, 32, 36)
+            };
+            bgra.extend_from_slice(&[b, g, r, 255]);
+        }
+    }
+    let rows = extract_cover_rows(&bgra, width, height).unwrap();
+    assert_eq!(rows.len(), height);
+    for (y, row) in rows.iter().enumerate() {
+        assert_eq!(*row, [32, 32, 36], "row {y}");
+    }
 }
 
 #[test]

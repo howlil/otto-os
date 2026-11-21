@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use otto_core::{NowPlaying, Rect, ShelfPayload, scale};
 use otto_platform::{
-    CaptureSubmission, ClipboardListenerGuard, ClipboardRead, LyricsRequest, LyricsService,
+    CaptureEvent, ClipboardListenerGuard, ClipboardRead, LyricsRequest, LyricsService,
     QuickCaptureInput, ShelfDropQueue, ShelfDropRegion, ShelfDropTargetGuard,
     clipboard_sequence_number, read_clipboard_payload, register_shelf_drop_target,
 };
@@ -31,7 +31,7 @@ pub(crate) struct NotchIo {
     suppressed_clipboard_seq: Option<u32>,
     pub(crate) quick_capture: Option<QuickCaptureInput>,
     pub(crate) seek_drag_hwnd: Option<isize>,
-    lyrics: LyricsService,
+    lyrics: Option<LyricsService>,
     lyrics_track: Option<(String, String)>,
     lyrics_generation: u64,
     pub(crate) online_lyrics_enabled: bool,
@@ -63,7 +63,7 @@ impl NotchIo {
             suppressed_clipboard_seq: None,
             quick_capture,
             seek_drag_hwnd: None,
-            lyrics: LyricsService::start(),
+            lyrics: None,
             lyrics_track: None,
             lyrics_generation: 0,
             online_lyrics_enabled,
@@ -181,16 +181,46 @@ impl NotchIo {
         self.quick_capture = None;
     }
 
-    pub(crate) fn show_quick_capture(&self, center_x: i32, below_y: i32, dpi: u32) {
+    pub(crate) fn show_inline_quick_capture(
+        &self,
+        rect: Rect,
+        initial_text: &str,
+        allow_keep_open: bool,
+        dpi: u32,
+    ) {
         if let Some(capture) = &self.quick_capture {
-            capture.show(center_x, below_y, dpi);
+            capture.show_inline(rect, initial_text, allow_keep_open, dpi);
         }
     }
 
-    pub(crate) fn take_capture_submission(&self) -> Option<CaptureSubmission> {
+    pub(crate) fn reposition_quick_capture(&self, rect: Rect, dpi: u32) {
+        if let Some(capture) = &self.quick_capture {
+            capture.reposition(rect, dpi);
+        }
+    }
+
+    pub(crate) fn raise_quick_capture(&self) {
+        if let Some(capture) = &self.quick_capture {
+            capture.raise();
+        }
+    }
+
+    pub(crate) fn hide_quick_capture(&self, restore_focus: bool) {
+        if let Some(capture) = &self.quick_capture {
+            capture.hide(restore_focus);
+        }
+    }
+
+    pub(crate) fn is_quick_capture_visible(&self) -> bool {
         self.quick_capture
             .as_ref()
-            .and_then(QuickCaptureInput::take_submission)
+            .is_some_and(QuickCaptureInput::is_visible)
+    }
+
+    pub(crate) fn take_capture_event(&self) -> Option<CaptureEvent> {
+        self.quick_capture
+            .as_ref()
+            .and_then(QuickCaptureInput::take_event)
     }
 
     pub(crate) fn forget_lyrics_track(&mut self) {
@@ -200,6 +230,13 @@ impl NotchIo {
     pub(crate) fn invalidate_lyrics(&mut self) {
         self.lyrics_track = None;
         self.lyrics_generation = self.lyrics_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn stop_lyrics(&mut self) {
+        self.invalidate_lyrics();
+        if let Some(mut lyrics) = self.lyrics.take() {
+            lyrics.shutdown();
+        }
     }
 
     pub(crate) fn request_lyrics(
@@ -216,7 +253,8 @@ impl NotchIo {
             return false;
         }
         let generation = self.lyrics_generation.wrapping_add(1);
-        let accepted = self.lyrics.request(LyricsRequest {
+        let lyrics = self.lyrics.get_or_insert_with(LyricsService::start);
+        let accepted = lyrics.request(LyricsRequest {
             generation,
             title: track.0.clone(),
             artist: track.1.clone(),
@@ -231,7 +269,7 @@ impl NotchIo {
     }
 
     pub(crate) fn poll_lyrics(&self) -> Option<otto_platform::LyricsResponse> {
-        self.lyrics.poll()
+        self.lyrics.as_ref().and_then(LyricsService::poll)
     }
 
     pub(crate) fn is_current_lyrics_generation(&self, generation: u64) -> bool {
@@ -239,6 +277,6 @@ impl NotchIo {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.lyrics.shutdown();
+        self.stop_lyrics();
     }
 }

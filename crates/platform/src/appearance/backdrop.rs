@@ -8,13 +8,21 @@ use otto_core::{PixelLimits, RgbBuffer, bgra_layout};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, ROP_CODE, SRCCOPY};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    IsWindowVisible, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 use crate::gdi::{CaptureCanvas, ScreenDc};
 use crate::worker::join_within;
 
 const STOP_JOIN_LIMIT: Duration = Duration::from_millis(1500);
+
+#[must_use]
+pub fn is_surface_visible(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe { IsWindowVisible(HWND(hwnd as *mut c_void)).as_bool() }
+}
 
 #[must_use]
 pub fn exclude_from_capture(hwnd: isize) -> bool {
@@ -92,21 +100,31 @@ impl BackdropGrabber {
     }
 
     fn grab(&self, request: &BackdropRequest) -> Option<BackdropFrame> {
-        let (bytes, pixels) = self.grab_pixels(request.origin, SRCCOPY | CAPTUREBLT)?;
+        let (signature, pixels) = self.grab_with_signature(request.origin, SRCCOPY | CAPTUREBLT)?;
         Some(BackdropFrame {
             id: request.id,
             origin: request.origin,
-            signature: pixel_signature(&bytes),
+            signature,
             pixels,
         })
     }
 
     fn grab_fast(&self, origin: (i32, i32)) -> Option<RgbBuffer> {
-        let (_, pixels) = self.grab_pixels(origin, SRCCOPY)?;
-        Some(pixels)
+        self.blit(origin, SRCCOPY)?;
+        let layout = self.canvas.layout();
+        RgbBuffer::from_bgra(layout.width, layout.height, self.canvas.as_bytes()).ok()
     }
 
-    fn grab_pixels(&self, origin: (i32, i32), rop: ROP_CODE) -> Option<(Vec<u8>, RgbBuffer)> {
+    fn grab_with_signature(&self, origin: (i32, i32), rop: ROP_CODE) -> Option<(u64, RgbBuffer)> {
+        self.blit(origin, rop)?;
+        let layout = self.canvas.layout();
+        let bytes = self.canvas.as_bytes();
+        let signature = pixel_signature(bytes);
+        let pixels = RgbBuffer::from_bgra(layout.width, layout.height, bytes).ok()?;
+        Some((signature, pixels))
+    }
+
+    fn blit(&self, origin: (i32, i32), rop: ROP_CODE) -> Option<()> {
         let layout = self.canvas.layout();
         unsafe {
             BitBlt(
@@ -122,19 +140,26 @@ impl BackdropGrabber {
             )
         }
         .ok()?;
-        let bytes = self.canvas.copy_pixels();
-        let pixels = RgbBuffer::from_bgra(layout.width, layout.height, &bytes).ok()?;
-        Some((bytes, pixels))
+        Some(())
     }
+}
+
+thread_local! {
+    static CAPTURE_GRABBER: RefCell<Option<BackdropGrabber>> = const { RefCell::new(None) };
+}
+
+pub fn release_backdrop_capture_cache() {
+    let _ = CAPTURE_GRABBER.try_with(|slot| {
+        if let Ok(mut grabber) = slot.try_borrow_mut() {
+            *grabber = None;
+        }
+    });
 }
 
 #[must_use]
 pub fn capture_backdrop_now(origin: (i32, i32), width: u32, height: u32) -> Option<RgbBuffer> {
-    thread_local! {
-        static CAPTURE_GRABBER: RefCell<Option<BackdropGrabber>> = const { RefCell::new(None) };
-    }
     CAPTURE_GRABBER.with(|slot| {
-        let mut grabber = slot.borrow_mut();
+        let mut grabber = slot.try_borrow_mut().ok()?;
         if !grabber
             .as_ref()
             .is_some_and(|held| held.matches_size(width, height))
@@ -271,7 +296,7 @@ mod tests {
 
     use super::{
         BackdropFrame, BackdropGrabber, BackdropRequest, BackdropWorker, capture_backdrop_now,
-        pixel_signature,
+        is_surface_visible, pixel_signature,
     };
 
     #[test]
@@ -441,6 +466,11 @@ mod tests {
         assert!(capture_backdrop_now((0, 0), 0, 10).is_none());
         assert!(capture_backdrop_now((0, 0), 10, 0).is_none());
         assert!(capture_backdrop_now((0, 0), 9_000, 10).is_none());
+    }
+
+    #[test]
+    fn is_surface_visible_returns_false_for_null_handle() {
+        assert!(!is_surface_visible(0));
     }
 
     mod native {

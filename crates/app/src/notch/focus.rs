@@ -2,9 +2,10 @@ use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    FocusSubMode, HitTarget, MotionMetrics, NotchExpandedTab, POMODORO_PRESETS_MINUTES,
-    PomodoroPeek, PomodoroPeekFrame, PomodoroScene, PomodoroStatus, PomodoroSurface, PomodoroTick,
-    TIMER_PRESETS_MINUTES, warning_threshold_crossed,
+    FocusBlocklist, FocusSubMode, HitTarget, MotionMetrics, NotchExpandedTab,
+    POMODORO_PRESETS_MINUTES, PomodoroPeek, PomodoroPeekFrame, PomodoroPhase, PomodoroScene,
+    PomodoroStatus, PomodoroSurface, PomodoroTick, TIMER_PRESETS_MINUTES,
+    warning_threshold_crossed,
 };
 
 use super::GLOW_BREATH_FLOOR;
@@ -17,6 +18,18 @@ use super::PanelTrigger;
 use otto_core::PomodoroState;
 
 impl NotchController {
+    pub(crate) fn set_focus_blocklist(&mut self, blocklist: FocusBlocklist) {
+        self.focus_blocklist = blocklist;
+    }
+
+    pub(crate) const fn is_focus_blocking_active(&self) -> bool {
+        self.focus_enabled
+            && ((matches!(self.pomodoro.status, PomodoroStatus::Running)
+                && matches!(self.pomodoro.phase, PomodoroPhase::Focus))
+                || matches!(self.quick_timer.status, PomodoroStatus::Running)
+                || self.stopwatch.running)
+    }
+
     pub(super) fn active_focus_status(&self) -> PomodoroStatus {
         match self.focus_mode {
             FocusSubMode::Pomodoro => self.pomodoro.status,

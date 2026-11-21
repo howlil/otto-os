@@ -16,6 +16,8 @@ impl NotchController {
                 if self.is_panel_target_open(now) {
                     self.panel_trigger = PanelTrigger::Closed;
                     self.hover_since = None;
+                    self.opened_by_task_editor = false;
+                    self.tasks.cancel_editor();
                     self.dismiss_active_alert();
                 } else {
                     if !self.has_openable_panel() {
@@ -88,7 +90,7 @@ impl NotchController {
     }
 
     pub(crate) fn handle_pointer_leave(&mut self, cursor_inside_notch: bool) -> bool {
-        if cursor_inside_notch || self.is_shelf_hold_open() {
+        if cursor_inside_notch || self.is_panel_held_open() {
             return false;
         }
         let press_cleared = std::mem::take(&mut self.press_active);
@@ -135,6 +137,7 @@ impl NotchController {
             | HitTarget::TasksPager
             | HitTarget::TaskItem(_)
             | HitTarget::TaskCheck(_)
+            | HitTarget::TaskEdit(_)
             | HitTarget::TaskRemove(_) => self.handle_tasks_click(target),
             HitTarget::PrivacyIndicator => self.handle_privacy_indicator_click(),
             HitTarget::PrivacyMicMute => self.handle_privacy_mic_click(),
@@ -196,6 +199,7 @@ impl NotchController {
                     | HitTarget::TasksPager
                     | HitTarget::TaskItem(_)
                     | HitTarget::TaskCheck(_)
+                    | HitTarget::TaskEdit(_)
                     | HitTarget::TaskRemove(_)
                     | HitTarget::PrivacyMicMute
             )

@@ -242,6 +242,10 @@ pub(crate) fn toggle_mic_mute() -> Option<bool> {
     Some(next)
 }
 
+pub fn stop_idle_audio_task() {
+    let _ = stop_runtime();
+}
+
 pub fn shutdown_audio_task() {
     SHUTTING_DOWN.store(true, Ordering::Release);
     let _ = stop_runtime();
