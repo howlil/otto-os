@@ -1,42 +1,150 @@
 ---
 import Base from "../layouts/Base.astro";
 import Nav from "../components/Nav.astro";
-import Hero from "../sections/Hero.astro";
-import HowItWorks from "../components/HowItWorks.astro";
-import Benefits from "../components/Benefits.tsx";
-import "../styles/otto-preview.css";
-import "../components/Benefits.css";
-import Requirements from "../components/Requirements.astro";
-import Faq from "../components/Faq.astro";
 import Footer from "../components/Footer.astro";
+import BetaDownload from "../components/BetaDownload.astro";
+import { T } from "../components/lib/T";
+import Hero from "../sections/Hero.astro";
+import { PartsStory } from "../components/islands/PartsStory";
+import { IslandStage } from "../components/islands/IslandStage";
+import { DockGenie } from "../components/islands/DockGenie";
+import { ControlCenter } from "../components/islands/ControlCenter";
+import { PocketClip } from "../components/islands/PocketClip";
+import { Spotlight } from "../components/islands/Spotlight";
+
+const headingClass =
+  "text-[clamp(2.25rem,4.4vw,3.5rem)] leading-[1.04] font-semibold tracking-[-0.03em] text-balance";
+const leadClass = "text-lg leading-[1.6] text-pretty";
+const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
 ---
 
 <Base
-  title="Otto OS — Bar atas, Dock, dan Dynamic Island untuk Windows 11"
-  description="Shell desktop berbahasa Rust untuk Windows 11 22H2+ dengan bar atas, Dock, kontrol jendela Genie, dan Dynamic Island. Unduh beta langsung tanpa waitlist."
+  title="Otto OS — Bar atas, Dynamic Island, dan Dock untuk Windows 11"
+  description="Shell desktop native untuk Windows 11 dengan bar atas, Dynamic Island, Dock, dan efek Genie. Unduh langsung dari GitHub Releases."
 >
   <Nav />
   <main id="main-content" class="flex-1">
     <Hero />
-    <div class="mx-auto flex w-full max-w-[1100px] flex-col items-center gap-20 px-4 pb-20 sm:gap-24 sm:px-6 sm:pb-28">
-      <section id="manfaat" class="w-full scroll-mt-24 py-2">
-        <Benefits />
-      </section>
-      <HowItWorks />
-      <section class="w-full max-w-2xl">
-        <Requirements />
-      </section>
-      <section id="faq" class="w-full max-w-2xl scroll-mt-24">
-        <h2 class="mb-6 text-left text-2xl font-medium tracking-[-0.02em] text-ink sm:text-center sm:text-3xl">
-          Pertanyaan umum
+
+    <section id="bagian" class="scroll-mt-20 border-t border-line">
+      <div class={`${sectionClass} pt-24 sm:pt-32`}>
+        <h2 class={`max-w-[640px] ${headingClass}`}>
+          <T id="Setiap bagian punya tugasnya." en="Every part has its job." />
         </h2>
-        <Faq />
-      </section>
-    </div>
+      </div>
+      <PartsStory client:visible />
+    </section>
+
+    <section class="on-stage bg-stage text-stage-ink">
+      <div class={`${sectionClass} py-24 sm:py-32`}>
+        <div class="max-w-[640px]">
+          <h2 class={headingClass}>
+            <T id="Dua aktivitas, satu notch." en="Two activities, one notch." />
+          </h2>
+          <p class={`mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
+            <T
+              id="Timer fokus dan musik ringkas di atas layar. Klik untuk membuka; lingkaran samping menukar aktivitas."
+              en="Focus timers and music sit compact at the top of the screen. Click to open; the side circle swaps activities."
+            />
+          </p>
+        </div>
+        <div class="mt-14 sm:mt-16">
+          <IslandStage client:visible />
+        </div>
+      </div>
+    </section>
+
+    <section class="border-b border-line">
+      <div class={`${sectionClass} py-24 sm:py-32`}>
+        <div class="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
+          <h2 class={`max-w-[560px] ${headingClass}`}>
+            <T id="Jendela pulang ke Dock." en="Windows return to the Dock." />
+          </h2>
+          <p class={`max-w-[420px] text-ink-soft ${leadClass}`}>
+            <T
+              id="Efek Genie menarik jendela tepat ke ikonnya, lalu mengembalikannya lewat jalur yang sama."
+              en="The Genie effect pulls a window straight into its icon, then returns it along the same path."
+            />
+          </p>
+        </div>
+        <div class="mt-14 sm:mt-16">
+          <DockGenie client:visible />
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-paper">
+      <div class={`${sectionClass} grid items-center gap-14 py-24 sm:py-32 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-16`}>
+        <div class="max-w-[480px]">
+          <h2 class={headingClass}>
+            <T id="Kontrol cepat dalam satu panel." en="Quick controls in one panel." />
+          </h2>
+          <p class={`mt-5 text-ink-soft ${leadClass}`}>
+            <T
+              id="Wi-Fi, Bluetooth, Focus, kecerahan, suara, dan musik. Coba setiap kontrolnya di sini."
+              en="Wi-Fi, Bluetooth, Focus, brightness, sound and music. Try every control here."
+            />
+          </p>
+        </div>
+        <ControlCenter client:visible />
+      </div>
+    </section>
+
+    <section class="border-t border-line">
+      <div class={`${sectionClass} py-24 sm:py-32`}>
+        <div class="max-w-[640px]">
+          <h2 class={headingClass}>
+            <T id="Simpan yang sedang dipakai." en="Keep what you are working with." />
+          </h2>
+          <p class={`mt-5 text-ink-soft ${leadClass}`}>
+            <T
+              id="Pocket menampung berkas dan tautan yang diseret ke notch. Clip menyimpan 12 salinan terakhir, hanya di RAM."
+              en="Pocket holds files and links dragged to the notch. Clip keeps the last 12 copies, in RAM only."
+            />
+          </p>
+        </div>
+        <div class="mt-14 sm:mt-16">
+          <PocketClip client:visible />
+        </div>
+      </div>
+    </section>
+
+    <section class="on-stage bg-stage text-stage-ink">
+      <div class={`${sectionClass} py-24 text-center sm:py-32`}>
+        <h2 class={`mx-auto max-w-[720px] ${headingClass}`}>
+          <T id="Cari, pilih, buka." en="Search, select, open." />
+        </h2>
+        <p class={`mx-auto mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
+          <T
+            id="Spotlight mencari aplikasi saat Anda mengetik. Ctrl+Alt+Space membukanya dari mana saja."
+            en="Spotlight finds apps as you type. Ctrl+Alt+Space opens it from anywhere."
+          />
+        </p>
+        <div class="mt-14 sm:mt-16">
+          <Spotlight client:visible />
+        </div>
+      </div>
+    </section>
+
+    <section id="unduh" class="scroll-mt-20 border-t border-line">
+      <div class={`${sectionClass} flex flex-col items-start py-28 sm:py-40`}>
+        <h2 class="text-[clamp(2.75rem,7vw,6rem)] leading-[0.98] font-semibold tracking-[-0.035em] text-balance">
+          <T id="Siap mencoba?" en="Ready to try it?" />
+        </h2>
+        <p class={`mt-6 max-w-[560px] text-ink-soft ${leadClass}`}>
+          <T
+            id="Installer per pengguna. Tanpa formulir, tanpa email, tanpa telemetri."
+            en="Per-user installer. No forms, no email, no telemetry."
+          />
+        </p>
+        <div class="mt-10">
+          <BetaDownload />
+        </div>
+        <p class="mt-8 text-[14px] text-muted">
+          <T id="Windows 11 22H2 atau lebih baru · x64 · build 22621+" en="Windows 11 22H2 or later · x64 · build 22621+" />
+        </p>
+      </div>
+    </section>
   </main>
   <Footer />
 </Base>
-
-<script>
-  import "../scripts/showcase-interactions";
-</script>

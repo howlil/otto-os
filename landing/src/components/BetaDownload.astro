@@ -1,84 +1,190 @@
 ---
 import { Download } from "lucide-astro";
-
-const releasesUrl = "https://github.com/howlil/otto-os/releases";
+import { T } from "./lib/T";
 ---
 
-<div id="unduh" class="mt-7 flex w-full scroll-mt-24 flex-col items-center">
-  <a
-    href={releasesUrl}
+<div class="flex flex-col items-start gap-3">
+  <button
+    type="button"
     data-beta-download
-    aria-describedby="beta-download-status"
-    class="inline-flex h-10 items-center justify-center gap-1.5 rounded-full bg-accent px-5 text-sm font-medium text-white transition-colors duration-150 hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
+    class="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-accent px-6 text-[15px] font-medium text-white transition-colors duration-200 hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
   >
-    <Download size={16} strokeWidth={1.8} aria-hidden="true" />
-    <span data-beta-download-label>Unduh Otto OS</span>
-  </a>
-  <p
-    id="beta-download-status"
-    role="status"
-    aria-live="polite"
-    class="mt-3 text-xs leading-relaxed text-muted sm:text-sm"
-    data-beta-download-status
-  >
-    Memeriksa rilis terbaru…
+    <Download size={18} strokeWidth={1.8} aria-hidden="true" />
+    <span data-beta-label><T id="Unduh Otto OS" en="Download Otto OS" /></span>
+  </button>
+  <p role="status" aria-live="polite" class="text-sm text-muted" data-beta-status>
+    <T id="Memeriksa rilis terbaru…" en="Checking the latest release…" />
   </p>
 </div>
 
 <script>
-  type ReleaseDownloadInfo = {
+  type Release = {
+    version: string | null;
+    downloadUrl: string | null;
+    downloads: number | null;
+    prerelease: boolean;
+  };
+
+  type ApiPayload = {
     version: string | null;
     downloadUrl: string | null;
     downloads: number;
     prerelease?: boolean;
   };
 
-  function isReleaseDownloadInfo(value: unknown): value is ReleaseDownloadInfo {
-    if (typeof value !== "object" || value === null) return false;
-    const info = value as Record<string, unknown>;
+  const RELEASE_API = "/api/beta-downloads";
+  const LATEST_RELEASE_API = "https://api.github.com/repos/howlil/otto-os/releases/latest";
+  const DOWNLOAD_PREFIX = "https://github.com/howlil/otto-os/releases/download/";
+  const INSTALLER_NAME = /^otto-os-setup-\d+(?:\.\d+)*-x64\.exe$/i;
+  const idFormat = new Intl.NumberFormat("id-ID");
+  const enFormat = new Intl.NumberFormat("en-US");
+
+  let current: Release | null = null;
+  let inFlight: Promise<Release | null> | null = null;
+  let busy = false;
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+  }
+
+  function isApiPayload(value: unknown): value is ApiPayload {
     return (
-      (typeof info.version === "string" || info.version === null) &&
-      (typeof info.downloadUrl === "string" || info.downloadUrl === null) &&
-      Number.isInteger(info.downloads) &&
-      Number(info.downloads) >= 0 &&
-      (typeof info.prerelease === "boolean" || typeof info.prerelease === "undefined")
+      isRecord(value) &&
+      (typeof value.version === "string" || value.version === null) &&
+      (typeof value.downloadUrl === "string" || value.downloadUrl === null) &&
+      Number.isInteger(value.downloads) &&
+      Number(value.downloads) >= 0 &&
+      (typeof value.prerelease === "boolean" || value.prerelease === undefined)
     );
   }
 
-  const link = document.querySelector<HTMLAnchorElement>("[data-beta-download]");
-  const label = document.querySelector<HTMLElement>("[data-beta-download-label]");
-  const status = document.querySelector<HTMLElement>("[data-beta-download-status]");
+  function isInstallerUrl(url: string): boolean {
+    return url.startsWith(DOWNLOAD_PREFIX);
+  }
 
-  if (link && label && status) {
-    const releasesUrl = "https://github.com/howlil/otto-os/releases";
-    const formatCount = (count: number) => new Intl.NumberFormat("id-ID").format(count);
-
+  async function fetchFromApi(): Promise<Release | null> {
     try {
-      const response = await fetch("/api/beta-downloads", {
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) throw new Error("Release metadata unavailable");
-
+      const response = await fetch(RELEASE_API, { headers: { Accept: "application/json" } });
+      if (!response.ok) return null;
       const payload: unknown = await response.json();
-      if (!isReleaseDownloadInfo(payload)) throw new Error("Invalid release metadata");
-
-      if (payload.downloadUrl && payload.version) {
-        link.href = payload.downloadUrl;
-        label.textContent = payload.prerelease
-          ? `Unduh Beta ${payload.version}`
-          : `Unduh Otto OS ${payload.version}`;
-        status.textContent = payload.prerelease
-          ? `${formatCount(payload.downloads)} unduhan beta`
-          : `${formatCount(payload.downloads)} unduhan`;
-      } else {
-        link.href = releasesUrl;
-        label.textContent = "Lihat rilis terbaru";
-        status.textContent = `Rilis belum diterbitkan · ${formatCount(payload.downloads)} unduhan`;
-      }
+      if (!isApiPayload(payload)) return null;
+      const downloadUrl = payload.downloadUrl && isInstallerUrl(payload.downloadUrl) ? payload.downloadUrl : null;
+      return {
+        version: payload.version,
+        downloadUrl,
+        downloads: payload.downloads,
+        prerelease: payload.prerelease === true,
+      };
     } catch {
-      link.href = releasesUrl;
-      label.textContent = "Buka halaman rilis";
-      status.textContent = "Status unduhan belum dapat dimuat.";
+      return null;
     }
   }
+
+  async function fetchFromGitHub(): Promise<Release | null> {
+    try {
+      const response = await fetch(LATEST_RELEASE_API, { headers: { Accept: "application/vnd.github+json" } });
+      if (!response.ok) return null;
+      const release: unknown = await response.json();
+      if (!isRecord(release) || typeof release.tag_name !== "string" || !Array.isArray(release.assets)) return null;
+      const installer = release.assets.find(
+        (asset: unknown) => isRecord(asset) && typeof asset.name === "string" && INSTALLER_NAME.test(asset.name),
+      );
+      const url = isRecord(installer) && typeof installer.browser_download_url === "string" ? installer.browser_download_url : null;
+      return {
+        version: release.tag_name,
+        downloadUrl: url && isInstallerUrl(url) ? url : null,
+        downloads: null,
+        prerelease: release.prerelease === true,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function fetchLatest(): Promise<Release | null> {
+    const fromApi = await fetchFromApi();
+    return fromApi ?? (await fetchFromGitHub());
+  }
+
+  function refresh(): Promise<Release | null> {
+    if (!inFlight) {
+      inFlight = fetchLatest().then((release) => {
+        current = release;
+        inFlight = null;
+        render();
+        return release;
+      });
+    }
+    return inFlight;
+  }
+
+  function instances() {
+    return [...document.querySelectorAll<HTMLButtonElement>("[data-beta-download]")].map((button) => ({
+      button,
+      label: button.querySelector("[data-beta-label]"),
+      status: button.parentElement?.querySelector("[data-beta-status]") ?? null,
+    }));
+  }
+
+  function setBilingual(element: Element | null, id: string, en: string) {
+    if (!element) return;
+    const idSpan = element.querySelector<HTMLElement>(".l-id");
+    const enSpan = element.querySelector<HTMLElement>(".l-en");
+    if (idSpan) idSpan.textContent = id;
+    if (enSpan) enSpan.textContent = en;
+  }
+
+  function render() {
+    const release = current;
+    instances().forEach(({ label, status }) => {
+      if (release?.downloadUrl) {
+        const kind = release.prerelease ? "Beta " : "";
+        const version = release.version ?? "";
+        setBilingual(label, `Unduh Otto OS ${kind}${version}`, `Download Otto OS ${kind}${version}`);
+        const countId = release.downloads === null ? "" : `${idFormat.format(release.downloads)} unduhan · `;
+        const countEn = release.downloads === null ? "" : `${enFormat.format(release.downloads)} downloads · `;
+        setBilingual(status, `${countId}Windows 11 x64`, `${countEn}Windows 11 x64`);
+      } else if (release) {
+        setBilingual(label, "Installer belum tersedia", "Installer not available yet");
+        setBilingual(status, "Rilis belum diterbitkan.", "No release published yet.");
+      } else {
+        setBilingual(label, "Unduh Otto OS", "Download Otto OS");
+        setBilingual(status, "Unduhan belum bisa disiapkan. Klik untuk mencoba lagi.", "The download could not be prepared. Click to try again.");
+      }
+    });
+  }
+
+  function showPreparing() {
+    instances().forEach(({ status }) => setBilingual(status, "Menyiapkan unduhan…", "Preparing download…"));
+  }
+
+  function startDownload(url: string) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
+  async function handleClick() {
+    if (busy) return;
+    busy = true;
+    try {
+      let release = current;
+      if (!release?.downloadUrl) {
+        showPreparing();
+        release = await refresh();
+      }
+      if (release?.downloadUrl) startDownload(release.downloadUrl);
+    } finally {
+      busy = false;
+    }
+  }
+
+  instances().forEach(({ button }) => {
+    button.addEventListener("click", () => void handleClick());
+  });
+
+  void refresh();
 </script>

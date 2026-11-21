@@ -1,56 +1,34 @@
 ---
 import BrandMark from "./ui/BrandMark.astro";
+import { T } from "./lib/T";
 
 interface Props {
   activePath?: string;
 }
 
 const { activePath = "/" } = Astro.props;
-const contactEmail = "";
 const repoUrl = "https://github.com/howlil/otto-os";
 const issuesUrl = "https://github.com/howlil/otto-os/issues";
+const linkClass =
+  "inline-flex min-h-11 items-center rounded-sm text-[14px] text-ink-soft transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 ---
 
-<footer class="border-t border-line bg-surface/60 px-4 py-8 text-sm text-ink-soft">
-  <div class="mx-auto flex max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-    <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-      <BrandMark size={18} />
-      <span class="text-xs text-muted">Shell desktop Windows 11 · Tahap pre-launch</span>
+<footer class="border-t border-line bg-page px-5 py-10 sm:px-8">
+  <div class="mx-auto flex w-full max-w-[1200px] flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+    <div class="flex flex-col gap-1.5">
+      <BrandMark size={20} />
+      <span class="text-[13px] text-muted">
+        <T id="Shell desktop untuk Windows 11 · Lisensi MIT" en="Desktop shell for Windows 11 · MIT License" />
+      </span>
     </div>
-    <nav aria-label="Footer" class="flex flex-wrap items-center gap-5">
-      <a
-        href="/privacy"
-        aria-current={activePath === "/privacy" ? "page" : undefined}
-        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-      >
-        Kebijakan privasi
+    <nav aria-label="Footer" class="flex flex-wrap items-center gap-x-6 gap-y-1">
+      <a href="/privacy" aria-current={activePath === "/privacy" ? "page" : undefined} class={linkClass}>
+        <T id="Kebijakan privasi" en="Privacy policy" />
       </a>
-      <a
-        href={repoUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-      >
-        GitHub
+      <a href={repoUrl} target="_blank" rel="noopener noreferrer" class={linkClass}>GitHub</a>
+      <a href={issuesUrl} target="_blank" rel="noopener noreferrer" class={linkClass}>
+        <T id="Isu & dukungan" en="Issues & support" />
       </a>
-      <a
-        href={issuesUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-      >
-        Dukungan & isu
-      </a>
-      {
-        contactEmail && (
-          <a
-            href={`mailto:${contactEmail}`}
-            class="rounded-sm underline underline-offset-4 transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
-          >
-            {contactEmail}
-          </a>
-        )
-      }
     </nav>
   </div>
 </footer>

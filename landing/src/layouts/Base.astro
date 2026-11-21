@@ -1,5 +1,6 @@
 ---
 import "../styles/global.css";
+import { T } from "../components/lib/T";
 
 interface Props {
   title: string;
@@ -10,11 +11,12 @@ const { title, description } = Astro.props;
 ---
 
 <!doctype html>
-<html lang="id">
+<html lang="id" data-lang="id">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
+    <meta name="theme-color" content="#fbfbfa" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
@@ -22,14 +24,21 @@ const { title, description } = Astro.props;
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
+    <script is:inline>
+      try {
+        var lang = localStorage.getItem("otto-lang") === "en" ? "en" : "id";
+        document.documentElement.dataset.lang = lang;
+        document.documentElement.lang = lang;
+      } catch (error) {}
+    </script>
     <title>{title}</title>
   </head>
-  <body class="flex min-h-dvh flex-col overflow-x-hidden">
+  <body class="flex min-h-dvh flex-col overflow-x-hidden bg-page font-sans text-ink antialiased">
     <a
       href="#main-content"
-      class="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[60] focus:rounded-lg focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-surface focus:outline-2 focus:outline-offset-2 focus:outline-accent"
+      class="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[60] focus:rounded-full focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-page focus:outline-2 focus:outline-offset-2 focus:outline-accent"
     >
-      Lewati ke konten
+      <T id="Lewati ke konten" en="Skip to content" />
     </a>
     <slot />
   </body>
