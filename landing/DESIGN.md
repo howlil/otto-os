@@ -99,7 +99,7 @@ Hanya klaim yang didukung CHANGELOG 1.0.0 dan README. Jangan menulis Microsoft S
 ## Gerak
 
 - Island memakai spring (stiffness 420, damping 36, mass 0.9). Transisi teks memakai `cubic-bezier(0.16, 1, 0.3, 1)` selama 0.28 detik.
-- Diagram terurai di-spring. Nilai explode berubah dari scroll dan tombol Rakit/Bongkar.
+- Diagram terurai di-spring. Nilai explode berubah dari scroll, dari menahan diagram hero (atau Spasi, Enter, panah saat fokus), dan dari geser ke kiri saat ditahan. Lepas untuk merakit kembali. Saat pertama tampil, diagram membuka sekali sebagai petunjuk.
 - Genie: jendela meminimalkan ke ikon di Dock dan kembali lewat jalur yang sama.
 - `prefers-reduced-motion`: `useReducedMotion` mengambil state akhir tanpa animasi. `scroll-behavior` dimatikan.
 - Tidak ada scroll reveal dengan `opacity: 0` pada section (UG1).
@@ -108,6 +108,7 @@ Hanya klaim yang didukung CHANGELOG 1.0.0 dan README. Jangan menulis Microsoft S
 
 - **Nav:** sticky, datar, tanpa blur. Tautan Bagian dan Unduh, toggle ID/EN berbentuk segmented dengan `aria-pressed`.
 - **BetaDownload:** tombol (bukan tautan ke halaman rilis) yang langsung mengunduh installer terbaru. Sumber utama `/api/beta-downloads` (Cloudflare Pages Function, cache 5 menit). Jika itu gagal, script mengambil `releases/latest` dari GitHub API. Klik pertama saat data belum siap menampilkan "Menyiapkan unduhan…", lalu unduhan dimulai otomatis. Jika installer belum ada, tombol menjelaskan kondisinya. Jika data tidak bisa diambil, klik berikutnya mencoba lagi.
+- **Diagram hero:** diagram itu sendiri adalah kontrolnya (`role="button"`, `aria-pressed`, dinamai oleh caption "Tahan untuk membongkar…"). Tidak ada tombol terpisah dan tidak ada tautan "Lihat bagiannya".
 - **Island demo:** tiga keadaan (idle, compact, expanded). Tab Fokus dengan timer 25 menit dan tombol atur ulang, lewati, jeda. Tab Musik dengan progres dan lirik demo. Data sintetis.
 - **Dock dan Genie:** wallpaper dengan jendela Explorer. Tombol kuning meminimalkan jendela ke ikon. Klik ikon untuk memulihkan. Dock membesar dengan kosinus saat kursor di atasnya; utilitas disembunyikan di mobile.
 - **Control Center:** switch Wi-Fi, Bluetooth, Focus memakai `role="switch"`. Slider Kecerahan dan Suara memakai kelas `range-quiet`. Demo musik dengan play/pause.
