@@ -116,6 +116,9 @@ pub use notch::focus_activity::{
     estimated_words, format_compact_count, format_screen_time, inspect_browser_context,
     is_browser_executable, normalize_app_key, normalize_domain,
 };
+pub use notch::focus_shield::{
+    FocusShieldDismissal, FocusShieldLayout, focus_shield_layout, is_back_hit,
+};
 pub use notch::hud::{
     HudGeometry, HudGlyph, HudLabel, HudPresentation, HudTone, HudValue, compute_hud_geometry,
     hud_content_alpha, present_hud,
@@ -183,7 +186,7 @@ pub use settings::model::{
     PluginSettingsState, SystemSettingsState,
 };
 pub use settings_content::{
-    BadgeTone, CardLayout, ContentLayout, SettingsAction, SettingsContent, SettingsHero,
+    BadgeTone, CardLayout, ContentLayout, DayBar, SettingsAction, SettingsContent, SettingsHero,
     SettingsRow, SettingsRowValue, SettingsSection, build_content, compute_content_layout,
 };
 pub use settings_window::{

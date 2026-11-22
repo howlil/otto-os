@@ -5,7 +5,8 @@ mod tests;
 mod tiles;
 
 use otto_core::{
-    ContentLayout, Rect, SettingsContent, SettingsHit, SettingsLayout, SettingsPage, scale,
+    Appearance, ContentLayout, GlassShape, Rect, ResolvedTheme, RgbBuffer, SettingsContent,
+    SettingsHit, SettingsLayout, SettingsPage, scale,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -25,6 +26,7 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 
+use crate::appearance::glass::GlassPainter;
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
 use self::palette::{
@@ -112,6 +114,7 @@ pub struct SettingsRenderer {
     pub(super) stroke: ID2D1StrokeStyle,
     pub(super) formats: Formats,
     pub(super) dpi: u32,
+    glass: GlassPainter,
 }
 
 impl SettingsRenderer {
@@ -155,8 +158,18 @@ impl SettingsRenderer {
                 stroke,
                 formats: Formats::new(dpi)?,
                 dpi,
+                glass: GlassPainter::default(),
             })
         }
+    }
+
+    pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
+        self.glass.set_backdrop(capture, origin);
+    }
+
+    #[must_use]
+    pub fn has_backdrop(&self) -> bool {
+        self.glass.has_backdrop()
     }
 
     pub fn resize(&self, width: i32, height: i32) -> Result<()> {
@@ -188,15 +201,37 @@ impl SettingsRenderer {
             self.target.Clear(Some(&clear));
         }
         if palette.glass {
-            self.fill(
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: state.layout.sidebar.width + state.layout.content.width,
-                    height: state.layout.sidebar.height,
-                },
-                palette.background,
-            );
+            let full_rect = Rect {
+                x: 0,
+                y: 0,
+                width: state.layout.sidebar.width + state.layout.content.width,
+                height: state.layout.sidebar.height,
+            };
+            let appearance = Appearance::glass(if state.dark {
+                ResolvedTheme::Dark
+            } else {
+                ResolvedTheme::Light
+            });
+            let drawn = self
+                .glass
+                .draw(
+                    &self.target,
+                    &appearance,
+                    self.dpi,
+                    GlassShape::from_rect(full_rect, 0.0),
+                    false,
+                )
+                .unwrap_or(false);
+            let veil = if drawn {
+                if state.dark {
+                    rgba(0x08_0A10, 0.18)
+                } else {
+                    rgba(0xF6_F7FB, 0.16)
+                }
+            } else {
+                palette.background
+            };
+            self.fill(full_rect, veil);
         }
         self.draw_body(state, &palette);
         self.draw_toolbar(state, &palette);

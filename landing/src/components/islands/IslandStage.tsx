@@ -1,361 +1,291 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Disc3, Pause, Play, RotateCcw, SkipBack, SkipForward, X } from "lucide-react";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { AnimatePresence, motion, useMotionValueEvent, useReducedMotion, useScroll } from "motion/react";
+import { ClipboardList, Inbox, ListTodo, Music, Phone, Timer, Volume2 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { T } from "../lib/T";
-import { formatClock } from "../lib/spring";
+import { clamp } from "../lib/spring";
+import { CallCompact, FocusCompact, HudPill, MusicCompact, PrivacyDot, SecondaryFocus } from "./notch/Compact";
+import { FocusPanel, MusicPanel } from "./notch/Panels";
+import { ClipPanel, PocketPanel, TasksPanel } from "./PocketClip";
+import {
+  CALL_START,
+  COMPACT_SHAPE,
+  CONTENT_FADE,
+  FOCUS_START,
+  FOCUS_TOTAL,
+  HUD_EVENTS,
+  INSTANT,
+  ISLAND,
+  LYRICS,
+  RAIL,
+  SCENES,
+  SECONDARY_SHAPE,
+  SHAPE,
+  TRACK_LENGTH,
+  TRACK_START,
+  lyricAt,
+  type Module,
+  type Scene,
+} from "./notch/spec";
 
-type Tab = "focus" | "music";
+const RAIL_ICON: Record<Module, LucideIcon> = {
+  focus: Timer,
+  music: Music,
+  pocket: Inbox,
+  clip: ClipboardList,
+  tasks: ListTodo,
+  call: Phone,
+  hud: Volume2,
+};
 
-const FOCUS_TOTAL = 1500;
-const TRACK_SECONDS = 180;
-const LYRICS: [string, string][] = [
-  ["Lirik tersinkron, baris demi baris", "Synced lyrics, line by line"],
-  ["Baris aktif mengikuti waktu", "The active line follows the time"],
-  ["Semua berjalan lokal di perangkatmu", "Everything runs locally on your device"],
-];
+const STEP_VH = 55;
+const CLIP_COUNT = 4;
+const HUD_HOLD_MS = 1900;
+const CLIP_HOLD_MS = 2200;
 
-const COMPACT_WIDTH: Record<Tab, number> = { focus: 184, music: 292 };
-const EXPANDED = { width: 400, height: 176, radius: 28 };
-const IDLE = { width: 120, height: 32, radius: 16 };
-const SPRING = { type: "spring" as const, stiffness: 420, damping: 36, mass: 0.9 };
-const INSTANT = { duration: 0 };
-const SOFT = { duration: 0.28, ease: [0.16, 1, 0.3, 1] as [number, number, number, number] };
-
-function Equalizer({ playing }: { playing: boolean }) {
-  return (
-    <span className="flex h-4 items-end gap-[3px]" aria-hidden="true">
-      {[0.5, 0.9, 0.35, 0.7].map((base, index) => (
-        <motion.span
-          key={index}
-          className="block h-full w-[2px] origin-bottom rounded-full bg-stage-ink"
-          animate={playing ? { scaleY: [base, 1, base * 0.45, base] } : { scaleY: 0.35 }}
-          transition={playing ? { duration: 0.9 + index * 0.12, repeat: Infinity, ease: "easeInOut" } : { duration: 0.3 }}
-        />
-      ))}
-    </span>
-  );
+function stepAt(progress: number) {
+  return clamp(Math.floor(progress * SCENES.length), 0, SCENES.length - 1);
 }
 
-function Ring({ fraction }: { fraction: number }) {
-  const radius = 7;
-  const length = 2 * Math.PI * radius;
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" className="shrink-0 -rotate-90">
-      <circle cx="9" cy="9" r={radius} fill="none" stroke="rgb(245 245 247 / 0.2)" strokeWidth="2" />
-      <circle
-        cx="9"
-        cy="9"
-        r={radius}
-        fill="none"
-        stroke="#ff6a2b"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeDasharray={length}
-        strokeDashoffset={length * (1 - fraction)}
-      />
-    </svg>
-  );
+function shapeOf(scene: Scene) {
+  if (scene.view === "panel") {
+    return { width: ISLAND.panelWidth, height: scene.lyrics ? ISLAND.lyricsHeight : ISLAND.panelHeight, radius: ISLAND.panelRadius };
+  }
+  if (scene.view === "hud") return { width: ISLAND.hudWidth, height: ISLAND.compactHeight, radius: ISLAND.compactRadius };
+  if (scene.view === "call") return { width: ISLAND.callWidth, height: ISLAND.compactHeight, radius: ISLAND.compactRadius };
+  return {
+    width: scene.module === "music" ? ISLAND.musicWidth : ISLAND.focusWidth,
+    height: ISLAND.compactHeight,
+    radius: ISLAND.compactRadius,
+  };
 }
 
-function IconButton({
-  label,
-  onClick,
-  children,
-  primary = false,
-}: {
-  label: [string, string];
-  onClick: () => void;
-  children: ReactNode;
-  primary?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex items-center justify-center rounded-full text-stage-ink transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
-        primary ? "size-9 bg-accent hover:bg-accent-hover" : "size-8 hover:bg-white/10"
-      }`}
-    >
-      {children}
-      <span className="sr-only">
-        <T id={label[0]} en={label[1]} />
-      </span>
-    </button>
-  );
+function useFitScale(ref: RefObject<HTMLDivElement | null>) {
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const update = () => setScale(Math.min(1, (node.clientWidth - 24) / ISLAND.panelWidth));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref]);
+  return scale;
 }
 
 export function IslandStage() {
   const reduced = useReducedMotion() ?? false;
-  const [expanded, setExpanded] = useState(false);
-  const [tab, setTab] = useState<Tab>("focus");
-  const [focusRunning, setFocusRunning] = useState(true);
-  const [remaining, setRemaining] = useState(1452);
-  const [musicPlaying, setMusicPlaying] = useState(true);
-  const [progress, setProgress] = useState(0.38);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const scale = useFitScale(stageRef);
+  const [index, setIndex] = useState(0);
+  const [remaining, setRemaining] = useState(FOCUS_START);
+  const [running, setRunning] = useState(true);
+  const [elapsed, setElapsed] = useState(TRACK_START);
+  const [playing, setPlaying] = useState(true);
+  const [callSeconds, setCallSeconds] = useState(CALL_START);
+  const [hudIndex, setHudIndex] = useState(0);
+  const [copied, setCopied] = useState(0);
+  const { scrollYProgress } = useScroll({ target: wrapperRef, offset: ["start start", "end end"] });
+
+  useMotionValueEvent(scrollYProgress, "change", (progress) => setIndex(stepAt(progress)));
 
   useEffect(() => {
-    if (!focusRunning) return;
+    setIndex(stepAt(scrollYProgress.get()));
+  }, [scrollYProgress]);
+
+  useEffect(() => {
+    if (!running) return;
     const id = window.setInterval(() => setRemaining((value) => Math.max(0, value - 1)), 1000);
     return () => window.clearInterval(id);
-  }, [focusRunning]);
+  }, [running]);
 
   useEffect(() => {
-    if (remaining === 0) setFocusRunning(false);
+    if (remaining === 0) setRunning(false);
   }, [remaining]);
 
   useEffect(() => {
-    if (!musicPlaying) return;
-    const id = window.setInterval(() => setProgress((value) => Math.min(1, value + 0.25 / TRACK_SECONDS)), 250);
+    if (!playing) return;
+    const id = window.setInterval(
+      () => setElapsed((value) => (value + 0.25 >= TRACK_LENGTH ? 0 : value + 0.25)),
+      250,
+    );
     return () => window.clearInterval(id);
-  }, [musicPlaying]);
+  }, [playing]);
 
   useEffect(() => {
-    if (progress >= 1) setMusicPlaying(false);
-  }, [progress]);
+    const id = window.setInterval(() => setCallSeconds((value) => value + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
-  const focusActive = focusRunning && remaining > 0;
-  const musicActive = musicPlaying;
-  const idle = !expanded && !focusActive && !musicActive;
+  const scene = SCENES[index];
 
-  const compactTab: Tab =
-    tab === "focus"
-      ? focusActive || !musicActive
-        ? "focus"
-        : "music"
-      : musicActive || !focusActive
-        ? "music"
-        : "focus";
-  const secondaryTab: Tab | null = focusActive && musicActive ? (compactTab === "focus" ? "music" : "focus") : null;
+  useEffect(() => {
+    if (scene.view !== "hud") return;
+    setHudIndex(0);
+    const id = window.setInterval(() => setHudIndex((value) => (value + 1) % HUD_EVENTS.length), HUD_HOLD_MS);
+    return () => window.clearInterval(id);
+  }, [scene.view]);
 
-  const lyricIndex = Math.min(LYRICS.length - 1, Math.floor(progress * LYRICS.length));
-  const lyric = LYRICS[lyricIndex];
-
-  const shape = expanded
-    ? { width: EXPANDED.width, height: EXPANDED.height, borderBottomLeftRadius: EXPANDED.radius, borderBottomRightRadius: EXPANDED.radius }
-    : idle
-      ? { width: IDLE.width, height: IDLE.height, borderBottomLeftRadius: IDLE.radius, borderBottomRightRadius: IDLE.radius }
-      : { width: COMPACT_WIDTH[compactTab], height: 36, borderBottomLeftRadius: 18, borderBottomRightRadius: 18 };
+  useEffect(() => {
+    if (scene.module !== "clip") return;
+    setCopied(0);
+    const id = window.setInterval(() => setCopied((value) => (value + 1) % CLIP_COUNT), CLIP_HOLD_MS);
+    return () => window.clearInterval(id);
+  }, [scene.module]);
 
   function toggleFocus() {
     if (remaining === 0) {
       setRemaining(FOCUS_TOTAL);
-      setFocusRunning(true);
+      setRunning(true);
       return;
     }
-    setFocusRunning((value) => !value);
+    setRunning((value) => !value);
   }
 
-  function restartFocus() {
+  function resetFocus() {
     setRemaining(FOCUS_TOTAL);
-    setFocusRunning(true);
+    setRunning(true);
+  }
+
+  function goTo(step: number) {
+    const node = wrapperRef.current;
+    if (!node) return;
+    const range = Math.max(0, node.offsetHeight - window.innerHeight);
+    const top = node.getBoundingClientRect().top + window.scrollY;
+    window.scrollTo({ top: top + ((step + 0.5) / SCENES.length) * range, behavior: reduced ? "auto" : "smooth" });
+  }
+
+  const shape = shapeOf(scene);
+  const lyric = lyricAt(elapsed);
+  const contentKey = `${scene.view}-${scene.module}-${scene.lyrics ? "lyrics" : "plain"}`;
+
+  function renderContent() {
+    if (scene.view === "compact") {
+      return scene.module === "music" ? (
+        <MusicCompact lyric={LYRICS[lyric.index]} playing={playing} reduced={reduced} />
+      ) : (
+        <FocusCompact remaining={remaining} />
+      );
+    }
+    if (scene.view === "call") return <CallCompact seconds={callSeconds} reduced={reduced} />;
+    if (scene.view === "hud") return <HudPill event={HUD_EVENTS[hudIndex]} />;
+    switch (scene.module) {
+      case "focus":
+        return (
+          <FocusPanel
+            remaining={remaining}
+            running={running}
+            onToggle={toggleFocus}
+            onReset={resetFocus}
+            onSkip={resetFocus}
+          />
+        );
+      case "music":
+        return (
+          <MusicPanel
+            playing={playing}
+            elapsed={elapsed}
+            lyricsOn={Boolean(scene.lyrics)}
+            reduced={reduced}
+            onToggle={() => setPlaying((value) => !value)}
+            onPrev={() => setElapsed(0)}
+            onNext={() => setElapsed(0)}
+          />
+        );
+      case "pocket":
+        return <PocketPanel reduced={reduced} />;
+      case "clip":
+        return <ClipPanel copied={copied} />;
+      case "tasks":
+        return <TasksPanel reduced={reduced} />;
+      default:
+        return null;
+    }
   }
 
   return (
-    <div className="flex flex-col items-center gap-8">
-      <div className="relative flex h-[260px] w-full items-start justify-center overflow-hidden rounded-[32px] border border-stage-line bg-[radial-gradient(120%_90%_at_50%_0%,#1d2b47_0%,#0e1017_55%,#08090c_100%)] pt-0 sm:h-[260px]">
-        <div aria-hidden="true" className="absolute inset-x-0 top-0 h-9 border-b border-white/5 bg-black/40" />
-        <div className="flex origin-top scale-[0.8] items-start gap-2 sm:scale-100">
-          <motion.div
-            className="relative overflow-hidden bg-stage ring-1 ring-white/10"
-            style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}
-            animate={shape}
-            transition={reduced ? INSTANT : SPRING}
+    <div ref={wrapperRef} className="relative" style={{ height: `${SCENES.length * STEP_VH}svh` }}>
+      <div className="sticky top-0 flex h-svh flex-col items-center justify-center gap-6 overflow-hidden px-5 sm:px-8">
+        <div
+          ref={stageRef}
+          className="relative h-[300px] w-full max-w-[1040px] overflow-hidden rounded-[32px] border border-stage-line bg-[radial-gradient(120%_90%_at_50%_0%,#1d2b47_0%,#0e1017_55%,#08090c_100%)]"
+        >
+          <div aria-hidden="true" className="absolute inset-x-0 top-0 flex h-10 items-center justify-between border-b border-white/5 bg-black/40 px-5 text-[12px]">
+            <span className="font-semibold text-stage-ink/85">Explorer</span>
+            <span className="hidden text-stage-muted tabular-nums sm:inline">Min 22 Nov 09:41</span>
+          </div>
+          <div
+            className="absolute top-0 left-1/2 h-[300px] w-[380px]"
+            style={{ transform: `translateX(-50%) scale(${scale})`, transformOrigin: "50% 0" }}
           >
-            {expanded ? (
-              <div className="flex h-full flex-col gap-3 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex gap-1 rounded-full bg-white/10 p-1">
-                    {(["focus", "music"] as Tab[]).map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        aria-pressed={tab === item}
-                        onClick={() => setTab(item)}
-                        className={`h-7 rounded-full px-3 text-[13px] font-medium transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
-                          tab === item ? "bg-white text-black" : "text-stage-muted hover:text-stage-ink"
-                        }`}
-                      >
-                        {item === "focus" ? <T id="Fokus" en="Focus" /> : <T id="Musik" en="Music" />}
-                      </button>
-                    ))}
-                  </div>
+            <motion.div
+              className="absolute left-1/2 overflow-hidden bg-black ring-1 ring-inset ring-white/[0.14]"
+              style={{ top: ISLAND.top, x: "-50%" }}
+              initial={false}
+              animate={{ width: shape.width, height: shape.height, borderRadius: shape.radius }}
+              transition={reduced ? INSTANT : scene.view === "panel" ? SHAPE : COMPACT_SHAPE}
+            >
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={contentKey}
+                  className="h-full w-full"
+                  initial={reduced ? false : { opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={reduced ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                  transition={reduced ? INSTANT : CONTENT_FADE}
+                >
+                  {renderContent()}
+                </motion.div>
+              </AnimatePresence>
+            </motion.div>
+            <AnimatePresence initial={false}>
+              {scene.secondary ? (
+                <motion.div
+                  key="secondary"
+                  className="absolute left-1/2 grid size-9 place-items-center overflow-hidden rounded-full bg-black ring-1 ring-inset ring-white/[0.14]"
+                  style={{ top: ISLAND.top, x: ISLAND.musicWidth / 2 + ISLAND.secondaryGap }}
+                  initial={reduced ? false : { opacity: 0, scale: 0.6 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.6 }}
+                  transition={reduced ? INSTANT : SECONDARY_SHAPE}
+                >
+                  <SecondaryFocus remaining={remaining} />
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+            {scene.view === "call" ? <PrivacyDot kind="mic" /> : null}
+          </div>
+        </div>
+
+        <p className="min-h-6 text-center text-[15px] leading-6 text-stage-muted" aria-live="polite">
+          <T id={scene.caption[0]} en={scene.caption[1]} />
+        </p>
+
+        <nav aria-label="Modul notch">
+          <ol className="flex flex-wrap justify-center gap-2">
+            {RAIL.map((item) => {
+              const Icon = RAIL_ICON[item.module];
+              const active = scene.module === item.module;
+              return (
+                <li key={item.module}>
                   <button
                     type="button"
-                    onClick={() => setExpanded(false)}
-                    className="inline-flex size-7 items-center justify-center rounded-full text-stage-muted transition-colors hover:bg-white/10 hover:text-stage-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff]"
+                    onClick={() => goTo(item.step)}
+                    aria-current={active ? "step" : undefined}
+                    className={`inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
+                      active ? "bg-stage-ink text-stage" : "text-stage-muted ring-1 ring-inset ring-stage-line hover:text-stage-ink"
+                    }`}
                   >
-                    <X size={15} strokeWidth={1.8} aria-hidden="true" />
-                    <span className="sr-only">
-                      <T id="Tutup panel" en="Close panel" />
-                    </span>
+                    <Icon size={14} strokeWidth={1.9} aria-hidden="true" />
+                    <T id={item.label[0]} en={item.label[1]} />
                   </button>
-                </div>
-
-                <AnimatePresence mode="wait" initial={false}>
-                  {tab === "focus" ? (
-                    <motion.div
-                      key="focus"
-                      initial={reduced ? false : { y: 8 }}
-                      animate={{ y: 0 }}
-                      exit={reduced ? { y: 0 } : { y: -8 }}
-                      transition={SOFT}
-                      className="flex flex-1 items-center justify-between"
-                    >
-                      <div className="flex flex-col">
-                        <span className="text-[34px] leading-none font-semibold tracking-[-0.02em] tabular-nums">
-                          {formatClock(remaining)}
-                        </span>
-                        <span className="mt-2 text-[13px] text-stage-muted">
-                          <T id="Sesi 1 dari 4" en="Session 1 of 4" />
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <IconButton label={["Atur ulang", "Reset"]} onClick={restartFocus}>
-                          <RotateCcw size={16} strokeWidth={1.8} aria-hidden="true" />
-                        </IconButton>
-                        <IconButton label={focusRunning && remaining > 0 ? ["Jeda", "Pause"] : ["Putar", "Play"]} primary onClick={toggleFocus}>
-                          {focusRunning && remaining > 0 ? (
-                            <Pause size={16} fill="currentColor" aria-hidden="true" />
-                          ) : (
-                            <Play size={16} fill="currentColor" aria-hidden="true" />
-                          )}
-                        </IconButton>
-                        <IconButton label={["Lewati", "Skip"]} onClick={restartFocus}>
-                          <SkipForward size={16} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
-                        </IconButton>
-                      </div>
-                    </motion.div>
-                  ) : (
-                    <motion.div
-                      key="music"
-                      initial={reduced ? false : { y: 8 }}
-                      animate={{ y: 0 }}
-                      exit={reduced ? { y: 0 } : { y: -8 }}
-                      transition={SOFT}
-                      className="flex flex-1 flex-col justify-between"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-music-activity text-white">
-                          <Disc3 size={20} strokeWidth={1.8} aria-hidden="true" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-[14px] font-semibold">
-                            <T id="Demo lagu" en="Demo track" />
-                          </p>
-                          <p className="truncate text-[13px] text-stage-muted">
-                            <AnimatePresence mode="wait" initial={false}>
-                              <motion.span
-                                key={lyricIndex}
-                                initial={reduced ? false : { y: 6 }}
-                                animate={{ y: 0 }}
-                                exit={reduced ? { y: 0 } : { y: -6 }}
-                                transition={{ duration: 0.22 }}
-                                className="inline-block"
-                              >
-                                <T id={lyric[0]} en={lyric[1]} />
-                              </motion.span>
-                            </AnimatePresence>
-                          </p>
-                        </div>
-                        <Equalizer playing={musicPlaying} />
-                      </div>
-                      <div className="flex flex-col gap-2">
-                        <div className="h-1 w-full overflow-hidden rounded-full bg-white/15">
-                          <div className="h-full rounded-full bg-stage-ink" style={{ width: `${progress * 100}%` }} />
-                        </div>
-                        <div className="flex items-center justify-center gap-1">
-                          <IconButton label={["Sebelumnya", "Previous"]} onClick={() => setProgress(0)}>
-                            <SkipBack size={16} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
-                          </IconButton>
-                          <IconButton
-                            label={musicPlaying ? ["Jeda", "Pause"] : ["Putar", "Play"]}
-                            primary
-                            onClick={() => setMusicPlaying((value) => !value)}
-                          >
-                            {musicPlaying ? (
-                              <Pause size={16} fill="currentColor" aria-hidden="true" />
-                            ) : (
-                              <Play size={16} fill="currentColor" aria-hidden="true" />
-                            )}
-                          </IconButton>
-                          <IconButton label={["Berikutnya", "Next"]} onClick={() => setProgress(0)}>
-                            <SkipForward size={16} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
-                          </IconButton>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setExpanded(true)}
-                aria-expanded={false}
-                className="flex size-full items-center justify-between px-3.5 text-stage-ink transition-colors hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#75b0ff]"
-              >
-                {idle ? (
-                  <span className="sr-only">
-                    <T id="Buka aktivitas" en="Open activity" />
-                  </span>
-                ) : compactTab === "focus" ? (
-                  <>
-                    <span className="flex items-center gap-2">
-                      <Ring fraction={remaining / FOCUS_TOTAL} />
-                      <span className="text-[13px] font-medium tabular-nums">{formatClock(remaining)}</span>
-                    </span>
-                    {musicActive ? <Equalizer playing={musicPlaying} /> : <span className="w-4" />}
-                  </>
-                ) : (
-                  <>
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="grid size-5 shrink-0 place-items-center rounded-md bg-music-activity">
-                        <Disc3 size={12} strokeWidth={2} aria-hidden="true" />
-                      </span>
-                      <span className="truncate text-[13px] font-medium">
-                        <T id="Demo lagu" en="Demo track" />
-                      </span>
-                    </span>
-                    <Equalizer playing={musicPlaying} />
-                  </>
-                )}
-              </button>
-            )}
-          </motion.div>
-
-          <AnimatePresence initial={false}>
-            {secondaryTab && !expanded && (
-              <motion.button
-                key={secondaryTab}
-                type="button"
-                onClick={() => setTab(secondaryTab)}
-                initial={reduced ? false : { scale: 0.6 }}
-                animate={{ scale: 1 }}
-                exit={reduced ? { scale: 1 } : { scale: 0.6 }}
-                transition={reduced ? INSTANT : SPRING}
-                className="grid size-9 shrink-0 place-items-center rounded-full bg-stage text-stage-ink ring-1 ring-white/10 transition-colors hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff]"
-              >
-                {secondaryTab === "focus" ? (
-                  <Ring fraction={remaining / FOCUS_TOTAL} />
-                ) : (
-                  <Disc3 size={16} strokeWidth={1.8} aria-hidden="true" />
-                )}
-                <span className="sr-only">
-                  {secondaryTab === "focus" ? <T id="Tampilkan Focus" en="Show Focus" /> : <T id="Tampilkan Musik" en="Show Music" />}
-                </span>
-              </motion.button>
-            )}
-          </AnimatePresence>
-        </div>
-      </div>
-
-      <div className="flex w-full flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[13px] text-stage-muted">
-        <span>
-          <T id="Klik notch untuk membuka. Lingkaran samping menukar aktivitas." en="Click the notch to open. The side circle swaps activities." />
-        </span>
-        <span>
-          <T id="Demo interaktif, data sintetis." en="Interactive demo, synthetic data." />
-        </span>
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
       </div>
     </div>
   );

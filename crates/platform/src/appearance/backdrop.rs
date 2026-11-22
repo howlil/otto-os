@@ -1,20 +1,32 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use otto_core::{PixelLimits, RgbBuffer, bgra_layout};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, ROP_CODE, SRCCOPY};
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppBGRA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapInterpolationModeLinear, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand, WICRect,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::WindowsAndMessaging::{
-    IsWindowVisible, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    IsWindowVisible, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetWindowDisplayAffinity, SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
+use crate::com::ComGuard;
 use crate::gdi::{CaptureCanvas, ScreenDc};
+use crate::screen::primary_screen;
 use crate::worker::join_within;
 
 const STOP_JOIN_LIMIT: Duration = Duration::from_millis(1500);
+const MAX_WALLPAPER_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const WALLPAPER_CHECK_TTL: Duration = Duration::from_secs(5);
 
 #[must_use]
 pub fn is_surface_visible(hwnd: isize) -> bool {
@@ -144,8 +156,18 @@ impl BackdropGrabber {
     }
 }
 
+struct CachedWallpaper {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    last_checked: Instant,
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
+}
+
 thread_local! {
     static CAPTURE_GRABBER: RefCell<Option<BackdropGrabber>> = const { RefCell::new(None) };
+    static WALLPAPER_CACHE: RefCell<Option<CachedWallpaper>> = const { RefCell::new(None) };
 }
 
 pub fn release_backdrop_capture_cache() {
@@ -154,6 +176,195 @@ pub fn release_backdrop_capture_cache() {
             *grabber = None;
         }
     });
+    let _ = WALLPAPER_CACHE.try_with(|slot| {
+        if let Ok(mut cache) = slot.try_borrow_mut() {
+            *cache = None;
+        }
+    });
+}
+
+fn active_wallpaper_path() -> Option<PathBuf> {
+    let mut buffer = [0u16; 520];
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETDESKWALLPAPER,
+            buffer.len() as u32,
+            Some(buffer.as_mut_ptr().cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok();
+    if ok {
+        let end = buffer
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(buffer.len());
+        if end > 0 {
+            let candidate = PathBuf::from(String::from_utf16_lossy(&buffer[..end]));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let appdata = std::env::var_os("APPDATA")?;
+    let transcoded = PathBuf::from(appdata).join("Microsoft\\Windows\\Themes\\TranscodedWallpaper");
+    transcoded.is_file().then_some(transcoded)
+}
+
+fn decode_wallpaper_bgra(path: &PathBuf, target_w: u32, target_h: u32) -> Option<Vec<u8>> {
+    let layout = bgra_layout(target_w, target_h, PixelLimits::WINDOW_SNAPSHOT).ok()?;
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() == 0 || meta.len() > MAX_WALLPAPER_FILE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let _com = ComGuard::single_threaded();
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let stream = factory.CreateStream().ok()?;
+        stream.InitializeFromMemory(&bytes).ok()?;
+        let decoder = factory
+            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let mut src_w = 0u32;
+        let mut src_h = 0u32;
+        frame.GetSize(&mut src_w, &mut src_h).ok()?;
+        if src_w == 0 || src_h == 0 {
+            return None;
+        }
+        let scale_x = f64::from(target_w) / f64::from(src_w);
+        let scale_y = f64::from(target_h) / f64::from(src_h);
+        let scale = scale_x.max(scale_y);
+        let scaled_w = ((f64::from(src_w) * scale).round() as u32).max(target_w);
+        let scaled_h = ((f64::from(src_h) * scale).round() as u32).max(target_h);
+        let scaler = factory.CreateBitmapScaler().ok()?;
+        scaler
+            .Initialize(&frame, scaled_w, scaled_h, WICBitmapInterpolationModeLinear)
+            .ok()?;
+        let converter = factory.CreateFormatConverter().ok()?;
+        converter
+            .Initialize(
+                &scaler,
+                &GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+            .ok()?;
+        let crop_x = i32::try_from((scaled_w - target_w) / 2).ok()?;
+        let crop_y = i32::try_from((scaled_h - target_h) / 2).ok()?;
+        let rect = WICRect {
+            X: crop_x,
+            Y: crop_y,
+            Width: i32::try_from(target_w).ok()?,
+            Height: i32::try_from(target_h).ok()?,
+        };
+        let mut out = vec![0u8; layout.byte_len];
+        converter
+            .CopyPixels(&raw const rect, layout.stride, &mut out)
+            .ok()?;
+        Some(out)
+    }
+}
+
+fn crop_bgra_region(
+    source: &[u8],
+    source_w: u32,
+    source_h: u32,
+    origin: (i32, i32),
+    width: u32,
+    height: u32,
+) -> Option<RgbBuffer> {
+    let layout = bgra_layout(width, height, PixelLimits::BACKDROP).ok()?;
+    if source_w == 0 || source_h == 0 {
+        return None;
+    }
+    let expected_source_len = (source_w as usize)
+        .checked_mul(source_h as usize)?
+        .checked_mul(4)?;
+    if source.len() < expected_source_len {
+        return None;
+    }
+    let max_x = i32::try_from(source_w).ok()?.saturating_sub(1).max(0);
+    let max_y = i32::try_from(source_h).ok()?.saturating_sub(1).max(0);
+    let mut cropped = vec![0u8; layout.byte_len];
+    let src_stride = source_w as usize * 4;
+    let dst_stride = layout.stride as usize;
+    for row in 0..height {
+        let sy = (origin.1 + row as i32).clamp(0, max_y) as usize;
+        let src_row = &source[sy * src_stride..(sy + 1) * src_stride];
+        let dst_row = &mut cropped[row as usize * dst_stride..(row as usize + 1) * dst_stride];
+        if origin.0 >= 0 && origin.0.saturating_add(width as i32) <= max_x + 1 {
+            let start = origin.0 as usize * 4;
+            dst_row.copy_from_slice(&src_row[start..start + dst_stride]);
+        } else {
+            for col in 0..width {
+                let sx = (origin.0 + col as i32).clamp(0, max_x) as usize * 4;
+                let dx = col as usize * 4;
+                dst_row[dx..dx + 4].copy_from_slice(&src_row[sx..sx + 4]);
+            }
+        }
+    }
+    RgbBuffer::from_bgra(width, height, &cropped).ok()
+}
+
+#[must_use]
+pub fn capture_wallpaper_now(origin: (i32, i32), width: u32, height: u32) -> Option<RgbBuffer> {
+    let _ = bgra_layout(width, height, PixelLimits::BACKDROP).ok()?;
+    let screen = primary_screen();
+    let screen_w = u32::try_from(screen.width.max(1)).ok()?;
+    let screen_h = u32::try_from(screen.height.max(1)).ok()?;
+    WALLPAPER_CACHE.with(|slot| {
+        let mut cache = slot.try_borrow_mut().ok()?;
+        let now = Instant::now();
+        let needs_check = cache.as_ref().is_none_or(|held| {
+            held.width != screen_w
+                || held.height != screen_h
+                || now.saturating_duration_since(held.last_checked) >= WALLPAPER_CHECK_TTL
+        });
+        if needs_check {
+            if let Some(held) = cache.as_mut()
+                && held.width == screen_w
+                && held.height == screen_h
+            {
+                held.last_checked = now;
+                let path = active_wallpaper_path()?;
+                let modified = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                if held.path != path || held.modified != modified {
+                    let bgra = decode_wallpaper_bgra(&path, screen_w, screen_h)?;
+                    *held = CachedWallpaper {
+                        path,
+                        modified,
+                        last_checked: now,
+                        width: screen_w,
+                        height: screen_h,
+                        bgra,
+                    };
+                }
+            } else {
+                let path = active_wallpaper_path()?;
+                let modified = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                let bgra = decode_wallpaper_bgra(&path, screen_w, screen_h)?;
+                *cache = Some(CachedWallpaper {
+                    path,
+                    modified,
+                    last_checked: now,
+                    width: screen_w,
+                    height: screen_h,
+                    bgra,
+                });
+            }
+        }
+        let held = cache.as_ref()?;
+        crop_bgra_region(&held.bgra, held.width, held.height, origin, width, height)
+    })
 }
 
 #[must_use]
@@ -296,7 +507,7 @@ mod tests {
 
     use super::{
         BackdropFrame, BackdropGrabber, BackdropRequest, BackdropWorker, capture_backdrop_now,
-        is_surface_visible, pixel_signature,
+        capture_wallpaper_now, crop_bgra_region, is_surface_visible, pixel_signature,
     };
 
     #[test]
@@ -471,6 +682,28 @@ mod tests {
     #[test]
     fn is_surface_visible_returns_false_for_null_handle() {
         assert!(!is_surface_visible(0));
+    }
+
+    #[test]
+    fn capture_wallpaper_now_rejects_empty_and_oversized_regions() {
+        assert!(capture_wallpaper_now((0, 0), 0, 10).is_none());
+        assert!(capture_wallpaper_now((0, 0), 10, 0).is_none());
+        assert!(capture_wallpaper_now((0, 0), 9_000, 10).is_none());
+    }
+
+    #[test]
+    fn crop_bgra_region_extracts_interior_and_clamps_out_of_bounds() {
+        let source = vec![
+            0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 255, 255, 255,
+        ];
+        let interior = crop_bgra_region(&source, 2, 2, (1, 0), 1, 1).expect("interior crop");
+        let p = interior.pixel(0, 0);
+        assert!(p[0] < 0.01 && p[1] > 0.99 && p[2] < 0.01);
+        let clamped = crop_bgra_region(&source, 2, 2, (-3, 5), 2, 1).expect("clamped crop");
+        for x in 0..2 {
+            let c = clamped.pixel(x, 0);
+            assert!(c[0] < 0.01 && c[1] < 0.01 && c[2] > 0.99);
+        }
     }
 
     mod native {

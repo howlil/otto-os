@@ -186,12 +186,33 @@ pub fn apply_cli_overrides() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn create_focus_shield_window() -> Option<isize> {
+    let instance: HINSTANCE =
+        unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+            .ok()?
+            .into();
+    let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }.ok()?;
+    create_overlay_window(
+        instance,
+        cursor,
+        windows::core::w!("OttoFocusShield"),
+        Some(messages::focus_shield_window_proc),
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+    )
+    .ok()
+    .map(|hwnd| hwnd.0 as isize)
+}
+
 pub fn stop() {
     let hwnds = HOST.with(|cell| {
         let Ok(mut guard) = cell.try_borrow_mut() else {
             return Vec::new();
         };
-        guard.as_mut().map(Host::shutdown).unwrap_or_default()
+        guard.as_mut().map_or_else(Vec::new, |host| {
+            let mut hwnds = host.shutdown();
+            hwnds.extend(crate::focus_shield::shutdown(&host.runtime));
+            hwnds
+        })
     });
     destroy_hwnds(&hwnds);
     let host = HOST.with(|cell| {

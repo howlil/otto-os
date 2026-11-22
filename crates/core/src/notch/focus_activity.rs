@@ -10,23 +10,38 @@ pub const MAX_BLOCKED_APPS: usize = 64;
 pub const MAX_BLOCKED_WEBSITES: usize = 64;
 pub const MAX_SEARCH_QUERY_CHARS: usize = 120;
 
-pub const PRESET_BLOCKED_APPS: [(&str, &str); 5] = [
+pub const PRESET_BLOCKED_APPS: [(&str, &str); 8] = [
     ("discord", "Discord"),
     ("steam", "Steam"),
+    ("epicgameslauncher", "Epic Games"),
+    ("riotclientservices", "Riot Client"),
+    ("robloxplayerbeta", "Roblox"),
     ("spotify", "Spotify"),
     ("whatsapp", "WhatsApp"),
     ("telegram", "Telegram"),
 ];
 
-pub const PRESET_BLOCKED_WEBSITES: [(&str, &str); 8] = [
+pub const PRESET_BLOCKED_WEBSITES: [(&str, &str); 20] = [
     ("youtube.com", "YouTube"),
     ("x.com", "X / Twitter"),
     ("reddit.com", "Reddit"),
     ("instagram.com", "Instagram"),
     ("tiktok.com", "TikTok"),
     ("facebook.com", "Facebook"),
+    ("threads.net", "Threads"),
+    ("snapchat.com", "Snapchat"),
+    ("pinterest.com", "Pinterest"),
+    ("tumblr.com", "Tumblr"),
+    ("bsky.app", "Bluesky"),
+    ("9gag.com", "9GAG"),
+    ("discord.com", "Discord (web)"),
     ("netflix.com", "Netflix"),
     ("twitch.tv", "Twitch"),
+    ("roblox.com", "Roblox"),
+    ("poki.com", "Poki"),
+    ("crazygames.com", "CrazyGames"),
+    ("miniclip.com", "Miniclip"),
+    ("y8.com", "Y8"),
 ];
 
 const BROWSER_EXECUTABLES: [&str; 12] = [

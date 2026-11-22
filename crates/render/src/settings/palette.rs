@@ -12,6 +12,10 @@ pub(super) const BADGE_WIDTH_POINTS: i32 = 84;
 pub(super) const DOT_POINTS: i32 = 8;
 pub(super) const KEYCAP_HEIGHT_POINTS: i32 = 22;
 pub(super) const KEYCAP_GAP_POINTS: i32 = 4;
+pub(super) const BAR_WIDTH_POINTS: i32 = 8;
+pub(super) const BAR_GAP_POINTS: i32 = 4;
+pub(super) const BAR_INSET_POINTS: i32 = 14;
+pub(super) const BAR_TRACK_ALPHA: f32 = 0.35;
 pub(super) const HERO_TILE_POINTS: i32 = 76;
 
 pub(super) const fn rgba(hex: u32, alpha: f32) -> D2D1_COLOR_F {
@@ -55,28 +59,33 @@ impl Palette {
         Self {
             glass: true,
             rim: if dark {
-                rgba(0xFF_FFFF, 0.16)
+                rgba(0xFF_FFFF, 0.22)
             } else {
-                rgba(0xFF_FFFF, 0.70)
+                rgba(0xFF_FFFF, 0.76)
             },
-            background: rgba(settings_background(dark), 0.30),
+            background: rgba(settings_background(dark), 0.24),
             sidebar: if dark {
-                rgba(0x00_0000, 0.22)
+                rgba(0x06_080E, 0.34)
             } else {
-                rgba(0xFF_FFFF, 0.30)
+                rgba(0xFF_FFFF, 0.34)
             },
             card: if dark {
-                rgba(0xFF_FFFF, 0.08)
+                rgba(0x0D_1018, 0.38)
             } else {
-                rgba(0xFF_FFFF, 0.60)
+                rgba(0xFF_FFFF, 0.56)
             },
             hairline: if dark {
-                rgba(0xFF_FFFF, 0.12)
+                rgba(0xFF_FFFF, 0.14)
             } else {
                 rgba(0x00_0000, 0.10)
             },
+            hover: if dark {
+                rgba(0xFF_FFFF, 0.10)
+            } else {
+                rgba(0x00_0000, 0.06)
+            },
             keycap: if dark {
-                rgba(0xFF_FFFF, 0.14)
+                rgba(0xFF_FFFF, 0.16)
             } else {
                 rgba(0xFF_FFFF, 0.80)
             },

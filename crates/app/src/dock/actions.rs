@@ -82,6 +82,9 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
         if let Some(feed) = dock.backdrop.as_mut() {
             feed.set_capture_visible(visible);
         }
+        if visible {
+            dock.renderer.clear_backdrop();
+        }
         dock.sync_backdrop(runtime, true);
         dock.present(runtime);
     });

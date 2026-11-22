@@ -1,6 +1,6 @@
 import { useId, useMemo, useState, type KeyboardEvent } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Code, Disc3, Folder, Globe, NotebookPen, Search, Settings2, Terminal } from "lucide-react";
+import { Code, Disc3, Folder, Globe, LayoutGrid, List, NotebookPen, Search, Settings2, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { T } from "../lib/T";
 
@@ -26,6 +26,7 @@ export function Spotlight() {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [launched, setLaunched] = useState<string | null>(null);
+  const [grid, setGrid] = useState(false);
 
   const results = useMemo(
     () => APPS.filter((app) => app.name.toLowerCase().includes(query.trim().toLowerCase())),
@@ -83,12 +84,37 @@ export function Spotlight() {
               </span>
             )}
           </div>
-          <span className="hidden items-center gap-1 sm:flex" aria-hidden="true">
-            <kbd className="rounded-md border border-stage-line px-1.5 py-0.5 text-[12px] text-stage-muted">Esc</kbd>
-          </span>
+          <div className="flex items-center gap-1 rounded-full bg-white/[0.06] p-0.5" role="group">
+            <button
+              type="button"
+              aria-pressed={!grid}
+              onClick={() => setGrid(false)}
+              className={`grid size-7 place-items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
+                grid ? "text-stage-muted hover:text-stage-ink" : "bg-white/15 text-stage-ink"
+              }`}
+            >
+              <List size={15} strokeWidth={1.9} aria-hidden="true" />
+              <span className="sr-only">
+                <T id="Tampilan daftar" en="List view" />
+              </span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={grid}
+              onClick={() => setGrid(true)}
+              className={`grid size-7 place-items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
+                grid ? "bg-white/15 text-stage-ink" : "text-stage-muted hover:text-stage-ink"
+              }`}
+            >
+              <LayoutGrid size={15} strokeWidth={1.9} aria-hidden="true" />
+              <span className="sr-only">
+                <T id="Tampilan kisi" en="Grid view" />
+              </span>
+            </button>
+          </div>
         </div>
 
-        <ul className="flex flex-col p-2">
+        <ul className={grid ? "grid grid-cols-4 gap-1 p-3" : "flex flex-col p-2"}>
           <AnimatePresence initial={false}>
             {results.map((app, index) => {
               const Icon = app.icon;
@@ -104,15 +130,17 @@ export function Spotlight() {
                   aria-current={selected ? "true" : undefined}
                   onPointerEnter={() => setActive(index)}
                   onClick={() => launch(app)}
-                  className={`flex cursor-default items-center gap-3 rounded-[14px] px-3 py-2.5 transition-colors ${
-                    selected ? "bg-white/10" : ""
-                  }`}
+                  className={
+                    grid
+                      ? `flex cursor-default flex-col items-center gap-2 rounded-[14px] px-1 py-3 transition-colors ${selected ? "bg-white/10" : ""}`
+                      : `flex cursor-default items-center gap-3 rounded-[14px] px-3 py-2.5 transition-colors ${selected ? "bg-white/10" : ""}`
+                  }
                 >
                   <span className="grid size-9 place-items-center squircle text-white" style={{ background: app.tint }} aria-hidden="true">
                     <Icon size={18} strokeWidth={1.8} />
                   </span>
-                  <span className="flex-1 text-[15px] text-stage-ink">{app.name}</span>
-                  {selected && (
+                  <span className={grid ? "w-full truncate text-center text-[12px] text-stage-ink" : "flex-1 text-[15px] text-stage-ink"}>{app.name}</span>
+                  {selected && !grid && (
                     <span className="text-[12px] text-stage-muted" aria-hidden="true">
                       <T id="Buka" en="Open" />
                     </span>
@@ -122,7 +150,7 @@ export function Spotlight() {
             })}
           </AnimatePresence>
           {results.length === 0 && (
-            <li className="px-3 py-6 text-center text-[14px] text-stage-muted">
+            <li className="col-span-full px-3 py-6 text-center text-[14px] text-stage-muted">
               <T id="Tidak ada aplikasi yang cocok" en="No matching apps" />
             </li>
           )}

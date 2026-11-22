@@ -11,7 +11,7 @@ const STEPS: { name: [string, string]; body: [string, string] }[] = [
   },
   {
     name: ["Notch", "Notch"],
-    body: ["Dynamic Island untuk timer fokus, musik, dan HUD sistem.", "Dynamic Island for focus timers, music and system HUD."],
+    body: ["Dynamic Island untuk Focus, musik, Pocket, Clip, Tasks, dan HUD.", "Dynamic Island for Focus, music, Pocket, Clip, Tasks and HUD."],
   },
   {
     name: ["Jendela", "Window"],

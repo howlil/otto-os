@@ -4,6 +4,7 @@ mod appearance;
 mod bar;
 mod control_center;
 mod dock;
+mod focus_shield;
 mod genie;
 mod host;
 mod menu;

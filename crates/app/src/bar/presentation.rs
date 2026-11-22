@@ -339,15 +339,27 @@ impl Bar {
         else {
             return;
         };
-        let can_prime_now =
-            !runtime.capture_visible.get() || !otto_platform::is_surface_visible(self.hwnd);
-        if can_prime_now
-            && let Some(renderer) = self.renderer.as_ref()
+        if let Some(renderer) = self.renderer.as_ref()
             && !renderer.has_bar_backdrop()
-            && let Some(pixels) =
-                otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
         {
-            renderer.set_bar_backdrop(pixels, region.origin());
+            let can_prime_screen =
+                !runtime.capture_visible.get() || !otto_platform::is_surface_visible(self.hwnd);
+            let pixels =
+                otto_platform::capture_wallpaper_now(region.origin(), region.width, region.height)
+                    .or_else(|| {
+                        can_prime_screen
+                            .then(|| {
+                                otto_platform::capture_backdrop_now(
+                                    region.origin(),
+                                    region.width,
+                                    region.height,
+                                )
+                            })
+                            .flatten()
+                    });
+            if let Some(pixels) = pixels {
+                renderer.set_bar_backdrop(pixels, region.origin());
+            }
         }
         let active = (self.panel_visible || self.hovered.is_some()) && feed.recently_changed();
         let interval = capture_interval_for(is_running_on_battery(), active);

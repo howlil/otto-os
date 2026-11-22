@@ -1,8 +1,11 @@
 use otto_core::{
-    ContentLayout, ModuleRow, OttoSettingsSnapshot, SettingsContent, SettingsHit, SettingsLayout,
-    SettingsPage, build_content, compute_content_layout, compute_settings_layout, resolve_modules,
+    ContentLayout, ModuleRow, OttoSettingsSnapshot, Rect, SettingsContent, SettingsHit,
+    SettingsLayout, SettingsPage, build_content, compute_content_layout, compute_settings_layout,
+    resolve_modules,
 };
-use otto_platform::{settings_client_size, settings_window_dpi};
+use otto_platform::{
+    capture_wallpaper_now, settings_client_screen_rect, settings_client_size, settings_window_dpi,
+};
 use otto_render::{SettingsPaintState, SettingsRenderer};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::ValidateRect;
@@ -32,6 +35,7 @@ pub(crate) struct SettingsWindow {
     pub(super) dpi: u32,
     pub(super) launch_at_login: bool,
     pub(super) glass: bool,
+    pub(super) backdrop_rect: Option<Rect>,
     pub(super) update_status: Option<String>,
     pub(super) tracking_leave: bool,
     pub(super) renderer: Option<SettingsRenderer>,
@@ -53,9 +57,34 @@ impl SettingsWindow {
             dpi,
             launch_at_login: false,
             glass: false,
+            backdrop_rect: None,
             update_status: None,
             tracking_leave: false,
             renderer: None,
+        }
+    }
+
+    pub(super) fn sync_backdrop(&mut self) {
+        if !self.glass {
+            self.backdrop_rect = None;
+            return;
+        }
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let Some(rect) = settings_client_screen_rect(self.hwnd) else {
+            return;
+        };
+        if renderer.has_backdrop() && self.backdrop_rect == Some(rect) {
+            return;
+        }
+        if let Some(pixels) = capture_wallpaper_now(
+            (rect.x, rect.y),
+            rect.width.max(1) as u32,
+            rect.height.max(1) as u32,
+        ) {
+            renderer.set_backdrop(pixels, (0, 0));
+            self.backdrop_rect = Some(rect);
         }
     }
 
@@ -130,7 +159,9 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
         if window.renderer.is_none() {
             let (width, height) = settings_client_size(hwnd);
             window.renderer = SettingsRenderer::new(hwnd, width, height, window.dpi).ok();
+            window.backdrop_rect = None;
         }
+        window.sync_backdrop();
         let drawn = window.renderer.as_mut().map(|renderer| {
             renderer.draw(&SettingsPaintState {
                 layout: &window.layout,

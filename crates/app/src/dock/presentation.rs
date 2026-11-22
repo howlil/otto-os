@@ -87,23 +87,24 @@ impl Dock {
         }
         if let Some(region) = region {
             let capture_visible = runtime.capture_visible.get();
-            let can_prime_now = !capture_visible || !otto_platform::is_surface_visible(self.hwnd);
-            if can_prime_now && !self.renderer.has_backdrop() {
-                let full_strip = (capture_visible && self.screen.width > 0).then(|| {
-                    otto_platform::capture_backdrop_now(
-                        (0, region.y),
-                        self.screen.width as u32,
-                        region.height,
-                    )
-                    .map(|pixels| (pixels, (-origin_x, region.y - origin_y)))
-                });
-                let primed = full_strip.flatten().or_else(|| {
-                    otto_platform::capture_backdrop_now(
-                        region.origin(),
-                        region.width,
-                        region.height,
-                    )
-                    .map(|pixels| (pixels, (region.x - origin_x, region.y - origin_y)))
+            if !self.renderer.has_backdrop() {
+                let full_w = self.screen.width.max(1) as u32;
+                let wallpaper_strip =
+                    otto_platform::capture_wallpaper_now((0, region.y), full_w, region.height)
+                        .map(|pixels| (pixels, (-origin_x, region.y - origin_y)));
+                let can_prime_screen =
+                    !capture_visible || !otto_platform::is_surface_visible(self.hwnd);
+                let primed = wallpaper_strip.or_else(|| {
+                    can_prime_screen
+                        .then(|| {
+                            otto_platform::capture_backdrop_now(
+                                region.origin(),
+                                region.width,
+                                region.height,
+                            )
+                            .map(|pixels| (pixels, (region.x - origin_x, region.y - origin_y)))
+                        })
+                        .flatten()
                 });
                 if let Some((pixels, local)) = primed {
                     self.renderer.set_backdrop(pixels, local);

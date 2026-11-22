@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_PROPERTIES, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, ID2D1Bitmap,
-    ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1DCRenderTarget, ID2D1Factory, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -235,7 +235,7 @@ pub(crate) fn draw_on<T>(
 }
 
 pub(crate) fn upload_bgra_bitmap(
-    target: &ID2D1DCRenderTarget,
+    target: &ID2D1RenderTarget,
     width: u32,
     height: u32,
     pixels: &[u8],

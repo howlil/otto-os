@@ -36,8 +36,8 @@ pub use appbar::{
     classify_shell_notification, restore_shell_from_recovery,
 };
 pub use backdrop::{
-    BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, exclude_from_capture,
-    include_in_capture, is_surface_visible, release_backdrop_capture_cache,
+    BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, capture_wallpaper_now,
+    exclude_from_capture, include_in_capture, is_surface_visible, release_backdrop_capture_cache,
 };
 pub use background_cleanup::set_background_cleanup;
 pub use bar::audio::{
@@ -126,7 +126,8 @@ pub use settings_window::{
     apply_settings_chrome, apply_settings_min_track, create_settings_window,
     destroy_settings_window, hide_settings_window, invalidate_settings_window,
     is_settings_window_foreground, is_settings_window_visible, present_settings_window,
-    settings_client_size, settings_glass_available, settings_window_dpi, suggested_dpi_rect,
+    settings_client_screen_rect, settings_client_size, settings_glass_available,
+    settings_window_dpi, suggested_dpi_rect,
 };
 pub use spotlight::collect_spotlight_apps;
 pub use startup::{read_launch_at_login, set_launch_at_login};
@@ -158,6 +159,10 @@ pub use window::ops::{
     is_window_minimized, is_window_uipi, minimize_window_native, minimize_window_native_quiet,
     restore_window_native, restore_window_native_quiet, restored_window_bounds,
     set_window_transitions_enabled, visible_window_targets, window_bounds,
+};
+pub use window::shield::{
+    activate_window, back_in_browser, destroy_window, foreground_window, hide_window, place,
+    show_over, window_below, window_dpi, window_frame,
 };
 pub use worker::join_within;
 

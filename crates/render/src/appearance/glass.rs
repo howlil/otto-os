@@ -6,7 +6,7 @@ use otto_core::{
 };
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, ID2D1Bitmap, ID2D1DCRenderTarget,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, ID2D1Bitmap, ID2D1RenderTarget,
 };
 use windows::core::Result;
 
@@ -286,7 +286,7 @@ impl GlassPainter {
 
     pub(crate) fn draw(
         &self,
-        target: &ID2D1DCRenderTarget,
+        target: &ID2D1RenderTarget,
         appearance: &Appearance,
         dpi: u32,
         shape: GlassShape,

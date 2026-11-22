@@ -529,6 +529,19 @@ pub(super) unsafe extern "system" fn genie_window_proc(
     })
 }
 
+pub(super) unsafe extern "system" fn focus_shield_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    safe_window_proc(hwnd, message, wparam, lparam, || {
+        dispatch_runtime_message(|runtime| {
+            crate::focus_shield::handle_message(runtime, message, wparam, lparam)
+        })
+    })
+}
+
 pub(super) unsafe extern "system" fn control_center_window_proc(
     hwnd: HWND,
     message: u32,

@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-22
+
+### Added
+
+- **Focus overlay with Back**: a blocked app or browser window is covered by a card with a **Back** button, and Esc does the same. Back sends a browser back one page, or activates the window below for an app. Nothing is closed.
+- **More Focus presets**: Epic Games Launcher, Riot Client, and Roblox join the blocked apps. Threads, Snapchat, Pinterest, Tumblr, Bluesky, 9GAG, Discord web, Roblox web, Poki, CrazyGames, Miniclip, and Y8 join the blocked websites.
+- **7-day screen time chart** on the Focus settings page. Each day shows total active time, with its Focus share in a darker tone.
+
+### Changed
+
+- Blocked apps and websites are covered with the Back overlay instead of being auto-minimized.
+- The Focus settings page no longer repeats the same stats. Today's totals sit in the header, usage lists show Blocked or Allowed status only, and blocks are edited only in the Blocked Apps and Blocked Websites sections.
+
 ## [1.1.0] - 2026-11-22
 
 ### Added
@@ -38,6 +51,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Single low-power GPU **Clear Liquid Glass** composition with opaque and Windows High Contrast accessibility fallbacks, UI Automation (`WM_GETOBJECT`) providers, full Bar/Dock/Control Center keyboard traversal, and opt-in **Background Cleanup** throttling.
 - Production Windows 11 22H2+ (build 22621+) packaging: `--quit` and `--restore-shell` lifecycle CLI, crash-safe shell recovery (`shell_recovery.json`), rolling zero-telemetry local logs, per-user Inno Setup installer (`otto-os-setup-1.0.0-x64.exe`), portable ZIP archive, SHA-256 checksums, and WinGet manifests.
 
-[Unreleased]: https://github.com/howlil/otto-os/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/howlil/otto-os/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/howlil/otto-os/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/howlil/otto-os/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/howlil/otto-os/releases/tag/v1.0.0

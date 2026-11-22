@@ -1,12 +1,17 @@
-use otto_core::{CardLayout, Rect, SettingsHit, SettingsRow, SettingsRowValue};
+use otto_core::{CardLayout, DayBar, Rect, SettingsHit, SettingsRow, SettingsRowValue};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 use super::palette::{
-    BADGE_WIDTH_POINTS, CARD_RADIUS_POINTS, DOT_POINTS, KEYCAP_GAP_POINTS, KEYCAP_HEIGHT_POINTS,
-    Palette, ROW_PAD_POINTS, ROW_TILE_POINTS, SWITCH_HEIGHT_POINTS, SWITCH_WIDTH_POINTS, WHITE,
-    rect_f, with_alpha,
+    BADGE_WIDTH_POINTS, BAR_GAP_POINTS, BAR_INSET_POINTS, BAR_TRACK_ALPHA, BAR_WIDTH_POINTS,
+    CARD_RADIUS_POINTS, DOT_POINTS, KEYCAP_GAP_POINTS, KEYCAP_HEIGHT_POINTS, Palette,
+    ROW_PAD_POINTS, ROW_TILE_POINTS, SWITCH_HEIGHT_POINTS, SWITCH_WIDTH_POINTS, WHITE, rect_f,
+    with_alpha,
 };
 use super::{SettingsPaintState, SettingsRenderer};
+
+fn bar_height(percent: u8, max_height: i32) -> i32 {
+    i32::from(percent) * max_height / 100
+}
 
 impl SettingsRenderer {
     pub(super) fn draw_card(
@@ -34,6 +39,17 @@ impl SettingsRenderer {
         let radius = self.px(CARD_RADIUS_POINTS) as f32;
         self.fill_round(card.card, radius, palette.card);
         if palette.glass {
+            let sheen_height = self.px(18).min(card.card.height / 2);
+            if sheen_height > 2 {
+                self.fill_round(
+                    Rect {
+                        height: sheen_height,
+                        ..card.card
+                    },
+                    radius,
+                    with_alpha(WHITE, if state.dark { 0.04 } else { 0.18 }),
+                );
+            }
             self.stroke_round_f(
                 rect_f(
                     card.card.x as f32 + 0.5,
@@ -231,7 +247,56 @@ impl SettingsRenderer {
                 right - width
             }
             SettingsRowValue::Keys(keys) => self.draw_keys(keys, rect, right, palette),
+            SettingsRowValue::Bars(days) => self.draw_bars(days, rect, right, palette, alpha),
         }
+    }
+
+    fn draw_bars(
+        &self,
+        days: &[DayBar],
+        rect: Rect,
+        right: i32,
+        palette: &Palette,
+        alpha: f32,
+    ) -> i32 {
+        let bar = self.px(BAR_WIDTH_POINTS);
+        let gap = self.px(BAR_GAP_POINTS);
+        let count = i32::try_from(days.len()).unwrap_or(0);
+        let left = right - (count * (bar + gap) - gap).max(0);
+        let max_height = (rect.height - self.px(BAR_INSET_POINTS)).max(bar);
+        let top = rect.y + (rect.height - max_height) / 2;
+        let baseline = top + max_height;
+        let radius = bar as f32 / 2.0;
+        for (index, day) in days.iter().enumerate() {
+            let x = left + i32::try_from(index).unwrap_or(0) * (bar + gap);
+            let active = bar_height(day.active_percent, max_height);
+            let focus = bar_height(day.focus_percent, max_height);
+            if active > 0 {
+                self.fill_round(
+                    Rect {
+                        x,
+                        y: baseline - active,
+                        width: bar,
+                        height: active,
+                    },
+                    radius,
+                    with_alpha(palette.secondary, alpha * BAR_TRACK_ALPHA),
+                );
+            }
+            if focus > 0 {
+                self.fill_round(
+                    Rect {
+                        x,
+                        y: baseline - focus,
+                        width: bar,
+                        height: focus,
+                    },
+                    radius,
+                    with_alpha(palette.accent, alpha),
+                );
+            }
+        }
+        left
     }
 
     fn draw_keys(&self, keys: &str, rect: Rect, right: i32, palette: &Palette) -> i32 {

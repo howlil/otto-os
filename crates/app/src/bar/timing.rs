@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::focus_shield::{self, ShieldTarget};
 use crate::host::RuntimeContext;
 use crate::win_msg::{
     DEADLINE_TIMER, HUD_ANIM_TIMER, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
@@ -11,9 +12,9 @@ use otto_core::{
 };
 use otto_platform::{
     LyricsOutcome, cursor_position, foreground_application, foreground_title_generation,
-    is_escape_down, minimize_window_native, motion_preference, notify_bluetooth_hardware_change,
-    read_system_status, register_idle_wake, request_browser_url_inspection, save_focus_activity,
-    suppress_native_osd, take_browser_url_inspection, take_keystroke_count, take_mouse_click_count,
+    is_escape_down, motion_preference, notify_bluetooth_hardware_change, read_system_status,
+    register_idle_wake, request_browser_url_inspection, save_focus_activity, suppress_native_osd,
+    take_browser_url_inspection, take_keystroke_count, take_mouse_click_count,
     unregister_idle_wake, user_idle_ms, watch_top_edge, window_change_generations,
 };
 use windows::Win32::Foundation::HWND;
@@ -416,6 +417,7 @@ impl Bar {
         (active_changed, title_changed, dirty)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn update_focus_activity(
         &mut self,
         runtime: &RuntimeContext,
@@ -460,9 +462,10 @@ impl Bar {
         let clicks = take_mouse_click_count();
         let keystrokes = take_keystroke_count();
         let focus_running = self.notch_enabled && self.notch.is_focus_blocking_active();
+        focus_shield::sync(runtime, focus_running);
 
         let mut blocked_hud: Option<NotchHudKind> = None;
-        let mut block_hwnd: Option<isize> = None;
+        let mut block_target: Option<ShieldTarget> = None;
         let mut stats_updated = false;
         if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut() {
             if active_changed
@@ -491,15 +494,30 @@ impl Bar {
                     hwnd != win.identity.hwnd
                         || now.saturating_duration_since(at) >= Duration::from_secs(2)
                 })
-                && let Some(enforcement) = {
+                && let Some((enforcement, page)) = {
                     let domain = fa.current_domain().map(str::to_owned);
-                    fa.evaluate_block(true, &win.executable, &win.app_name, domain.as_deref())
+                    let page = if is_browser {
+                        win.title.clone()
+                    } else {
+                        win.executable.clone()
+                    };
+                    if focus_shield::may_block(runtime, win.identity.hwnd, &page) {
+                        fa.evaluate_block(true, &win.executable, &win.app_name, domain.as_deref())
+                            .map(|enforcement| (enforcement, page))
+                    } else {
+                        None
+                    }
                 }
             {
                 self.last_blocked_window = Some((win.identity.hwnd, now));
                 let target = HudDeviceLabel::from_name(enforcement.target_label());
                 blocked_hud = Some(NotchHudKind::FocusBlocked { target });
-                block_hwnd = Some(win.identity.hwnd);
+                block_target = Some(ShieldTarget {
+                    window: win.identity.hwnd,
+                    label: enforcement.target_label().to_owned(),
+                    page,
+                    browser: is_browser,
+                });
             }
 
             if fa.is_dirty()
@@ -513,8 +531,8 @@ impl Bar {
             }
         }
 
-        if let Some(hwnd) = block_hwnd {
-            minimize_window_native(hwnd);
+        if let Some(target) = block_target {
+            focus_shield::block(runtime, target);
         }
         if stats_updated && self.periodic_due(MAINTAIN_EVERY_TICKS) {
             crate::settings_window::repaint_if_focus_page(runtime);

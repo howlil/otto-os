@@ -2,7 +2,8 @@ use std::mem::size_of;
 
 use otto_core::{SettingsHit, scale};
 use otto_platform::{
-    apply_settings_min_track, invalidate_settings_window, settings_client_size, suggested_dpi_rect,
+    apply_settings_min_track, invalidate_settings_window, settings_client_screen_rect,
+    settings_client_size, suggested_dpi_rect,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -89,6 +90,13 @@ pub(crate) fn handle_message(
             Some(LRESULT(0))
         }
         WM_MOVE | WM_ACTIVATE | WM_WINDOWPOSCHANGED => {
+            let moved = with_window(runtime, |window| {
+                window.glass && settings_client_screen_rect(hwnd) != window.backdrop_rect
+            })
+            .unwrap_or(false);
+            if moved {
+                invalidate_settings_window(hwnd);
+            }
             crate::window_controls::notify_own_window_change(runtime);
             None
         }

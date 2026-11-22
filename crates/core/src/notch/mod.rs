@@ -1,6 +1,7 @@
 pub(crate) mod call_activity;
 pub(crate) mod clipboard;
 pub(crate) mod focus_activity;
+pub(crate) mod focus_shield;
 pub(crate) mod hud;
 pub(crate) mod island;
 pub(crate) mod lyrics;

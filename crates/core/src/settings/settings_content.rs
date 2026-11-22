@@ -48,6 +48,12 @@ pub enum BadgeTone {
     Bad,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DayBar {
+    pub active_percent: u8,
+    pub focus_percent: u8,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsRowValue {
     Toggle(bool),
@@ -55,6 +61,7 @@ pub enum SettingsRowValue {
     Detail(&'static str),
     Text(String),
     Keys(&'static str),
+    Bars(Vec<DayBar>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -470,51 +477,65 @@ fn about_page(version: &str, update_status: Option<&str>) -> SettingsContent {
     }
 }
 
-fn focus_summary_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+fn focus_activity_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
     let today = &activity.today;
     let summary = activity.rolling_summary();
+    let average_active_ms =
+        summary.total_active_ms / u64::try_from(summary.days_counted.max(1)).unwrap_or(1);
     vec![
         SettingsRow::new(
-            "Screen Time Today",
+            "Screen Time, Last 7 Days",
             format!(
-                "7-day total: {} across {} day(s)",
-                format_screen_time(summary.total_active_ms),
-                summary.days_counted
+                "Avg {}/day · darker part is Focus",
+                format_screen_time(average_active_ms)
             ),
-            SettingsRowValue::Text(format_screen_time(today.total_active_ms)),
+            SettingsRowValue::Bars(activity_week_bars(activity)),
         ),
         SettingsRow::new(
-            "Focus Session Time",
+            "Clicks & Keys Today",
             format!(
-                "7-day Focus: {} · {} blocked today ({} in 7d)",
-                format_screen_time(summary.focus_session_ms),
-                today.blocked_attempts,
-                summary.blocked_attempts
-            ),
-            SettingsRowValue::Text(format_screen_time(today.focus_session_ms)),
-        ),
-        SettingsRow::new(
-            "Mouse Clicks",
-            format!(
-                "7-day total: {} clicks",
-                format_compact_count(summary.total_clicks)
-            ),
-            SettingsRowValue::Text(format_compact_count(today.total_clicks)),
-        ),
-        SettingsRow::new(
-            "Typing Activity",
-            format!(
-                "7-day total: {} keys (~{} words)",
+                "7-day: {} clicks · {} keys (~{}w)",
+                format_compact_count(summary.total_clicks),
                 format_compact_count(summary.total_keystrokes),
                 format_compact_count(estimated_words(summary.total_keystrokes))
             ),
             SettingsRowValue::Text(format!(
-                "{} keys (~{}w)",
-                format_compact_count(today.total_keystrokes),
-                format_compact_count(estimated_words(today.total_keystrokes))
+                "{} clicks · {} keys",
+                format_compact_count(today.total_clicks),
+                format_compact_count(today.total_keystrokes)
             )),
         ),
     ]
+}
+
+fn activity_week_bars(activity: &crate::FocusActivityState) -> Vec<DayBar> {
+    let days: Vec<(u64, u64)> = activity
+        .history
+        .iter()
+        .take(crate::notch::focus_activity::FOCUS_HISTORY_DAYS.saturating_sub(1))
+        .rev()
+        .map(|day| (day.total_active_ms, day.focus_session_ms))
+        .chain(std::iter::once((
+            activity.today.total_active_ms,
+            activity.today.focus_session_ms,
+        )))
+        .collect();
+    let peak = days
+        .iter()
+        .map(|(active, _)| *active)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    days.into_iter()
+        .map(|(active, focus)| DayBar {
+            active_percent: percent_of(active, peak),
+            focus_percent: percent_of(focus.min(active), peak),
+        })
+        .collect()
+}
+
+fn percent_of(value: u64, peak: u64) -> u8 {
+    u8::try_from(value.min(peak).saturating_mul(100) / peak).unwrap_or(100)
 }
 
 fn focus_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
@@ -528,7 +549,7 @@ fn focus_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
                 .blocklist
                 .is_app_blocked(&app.app_key, &app.display_name);
             let words = estimated_words(app.keystroke_count);
-            let mut row = SettingsRow::new(
+            SettingsRow::new(
                 app.display_name,
                 format!(
                     "{} open · {}x opened · {} clicks · {} keys (~{}w)",
@@ -538,15 +559,8 @@ fn focus_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
                     format_compact_count(app.keystroke_count),
                     format_compact_count(words)
                 ),
-                SettingsRowValue::Toggle(blocked),
+                SettingsRowValue::Text(String::from(if blocked { "Blocked" } else { "Allowed" })),
             )
-            .with_action(SettingsAction::ToggleBlockedApp(app.app_key));
-            row.badge = Some(if blocked {
-                ("Blocked", BadgeTone::Warning)
-            } else {
-                ("Allowed", BadgeTone::Good)
-            });
-            row
         })
         .collect();
     if rows.is_empty() {
@@ -567,22 +581,15 @@ fn focus_sites_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
         .take(10)
         .map(|site| {
             let blocked = activity.blocklist.is_website_blocked(&site.domain);
-            let mut row = SettingsRow::new(
-                site.domain.clone(),
+            SettingsRow::new(
+                site.domain,
                 format!(
                     "{} active · {} visits",
                     format_screen_time(site.active_ms),
                     site.visit_count
                 ),
-                SettingsRowValue::Toggle(blocked),
+                SettingsRowValue::Text(String::from(if blocked { "Blocked" } else { "Allowed" })),
             )
-            .with_action(SettingsAction::ToggleBlockedWebsite(site.domain));
-            row.badge = Some(if blocked {
-                ("Blocked", BadgeTone::Warning)
-            } else {
-                ("Allowed", BadgeTone::Good)
-            });
-            row
         })
         .collect();
     if rows.is_empty() {
@@ -619,21 +626,15 @@ fn focus_searches_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow>
     rows
 }
 
-fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+fn focus_blocked_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
     let blocklist = &activity.blocklist;
     let mut rows = vec![
         SettingsRow::new(
             "+ Block App from File...",
-            "Choose an .exe application to auto-minimize during Focus",
+            "Choose an .exe to cover with a Back overlay during Focus",
             SettingsRowValue::Detail(""),
         )
         .with_action(SettingsAction::PickBlockedAppFile),
-        SettingsRow::new(
-            "+ Block Website from Clipboard",
-            "Paste a copied URL or domain into the Focus blocklist",
-            SettingsRowValue::Detail(""),
-        )
-        .with_action(SettingsAction::AddBlockedWebsiteFromClipboard),
     ];
     for custom_app in &blocklist.blocked_apps {
         if PRESET_BLOCKED_APPS
@@ -645,7 +646,7 @@ fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow
         rows.push(
             SettingsRow::new(
                 format!("App: {custom_app}"),
-                "Custom blocked application during Focus",
+                "Custom app covered with a Back overlay during Focus",
                 SettingsRowValue::Toggle(true),
             )
             .with_action(SettingsAction::ToggleBlockedApp(custom_app.clone())),
@@ -657,12 +658,25 @@ fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow
         rows.push(
             SettingsRow::new(
                 format!("App: {preset_label}"),
-                "Auto-minimize this app while Focus Mode runs",
+                "Covered with a Back overlay while Focus runs",
                 SettingsRowValue::Toggle(blocked),
             )
             .with_action(SettingsAction::ToggleBlockedApp(key)),
         );
     }
+    rows
+}
+
+fn focus_blocked_sites_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
+    let blocklist = &activity.blocklist;
+    let mut rows = vec![
+        SettingsRow::new(
+            "+ Block Website from Clipboard",
+            "Paste a copied URL or domain into the Focus blocklist",
+            SettingsRowValue::Detail(""),
+        )
+        .with_action(SettingsAction::AddBlockedWebsiteFromClipboard),
+    ];
     for custom_site in &blocklist.blocked_websites {
         if PRESET_BLOCKED_WEBSITES
             .iter()
@@ -673,7 +687,7 @@ fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow
         rows.push(
             SettingsRow::new(
                 format!("Site: {custom_site}"),
-                "Custom blocked website during Focus",
+                "Custom website covered with a Back overlay during Focus",
                 SettingsRowValue::Toggle(true),
             )
             .with_action(SettingsAction::ToggleBlockedWebsite(custom_site.clone())),
@@ -684,7 +698,7 @@ fn focus_blocklist_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow
         rows.push(
             SettingsRow::new(
                 format!("{preset_label} ({preset_domain})"),
-                "Block and minimize browser tabs on this domain during Focus",
+                "Tabs on this domain get a Back overlay during Focus",
                 SettingsRowValue::Toggle(blocked),
             )
             .with_action(SettingsAction::ToggleBlockedWebsite(String::from(
@@ -718,11 +732,10 @@ fn focus_page(snapshot: &OttoSettingsSnapshot, modules: &[ModuleRow]) -> Setting
         hero: Some(SettingsHero {
             title: String::from("Focus & Screen Time"),
             subtitle: format!(
-                "{} active today · {} in Focus · {} clicks · {} keys",
+                "{} today · {} in Focus · {} blocked",
                 format_screen_time(today.total_active_ms),
                 format_screen_time(today.focus_session_ms),
-                format_compact_count(today.total_clicks),
-                format_compact_count(today.total_keystrokes),
+                today.blocked_attempts,
             ),
         }),
         sections: vec![
@@ -748,19 +761,21 @@ fn focus_page(snapshot: &OttoSettingsSnapshot, modules: &[ModuleRow]) -> Setting
                 ],
             },
             SettingsSection {
-                title: "Today & 7-Day Activity",
+                title: "Activity",
                 footer: Some(
                     "Clicks and keystrokes count totals only. Typed characters and passwords are never recorded.",
                 ),
-                rows: focus_summary_rows(activity),
+                rows: focus_activity_rows(activity),
             },
             SettingsSection {
-                title: "Most Used & Most Opened Apps",
-                footer: Some("Toggle any app switch to block and auto-minimize it during Focus."),
+                title: "Most Used Apps Today",
+                footer: Some(
+                    "Status shows whether an app is blocked. Change blocks in the Focus Blocklist below.",
+                ),
                 rows: focus_apps_rows(activity),
             },
             SettingsSection {
-                title: "Top Websites",
+                title: "Top Websites Today",
                 footer: Some(
                     "Detected natively from browser tabs and address bars with zero extensions.",
                 ),
@@ -772,11 +787,16 @@ fn focus_page(snapshot: &OttoSettingsSnapshot, modules: &[ModuleRow]) -> Setting
                 rows: focus_searches_rows(activity),
             },
             SettingsSection {
-                title: "Focus Blocklist & Distraction Presets",
+                title: "Blocked Apps",
+                footer: Some("Covered apps get a Back overlay during Focus. Nothing is closed."),
+                rows: focus_blocked_apps_rows(activity),
+            },
+            SettingsSection {
+                title: "Blocked Websites",
                 footer: Some(
-                    "Blocked apps and websites minimize automatically without closing unsaved work.",
+                    "Covered tabs get a Back overlay. Back returns you to the previous page.",
                 ),
-                rows: focus_blocklist_rows(activity),
+                rows: focus_blocked_sites_rows(activity),
             },
             SettingsSection {
                 title: "Activity Data",
@@ -946,7 +966,9 @@ pub fn compute_content_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsAction, SettingsRowValue, build_content, compute_content_layout};
+    use super::{
+        SettingsAction, SettingsRowValue, build_content, compute_content_layout, percent_of,
+    };
     use crate::dock::layout::DOCK_ICON_LARGE;
     use crate::layout::Rect;
     use crate::settings::model::{
@@ -1227,8 +1249,7 @@ mod tests {
         let page = content(&snap, SettingsPage::Focus);
         let hero = page.hero.as_ref().expect("focus hero");
         assert_eq!(hero.title, "Focus & Screen Time");
-        assert!(hero.subtitle.contains("16 clicks"));
-        assert!(hero.subtitle.contains("85 keys"));
+        assert!(hero.subtitle.contains("blocked"));
         let labels: Vec<&str> = page
             .sections
             .iter()
@@ -1238,5 +1259,27 @@ mod tests {
         assert!(labels.contains(&"google.com"));
         assert!(labels.contains(&"otto focus"));
         assert!(labels.contains(&"Reset Activity & Screen Time Stats"));
+        let row = |label: &str| {
+            page.sections
+                .iter()
+                .flat_map(|section| section.rows.iter())
+                .find(|row| row.label == label)
+                .unwrap_or_else(|| panic!("missing row {label}"))
+        };
+        assert_eq!(
+            row("Clicks & Keys Today").value,
+            SettingsRowValue::Text(String::from("16 clicks · 85 keys"))
+        );
+        assert!(matches!(
+            &row("Screen Time, Last 7 Days").value,
+            SettingsRowValue::Bars(days) if days.len() == 1
+        ));
+    }
+
+    #[test]
+    fn day_bars_scale_against_the_busiest_day() {
+        assert_eq!(percent_of(0, 200), 0);
+        assert_eq!(percent_of(50, 200), 25);
+        assert_eq!(percent_of(400, 200), 100);
     }
 }

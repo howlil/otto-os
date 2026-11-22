@@ -1,77 +1,105 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
-import { motion } from "motion/react";
-import { BatteryMedium, Bluetooth, Disc3, Moon, Pause, Play, Sun, Volume2, Wifi } from "lucide-react";
-import { T } from "../lib/T";
+import { useState, type CSSProperties } from "react";
+import { BatteryMedium, Bluetooth, Moon, Pause, Play, Settings, SkipBack, SkipForward, Sun, Volume2, VolumeX, Wifi } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
-const SPRING = { type: "spring" as const, stiffness: 500, damping: 34, mass: 0.7 };
+const NATIVE_ACCENT = "#007aff";
+const CARD = "bg-white/80 ring-1 ring-inset ring-black/[0.05]";
+const FOCUS_RING = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
-function Switch({
-  checked,
-  onChange,
-  label,
+function ConnectionRow({
+  icon: Icon,
+  title,
+  subtitle,
+  on,
+  onToggle,
 }: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  label: [string, string];
+  icon: LucideIcon;
+  title: string;
+  subtitle: string;
+  on: boolean;
+  onToggle: () => void;
 }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-[2px] transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
-        checked ? "bg-accent" : "bg-[#c9ccd3]"
-      }`}
+    <div className="flex flex-1 items-center gap-2.5 px-3">
+      <button
+        type="button"
+        aria-label={title}
+        aria-pressed={on}
+        onClick={onToggle}
+        className={`grid size-8 shrink-0 place-items-center rounded-full transition-colors ${FOCUS_RING} ${on ? "text-white" : "bg-black/[0.08] text-ink-soft"}`}
+        style={on ? { background: NATIVE_ACCENT } : undefined}
+      >
+        <Icon size={15} strokeWidth={2} aria-hidden="true" />
+      </button>
+      <div className="min-w-0">
+        <p className="text-[13px] font-semibold text-ink">{title}</p>
+        <p className="text-[12px] text-ink-soft">{subtitle}</p>
+      </div>
+    </div>
+  );
+}
+
+function Tile({
+  icon: Icon,
+  title,
+  status,
+  on,
+  onToggle,
+  gear,
+}: {
+  icon: LucideIcon;
+  title: string;
+  status: string;
+  on: boolean;
+  onToggle: () => void;
+  gear: string;
+}) {
+  return (
+    <div
+      className={`relative flex flex-col justify-center gap-1 rounded-[14px] p-2.5 ${on ? "text-white" : `${CARD} text-ink`}`}
+      style={on ? { background: NATIVE_ACCENT } : undefined}
     >
-      <motion.span
-        className="block size-[18px] rounded-full bg-white shadow-[0_1px_2px_rgb(0_0_0/0.25)]"
-        animate={{ x: checked ? 16 : 0 }}
-        transition={SPRING}
-      />
-      <span className="sr-only">
-        <T id={label[0]} en={label[1]} />
-      </span>
-    </button>
+      <button type="button" aria-pressed={on} onClick={onToggle} className={`flex flex-col items-start gap-1 rounded-[8px] text-left ${FOCUS_RING}`}>
+        <span className="flex items-center gap-2">
+          <Icon size={15} strokeWidth={2} aria-hidden="true" />
+          <span className="text-[13px] font-semibold">{title}</span>
+        </span>
+        <span className={`pl-[23px] text-[12px] ${on ? "text-white/85" : "text-ink-soft"}`}>{status}</span>
+      </button>
+      <button
+        type="button"
+        aria-label={gear}
+        className={`absolute top-1.5 right-1.5 grid size-5 place-items-center rounded-full transition-colors ${FOCUS_RING} ${on ? "text-white/85 hover:bg-white/15" : "text-ink-soft hover:bg-black/5"}`}
+      >
+        <Settings size={12} strokeWidth={2} aria-hidden="true" />
+      </button>
+    </div>
   );
 }
 
 function Slider({
+  label,
   value,
   onChange,
-  icon,
-  label,
+  disabled = false,
 }: {
+  label: string;
   value: number;
   onChange: (value: number) => void;
-  icon: ReactNode;
-  label: [string, string];
+  disabled?: boolean;
 }) {
-  const style = {
-    "--range-value": `${value}%`,
-    "--range-fill": "#075bef",
-  } as CSSProperties;
   return (
-    <label className="flex items-center gap-3 rounded-[14px] bg-[#f3f4f6] px-3 py-3 text-ink">
-      <span className="shrink-0 text-ink-soft" aria-hidden="true">
-        {icon}
-      </span>
-      <input
-        type="range"
-        min={0}
-        max={100}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        style={style}
-        className="range-quiet w-full"
-      />
-      <span className="sr-only">
-        <T id={label[0]} en={label[1]} />
-      </span>
-      <span className="w-9 text-right text-[13px] font-medium tabular-nums text-ink-soft" aria-hidden="true">
-        {value}
-      </span>
-    </label>
+    <input
+      type="range"
+      aria-label={label}
+      min={0}
+      max={100}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(Number(event.target.value))}
+      style={{ "--range-value": `${value}%`, "--range-fill": NATIVE_ACCENT } as CSSProperties}
+      className="range-quiet w-full disabled:opacity-40"
+    />
   );
 }
 
@@ -79,87 +107,103 @@ export function ControlCenter() {
   const [wifi, setWifi] = useState(true);
   const [bluetooth, setBluetooth] = useState(true);
   const [focus, setFocus] = useState(false);
-  const [saver, setSaver] = useState(false);
   const [display, setDisplay] = useState(72);
   const [sound, setSound] = useState(58);
+  const [muted, setMuted] = useState(false);
   const [playing, setPlaying] = useState(true);
 
   return (
-    <div className="mx-auto w-full max-w-[380px] rounded-[26px] bg-paper p-3 shadow-[0_30px_60px_-30px_rgb(20_40_80/0.35)] ring-1 ring-black/[0.06]">
+    <div className="w-full max-w-[376px] rounded-[26px] bg-white/45 p-3 shadow-[0_24px_48px_-24px_rgb(20_40_80/0.45)] ring-1 ring-inset ring-white/70 backdrop-blur-2xl">
       <div className="grid grid-cols-2 gap-2">
-        <div className="flex flex-col justify-between gap-4 rounded-[14px] bg-[#f3f4f6] p-3">
-          <div className="flex items-center justify-between">
-            <span className="grid size-8 place-items-center rounded-full bg-accent text-white" aria-hidden="true">
-              <Wifi size={16} strokeWidth={2} />
+        <div className={`flex h-36 flex-col overflow-hidden rounded-[14px] ${CARD}`}>
+          <ConnectionRow
+            icon={Wifi}
+            title="Wi-Fi"
+            subtitle={wifi ? "On" : "Off"}
+            on={wifi}
+            onToggle={() => setWifi((value) => !value)}
+          />
+          <span aria-hidden="true" className="mx-3 h-px bg-black/[0.08]" />
+          <ConnectionRow
+            icon={Bluetooth}
+            title="Bluetooth"
+            subtitle={bluetooth ? "On" : "Off"}
+            on={bluetooth}
+            onToggle={() => setBluetooth((value) => !value)}
+          />
+        </div>
+        <div className="grid h-36 grid-rows-2 gap-2">
+          <Tile
+            icon={Moon}
+            title="Focus"
+            status={focus ? "Focus On" : "Off"}
+            on={focus}
+            onToggle={() => setFocus((value) => !value)}
+            gear="Focus settings"
+          />
+          <div className={`flex flex-col justify-center gap-1 rounded-[14px] p-2.5 text-ink ${CARD}`}>
+            <span className="flex items-center gap-2">
+              <BatteryMedium size={15} strokeWidth={2} aria-hidden="true" />
+              <span className="text-[13px] font-semibold">Battery</span>
             </span>
-            <Switch checked={wifi} onChange={setWifi} label={["Wi-Fi", "Wi-Fi"]} />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-[13px] font-semibold text-ink">Wi-Fi</span>
-            <span className="text-[12px] text-ink-soft">
-              {wifi ? <T id="Terhubung" en="Connected" /> : <T id="Mati" en="Off" />}
-            </span>
+            <span className="pl-[23px] text-[12px] text-ink-soft">Standard</span>
           </div>
         </div>
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between rounded-[14px] bg-[#f3f4f6] px-3 py-2.5">
-            <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
-              <Bluetooth size={15} strokeWidth={2} aria-hidden="true" />
-              Bluetooth
-            </span>
-            <Switch checked={bluetooth} onChange={setBluetooth} label={["Bluetooth", "Bluetooth"]} />
-          </div>
-          <div className="flex items-center justify-between rounded-[14px] bg-[#f3f4f6] px-3 py-2.5">
-            <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
-              <Moon size={15} strokeWidth={2} aria-hidden="true" />
-              <T id="Fokus" en="Focus" />
-            </span>
-            <Switch checked={focus} onChange={setFocus} label={["Fokus", "Focus"]} />
-          </div>
+      </div>
+
+      <div className={`mt-2 flex h-16 flex-col justify-center gap-1 rounded-[14px] px-3 ${CARD}`}>
+        <p className="text-[12px] font-semibold text-ink-soft">Display</p>
+        <div className="flex items-center gap-2.5">
+          <Sun size={15} strokeWidth={2} className="shrink-0 text-ink-soft" aria-hidden="true" />
+          <Slider label="Brightness" value={display} onChange={setDisplay} />
         </div>
       </div>
 
-      <div className="mt-2 flex items-center justify-between rounded-[14px] bg-[#f3f4f6] px-3 py-2.5">
-        <span className="flex items-center gap-2 text-[13px] font-medium text-ink">
-          <BatteryMedium size={15} strokeWidth={2} aria-hidden="true" />
-          <T id="Baterai" en="Battery" />
-        </span>
-        <button
-          type="button"
-          onClick={() => setSaver((value) => !value)}
-          className="rounded-full bg-paper px-3 py-1 text-[12px] font-medium text-ink ring-1 ring-black/10 transition-colors hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          {saver ? <T id="Hemat" en="Saver" /> : <T id="Seimbang" en="Balanced" />}
-        </button>
+      <div className={`mt-2 flex h-16 flex-col justify-center gap-1 rounded-[14px] px-3 ${CARD}`}>
+        <p className="text-[12px] font-semibold text-ink-soft">Sound</p>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            aria-label={muted ? "Unmute" : "Mute"}
+            aria-pressed={muted}
+            onClick={() => setMuted((value) => !value)}
+            className={`grid size-6 shrink-0 place-items-center rounded-full text-ink-soft transition-colors hover:bg-black/5 ${FOCUS_RING}`}
+          >
+            {muted ? <VolumeX size={15} strokeWidth={2} aria-hidden="true" /> : <Volume2 size={15} strokeWidth={2} aria-hidden="true" />}
+          </button>
+          <Slider label="Output volume" value={sound} onChange={setSound} disabled={muted} />
+        </div>
       </div>
 
-      <div className="mt-2 flex flex-col gap-2">
-        <Slider value={display} onChange={setDisplay} icon={<Sun size={16} strokeWidth={2} />} label={["Kecerahan", "Brightness"]} />
-        <Slider value={sound} onChange={setSound} icon={<Volume2 size={16} strokeWidth={2} />} label={["Suara", "Sound"]} />
-      </div>
-
-      <div className="mt-2 flex items-center gap-3 rounded-[14px] bg-[#f3f4f6] px-3 py-2.5">
-        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-music-activity text-white" aria-hidden="true">
-          <Disc3 size={18} strokeWidth={1.8} />
-        </span>
+      <div className={`mt-2 flex h-[74px] items-center gap-3 rounded-[14px] py-3 pr-2.5 pl-3 ${CARD}`}>
         <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-semibold text-ink">
-            <T id="Demo lagu" en="Demo track" />
-          </p>
-          <p className="text-[12px] text-ink-soft">
-            <T id="Sumber demo" en="Demo source" />
-          </p>
+          <p className="truncate text-[13px] font-semibold text-ink">Lampu Kota</p>
+          <p className="truncate text-[12px] text-ink-soft">Demo data</p>
         </div>
-        <button
-          type="button"
-          onClick={() => setPlaying((value) => !value)}
-          className="grid size-9 place-items-center rounded-full bg-accent text-white transition-colors hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          {playing ? <Pause size={15} fill="currentColor" aria-hidden="true" /> : <Play size={15} fill="currentColor" aria-hidden="true" />}
-          <span className="sr-only">
-            {playing ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}
-          </span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            aria-label="Previous"
+            className={`grid size-7 place-items-center rounded-full text-ink transition-colors hover:bg-black/5 ${FOCUS_RING}`}
+          >
+            <SkipBack size={14} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label={playing ? "Pause" : "Play"}
+            onClick={() => setPlaying((value) => !value)}
+            className={`grid size-7 place-items-center rounded-full text-ink transition-colors hover:bg-black/5 ${FOCUS_RING}`}
+          >
+            {playing ? <Pause size={14} fill="currentColor" aria-hidden="true" /> : <Play size={14} fill="currentColor" aria-hidden="true" />}
+          </button>
+          <button
+            type="button"
+            aria-label="Next"
+            className={`grid size-7 place-items-center rounded-full text-ink transition-colors hover:bg-black/5 ${FOCUS_RING}`}
+          >
+            <SkipForward size={14} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </div>
   );

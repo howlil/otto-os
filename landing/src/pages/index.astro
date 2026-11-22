@@ -6,10 +6,11 @@ import BetaDownload from "../components/BetaDownload.astro";
 import { T } from "../components/lib/T";
 import Hero from "../sections/Hero.astro";
 import { PartsStory } from "../components/islands/PartsStory";
+import { BarToggle } from "../components/islands/BarToggle";
 import { IslandStage } from "../components/islands/IslandStage";
 import { DockGenie } from "../components/islands/DockGenie";
-import { ControlCenter } from "../components/islands/ControlCenter";
-import { PocketClip } from "../components/islands/PocketClip";
+import { FocusShowcase } from "../components/islands/FocusShowcase";
+import { SettingsScene } from "../components/islands/SettingsScene";
 import { Spotlight } from "../components/islands/Spotlight";
 
 const headingClass =
@@ -35,35 +36,52 @@ const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
       <PartsStory client:visible />
     </section>
 
-    <section class="on-stage bg-stage text-stage-ink">
+    <section id="bar" class="scroll-mt-20 border-t border-line">
       <div class={`${sectionClass} py-24 sm:py-32`}>
         <div class="max-w-[640px]">
           <h2 class={headingClass}>
-            <T id="Dua aktivitas, satu notch." en="Two activities, one notch." />
+            <T id="Bar atas bisa berdiri sendiri." en="The top bar can stand alone." />
           </h2>
-          <p class={`mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
+          <p class={`mt-5 text-ink-soft ${leadClass}`}>
             <T
-              id="Timer fokus dan musik ringkas di atas layar. Klik untuk membuka; lingkaran samping menukar aktivitas."
-              en="Focus timers and music sit compact at the top of the screen. Click to open; the side circle swaps activities."
+              id="Matikan bar atas. Notch, Control Center, dan Spotlight tetap aktif."
+              en="Turn the top bar off. The notch, Control Center and Spotlight stay active."
             />
           </p>
         </div>
         <div class="mt-14 sm:mt-16">
-          <IslandStage client:visible />
+          <BarToggle client:visible />
         </div>
       </div>
     </section>
 
-    <section class="border-b border-line">
+    <section id="notch" class="scroll-mt-20 on-stage bg-stage text-stage-ink">
+      <div class={`${sectionClass} pt-24 sm:pt-32`}>
+        <div class="max-w-[640px]">
+          <h2 class={headingClass}>
+            <T id="Satu notch, semua modulnya." en="One notch, every module." />
+          </h2>
+          <p class={`mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
+            <T
+              id="Gulir untuk melihat setiap modul. Klik namanya untuk langsung melompat."
+              en="Scroll to see each module. Click a name to jump straight there."
+            />
+          </p>
+        </div>
+      </div>
+      <IslandStage client:visible />
+    </section>
+
+    <section class="border-t border-line">
       <div class={`${sectionClass} py-24 sm:py-32`}>
         <div class="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
           <h2 class={`max-w-[560px] ${headingClass}`}>
-            <T id="Jendela pulang ke Dock." en="Windows return to the Dock." />
+            <T id="Minimize masuk ke Dock." en="Minimize into the Dock." />
           </h2>
           <p class={`max-w-[420px] text-ink-soft ${leadClass}`}>
             <T
-              id="Efek Genie menarik jendela tepat ke ikonnya, lalu mengembalikannya lewat jalur yang sama."
-              en="The Genie effect pulls a window straight into its icon, then returns it along the same path."
+              id="Animasi Genie untuk minimize dan restore, dengan tombol caption Windows 11."
+              en="Genie animations for minimize and restore, with Windows 11 caption buttons."
             />
           </p>
         </div>
@@ -73,38 +91,40 @@ const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
       </div>
     </section>
 
-    <section class="bg-paper">
-      <div class={`${sectionClass} grid items-center gap-14 py-24 sm:py-32 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-16`}>
-        <div class="max-w-[480px]">
+    <section id="fokus" class="scroll-mt-20 on-stage bg-stage text-stage-ink">
+      <div class={`${sectionClass} pt-24 sm:pt-32`}>
+        <div class="max-w-[640px]">
           <h2 class={headingClass}>
-            <T id="Kontrol cepat dalam satu panel." en="Quick controls in one panel." />
+            <T id="Focus: timer, blokir, dan waktu layar." en="Focus: timer, blocking and screen time." />
           </h2>
-          <p class={`mt-5 text-ink-soft ${leadClass}`}>
+          <p class={`mt-5 max-w-[560px] text-stage-muted ${leadClass}`}>
             <T
-              id="Wi-Fi, Bluetooth, Focus, kecerahan, suara, dan musik. Coba setiap kontrolnya di sini."
-              en="Wi-Fi, Bluetooth, Focus, brightness, sound and music. Try every control here."
+              id="Pomodoro ada di notch. Blocklist dan aktivitas Today serta 7 hari ada di halaman Focus di Otto Settings, disimpan lokal."
+              en="Pomodoro lives in the notch. The blocklist and Today and 7-day activity sit on the Focus page in Otto Settings, stored locally."
             />
           </p>
         </div>
-        <ControlCenter client:visible />
+        <div class="mt-14 pb-24 sm:mt-16 sm:pb-32">
+          <FocusShowcase client:visible />
+        </div>
       </div>
     </section>
 
-    <section class="border-t border-line">
+    <section id="kontrol" class="scroll-mt-20 border-t border-line bg-paper">
       <div class={`${sectionClass} py-24 sm:py-32`}>
         <div class="max-w-[640px]">
           <h2 class={headingClass}>
-            <T id="Simpan yang sedang dipakai." en="Keep what you are working with." />
+            <T id="Kontrol cepat, dan Otto Settings." en="Quick controls, and Otto Settings." />
           </h2>
           <p class={`mt-5 text-ink-soft ${leadClass}`}>
             <T
-              id="Pocket menampung berkas dan tautan yang diseret ke notch. Clip menyimpan 12 salinan terakhir, hanya di RAM."
-              en="Pocket holds files and links dragged to the notch. Clip keeps the last 12 copies, in RAM only."
+              id="Ctrl+Alt+C membuka Control Center. Ctrl+Alt+, membuka Otto Settings, jendela terpisah dengan sidebar dan 13 modul."
+              en="Ctrl+Alt+C opens Control Center. Ctrl+Alt+, opens Otto Settings, a separate window with a sidebar and 13 modules."
             />
           </p>
         </div>
         <div class="mt-14 sm:mt-16">
-          <PocketClip client:visible />
+          <SettingsScene client:visible />
         </div>
       </div>
     </section>
@@ -112,12 +132,12 @@ const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
     <section class="on-stage bg-stage text-stage-ink">
       <div class={`${sectionClass} py-24 text-center sm:py-32`}>
         <h2 class={`mx-auto max-w-[720px] ${headingClass}`}>
-          <T id="Cari, pilih, buka." en="Search, select, open." />
+          <T id="Cari aplikasi di Spotlight." en="Find apps in Spotlight." />
         </h2>
         <p class={`mx-auto mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
           <T
-            id="Spotlight mencari aplikasi saat Anda mengetik. Ctrl+Alt+Space membukanya dari mana saja."
-            en="Spotlight finds apps as you type. Ctrl+Alt+Space opens it from anywhere."
+            id="Pencarian aplikasi lokal. Ctrl+Alt+Space membukanya. Hanya mencari aplikasi yang terpasang, bukan file atau web."
+            en="Local app search. Ctrl+Alt+Space opens it. Search covers installed apps only, not files or the web."
           />
         </p>
         <div class="mt-14 sm:mt-16">
@@ -133,8 +153,8 @@ const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
         </h2>
         <p class={`mt-6 max-w-[560px] text-ink-soft ${leadClass}`}>
           <T
-            id="Installer per pengguna. Tanpa formulir, tanpa email, tanpa telemetri."
-            en="Per-user installer. No forms, no email, no telemetry."
+            id="Installer per pengguna. Tanpa akun, tanpa telemetri."
+            en="Per-user installer. No account, no telemetry."
           />
         </p>
         <div class="mt-10">

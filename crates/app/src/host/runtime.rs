@@ -127,6 +127,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) pending_modal_action: RefCell<Option<bar::DeferredModalAction>>,
     pub(crate) pending_destroy_hwnds: RefCell<Vec<isize>>,
     pub(crate) focus_activity: RefCell<otto_core::FocusActivityState>,
+    pub(crate) focus_shield: RefCell<crate::focus_shield::FocusShield>,
 }
 
 impl RuntimeContext {
@@ -190,6 +191,7 @@ impl RuntimeContext {
             pending_modal_action: RefCell::new(None),
             pending_destroy_hwnds: RefCell::new(Vec::new()),
             focus_activity: RefCell::new(otto_platform::load_focus_activity()),
+            focus_shield: RefCell::new(crate::focus_shield::FocusShield::default()),
         }
     }
 

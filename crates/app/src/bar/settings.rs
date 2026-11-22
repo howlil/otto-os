@@ -428,6 +428,9 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
         if let Some(feed) = bar.backdrop.as_mut() {
             feed.set_capture_visible(visible);
         }
+        if visible && let Some(renderer) = bar.renderer.as_ref() {
+            renderer.clear_bar_backdrop();
+        }
         bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
