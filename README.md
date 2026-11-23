@@ -132,6 +132,18 @@ WinGet manifest templates (`howlil.OttoOS`) are generated with every release und
 
 ---
 
+## Project Growth
+
+Otto OS stars, forks, and GitHub Release asset downloads, recorded daily. Download history begins with the first tracking run.
+
+<p align="center">
+  <a href="https://github.com/howlil/otto-os/releases">
+    <img src="assets/repo-growth.svg" alt="Otto OS repository growth: stars, forks, and release downloads" width="900" />
+  </a>
+</p>
+
+---
+
 ## Keyboard Shortcuts & Recovery
 
 ### Global Shortcuts
