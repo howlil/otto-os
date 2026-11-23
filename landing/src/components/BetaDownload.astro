@@ -41,6 +41,7 @@ import { T } from "./lib/T";
   const RELEASES_API = "https://api.github.com/repos/howlil/otto-os/releases?per_page=100";
   const DOWNLOAD_PREFIX = "https://github.com/howlil/otto-os/releases/download/";
   const INSTALLER_NAME = /^otto-os-setup-\d+(?:\.\d+)*-x64\.exe$/i;
+  const PORTABLE_ZIP_NAME = /^otto-os-\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?-windows-x64\.zip$/i;
   const idFormat = new Intl.NumberFormat("id-ID");
   const enFormat = new Intl.NumberFormat("en-US");
 
@@ -67,15 +68,22 @@ import { T } from "./lib/T";
     return url.startsWith(DOWNLOAD_PREFIX);
   }
 
-  function isInstallerAsset(value: unknown): value is InstallerAsset {
+  function isReleaseAsset(value: unknown): value is InstallerAsset {
     return (
       isRecord(value) &&
       typeof value.name === "string" &&
-      INSTALLER_NAME.test(value.name) &&
       typeof value.browser_download_url === "string" &&
       Number.isInteger(value.download_count) &&
       Number(value.download_count) >= 0
     );
+  }
+
+  function isInstallerAsset(value: unknown): value is InstallerAsset {
+    return isReleaseAsset(value) && INSTALLER_NAME.test(value.name);
+  }
+
+  function isCountedDownloadAsset(value: unknown): value is InstallerAsset {
+    return isReleaseAsset(value) && (INSTALLER_NAME.test(value.name) || PORTABLE_ZIP_NAME.test(value.name));
   }
 
   async function fetchFromApi(): Promise<Release | null> {
@@ -107,8 +115,10 @@ import { T } from "./lib/T";
           isRecord(release) && release.draft !== true && typeof release.tag_name === "string" && Array.isArray(release.assets),
       );
       const installersOf = (release: Record<string, unknown>) => (release.assets as unknown[]).filter(isInstallerAsset);
+      const countedAssetsOf = (release: Record<string, unknown>) =>
+        (release.assets as unknown[]).filter(isCountedDownloadAsset);
       const downloads = releases.reduce(
-        (total, release) => total + installersOf(release).reduce((sum, asset) => sum + asset.download_count, 0),
+        (total, release) => total + countedAssetsOf(release).reduce((sum, asset) => sum + asset.download_count, 0),
         0,
       );
       const latest = [

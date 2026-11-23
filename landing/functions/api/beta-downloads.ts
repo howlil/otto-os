@@ -14,10 +14,54 @@ type GitHubRelease = {
 
 const RELEASES_URL = "https://api.github.com/repos/howlil/otto-os/releases?per_page=100";
 const INSTALLER_NAME = /^otto-os-setup-\d+(?:\.\d+)*-x64\.exe$/i;
+const PORTABLE_ZIP_NAME = /^otto-os-\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?-windows-x64\.zip$/i;
 const INSTALLER_URL = "https://github.com/howlil/otto-os/releases/download/";
 const CACHE_SECONDS = 300;
 const REQUEST_TIMEOUT_MS = 8000;
 const MAX_RELEASE_PAGES = 20;
+
+export function isCountedReleaseAsset(name: string): boolean {
+  return INSTALLER_NAME.test(name) || PORTABLE_ZIP_NAME.test(name);
+}
+
+export type ReleaseSummary = {
+  version: string | null;
+  downloadUrl: string | null;
+  downloads: number;
+  prerelease: boolean;
+};
+
+export function summarizeReleases(releases: GitHubRelease[]): ReleaseSummary {
+  const publishedReleases = releases
+    .filter((release) => !release.draft)
+    .sort((left, right) => {
+      if (left.prerelease !== right.prerelease) {
+        return left.prerelease ? 1 : -1;
+      }
+      return Date.parse(right.created_at) - Date.parse(left.created_at);
+    });
+  const installerFor = (release: GitHubRelease) =>
+    release.assets.find((asset) => INSTALLER_NAME.test(asset.name));
+  const latest = publishedReleases.find((release) => {
+    const installer = installerFor(release);
+    return installer?.browser_download_url.startsWith(INSTALLER_URL);
+  });
+  const latestInstaller = latest ? installerFor(latest) : undefined;
+  const downloads = publishedReleases.reduce(
+    (total, release) =>
+      total +
+      release.assets
+        .filter((asset) => isCountedReleaseAsset(asset.name))
+        .reduce((assetTotal, asset) => assetTotal + asset.download_count, 0),
+    0,
+  );
+  return {
+    version: latest && latestInstaller ? latest.tag_name : null,
+    downloadUrl: latestInstaller?.browser_download_url ?? null,
+    downloads,
+    prerelease: latest && latestInstaller ? latest.prerelease : false,
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -69,11 +113,35 @@ function json(body: Record<string, unknown>, status = 200, cache = false): Respo
   });
 }
 
-export const onRequestGet: PagesFunction = async ({ request }) => {
-  const cacheKey = new Request(new URL("/api/beta-downloads", request.url));
+export type ReleaseSummaryResult =
+  | { ok: true; summary: ReleaseSummary }
+  | { ok: false; status: number; error: string };
+
+export async function fetchReleaseSummary(requestUrl: string): Promise<ReleaseSummaryResult> {
+  const cacheKey = new Request(new URL("/api/beta-downloads", requestUrl));
   const cache = (caches as CacheStorage & { default: Cache }).default;
   const cached = await cache.match(cacheKey).catch(() => undefined);
-  if (cached) return cached;
+  if (cached) {
+    try {
+      const payload = (await cached.clone().json()) as unknown;
+      if (
+        isRecord(payload) &&
+        Number.isInteger(payload.downloads) &&
+        Number(payload.downloads) >= 0
+      ) {
+        return {
+          ok: true,
+          summary: {
+            version: typeof payload.version === "string" ? payload.version : null,
+            downloadUrl: typeof payload.downloadUrl === "string" ? payload.downloadUrl : null,
+            downloads: Number(payload.downloads),
+            prerelease: payload.prerelease === true,
+          },
+        };
+      }
+    } catch {
+    }
+  }
 
   try {
     const releases: GitHubRelease[] = [];
@@ -89,54 +157,30 @@ export const onRequestGet: PagesFunction = async ({ request }) => {
         },
         signal,
       });
-      if (!response.ok) return json({ error: "release_metadata_unavailable" }, 503);
+      if (!response.ok) return { ok: false, status: 503, error: "release_metadata_unavailable" };
 
       const payload: unknown = await response.json();
-      if (!Array.isArray(payload)) return json({ error: "invalid_release_metadata" }, 502);
+      if (!Array.isArray(payload)) return { ok: false, status: 502, error: "invalid_release_metadata" };
 
       releases.push(...payload.filter(isRelease));
       nextPage = nextReleasePage(response);
       pagesRead += 1;
     }
-    if (nextPage) return json({ error: "release_metadata_incomplete" }, 502);
+    if (nextPage) return { ok: false, status: 502, error: "release_metadata_incomplete" };
 
-    const publishedReleases = releases
-      .filter((release) => !release.draft)
-      .sort((left, right) => {
-        if (left.prerelease !== right.prerelease) {
-          return left.prerelease ? 1 : -1;
-        }
-        return Date.parse(right.created_at) - Date.parse(left.created_at);
-      });
-    const installerFor = (release: GitHubRelease) =>
-      release.assets.find((asset) => INSTALLER_NAME.test(asset.name));
-    const latest = publishedReleases.find((release) => {
-      const installer = installerFor(release);
-      return installer?.browser_download_url.startsWith(INSTALLER_URL);
-    });
-    const latestInstaller = latest ? installerFor(latest) : undefined;
-    const downloads = publishedReleases.reduce(
-      (total, release) =>
-        total +
-        release.assets
-          .filter((asset) => INSTALLER_NAME.test(asset.name))
-          .reduce((assetTotal, asset) => assetTotal + asset.download_count, 0),
-      0,
-    );
-
-    const result = json(
-      {
-        version: latest && latestInstaller ? latest.tag_name : null,
-        downloadUrl: latestInstaller?.browser_download_url ?? null,
-        downloads,
-        prerelease: latest && latestInstaller ? latest.prerelease : false,
-      },
-      200,
-      true,
-    );
+    const summary = summarizeReleases(releases);
+    const result = json(summary, 200, true);
     await cache.put(cacheKey, result.clone()).catch(() => undefined);
-    return result;
+    return { ok: true, summary };
   } catch {
-    return json({ error: "release_metadata_unavailable" }, 503);
+    return { ok: false, status: 503, error: "release_metadata_unavailable" };
   }
+}
+
+export const onRequestGet: PagesFunction = async ({ request }) => {
+  const outcome = await fetchReleaseSummary(request.url);
+  if (!outcome.ok) {
+    return json({ error: outcome.error }, outcome.status);
+  }
+  return json(outcome.summary, 200, true);
 };

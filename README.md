@@ -14,7 +14,7 @@
       <img src="https://img.shields.io/github/actions/workflow/status/howlil/otto-os/ci.yml?branch=main&style=flat-square&label=CI" alt="CI Status" />
     </a>
     <a href="https://github.com/howlil/otto-os/releases">
-      <img src="https://img.shields.io/github/downloads/howlil/otto-os/total?style=flat-square&color=1f2328" alt="Total Downloads" />
+      <img src="https://otto-os-landing.pages.dev/api/downloads-badge" alt="Total Downloads" />
     </a>
     <img src="https://img.shields.io/badge/Windows_11-22H2%2B_(x64)-0078D4?style=flat-square" alt="Windows 11 22H2+ x64" />
     <a href="LICENSE">
@@ -23,6 +23,8 @@
   </p>
 
   <p>
+    <a href="https://otto-os-landing.pages.dev">Website</a>
+    &nbsp;·&nbsp;
     <a href="#download--installation">Download</a>
     &nbsp;·&nbsp;
     <a href="#features">Features</a>
