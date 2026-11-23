@@ -1,18 +1,22 @@
-# Media Assets for README Showcase
+# Media assets for the README showcase
 
-Drop captured screenshots or recordings of Otto OS here, then uncomment the visual showcase block in [`README.md`](../../README.md).
+Otto OS does not currently ship real product screenshots or recordings in this directory. Capture them on Windows 11 before embedding them into the [main README](../../README.md); do not use concept renders as evidence of the application.
 
-## Recommended Assets
+## Recommended captures
 
-| Filename | Content | Recommended Dimensions |
+| Filename | What to capture | Suggested output |
 | --- | --- | --- |
-| `hero-desktop.png` | Full Windows 11 desktop showing Top Bar, Dynamic Island, Floating Dock, and Liquid Glass | `2560x1440` or `1920x1080` PNG/WebP |
-| `dynamic-island.gif` | Short loop of Dynamic Island expanding (Focus, Music + Synced Lyrics, Screen Time, HUD) | `1200x520` GIF/MP4 (keep `< 5 MB`) |
-| `control-center.png` | Bento Control Center popover over wallpaper | `1280x800` PNG/WebP |
-| `focus-screen-time.png` | Notch `Time` tab and/or Focus Shield overlay | `1280x800` PNG/WebP |
-| `otto-settings.png` | Standalone `Otto Settings` window (Modules / Appearance / Focus) | `1280x800` PNG/WebP |
+| `hero-desktop.webp` | Full desktop showing the Otto Top Bar, Dynamic Island, Dock, and native Windows context | 1920×1080 or 2560×1440 WebP |
+| `dynamic-island.gif` | A short, cropped loop showing actual expand/collapse, Focus and Media | GIF under 5 MB, or link to a hosted video |
+| `control-center.webp` | Real Control Center popover, with readable system controls | 1280×800 WebP |
+| `focus-screen-time.webp` | Focus mode or Screen Time interface | 1280×800 WebP |
+| `otto-settings.webp` | Standalone settings window with Modules or Appearance | 1280×800 WebP |
 
-## Capture Tips
+## Capture and publishing requirements
 
-- Enable **Visible in Screenshots / Screen Share** in `Otto Settings → General` before capturing so Liquid Glass surfaces remain visible without `WDA_EXCLUDEFROMCAPTURE` hiding Otto windows.
-- Capture at `100%` or `150%` DPI on a clean wallpaper with no private notifications, emails, or tokens visible.
+- In **Otto Settings → General**, enable **Visible in Screenshots / Screen Share** so `WDA_EXCLUDEFROMCAPTURE` does not hide Otto surfaces.
+- Use a clean desktop at 100% or 150% scaling. Remove personal notifications, account names, secrets and unrelated applications.
+- Prefer a sharp still screenshot over a large GIF. Use short motion previews only when behavior needs movement to be understood.
+- Inspect the captured media at GitHub README width, optimize file sizes, and add descriptive `alt` text.
+- Once the real files exist, add a hero image directly below the README header and provide a compact, optional demo gallery. Do not add image links to files that have not been committed.
+- Preserve the accessible text-based links to the [official interactive product demo](https://otto-os-landing.pages.dev) even after adding images.
