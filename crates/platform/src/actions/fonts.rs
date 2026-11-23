@@ -2,24 +2,19 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::Graphics::Gdi::{AddFontResourceW, RemoveFontResourceW};
-use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SendNotifyMessageW, WM_FONTCHANGE};
+use windows::Win32::Graphics::Gdi::{
+    AddFontResourceExW, FONT_RESOURCE_CHARACTERISTICS, FR_PRIVATE, RemoveFontResourceExW,
+};
 use windows::core::PCWSTR;
 
 pub(super) static LOADED_APPLE_FONTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub(super) const PRIVATE_FONT_FLAGS: FONT_RESOURCE_CHARACTERISTICS = FR_PRIVATE;
 
 pub(super) fn font_path_wide_z(path: &Path) -> Vec<u16> {
     path.as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
-}
-
-pub(super) fn broadcast_font_change() {
-    unsafe {
-        let _ = SendNotifyMessageW(HWND_BROADCAST, WM_FONTCHANGE, WPARAM(0), LPARAM(0));
-    }
 }
 
 pub(super) fn record_loaded_font(registry: &mut Vec<PathBuf>, path: PathBuf) -> bool {
@@ -38,7 +33,6 @@ pub fn load_apple_fonts() {
     let Ok(mut loaded_registry) = LOADED_APPLE_FONTS.lock() else {
         return;
     };
-    let mut loaded = false;
     for file in [
         "SF-Pro-Text-Regular.otf",
         "SF-Pro-Text-Medium.otf",
@@ -50,16 +44,10 @@ pub fn load_apple_fonts() {
         }
         let wide = font_path_wide_z(&path);
         unsafe {
-            if AddFontResourceW(PCWSTR(wide.as_ptr())) > 0
-                && record_loaded_font(&mut loaded_registry, path)
-            {
-                loaded = true;
+            if AddFontResourceExW(PCWSTR(wide.as_ptr()), PRIVATE_FONT_FLAGS, None) > 0 {
+                let _ = record_loaded_font(&mut loaded_registry, path);
             }
         }
-    }
-    drop(loaded_registry);
-    if loaded {
-        broadcast_font_change();
     }
 }
 
@@ -72,16 +60,10 @@ pub fn remove_apple_fonts() {
     }
     let paths = std::mem::take(&mut *loaded_registry);
     drop(loaded_registry);
-    let mut removed = false;
     for path in paths {
         let wide = font_path_wide_z(&path);
         unsafe {
-            if RemoveFontResourceW(PCWSTR(wide.as_ptr())).as_bool() {
-                removed = true;
-            }
+            let _ = RemoveFontResourceExW(PCWSTR(wide.as_ptr()), PRIVATE_FONT_FLAGS.0, None);
         }
-    }
-    if removed {
-        broadcast_font_change();
     }
 }

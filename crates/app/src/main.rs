@@ -48,6 +48,40 @@ where
     }
 }
 
+struct SessionShutdownGuard<F: FnOnce()> {
+    on_drop: Option<F>,
+}
+
+impl<F: FnOnce()> SessionShutdownGuard<F> {
+    fn new(on_drop: F) -> Self {
+        Self {
+            on_drop: Some(on_drop),
+        }
+    }
+
+    fn run(mut self) {
+        if let Some(cleanup) = self.on_drop.take() {
+            cleanup();
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for SessionShutdownGuard<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.on_drop.take() {
+            cleanup();
+        }
+    }
+}
+
+const fn should_emergency_restore_shell(
+    abort_profile: bool,
+    is_main_thread: bool,
+    in_caught_wnd_proc: bool,
+) -> bool {
+    abort_profile || (is_main_thread && !in_caught_wnd_proc)
+}
+
 struct AppleFontsGuard;
 
 impl AppleFontsGuard {
@@ -122,9 +156,9 @@ fn main() -> Result<()> {
         );
         return Err(error);
     }
+    let session_guard = SessionShutdownGuard::new(host::shutdown_session);
     if let Err(error) = host::apply_cli_overrides() {
-        host::stop();
-        otto_platform::uninstall_window_event_hooks();
+        session_guard.run();
         otto_platform::log_error("app", &format!("cli overrides failed: {error}"));
         otto_platform::show_error_dialog(
             "Otto OS Failed to Start",
@@ -134,13 +168,14 @@ fn main() -> Result<()> {
     }
     let _ = otto_platform::install_keyboard_hook();
     host::run_message_loop();
-    host::shutdown_session();
+    session_guard.run();
     drop(fonts);
     otto_platform::log_info("app", "shutdown complete");
     Ok(())
 }
 
 fn install_shell_recovery_panic_hook() {
+    let main_thread = std::thread::current().id();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let message = panic_message(info);
@@ -149,7 +184,12 @@ fn install_shell_recovery_panic_hook() {
             |loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()),
         );
         otto_platform::log_error("panic", &format!("at {location}: {message}"));
-        if cfg!(panic = "abort") {
+        let is_main = std::thread::current().id() == main_thread;
+        if should_emergency_restore_shell(
+            cfg!(panic = "abort"),
+            is_main,
+            host::in_safe_window_proc(),
+        ) {
             let _ = otto_platform::restore_hidden_windows();
             let _ = otto_platform::restore_shell_from_recovery();
         }
@@ -169,7 +209,11 @@ fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{StartupCommand, startup_command};
+    use std::cell::Cell;
+
+    use super::{
+        SessionShutdownGuard, StartupCommand, should_emergency_restore_shell, startup_command,
+    };
 
     #[test]
     fn startup_command_prioritizes_quit_then_restore_then_run() {
@@ -182,5 +226,31 @@ mod tests {
             startup_command(["--restore-shell", "--quit"]),
             StartupCommand::Quit
         );
+    }
+
+    #[test]
+    fn session_shutdown_guard_runs_once_on_explicit_run_or_unwind() {
+        let count = Cell::new(0usize);
+        let guard = SessionShutdownGuard::new(|| count.set(count.get() + 1));
+        guard.run();
+        assert_eq!(count.get(), 1);
+
+        let unwind_count = Cell::new(0usize);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SessionShutdownGuard::new(|| unwind_count.set(unwind_count.get() + 1));
+            panic!("simulated fatal unwind");
+        }));
+        assert!(result.is_err());
+        assert_eq!(unwind_count.get(), 1);
+    }
+
+    #[test]
+    fn emergency_shell_restore_skips_caught_wnd_proc_and_worker_panics() {
+        assert!(!should_emergency_restore_shell(false, false, false));
+        assert!(!should_emergency_restore_shell(false, false, true));
+        assert!(!should_emergency_restore_shell(false, true, true));
+        assert!(should_emergency_restore_shell(false, true, false));
+        assert!(should_emergency_restore_shell(true, false, true));
+        assert!(should_emergency_restore_shell(true, true, true));
     }
 }

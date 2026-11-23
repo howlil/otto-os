@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use otto_core::{LyricsSheet, parse_lrc};
-use windows::Web::Http::{HttpClient, HttpCompletionOption};
+use windows::Web::Http::{HttpClient, HttpCompletionOption, HttpResponseMessage};
 use windows::core::HSTRING;
 
 use crate::winrt_io::{await_until, read_stream_bounded};
@@ -191,6 +191,19 @@ pub fn clean_track_title(title: &str) -> String {
     }
 }
 
+fn is_https_scheme(scheme: &str) -> bool {
+    scheme.eq_ignore_ascii_case("https")
+}
+
+fn response_uses_https(response: &HttpResponseMessage) -> bool {
+    response
+        .RequestMessage()
+        .ok()
+        .and_then(|req| req.RequestUri().ok())
+        .and_then(|uri| uri.SchemeName().ok())
+        .is_some_and(|scheme| is_https_scheme(&scheme.to_string()))
+}
+
 fn request_url(
     client: &HttpClient,
     url: &str,
@@ -205,7 +218,7 @@ fn request_url(
         client.GetWithOptionAsync(&uri, HttpCompletionOption::ResponseHeadersRead),
         deadline
     )?;
-    if !response.IsSuccessStatusCode().ok()? {
+    if !response_uses_https(&response) || !response.IsSuccessStatusCode().ok()? {
         return None;
     }
     let content = response.Content().ok()?;
@@ -730,5 +743,14 @@ mod tests {
             r#"[{"id":1,"syncedLyrics":null},{"id":2,"syncedLyrics":"[00:05.00] Hello world"}]"#;
         let lrc = extract_synced_lyrics_from_json(array_json).unwrap();
         assert_eq!(lrc, "[00:05.00] Hello world");
+    }
+
+    #[test]
+    fn https_scheme_check_rejects_downgrades() {
+        assert!(is_https_scheme("https"));
+        assert!(is_https_scheme("HTTPS"));
+        assert!(!is_https_scheme("http"));
+        assert!(!is_https_scheme("file"));
+        assert!(!is_https_scheme(""));
     }
 }

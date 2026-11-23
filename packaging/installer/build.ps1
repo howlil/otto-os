@@ -99,7 +99,7 @@ try {
 
     if ($CertificatePath) {
         $signTool = Find-SignTool
-        $signArgs = @('sign', '/fd', 'SHA256', '/a', '/f', $CertificatePath)
+        $signArgs = @('sign', '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', '/f', $CertificatePath)
         if ($CertificatePassword) {
             $signArgs += @('/p', ([System.Net.NetworkCredential]::new('', $CertificatePassword).Password))
         }

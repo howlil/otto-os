@@ -53,10 +53,11 @@ BEGIN\n\
     BEGIN\n\
         BLOCK \"040904b0\"\n\
         BEGIN\n\
+            VALUE \"CompanyName\", \"Otto OS Contributors\"\n\
             VALUE \"FileDescription\", \"Otto OS\"\n\
             VALUE \"FileVersion\", \"{major}.{minor}.{patch}.0\"\n\
             VALUE \"InternalName\", \"otto-os.exe\"\n\
-            VALUE \"LegalCopyright\", \"MIT License\"\n\
+            VALUE \"LegalCopyright\", \"Copyright (c) 2026 Otto OS Contributors (MIT)\"\n\
             VALUE \"OriginalFilename\", \"otto-os.exe\"\n\
             VALUE \"ProductName\", \"Otto OS\"\n\
             VALUE \"ProductVersion\", \"{pkg_version}\"\n\

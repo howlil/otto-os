@@ -819,6 +819,9 @@ impl Renderer {
 
     pub fn release_panel_surface(&self) {
         if let Ok(mut slot) = self.panel_surface.try_borrow_mut() {
+            if slot.is_some() {
+                let _ = self.bar_surface.bind(&self.target, self.bar_surface.size());
+            }
             slot.take();
         }
         if let Ok(mut cached) = self.cached_panel_notch.try_borrow_mut() {

@@ -7,12 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (for example v0.1.0)"
+        description: "Release tag (for example v1.3.1)"
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,8 +23,10 @@ jobs:
     name: Build Windows Installer & Release
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Resolve release metadata and check version parity
         id: meta
@@ -49,22 +51,37 @@ jobs:
           if ($Matches[1] -ne $expectedManifestVersion) {
             throw "Manifest version mismatch: expected '$expectedManifestVersion', found '$($Matches[1])'"
           }
+          $toolchainToml = Get-Content -LiteralPath 'rust-toolchain.toml' -Raw
+          if ($toolchainToml -notmatch '(?m)^channel\s*=\s*"([^"]+)"') {
+            throw 'Could not read channel from rust-toolchain.toml'
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "numeric_version=$numericVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "rust_channel=$($Matches[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: ${{ steps.meta.outputs.rust_channel }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - name: Verify formatting, clippy, and tests
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
-          cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test core, render, and app crates
+        run: cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
+
+      - name: Test headless platform units
+        run: cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1
+
+      - name: Static E2E and visual manifest check
+        shell: pwsh
+        run: .\scripts\check-e2e.ps1
 
       - name: Build release binary
         run: cargo build --release -p otto-os
@@ -171,7 +188,7 @@ jobs:
         run: Remove-Item -LiteralPath '${{ steps.cert.outputs.pfx_path }}' -Force -ErrorAction SilentlyContinue
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: Otto OS ${{ steps.meta.outputs.tag }}

@@ -1,0 +1,87 @@
+name: Bug Report
+description: Report a bug, crash, visual glitch, or unexpected shell behavior in Otto OS.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please check [existing issues](https://github.com/howlil/otto-os/issues) first.
+        For security vulnerabilities, please use [Private Security Advisories](https://github.com/howlil/otto-os/security/advisories/new) instead.
+
+  - type: input
+    id: otto_version
+    attributes:
+      label: Otto OS Version
+      description: Found in Otto Settings → About or installer filename.
+      placeholder: "e.g. v1.3.1 (installer / portable ZIP / built from source)"
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows 11 Build
+      description: Run `winver` and enter the OS build number (must be 22621+).
+      placeholder: "e.g. Windows 11 24H2 (Build 26100.xxxx)"
+    validations:
+      required: true
+
+  - type: input
+    id: display_setup
+    attributes:
+      label: Display, DPI & GPU Setup
+      description: Monitor count, resolution, DPI scaling, and GPU (integrated/discrete).
+      placeholder: "e.g. 1x 2560x1440 @ 150%, Intel Iris Xe + RTX 4060"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - Top Bar / Menu Bar / Calendar
+        - Dynamic Island / Classic Notch
+        - Dock / Downloads Stack / Trash
+        - Genie Minimize / Restore
+        - Window Controls / Tiling / Rounded Corners
+        - Control Center
+        - Spotlight / Apps
+        - Focus Mode / Focus Shield / Screen Time
+        - Appearance / Liquid Glass
+        - Otto Settings / Modules / Process Audit
+        - Installer / Updater / Shell Recovery
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Enable ...
+        2. Click / press ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Screenshots
+      description: |
+        Attach screenshots or relevant lines from `%LOCALAPPDATA%\otto-os\logs\otto-os.log` (Otto Settings → About → Open Logs Folder).
+        Please review logs to ensure no personal information is included.
+      render: text
+    validations:
+      required: false

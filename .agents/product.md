@@ -106,30 +106,18 @@ Otto OS transforms the Windows 11 desktop experience into an authentic, highly r
 
 ## 6. Public-Readiness Gap Inventory (Verified Audit)
 
-The following gaps were verified against the repository state and must be closed before their respective target releases:
+### Closed in v1.0.0 – v1.3.1
+- Root `LICENSE` (MIT), `build.rs` executable icon and `VERSIONINFO`, Orbit O default branding, crate-versioned `User-Agent`, Inno Setup per-user installer (`--quit`, Launch at Login), GitHub Actions CI & Release workflows, WinGet templates, MSIX Store assets and `MinVersion="10.0.22621.0"`, Windows 11 22H2 startup gate, DDC/CI brightness, conflict-safe `Ctrl+Alt+*` hotkeys, standalone Otto Settings window, rolling zero-telemetry local logs, `MessageBoxW` fatal error dialogs, and core `M04` UIA fragment/invoke providers.
+- OSS repository governance files (`CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, GitHub Issue/PR templates, Dependabot) and refreshed user-first `README.md`.
 
-1. **Packaging, Installer & CI/CD (v1.0 Blocker)**:
-   - No per-user `.exe` installer script, no WinGet manifest, and no `.github/workflows/` CI/Release automation or code-signing pipeline.
-   - Missing `--quit` CLI handshake in `crates/app/src/main.rs` and no `HKCU\...\Run` Launch-at-Login toggle.
-   - `packaging/msix/Assets/` currently contains `0` required PNG assets (`StoreLogo.png`, `Square150x150Logo.png`, `Square44x44Logo.png`), and `AppxManifest.xml.template` still lists `MinVersion="10.0.17763.0"` instead of `10.0.22621.0` (v1.0/v1.1 sync).
-2. **Executable Metadata, Branding & Legal (v1.0 Blocker)**:
-   - No `LICENSE` file in repository root despite MIT declarations in `Cargo.toml` and `README.md`.
-   - `crates/app` lacks `build.rs` / `winresource` for embedded `.exe` icon and Windows version/product metadata.
-   - `crates/render/src/lib.rs` (`draw_apple_logo`) defaults to a literal Apple bezier glyph; no default Otto OS brand mark yet.
-   - `crates/platform/src/lyrics.rs` hardcodes `"OttoOS/0.1.0 (https://github.com/otto-os)"` instead of crate version metadata.
-   - `landing/src/pages/index.astro` advertises `"jadwal"` (schedule), which is not implemented.
-3. **Configuration, Menus & Onboarding (v1.0 Blocker)**:
-   - `theme_mode` is kept in `RuntimeContext` memory (`crates/app/src/host.rs`, `theme_state.rs`) and not persisted to `plugins.txt`.
-   - Top Bar menu and Control Center (`crates/core/src/menu.rs`) lack module toggles (`Dock`, `WindowControls`, `Genie`), `Launch at Login`, `Visible in Screenshots / Screen Share`, `Open Logs Folder`, `Check for Updates...`, and hotkey settings.
-   - `crates/app/src/bar.rs` unconditionally calls `hide_system_taskbar()` at startup without automatically restoring `Shell_TrayWnd` when the Dock module is disabled.
-   - `crates/platform/src/dock.rs` (`pinned_from_read`) initializes first-run `pinned.txt` as empty (`Vec::new()`) with no default apps or welcome hint, and unconditionally renames `"explorer"` / `"notepad"` to `"Finder"` / `"Notes"`.
-4. **Windows Compatibility, Hardware, Shortcuts & Performance (v1.0 Blocker)**:
-   - No startup Windows 11 build check (`>= 22621`), despite depending on Win 11 APIs (`DWMWA_SYSTEMBACKDROP_TYPE = 38`, `DWMWA_WINDOW_CORNER_PREFERENCE`, `Segoe UI Variable Display`).
-   - `crates/platform/src/status.rs` only drives internal laptop `\\.\LCD` brightness and silently stores `FALLBACK_BRIGHTNESS = 80` on desktops/external monitors (lacks `Win32_Devices_Display` DDC/CI and UI capability feedback).
-   - `crates/platform/src/actions.rs` binds global hotkeys `Alt+N` and `Alt+P` with no conflict-safe default or disable toggle.
-   - Idle CPU defect remains open in `.agents/engineering.md` (`~0.63–1.67%` single-core vs `0%` target).
-5. **Diagnostics & Fatal Error Visibility (v1.0 Blocker)**:
-   - `crates/app/src/main.rs` uses `#![windows_subsystem = "windows"]` with `eprintln!` and no rolling file log in `%LOCALAPPDATA%\otto-os\logs\` and no `MessageBoxW` crash/startup failure dialog.
-6. **Deferred to v1.1 (Microsoft Store Readiness)**:
-   - `M04` full UI Automation provider (`WM_GETOBJECT`) and complete accessibility/focus verification across all surfaces.
-   - `M13` MSIX Store qualification, populated Store logo assets, and clean Store branding without Apple-trademark iconography.
+### Open Gaps for Production & Store Qualification
+1. **Authenticode Code Signing & Cryptographic Update Verification**:
+   - Configure CI Authenticode signing secrets (`WINDOWS_CERT_PFX_BASE64` / `WINDOWS_CERT_PASSWORD`, e.g. SignPath OSS or Azure Trusted Signing) so public installers and executables no longer trigger SmartScreen warnings.
+   - Add cryptographic publisher verification (`WinVerifyTrust` / pinned public-key signature) in `crates/platform/src/control_center/updates.rs` beyond same-origin `SHA256SUMS.txt`.
+2. **Distribution Channels & Platform Parity**:
+   - Publish `howlil.OttoOS` to `microsoft/winget-pkgs` (and automate manifest PRs on release tags).
+   - Ship signed **MSIX / Sparse Package** (`M13` Store qualification, Store-safe build flag gating `BrandIcon::ClassicApple`) to unlock `UserNotificationListener` Notification Center and Notch toast events for end users.
+   - Evaluate `aarch64-pc-windows-msvc` (Windows 11 ARM64) release builds and multi-monitor Top Bar/Dock support.
+3. **Performance & Visual Release Evidence**:
+   - Measure and record post-DEC-69 release SLIs (idle CPU `<= 1%`, discrete GPU `0%`, p95 frame `<= 16.6 ms`) and refresh `tests/visual/reference/manifest.json` across the 4 material styles (`Liquid Glass`, `Frosted`, `Tinted`, `Solid`).
+   - `.ics` calendar integration remains deferred pending an explicit network/privacy specification.

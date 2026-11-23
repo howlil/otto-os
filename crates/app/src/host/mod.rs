@@ -52,6 +52,13 @@ struct Host {
 thread_local! {
     pub(super) static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
     pub(super) static MODAL_ACTION_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    pub(super) static WND_PROC_CATCH_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+pub(crate) fn in_safe_window_proc() -> bool {
+    WND_PROC_CATCH_DEPTH
+        .try_with(|depth| depth.get() > 0)
+        .unwrap_or(false)
 }
 
 struct ModalActionGuard;

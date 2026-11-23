@@ -163,7 +163,11 @@ fn shell_and_settings_hotkeys_do_not_collide_with_other_hotkeys() {
 }
 
 #[test]
-fn loaded_font_registry_deduplicates_paths_and_remove_drains_cleanly() {
+fn loaded_font_registry_deduplicates_paths_and_uses_process_private_flags() {
+    assert_eq!(
+        super::fonts::PRIVATE_FONT_FLAGS,
+        windows::Win32::Graphics::Gdi::FR_PRIVATE
+    );
     let mut tracked = Vec::new();
     let font = std::path::PathBuf::from("C:\\Fonts\\SF-Pro-Text-Regular.otf");
     assert!(super::fonts::record_loaded_font(&mut tracked, font.clone()));

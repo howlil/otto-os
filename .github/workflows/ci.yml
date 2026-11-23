@@ -8,18 +8,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   rust:
     name: Rust Gate (Windows)
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read Rust toolchain channel
+        id: toolchain
+        shell: pwsh
+        run: |
+          $toml = Get-Content -LiteralPath 'rust-toolchain.toml' -Raw
+          if ($toml -notmatch '(?m)^channel\s*=\s*"([^"]+)"') {
+            throw 'Could not read channel from rust-toolchain.toml'
+          }
+          "channel=$($Matches[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -36,16 +52,21 @@ jobs:
       - name: Test headless platform units
         run: cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1
 
+      - name: Static E2E and visual manifest check
+        shell: pwsh
+        run: .\scripts\check-e2e.ps1
+
   landing:
     name: Landing Site
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: landing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

@@ -1,0 +1,52 @@
+name: Feature Request
+description: Suggest a new capability or enhancement for Otto OS.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, please review the [Known Limitations & Non-Goals](https://github.com/howlil/otto-os#known-limitations--non-goals) in the README.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      options:
+        - Top Bar / Menu Bar
+        - Dynamic Island / Notch
+        - Dock / Genie
+        - Window Controls / Tiling
+        - Control Center
+        - Spotlight
+        - Focus Mode / Screen Time
+        - Appearance / Materials
+        - Otto Settings / Accessibility
+        - Packaging / Distribution
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: Describe the workflow friction or desktop problem this solves.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Behavior
+      description: Describe how you expect this feature to behave and how it fits Otto OS's local-first, native design.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds or alternative designs you considered.
+    validations:
+      required: false

@@ -12,7 +12,7 @@ Pengguna Windows 11 yang menginginkan presisi spasial macOS (bar atas, Dynamic I
 
 ## Product Purpose
 
-Otto OS v1.3.0 adalah shell desktop native Rust untuk Windows 11 22H2+ yang menyatukan Top Bar, Dynamic Island & Classic Notch (Focus, Screen Time, Music & Synced Lyrics, Pocket, Clip, Tasks, Calls, System HUD), Dock dengan efek Genie dan Downloads Stack, Top-Right Window Controls dengan Tiling, Focus Shield & 7-day Screen Time, Material Appearance Engine (4 gaya permukaan × 3 tema × 7 aksen WCAG), Control Center dengan Audio Output Switcher & DDC/CI, Otto Settings 13 modul dengan Process & Memory Buffer Audit serta pembaruan SHA-256 in-app, dan Spotlight lokal.
+Otto OS v1.3.1 adalah shell desktop native Rust untuk Windows 11 22H2+ yang menyatukan Top Bar, Dynamic Island & Classic Notch (Focus, Screen Time, Music & Synced Lyrics, Pocket, Clip, Tasks, Calls, System HUD), Dock dengan efek Genie dan Downloads Stack, Top-Right Window Controls dengan Tiling, Focus Shield & 7-day Screen Time, Material Appearance Engine (4 gaya permukaan × 3 tema × 7 aksen WCAG), Control Center dengan Audio Output Switcher & DDC/CI, Otto Settings 13 modul dengan Process & Memory Buffer Audit serta pembaruan SHA-256 in-app, dan Spotlight lokal.
 
 ## Positioning
 
@@ -21,7 +21,7 @@ Ditulis dengan Rust 2024, Win32, Direct2D, DirectWrite, D3D11, dan GDI dalam sat
 ## Operating Context
 
 - Unduhan: installer per pengguna `otto-os-setup-<versi>-x64.exe` (tanpa UAC), ZIP portabel, checksum `SHA256SUMS.txt`, dan manifest WinGet.
-- Pintasan global: `Ctrl+Alt+,` (Otto Settings), `Ctrl+Alt+C` (Control Center), `Ctrl+Alt+Space` (Spotlight), `Ctrl+Alt+B` (Top Bar), `Ctrl+Alt+D` (Dock), `Ctrl+Alt+Q` (Quick Capture), `Alt+N` (Notch), `Alt+P` (Focus).
+- Pintasan global: `Ctrl+Alt+,` (Otto Settings), `Ctrl+Alt+C` (Control Center), `Ctrl+Alt+Space` (Spotlight), `Ctrl+Alt+B` (Top Bar), `Ctrl+Alt+D` (Dock), `Ctrl+Alt+N` (Notch), `Ctrl+Alt+P` (Focus), `Ctrl+Alt+Q` (Quick Capture), `Ctrl+F2` (fokus Top Bar).
 - Pemulihan: `--quit` dan `--restore-shell` mengembalikan taskbar dan area kerja Windows.
 
 ## Capabilities and Constraints

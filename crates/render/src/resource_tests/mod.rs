@@ -2078,41 +2078,50 @@ fn panel_surface_allocates_lazily_and_releases_gdi_objects_on_release() {
     .expect("renderer");
     assert!(renderer.panel_surface.borrow().is_none());
 
-    let baseline = GuiCounts::now();
-    renderer
-        .draw_panel(
-            &layout,
-            None,
-            None,
-            &pomodoro,
-            None,
-            0.0,
-            otto_core::LyricsView {
-                sheet: None,
-                status: otto_core::LyricsStatus::Idle,
-                animated: false,
-            },
-            &shelf,
-            &clipboard,
-            &tasks,
-            &privacy,
-            None,
-            &otto_core::FocusStatsView::default(),
-        )
-        .expect("draw panel");
-    assert!(renderer.panel_surface.borrow().is_some());
-
-    renderer
-        .set_stats_app_icon(String::from("code"), 2, 2, &[0xFF; 16])
-        .expect("stats icon");
-    assert!(renderer.has_stats_app_icon("code"));
-
-    renderer.release_notch_resources();
+    draw_test_bar(&renderer, &layout, None).expect("warm-up bar draw");
     assert!(renderer.panel_surface.borrow().is_none());
-    assert!(renderer.cached_cover_art.borrow().is_none());
-    assert!(renderer.cached_shelf_bitmaps.borrow().is_empty());
-    assert!(renderer.cached_stats_icons.borrow().is_empty());
-    baseline.assert_no_growth("panel surface release");
+
+    let baseline = GuiCounts::now();
+    for round in 0..2 {
+        renderer
+            .draw_panel(
+                &layout,
+                None,
+                None,
+                &pomodoro,
+                None,
+                0.0,
+                otto_core::LyricsView {
+                    sheet: None,
+                    status: otto_core::LyricsStatus::Idle,
+                    animated: false,
+                },
+                &shelf,
+                &clipboard,
+                &tasks,
+                &privacy,
+                None,
+                &otto_core::FocusStatsView::default(),
+            )
+            .expect("draw panel");
+        assert!(renderer.panel_surface.borrow().is_some());
+        assert!(
+            GuiCounts::now().gdi > baseline.gdi,
+            "round {round}: panel surface should allocate GDI objects"
+        );
+
+        renderer
+            .set_stats_app_icon(String::from("code"), 2, 2, &[0xFF; 16])
+            .expect("stats icon");
+        assert!(renderer.has_stats_app_icon("code"));
+
+        renderer.release_notch_resources();
+        assert!(renderer.panel_surface.borrow().is_none());
+        assert!(renderer.cached_cover_art.borrow().is_none());
+        assert!(renderer.cached_shelf_bitmaps.borrow().is_empty());
+        assert!(renderer.cached_stats_icons.borrow().is_empty());
+        baseline.assert_no_growth("panel surface release");
+    }
 }
 
 fn sample_focus_stats_activity() -> otto_core::FocusActivityState {

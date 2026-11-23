@@ -123,7 +123,7 @@ try {
         if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
             throw "Certificate was not found: $CertificatePath"
         }
-        $signArguments = @('sign', '/fd', 'SHA256', '/a', '/f', $CertificatePath)
+        $signArguments = @('sign', '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', '/f', $CertificatePath)
         if ($CertificatePassword) {
             $signArguments += @('/p', ([System.Net.NetworkCredential]::new('', $CertificatePassword).Password))
         }

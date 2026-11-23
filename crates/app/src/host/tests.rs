@@ -609,3 +609,32 @@ fn queued_plugin_toggles_preserve_multiple_plugins_without_clobbering() {
     );
     assert!(runtime.take_plugin_toggles().is_empty());
 }
+
+#[test]
+fn safe_window_proc_tracks_catch_depth_across_normal_and_panicking_handlers() {
+    assert!(!super::in_safe_window_proc());
+    let ok = super::messages::safe_window_proc(
+        HWND::default(),
+        0,
+        windows::Win32::Foundation::WPARAM(0),
+        windows::Win32::Foundation::LPARAM(0),
+        || {
+            assert!(super::in_safe_window_proc());
+            Some(LRESULT(99))
+        },
+    );
+    assert_eq!(ok, LRESULT(99));
+    assert!(!super::in_safe_window_proc());
+
+    let _ = super::messages::safe_window_proc(
+        HWND::default(),
+        0,
+        windows::Win32::Foundation::WPARAM(0),
+        windows::Win32::Foundation::LPARAM(0),
+        || {
+            assert!(super::in_safe_window_proc());
+            panic!("simulated wnd_proc panic");
+        },
+    );
+    assert!(!super::in_safe_window_proc());
+}

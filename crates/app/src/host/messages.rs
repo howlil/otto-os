@@ -1,5 +1,6 @@
 use super::HOST;
 use super::MODAL_ACTION_ACTIVE;
+use super::WND_PROC_CATCH_DEPTH;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -362,6 +363,21 @@ pub(super) fn sync_pending_platform_modules(
     }
 }
 
+struct WndProcCatchGuard;
+
+impl WndProcCatchGuard {
+    fn enter() -> Self {
+        WND_PROC_CATCH_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for WndProcCatchGuard {
+    fn drop(&mut self) {
+        WND_PROC_CATCH_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 pub(super) fn safe_window_proc(
     hwnd: HWND,
     message: u32,
@@ -369,6 +385,7 @@ pub(super) fn safe_window_proc(
     lparam: LPARAM,
     handler: impl FnOnce() -> Option<LRESULT>,
 ) -> LRESULT {
+    let _catch_guard = WndProcCatchGuard::enter();
     let result = catch_unwind(AssertUnwindSafe(handler));
     if let Ok(Some(result)) = result {
         return result;
