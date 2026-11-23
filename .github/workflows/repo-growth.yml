@@ -21,7 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Keep generated metrics off protected main; the action commits to this branch.
       - uses: actions/checkout@v7
+        with:
+          ref: repo-growth-data
       - uses: MacRimi/repo-growth@v1
         with:
           title: Otto OS growth
