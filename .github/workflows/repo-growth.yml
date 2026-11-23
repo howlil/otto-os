@@ -29,3 +29,20 @@ jobs:
         with:
           title: Otto OS growth
           metrics: stars,forks,downloads
+          commit: 'false'
+
+      - name: Render compact adoption dashboard
+        run: node .github/repo-growth/render-growth.mjs
+
+      - name: Publish metrics and SVG to data branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/repo-growth/history.json assets/repo-growth.svg
+          if git diff --cached --quiet; then
+            echo 'No data or chart changes to commit.'
+          else
+            git commit -m 'chore: update Otto OS growth chart [skip ci]'
+            git push origin HEAD:repo-growth-data
+          fi
