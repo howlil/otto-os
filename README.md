@@ -138,7 +138,7 @@ Otto OS stars, forks, and GitHub Release asset downloads, recorded daily. Downlo
 
 <p align="center">
   <a href="https://github.com/howlil/otto-os/releases">
-    <img src="assets/repo-growth.svg" alt="Otto OS repository growth: stars, forks, and release downloads" width="900" />
+    <img src="https://raw.githubusercontent.com/howlil/otto-os/repo-growth-data/assets/repo-growth.svg" alt="Otto OS repository growth: stars, forks, and release downloads" width="900" />
   </a>
 </p>
 
