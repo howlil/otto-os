@@ -1,38 +1,73 @@
 import type { ReactNode } from "react";
 import { motion } from "motion/react";
-import { ClipboardList, Inbox, ListTodo, Music, Pause, Play, Quote, RotateCcw, SkipBack, SkipForward, Timer } from "lucide-react";
+import {
+  BarChart3,
+  ClipboardList,
+  Inbox,
+  ListTodo,
+  Music,
+  Pause,
+  Play,
+  Quote,
+  RotateCcw,
+  SkipBack,
+  SkipForward,
+  Timer,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { T } from "../../lib/T";
 import { clamp, formatClock } from "../../lib/spring";
 import { Cover, Equalizer } from "./Compact";
-import { FOCUS_CUT, FOCUS_TOTAL, LYRICS, PALETTE, TRACK_LENGTH, lyricAt, type Module } from "./spec";
+import { FOCUS_CUT, FOCUS_TOTAL, LYRICS, PALETTE, TRACK_LENGTH, lyricAt, type NotchTabKey } from "./spec";
 
-type Tab = Extract<Module, "focus" | "music" | "pocket" | "clip" | "tasks">;
-
-const TABS: Record<Tab, { icon: LucideIcon; label: string }> = {
+const TABS: Record<NotchTabKey, { icon: LucideIcon; label: string }> = {
   focus: { icon: Timer, label: "Focus" },
-  music: { icon: Music, label: "Music" },
+  time: { icon: BarChart3, label: "Time" },
   pocket: { icon: Inbox, label: "Pocket" },
   clip: { icon: ClipboardList, label: "Clip" },
   tasks: { icon: ListTodo, label: "Tasks" },
+  music: { icon: Music, label: "Music" },
 };
 
-const TAB_KEYS = Object.keys(TABS) as Tab[];
+const TAB_KEYS: NotchTabKey[] = ["focus", "time", "pocket", "clip", "tasks", "music"];
 
-export function NotchTabs({ active }: { active: Tab }) {
+export function NotchTabs({
+  active,
+  onSelect,
+}: {
+  active: NotchTabKey;
+  onSelect?: (tab: NotchTabKey) => void;
+}) {
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-white/[0.08] p-[3px]" aria-hidden="true">
+    <div className="flex items-center gap-0.5 rounded-full bg-white/[0.08] p-[3px]" role="tablist" aria-label="Notch tabs">
       {TAB_KEYS.map((tab) => {
         const { icon: Icon, label } = TABS[tab];
         const on = tab === active;
+        if (onSelect) {
+          return (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => onSelect(tab)}
+              className={`inline-flex h-[18px] items-center gap-1 rounded-full px-2 text-[11px] font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff] ${
+                on ? "bg-white/[0.18] text-[#f5f5f7]" : "text-[#a8abb2] hover:text-[#f5f5f7]"
+              }`}
+            >
+              <Icon size={11} strokeWidth={2.1} aria-hidden="true" />
+              {on ? label : <span className="sr-only">{label}</span>}
+            </button>
+          );
+        }
         return (
           <span
             key={tab}
-            className={`inline-flex h-[18px] items-center gap-1.5 rounded-full px-2 text-[12px] font-semibold ${
-              on ? "bg-white/[0.16] text-[#f5f5f7]" : "text-[#a8abb2]"
+            className={`inline-flex h-[18px] items-center gap-1 rounded-full px-2 text-[11px] font-semibold ${
+              on ? "bg-white/[0.18] text-[#f5f5f7]" : "text-[#a8abb2]"
             }`}
           >
-            <Icon size={12} strokeWidth={2} />
+            <Icon size={11} strokeWidth={2.1} aria-hidden="true" />
             {on ? label : null}
           </span>
         );
@@ -41,19 +76,50 @@ export function NotchTabs({ active }: { active: Tab }) {
   );
 }
 
-export function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "danger" | "positive" }) {
+export function Pill({
+  children,
+  tone = "neutral",
+  onClick,
+}: {
+  children: ReactNode;
+  tone?: "neutral" | "danger" | "positive";
+  onClick?: () => void;
+}) {
   const toneClass =
-    tone === "danger" ? "bg-[#ff453a]/25 text-[#ff8a82]" : tone === "positive" ? "bg-white/[0.08] text-[#f5f5f7]" : "bg-white/[0.12] text-[#f5f5f7]";
-  return (
-    <span className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-semibold ${toneClass}`}>{children}</span>
-  );
+    tone === "danger"
+      ? "bg-[#ff453a]/25 text-[#ff8a82] hover:bg-[#ff453a]/35"
+      : tone === "positive"
+        ? "bg-white/[0.1] text-[#f5f5f7] hover:bg-white/[0.16]"
+        : "bg-white/[0.12] text-[#f5f5f7] hover:bg-white/[0.18]";
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff] ${toneClass}`}
+      >
+        {children}
+      </button>
+    );
+  }
+  return <span className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-semibold ${toneClass}`}>{children}</span>;
 }
 
-export function PanelFrame({ tab, actions, children }: { tab: Tab; actions?: ReactNode; children: ReactNode }) {
+export function PanelFrame({
+  tab,
+  onSelectTab,
+  actions,
+  children,
+}: {
+  tab: NotchTabKey;
+  onSelectTab?: (tab: NotchTabKey) => void;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <div className="flex h-full flex-col px-4 pt-[10px] pb-3">
+    <div className="flex h-full flex-col px-4 pt-[10px] pb-3 text-[#f5f5f7]">
       <div className="flex h-6 shrink-0 items-center justify-between gap-2">
-        <NotchTabs active={tab} />
+        <NotchTabs active={tab} onSelect={onSelectTab} />
         {actions ? <div className="flex items-center gap-1.5">{actions}</div> : null}
       </div>
       <div className="mt-[6px] flex min-h-0 flex-1 flex-col">{children}</div>
@@ -94,36 +160,79 @@ function Tomato({ size }: { size: number }) {
   );
 }
 
+export type FocusMode = "pomo" | "timer" | "watch";
+
 export function FocusPanel({
   remaining,
   running,
   onToggle,
   onReset,
   onSkip,
+  onSelectTab,
   total = FOCUS_TOTAL,
+  mode = "pomo",
+  onModeChange,
+  activeTask,
 }: {
   remaining: number;
   running: boolean;
   onToggle: () => void;
   onReset: () => void;
   onSkip: () => void;
+  onSelectTab?: (tab: NotchTabKey) => void;
   total?: number;
+  mode?: FocusMode;
+  onModeChange?: (mode: FocusMode) => void;
+  activeTask?: [string, string] | null;
 }) {
-  const urgent = remaining <= FOCUS_CUT;
-  const fraction = (total - remaining) / total;
+  const urgent = mode !== "watch" && remaining <= FOCUS_CUT;
+  const fraction = mode === "watch" ? ((remaining % 60) / 60) : (total - remaining) / Math.max(1, total);
+  const accent = mode === "pomo" ? PALETTE.focus : "#f5f5f7";
+
   return (
-    <PanelFrame tab="focus">
+    <PanelFrame
+      tab="focus"
+      onSelectTab={onSelectTab}
+      actions={
+        onModeChange ? (
+          <div className="flex items-center rounded-full bg-white/[0.08] p-[2px]" role="group" aria-label="Focus mode">
+            {(["pomo", "timer", "watch"] as FocusMode[]).map((item) => (
+              <button
+                key={item}
+                type="button"
+                aria-pressed={mode === item}
+                onClick={() => onModeChange(item)}
+                className={`h-[18px] rounded-full px-1.5 text-[10px] font-semibold capitalize transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff] ${
+                  mode === item ? "bg-white/[0.18] text-[#f5f5f7]" : "text-[#a8abb2] hover:text-[#f5f5f7]"
+                }`}
+              >
+                {item === "pomo" ? "Pomo" : item === "timer" ? "Timer" : "Watch"}
+              </button>
+            ))}
+          </div>
+        ) : null
+      }
+    >
       <div className="flex h-full flex-col justify-between">
         <div className="flex items-center gap-3">
-          <span className="grid size-12 shrink-0 place-items-center rounded-[14px] bg-[#ff9230]/15">
-            <Tomato size={28} />
+          <span
+            className="grid size-12 shrink-0 place-items-center rounded-[14px]"
+            style={{ background: mode === "pomo" ? "rgb(255 146 48 / 0.16)" : "rgb(255 255 255 / 0.1)" }}
+          >
+            {mode === "pomo" ? <Tomato size={28} /> : <Timer size={22} strokeWidth={1.9} className="text-[#f5f5f7]" aria-hidden="true" />}
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[30px] leading-none font-semibold tracking-[-0.02em] tabular-nums" style={{ color: urgent ? PALETTE.urgent : PALETTE.ink }}>
               {formatClock(remaining)}
             </p>
             <p className="mt-1.5 truncate text-[11px] text-[#a8abb2]">
-              <T id="Fokus dalam · selesai 12:48" en="Deep focus · ends 12:48" />
+              {activeTask ? (
+                <T id={activeTask[0]} en={activeTask[1]} />
+              ) : mode === "watch" ? (
+                <T id="Stopwatch aktif" en="Stopwatch running" />
+              ) : (
+                <T id="Fokus dalam · selesai 12:48" en="Deep focus · ends 12:48" />
+              )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -133,17 +242,18 @@ export function FocusPanel({
             <button
               type="button"
               onClick={onToggle}
-              className={`grid size-10 place-items-center rounded-full bg-[#ff9230] text-black transition-opacity focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
-                running ? "" : "opacity-55"
+              className={`grid size-10 place-items-center rounded-full text-black transition-opacity focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] ${
+                running ? "" : "opacity-60"
               }`}
+              style={{ background: accent }}
             >
-              {running && remaining > 0 ? (
+              {running && (mode === "watch" || remaining > 0) ? (
                 <Pause size={15} fill="currentColor" aria-hidden="true" />
               ) : (
                 <Play size={15} fill="currentColor" aria-hidden="true" />
               )}
               <span className="sr-only">
-                {running && remaining > 0 ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}
+                {running ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}
               </span>
             </button>
             <IconButton label={["Lewati", "Skip"]} onClick={onSkip}>
@@ -157,30 +267,18 @@ export function FocusPanel({
               <span key={index} className="relative h-1 flex-1 overflow-hidden rounded-full bg-white/[0.14]">
                 <span
                   className="absolute inset-y-0 left-0 rounded-full"
-                  style={{ width: `${clamp(fraction * 4 - index, 0, 1) * 100}%`, background: PALETTE.focus }}
+                  style={{ width: `${clamp(fraction * 4 - index, 0, 1) * 100}%`, background: accent }}
                 />
               </span>
             ))}
           </div>
           <div className="mt-1.5 flex justify-between text-[10px] text-[#a8abb2] tabular-nums">
-            <span>
-              <T id="Mulai 12:23" en="Started 12:23" />
-            </span>
-            <span>
-              <T id="Istirahat 12:48" en="Next break 12:48" />
-            </span>
+            <span><T id="Mulai 12:23" en="Started 12:23" /></span>
+            <span><T id="Istirahat 12:48" en="Next break 12:48" /></span>
           </div>
         </div>
       </div>
     </PanelFrame>
-  );
-}
-
-function LyricsToggle({ on }: { on: boolean }) {
-  return (
-    <span className={`grid size-6 place-items-center rounded-full ${on ? "bg-white/[0.16] text-[#f5f5f7]" : "text-[#a8abb2]"}`} aria-hidden="true">
-      <Quote size={12} fill={on ? "currentColor" : "none"} strokeWidth={2} />
-    </span>
   );
 }
 
@@ -206,7 +304,7 @@ function LyricsCard({ index, fraction, reduced }: { index: number; fraction: num
               initial={reduced ? false : { y: 6, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
               transition={{ duration: 0.22 }}
-              className={`flex h-[30px] items-center truncate ${active ? "text-[16px] font-bold" : "text-[13px] text-[#a8abb2]"}`}
+              className={`flex h-[30px] items-center truncate ${active ? "text-[15.5px] font-bold" : "text-[13px] text-[#a8abb2]"}`}
               style={
                 active
                   ? {
@@ -235,6 +333,9 @@ export function MusicPanel({
   onToggle,
   onPrev,
   onNext,
+  onToggleLyrics,
+  onSeek,
+  onSelectTab,
 }: {
   playing: boolean;
   elapsed: number;
@@ -243,19 +344,41 @@ export function MusicPanel({
   onToggle: () => void;
   onPrev: () => void;
   onNext: () => void;
+  onToggleLyrics?: () => void;
+  onSeek?: (seconds: number) => void;
+  onSelectTab?: (tab: NotchTabKey) => void;
 }) {
   const { index, fraction } = lyricAt(elapsed);
   const position = clamp(elapsed / TRACK_LENGTH, 0, 1);
   const remain = Math.max(0, TRACK_LENGTH - Math.floor(elapsed));
   return (
-    <PanelFrame tab="music" actions={<LyricsToggle on={lyricsOn} />}>
+    <PanelFrame
+      tab="music"
+      onSelectTab={onSelectTab}
+      actions={
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10.5px] font-medium text-[#a8abb2]">Spotify</span>
+          <button
+            type="button"
+            aria-pressed={lyricsOn}
+            onClick={onToggleLyrics}
+            className={`grid size-6 place-items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff] ${
+              lyricsOn ? "bg-white/[0.18] text-[#f5f5f7]" : "text-[#a8abb2] hover:bg-white/10 hover:text-[#f5f5f7]"
+            }`}
+          >
+            <Quote size={12} fill={lyricsOn ? "currentColor" : "none"} strokeWidth={2} aria-hidden="true" />
+            <span className="sr-only"><T id="Tampilkan lirik" en="Toggle lyrics" /></span>
+          </button>
+        </div>
+      }
+    >
       <div className="flex h-full flex-col justify-between gap-2.5">
         <div className="flex items-center gap-3">
           <Cover size={48} dim={!playing} radius={0.25} />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[15px] leading-tight font-semibold">Lampu Kota</p>
             <p className="truncate text-[11px] text-[#a8abb2]">
-              <T id={playing ? "Data demo · Browser" : "Dijeda · Data demo"} en={playing ? "Demo data · Browser" : "Paused · Demo data"} />
+              <T id={playing ? "Hujan Sore · Akustik" : "Dijeda · Hujan Sore"} en={playing ? "Hujan Sore · Acoustic" : "Paused · Hujan Sore"} />
             </p>
           </div>
           <Equalizer playing={playing} color={PALETTE.cover} reduced={reduced} />
@@ -279,10 +402,27 @@ export function MusicPanel({
         </div>
         {lyricsOn ? <LyricsCard index={index} fraction={fraction} reduced={reduced} /> : null}
         <div>
-          <div className="h-1 w-full overflow-hidden rounded-full bg-white/[0.15]">
-            <div className="h-full rounded-full" style={{ width: `${position * 100}%`, background: PALETTE.cover }} />
-          </div>
-          <div className="mt-1.5 flex justify-between text-[10px] text-[#a8abb2] tabular-nums">
+          <button
+            type="button"
+            aria-label="Seek track"
+            onClick={(event) => {
+              if (!onSeek) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+              onSeek(ratio * TRACK_LENGTH);
+            }}
+            className="group relative flex h-4 w-full items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff]"
+          >
+            <span className="relative h-1 w-full overflow-hidden rounded-full bg-white/[0.16]">
+              <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${position * 100}%`, background: PALETTE.cover }} />
+            </span>
+            <span
+              className="pointer-events-none absolute size-2.5 -translate-x-1/2 rounded-full bg-white opacity-0 transition-opacity group-hover:opacity-100"
+              style={{ left: `${position * 100}%` }}
+              aria-hidden="true"
+            />
+          </button>
+          <div className="flex justify-between text-[10px] text-[#a8abb2] tabular-nums">
             <span>{formatClock(Math.floor(elapsed))}</span>
             <span>-{formatClock(remain)}</span>
           </div>

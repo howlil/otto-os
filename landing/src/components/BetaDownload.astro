@@ -3,18 +3,17 @@ import { Download } from "lucide-astro";
 import { T } from "./lib/T";
 ---
 
-<div class="flex flex-col items-start gap-3">
+<div class="flex flex-col items-center gap-4">
   <button
     type="button"
     data-beta-download
-    class="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-accent px-6 text-[15px] font-medium text-white transition-colors duration-200 hover:bg-accent-hover focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
+    class="inline-flex h-11 items-center justify-center gap-2 whitespace-nowrap rounded-full surface-logo px-6 text-[16px] font-medium text-white transition-[filter] duration-200 hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
   >
     <Download size={18} strokeWidth={1.8} aria-hidden="true" />
     <span data-beta-label><T id="Unduh Otto OS" en="Download Otto OS" /></span>
   </button>
-  <p role="status" aria-live="polite" class="text-sm text-muted" data-beta-status>
-    <T id="Memeriksa rilis terbaru…" en="Checking the latest release…" />
-  </p>
+  <div class="flex min-h-9 items-center justify-center">
+    <p role="status" aria-live="polite" class="text-sm text-muted" data-beta-status><span class="l-id"></span><span class="l-en"></span></p>  </div>
 </div>
 
 <script>
@@ -32,8 +31,14 @@ import { T } from "./lib/T";
     prerelease?: boolean;
   };
 
+  type InstallerAsset = {
+    name: string;
+    browser_download_url: string;
+    download_count: number;
+  };
+
   const RELEASE_API = "/api/beta-downloads";
-  const LATEST_RELEASE_API = "https://api.github.com/repos/howlil/otto-os/releases/latest";
+  const RELEASES_API = "https://api.github.com/repos/howlil/otto-os/releases?per_page=100";
   const DOWNLOAD_PREFIX = "https://github.com/howlil/otto-os/releases/download/";
   const INSTALLER_NAME = /^otto-os-setup-\d+(?:\.\d+)*-x64\.exe$/i;
   const idFormat = new Intl.NumberFormat("id-ID");
@@ -62,6 +67,17 @@ import { T } from "./lib/T";
     return url.startsWith(DOWNLOAD_PREFIX);
   }
 
+  function isInstallerAsset(value: unknown): value is InstallerAsset {
+    return (
+      isRecord(value) &&
+      typeof value.name === "string" &&
+      INSTALLER_NAME.test(value.name) &&
+      typeof value.browser_download_url === "string" &&
+      Number.isInteger(value.download_count) &&
+      Number(value.download_count) >= 0
+    );
+  }
+
   async function fetchFromApi(): Promise<Release | null> {
     try {
       const response = await fetch(RELEASE_API, { headers: { Accept: "application/json" } });
@@ -82,19 +98,32 @@ import { T } from "./lib/T";
 
   async function fetchFromGitHub(): Promise<Release | null> {
     try {
-      const response = await fetch(LATEST_RELEASE_API, { headers: { Accept: "application/vnd.github+json" } });
+      const response = await fetch(RELEASES_API, { headers: { Accept: "application/vnd.github+json" } });
       if (!response.ok) return null;
-      const release: unknown = await response.json();
-      if (!isRecord(release) || typeof release.tag_name !== "string" || !Array.isArray(release.assets)) return null;
-      const installer = release.assets.find(
-        (asset: unknown) => isRecord(asset) && typeof asset.name === "string" && INSTALLER_NAME.test(asset.name),
+      const payload: unknown = await response.json();
+      if (!Array.isArray(payload)) return null;
+      const releases = payload.filter(
+        (release): release is Record<string, unknown> =>
+          isRecord(release) && release.draft !== true && typeof release.tag_name === "string" && Array.isArray(release.assets),
       );
-      const url = isRecord(installer) && typeof installer.browser_download_url === "string" ? installer.browser_download_url : null;
+      const installersOf = (release: Record<string, unknown>) => (release.assets as unknown[]).filter(isInstallerAsset);
+      const downloads = releases.reduce(
+        (total, release) => total + installersOf(release).reduce((sum, asset) => sum + asset.download_count, 0),
+        0,
+      );
+      const latest = [
+        ...releases.filter((release) => release.prerelease !== true),
+        ...releases.filter((release) => release.prerelease === true),
+      ].find((release) => installersOf(release).some((asset) => isInstallerUrl(asset.browser_download_url)));
+      const installer = latest
+        ? installersOf(latest).find((asset) => isInstallerUrl(asset.browser_download_url))
+        : undefined;
+      const incomplete = /\brel="next"/.test(response.headers.get("link") ?? "");
       return {
-        version: release.tag_name,
-        downloadUrl: url && isInstallerUrl(url) ? url : null,
-        downloads: null,
-        prerelease: release.prerelease === true,
+        version: latest && installer ? String(latest.tag_name) : null,
+        downloadUrl: installer?.browser_download_url ?? null,
+        downloads: incomplete ? null : downloads,
+        prerelease: latest?.prerelease === true,
       };
     } catch {
       return null;
@@ -119,11 +148,14 @@ import { T } from "./lib/T";
   }
 
   function instances() {
-    return [...document.querySelectorAll<HTMLButtonElement>("[data-beta-download]")].map((button) => ({
-      button,
-      label: button.querySelector("[data-beta-label]"),
-      status: button.parentElement?.querySelector("[data-beta-status]") ?? null,
-    }));
+    return [...document.querySelectorAll<HTMLButtonElement>("[data-beta-download]")].map((button) => {
+      const wrapper = button.parentElement;
+      return {
+        button,
+        label: button.querySelector("[data-beta-label]"),
+        status: wrapper?.querySelector("[data-beta-status]") ?? null,
+      };
+    });
   }
 
   function setBilingual(element: Element | null, id: string, en: string) {
@@ -134,22 +166,34 @@ import { T } from "./lib/T";
     if (enSpan) enSpan.textContent = en;
   }
 
+  function showCount(element: Element | null, count: number | null) {
+    if (!element) return;
+    (element as HTMLElement).hidden = count === null;
+    if (count === null) return;
+    const idCount = element.querySelector("[data-count-id]");
+    const enCount = element.querySelector("[data-count-en]");
+    if (idCount) idCount.textContent = idFormat.format(count);
+    if (enCount) enCount.textContent = enFormat.format(count);
+  }
+
   function render() {
     const release = current;
+    const count = document.querySelector("[data-beta-count]");
     instances().forEach(({ label, status }) => {
       if (release?.downloadUrl) {
         const kind = release.prerelease ? "Beta " : "";
         const version = release.version ?? "";
         setBilingual(label, `Unduh Otto OS ${kind}${version}`, `Download Otto OS ${kind}${version}`);
-        const countId = release.downloads === null ? "" : `${idFormat.format(release.downloads)} unduhan · `;
-        const countEn = release.downloads === null ? "" : `${enFormat.format(release.downloads)} downloads · `;
-        setBilingual(status, `${countId}Windows 11 x64`, `${countEn}Windows 11 x64`);
+        setBilingual(status, "", "");
+        showCount(count, release.downloads);
       } else if (release) {
         setBilingual(label, "Installer belum tersedia", "Installer not available yet");
         setBilingual(status, "Rilis belum diterbitkan.", "No release published yet.");
+        showCount(count, null);
       } else {
         setBilingual(label, "Unduh Otto OS", "Download Otto OS");
         setBilingual(status, "Unduhan belum bisa disiapkan. Klik untuk mencoba lagi.", "The download could not be prepared. Click to try again.");
+        showCount(count, null);
       }
     });
   }

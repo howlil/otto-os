@@ -33,7 +33,7 @@ export function Switch({
       }`}
     >
       <motion.span
-        className="block size-[18px] rounded-full bg-white shadow-[0_1px_2px_rgb(0_0_0/0.25)]"
+        className="block size-[18px] rounded-full border border-black/[0.08] bg-white"
         animate={{ x: checked ? 16 : 0 }}
         transition={SPRING}
       />

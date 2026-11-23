@@ -1,0 +1,22 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = "" } = Astro.props;
+---
+
+<div class={`relative mx-auto grid size-[220px] place-items-center sm:size-[260px] ${className}`} aria-hidden="true">
+  <span class="absolute inset-0 rounded-full border border-dashed border-line-strong"></span>
+  <span class="absolute inset-[16%] rounded-full border border-line"></span>
+  <span class="orbit-spin absolute inset-0">
+    <span class="absolute top-0 left-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent"></span>
+  </span>
+  <span class="orbit-spin-reverse absolute inset-[16%]">
+    <span class="absolute bottom-0 left-[14%] size-2 translate-y-1/2 rounded-full bg-[#30d158]"></span>
+    <span class="absolute top-[18%] right-0 size-2 translate-x-1/2 rounded-full bg-[#ff9230]"></span>
+  </span>
+  <span class="relative grid size-[96px] place-items-center rounded-[34%] border border-line bg-paper sm:size-[112px]">
+    <img src="/favicon.svg" width="60" height="60" alt="" decoding="async" class="size-[60px] sm:size-[68px]" />
+  </span>
+</div>

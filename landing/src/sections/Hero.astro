@@ -1,29 +1,39 @@
 ---
 import BetaDownload from "../components/BetaDownload.astro";
 import { T } from "../components/lib/T";
-import { HeroStack } from "../components/islands/HeroStack";
+import { HeroDesktop } from "../components/islands/HeroDesktop";
+import { Download } from "lucide-astro";
 ---
 
 <section class="relative">
-  <div
-    class="mx-auto grid w-full max-w-[1200px] items-center gap-12 px-5 pt-12 pb-20 sm:px-8 lg:min-h-[calc(100svh-80px)] lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)] lg:gap-10 lg:pt-8 lg:pb-24"
-  >
-    <div class="max-w-[520px]">
-      <h1 class="text-[clamp(2.75rem,6vw,5rem)] leading-[1.02] font-semibold tracking-[-0.035em] text-ink text-balance">
-        <T id="Windows 11, dengan ritme macOS." en="Windows 11, with the rhythm of macOS." />
-      </h1>
-      <p class="mt-6 max-w-[440px] text-lg leading-[1.55] text-ink-soft text-pretty">
-        <T
-          id="Bar atas, Dynamic Island, dan Dock yang bergerak sebagai satu sistem. Native, lokal, tanpa telemetri."
-          en="A top bar, Dynamic Island and Dock that move as one system. Native, local, no telemetry."
-        />
-      </p>
-      <div class="mt-9">
-        <BetaDownload />
+  <div class="mx-auto flex w-full max-w-[1200px] flex-col items-center px-5 pt-12 pb-12 text-center sm:px-8 sm:pt-16 sm:pb-16">
+    <div class="flex h-9 items-center justify-center">
+      <div data-beta-count hidden>
+        <p class="relative inline-flex h-9 items-center gap-2.5 overflow-hidden rounded-full border border-line bg-paper py-1 pr-4 pl-1.5 text-[14px] text-ink-soft tabular-nums">
+          <span class="grid size-7 place-items-center rounded-full bg-ink text-page" aria-hidden="true"><Download size={13} strokeWidth={2.4} /></span>
+          <span class="text-[15px] font-semibold text-ink"><span class="l-id" data-count-id></span><span class="l-en" data-count-en></span></span>
+          <T id="unduhan" en="downloads" />
+          <span class="badge-sheen pointer-events-none absolute inset-y-0 left-0 w-2/5" aria-hidden="true"></span>
+        </p>
       </div>
     </div>
-    <div>
-      <HeroStack client:load />
+
+    <h1 class="mt-6 text-[clamp(2.5rem,5.4vw,3.75rem)] leading-[1.04] font-medium tracking-[-0.035em] text-ink">
+      <span class="block"><T id="Layar yang diam," en="A still screen," /></span>
+      <span class="block"><T id="kerjamu yang jalan." en="your work in motion." /></span>
+    </h1>
+    <p class="mt-4 max-w-[540px] text-[17px] leading-[1.5] text-ink-soft text-balance">
+      <T
+        id="Bar atas dan dock menempel di tepi layar. Sisanya untuk kerjamu."
+        en="The top bar and dock hug the screen edges. Everything else is yours."
+      />
+    </p>
+    <div class="mt-7">
+      <BetaDownload />
+    </div>
+
+    <div class="mt-10 w-full sm:mt-12">
+      <HeroDesktop client:load />
     </div>
   </div>
 </section>

@@ -3,166 +3,186 @@ import Base from "../layouts/Base.astro";
 import Nav from "../components/Nav.astro";
 import Footer from "../components/Footer.astro";
 import BetaDownload from "../components/BetaDownload.astro";
+import AgentStack from "../components/ui/AgentStack.astro";
 import { T } from "../components/lib/T";
 import Hero from "../sections/Hero.astro";
-import { PartsStory } from "../components/islands/PartsStory";
-import { BarToggle } from "../components/islands/BarToggle";
 import { IslandStage } from "../components/islands/IslandStage";
+import { TopBarStudio } from "../components/islands/TopBarStudio";
 import { DockGenie } from "../components/islands/DockGenie";
 import { FocusShowcase } from "../components/islands/FocusShowcase";
-import { SettingsScene } from "../components/islands/SettingsScene";
+import { AppearanceAtelier } from "../components/islands/AppearanceAtelier";
+import { ModuleRack } from "../components/islands/ModuleRack";
 import { Spotlight } from "../components/islands/Spotlight";
 
-const headingClass =
-  "text-[clamp(2.25rem,4.4vw,3.5rem)] leading-[1.04] font-semibold tracking-[-0.03em] text-balance";
-const leadClass = "text-lg leading-[1.6] text-pretty";
-const sectionClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
+const containerClass = "mx-auto w-full max-w-[1200px] px-5 sm:px-8";
+const sectionClass = `${containerClass} py-20 sm:py-28`;
+const actHeading = "text-[clamp(2.25rem,4.4vw,3.5rem)] leading-[1.04] font-medium tracking-[-0.035em] text-balance";
+const actLead = "mx-auto mt-4 max-w-[540px] text-[17px] leading-[1.5] text-pretty";
+const actHead = "mx-auto max-w-[640px] text-center";
+const barRow = "flex items-start justify-between gap-6 border-b border-line py-4";
+const barRowTitle = "text-[15px] font-medium text-ink";
+const barRowText = "max-w-[220px] text-right text-[13.5px] leading-[1.45] text-muted";
 ---
 
 <Base
-  title="Otto OS — Bar atas, Dynamic Island, dan Dock untuk Windows 11"
-  description="Shell desktop native untuk Windows 11 dengan bar atas, Dynamic Island, Dock, dan efek Genie. Unduh langsung dari GitHub Releases."
+  title="Otto OS — Bar atas, Dynamic Island, Dock, dan Liquid Glass untuk Windows 11"
+  description="Shell desktop native Rust untuk Windows 11 dengan bar atas, Dynamic Island, Screen Time, Dock Genie, Focus Shield, dan material Liquid Glass."
 >
   <Nav />
   <main id="main-content" class="flex-1">
     <Hero />
 
-    <section id="bagian" class="scroll-mt-20 border-t border-line">
-      <div class={`${sectionClass} pt-24 sm:pt-32`}>
-        <h2 class={`max-w-[640px] ${headingClass}`}>
-          <T id="Setiap bagian punya tugasnya." en="Every part has its job." />
-        </h2>
-      </div>
-      <PartsStory client:visible />
-    </section>
-
-    <section id="bar" class="scroll-mt-20 border-t border-line">
-      <div class={`${sectionClass} py-24 sm:py-32`}>
-        <div class="max-w-[640px]">
-          <h2 class={headingClass}>
-            <T id="Bar atas bisa berdiri sendiri." en="The top bar can stand alone." />
-          </h2>
-          <p class={`mt-5 text-ink-soft ${leadClass}`}>
-            <T
-              id="Matikan bar atas. Notch, Control Center, dan Spotlight tetap aktif."
-              en="Turn the top bar off. The notch, Control Center and Spotlight stay active."
-            />
-          </p>
-        </div>
-        <div class="mt-14 sm:mt-16">
-          <BarToggle client:visible />
-        </div>
-      </div>
-    </section>
-
-    <section id="notch" class="scroll-mt-20 on-stage bg-stage text-stage-ink">
-      <div class={`${sectionClass} pt-24 sm:pt-32`}>
-        <div class="max-w-[640px]">
-          <h2 class={headingClass}>
-            <T id="Satu notch, semua modulnya." en="One notch, every module." />
-          </h2>
-          <p class={`mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
-            <T
-              id="Gulir untuk melihat setiap modul. Klik namanya untuk langsung melompat."
-              en="Scroll to see each module. Click a name to jump straight there."
-            />
-          </p>
-        </div>
-      </div>
+    <section id="notch" class="scroll-mt-16 on-stage bg-stage text-stage-ink">
       <IslandStage client:visible />
     </section>
 
-    <section class="border-t border-line">
-      <div class={`${sectionClass} py-24 sm:py-32`}>
-        <div class="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-          <h2 class={`max-w-[560px] ${headingClass}`}>
-            <T id="Minimize masuk ke Dock." en="Minimize into the Dock." />
+    <section id="bar" class="scroll-mt-16 border-t border-line bg-page">
+      <div class={sectionClass}>
+        <div class="grid items-center gap-12 lg:grid-cols-[minmax(0,0.84fr)_minmax(0,1.16fr)] lg:gap-16">
+          <div data-reveal>
+            <h2 class={`${actHeading} text-left text-ink`}>
+              <T id="Bar atas yang tahu kapan minggir." en="A top bar that knows when to step aside." />
+            </h2>
+            <p class="mt-4 max-w-[440px] text-[17px] leading-[1.5] text-pretty text-ink-soft">
+              <T
+                id="Sembunyi saat tidak dibutuhkan. Kalender dan Notification Center tetap satu klik jauhnya."
+                en="It hides when you don't need it. The calendar and Notification Center stay one click away."
+              />
+            </p>
+            <ul class="mt-9 border-t border-line">
+              <li class={barRow}>
+                <span class={barRowTitle}><T id="Kursor di tepi atas" en="Pointer at the top edge" /></span>
+                <span class={barRowText}><T id="Bar muncul, lalu menyingkir saat kursor pergi." en="The bar appears, then steps aside." /></span>
+              </li>
+              <li class={barRow}>
+                <span class={barRowTitle}><T id="Klik jam" en="Click the clock" /></span>
+                <span class={barRowText}><T id="Kalender bulan ini terbuka tepat di bawah bar." en="This month's calendar opens right beneath the bar." /></span>
+              </li>
+              <li class={barRow}>
+                <span class={barRowTitle}><T id="Klik lonceng" en="Click the bell" /></span>
+                <span class={barRowText}><T id="Notification Center dengan kartu yang ringkas." en="Notification Center with compact alert cards." /></span>
+              </li>
+            </ul>
+          </div>
+          <div class="min-w-0">
+            <TopBarStudio client:visible />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="dock" class="scroll-mt-16 border-t border-line bg-paper">
+      <div class={sectionClass}>
+        <div data-reveal class={actHead}>
+          <h2 class={`${actHeading} text-ink`}>
+            <T id="Genie ke Dock." en="Genie into the Dock." />
           </h2>
-          <p class={`max-w-[420px] text-ink-soft ${leadClass}`}>
+          <p class={`${actLead} text-ink-soft`}>
             <T
-              id="Animasi Genie untuk minimize dan restore, dengan tombol caption Windows 11."
-              en="Genie animations for minimize and restore, with Windows 11 caption buttons."
+              id="Jendela meluncur ke ikonnya di Dock lewat animasi Genie. Dock membesar mengikuti kursor."
+              en="A window warps into its icon in the Dock with the Genie animation. The Dock magnifies under your pointer."
             />
           </p>
         </div>
-        <div class="mt-14 sm:mt-16">
+        <div class="mt-10 sm:mt-12">
           <DockGenie client:visible />
         </div>
       </div>
     </section>
 
-    <section id="fokus" class="scroll-mt-20 on-stage bg-stage text-stage-ink">
-      <div class={`${sectionClass} pt-24 sm:pt-32`}>
-        <div class="max-w-[640px]">
-          <h2 class={headingClass}>
-            <T id="Focus: timer, blokir, dan waktu layar." en="Focus: timer, blocking and screen time." />
+    <section id="fokus" class="scroll-mt-16 on-stage bg-stage text-stage-ink">
+      <div class={sectionClass}>
+        <div data-reveal class={actHead}>
+          <h2 class={`${actHeading} text-stage-ink`}>
+            <T id="Focus yang melindungi, bukan memaksa." en="Focus that protects, never forces." />
           </h2>
-          <p class={`mt-5 max-w-[560px] text-stage-muted ${leadClass}`}>
+          <p class={`${actLead} text-stage-muted`}>
             <T
-              id="Pomodoro ada di notch. Blocklist dan aktivitas Today serta 7 hari ada di halaman Focus di Otto Settings, disimpan lokal."
-              en="Pomodoro lives in the notch. The blocklist and Today and 7-day activity sit on the Focus page in Otto Settings, stored locally."
+              id="Aplikasi yang diblokir tertutup layar lembut dengan tombol Back. Tidak ada yang ditutup paksa."
+              en="Blocked apps sit behind a calm shield with a Back button. Nothing is force-closed."
             />
           </p>
         </div>
-        <div class="mt-14 pb-24 sm:mt-16 sm:pb-32">
+        <div class="mt-10 sm:mt-12">
           <FocusShowcase client:visible />
         </div>
       </div>
     </section>
 
-    <section id="kontrol" class="scroll-mt-20 border-t border-line bg-paper">
-      <div class={`${sectionClass} py-24 sm:py-32`}>
-        <div class="max-w-[640px]">
-          <h2 class={headingClass}>
-            <T id="Kontrol cepat, dan Otto Settings." en="Quick controls, and Otto Settings." />
+    <section id="tampilan" class="scroll-mt-16 border-t border-line bg-page">
+      <div class={sectionClass}>
+        <div data-reveal class={actHead}>
+          <h2 class={`${actHeading} text-ink`}>
+            <T id="Empat material. Tujuh aksen." en="Four materials. Seven accents." />
           </h2>
-          <p class={`mt-5 text-ink-soft ${leadClass}`}>
+          <p class={`${actLead} text-ink-soft`}>
             <T
-              id="Ctrl+Alt+C membuka Control Center. Ctrl+Alt+, membuka Otto Settings, jendela terpisah dengan sidebar dan 13 modul."
-              en="Ctrl+Alt+C opens Control Center. Ctrl+Alt+, opens Otto Settings, a separate window with a sidebar and 13 modules."
+              id="Liquid Glass, Frosted, Tinted, atau Solid, dengan kontras WCAG AA di setiap aksen."
+              en="Liquid Glass, Frosted, Tinted or Solid, with WCAG AA contrast across every accent."
             />
           </p>
         </div>
-        <div class="mt-14 sm:mt-16">
-          <SettingsScene client:visible />
+        <div class="mt-10 sm:mt-12">
+          <AppearanceAtelier client:visible />
         </div>
       </div>
     </section>
 
-    <section class="on-stage bg-stage text-stage-ink">
-      <div class={`${sectionClass} py-24 text-center sm:py-32`}>
-        <h2 class={`mx-auto max-w-[720px] ${headingClass}`}>
-          <T id="Cari aplikasi di Spotlight." en="Find apps in Spotlight." />
-        </h2>
-        <p class={`mx-auto mt-5 max-w-[540px] text-stage-muted ${leadClass}`}>
-          <T
-            id="Pencarian aplikasi lokal. Ctrl+Alt+Space membukanya. Hanya mencari aplikasi yang terpasang, bukan file atau web."
-            en="Local app search. Ctrl+Alt+Space opens it. Search covers installed apps only, not files or the web."
-          />
-        </p>
-        <div class="mt-14 sm:mt-16">
+    <section id="modul" class="scroll-mt-16 border-t border-line bg-paper">
+      <div class={sectionClass}>
+        <div data-reveal class={actHead}>
+          <h2 class={`${actHeading} text-ink`}>
+            <T id="13 modul. Pasang atau lepas." en="13 modules. Plug in or out." />
+          </h2>
+          <p class={`${actLead} text-ink-soft`}>
+            <T
+              id="Setiap fitur adalah modul yang bisa dinyalakan sendiri. Quick Capture dan Background Cleanup mulai dalam keadaan mati."
+              en="Every feature is a module you switch on its own. Quick Capture and Background Cleanup start off."
+            />
+          </p>
+        </div>
+        <div class="mt-10 sm:mt-12">
+          <ModuleRack client:visible />
+        </div>
+      </div>
+    </section>
+
+    <section id="spotlight" class="scroll-mt-16 on-stage bg-stage text-stage-ink">
+      <div class={sectionClass}>
+        <div data-reveal class={actHead}>
+          <h2 class={`${actHeading} text-stage-ink`}>
+            <T id="Cari, lalu jalankan." en="Search, then launch." />
+          </h2>
+          <p class={`${actLead} text-stage-muted`}>
+            <T
+              id="Ctrl+Alt+Space membuka aplikasi terpasang dalam daftar atau kisi."
+              en="Ctrl+Alt+Space opens your installed apps as a list or a grid."
+            />
+          </p>
+        </div>
+        <div class="mt-10 sm:mt-12">
           <Spotlight client:visible />
         </div>
       </div>
     </section>
 
-    <section id="unduh" class="scroll-mt-20 border-t border-line">
-      <div class={`${sectionClass} flex flex-col items-start py-28 sm:py-40`}>
-        <h2 class="text-[clamp(2.75rem,7vw,6rem)] leading-[0.98] font-semibold tracking-[-0.035em] text-balance">
-          <T id="Siap mencoba?" en="Ready to try it?" />
-        </h2>
-        <p class={`mt-6 max-w-[560px] text-ink-soft ${leadClass}`}>
-          <T
-            id="Installer per pengguna. Tanpa akun, tanpa telemetri."
-            en="Per-user installer. No account, no telemetry."
-          />
-        </p>
-        <div class="mt-10">
-          <BetaDownload />
+    <section id="unduh" class="scroll-mt-16 border-t border-line bg-page">
+      <div class={`${containerClass} py-20 text-center sm:py-28`}>
+        <AgentStack />
+        <div data-reveal class="mx-auto mt-10 max-w-[640px] sm:mt-12">
+          <h2 class="text-[clamp(2.5rem,5.6vw,4.5rem)] leading-[1.02] font-medium tracking-[-0.035em] text-ink text-balance">
+            <T id="Pasang di Windows 11." en="Install on Windows 11." />
+          </h2>
+          <p class={`${actLead} text-ink-soft`}>
+            <T
+              id="Tanpa akun, tanpa telemetri, tanpa Electron. Installer per pengguna tanpa UAC."
+              en="No account, no telemetry, no Electron. A per-user installer with no UAC prompt."
+            />
+          </p>
+          <div class="mt-8 flex justify-center">
+            <BetaDownload />
+          </div>
         </div>
-        <p class="mt-8 text-[14px] text-muted">
-          <T id="Windows 11 22H2 atau lebih baru · x64 · build 22621+" en="Windows 11 22H2 or later · x64 · build 22621+" />
-        </p>
       </div>
     </section>
   </main>

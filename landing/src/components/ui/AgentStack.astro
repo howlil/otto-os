@@ -1,0 +1,27 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = "" } = Astro.props;
+---
+
+<div class={`relative mx-auto h-[220px] w-[280px] sm:h-[260px] sm:w-[340px] ${className}`} aria-hidden="true">
+  <span class="absolute top-[14%] left-[4%] h-[70%] w-[46%] -rotate-[8deg] rounded-[24px] border border-line bg-paper">
+    <span class="absolute top-[22%] left-[12%] h-1.5 w-[58%] rounded-full bg-line-strong"></span>
+    <span class="absolute top-[36%] left-[12%] h-1.5 w-[36%] rounded-full bg-line"></span>
+  </span>
+  <span class="absolute top-[14%] right-[4%] h-[70%] w-[46%] rotate-[7deg] rounded-[24px] border border-line bg-paper">
+    <span class="absolute top-[22%] left-[12%] h-1.5 w-[50%] rounded-full bg-line-strong"></span>
+    <span class="absolute top-[36%] left-[12%] h-1.5 w-[30%] rounded-full bg-line"></span>
+  </span>
+  <span class="surface-logo absolute top-[6%] left-1/2 grid h-[88%] w-[50%] -translate-x-1/2 place-items-center overflow-hidden rounded-[28px] border border-paper/15">
+    <svg viewBox="246 246 532 530" class="h-auto w-[56%] text-paper" fill="currentColor" aria-hidden="true">
+      <path fill-rule="evenodd" d="M512 251C638 251 735 327 766 433C775 466 778 501 778 530C778 687 673 775 512 775C351 775 246 687 246 530C246 373 351 251 512 251ZM512 338C395 338 329 416 329 531C329 639 398 690 512 690C626 690 695 639 695 531C695 416 629 338 512 338Z"/>
+      <rect x="446" y="246" width="132" height="45" rx="22.5" style="fill: var(--color-logo-light)"/>
+      <rect x="414" y="476" width="39" height="90" rx="19.5"/>
+      <rect x="571" y="476" width="39" height="90" rx="19.5"/>
+    </svg>
+    <span class="hero-sheen pointer-events-none absolute inset-y-0 left-0 w-2/5"></span>
+  </span>
+</div>

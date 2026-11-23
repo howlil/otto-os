@@ -1,6 +1,21 @@
 import type { ReactNode } from "react";
 import { motion } from "motion/react";
-import { BatteryLow, CaseUpper, Headphones, Phone, Sun, Volume2, VolumeX, Zap } from "lucide-react";
+import {
+  BatteryLow,
+  CaseUpper,
+  Globe,
+  Headphones,
+  MicOff,
+  Moon,
+  Navigation,
+  Phone,
+  PhoneOff,
+  Sun,
+  Video,
+  Volume2,
+  VolumeX,
+  Zap,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { T } from "../../lib/T";
 import { formatClock } from "../../lib/spring";
@@ -14,6 +29,8 @@ const HUD_ICON: Record<HudGlyph, LucideIcon> = {
   bolt: Zap,
   battery: BatteryLow,
   headphones: Headphones,
+  dnd: Moon,
+  lang: Globe,
 };
 
 const HUD_TONE: Record<HudTone, string> = {
@@ -23,11 +40,16 @@ const HUD_TONE: Record<HudTone, string> = {
   muted: PALETTE.muted,
 };
 
-export function IslandShell({ width, children }: { width: number; children: ReactNode }) {
+export function IslandShell({ width, height = ISLAND.compactHeight, radius = ISLAND.compactRadius, children }: {
+  width: number;
+  height?: number;
+  radius?: number;
+  children: ReactNode;
+}) {
   return (
     <div
       className="relative overflow-hidden bg-black ring-1 ring-inset ring-white/[0.14]"
-      style={{ width, height: ISLAND.compactHeight, borderRadius: ISLAND.compactRadius }}
+      style={{ width, height, borderRadius: radius }}
     >
       {children}
     </div>
@@ -80,16 +102,25 @@ export function Equalizer({ playing, color, reduced }: { playing: boolean; color
   );
 }
 
-export function Waveform({ reduced }: { reduced: boolean }) {
+export function Waveform({ muted = false, reduced }: { muted?: boolean; reduced: boolean }) {
+  if (muted) {
+    return (
+      <span className="flex h-4 items-center gap-[4px]" aria-hidden="true">
+        {[0, 1, 2, 3, 4].map((index) => (
+          <span key={index} className="block size-[3px] rounded-full bg-[#a8abb2]" />
+        ))}
+      </span>
+    );
+  }
   return (
     <span className="flex h-4 items-center gap-[3px]" aria-hidden="true">
-      {[0.4, 0.8, 0.55, 1, 0.6, 0.9, 0.45].map((base, index) => (
+      {[0.45, 0.85, 1, 0.75, 0.5].map((base, index) => (
         <motion.span
           key={index}
           className="block h-full w-[2px] origin-center rounded-full"
           style={{ background: PALETTE.positive }}
           animate={reduced ? { scaleY: base } : { scaleY: [base, 0.3, base] }}
-          transition={reduced ? { duration: 0 } : { duration: 0.7 + index * 0.09, repeat: Infinity, ease: "easeInOut" }}
+          transition={reduced ? { duration: 0 } : { duration: 0.72 + index * 0.1, repeat: Infinity, ease: "easeInOut" }}
         />
       ))}
     </span>
@@ -138,7 +169,7 @@ export function MusicCompact({ lyric, playing, reduced }: { lyric: [string, stri
   return (
     <div className="flex h-full w-full items-center justify-between px-2.5">
       <Cover size={20} radius={0.3} dim={!playing} />
-      <span className="min-w-0 flex-1 truncate px-2 text-center text-[13px] font-medium">
+      <span className="min-w-0 flex-1 truncate px-2 text-center text-[13px] font-medium text-[#f5f5f7]">
         <T id={lyric[0]} en={lyric[1]} />
       </span>
       <span className="flex w-4 justify-end">
@@ -148,12 +179,69 @@ export function MusicCompact({ lyric, playing, reduced }: { lyric: [string, stri
   );
 }
 
-export function CallCompact({ seconds, reduced }: { seconds: number; reduced: boolean }) {
+export function CallCompact({ seconds, muted, reduced }: { seconds: number; muted: boolean; reduced: boolean }) {
   return (
     <div className="flex h-full w-full items-center justify-between px-3">
-      <Phone size={14} strokeWidth={2} color={PALETTE.positive} aria-hidden="true" />
-      <Waveform reduced={reduced} />
-      <span className="text-[13px] font-medium tabular-nums">{formatClock(seconds)}</span>
+      {muted ? (
+        <MicOff size={14} strokeWidth={2} color={PALETTE.danger} aria-hidden="true" />
+      ) : (
+        <Phone size={14} strokeWidth={2} color={PALETTE.positive} aria-hidden="true" />
+      )}
+      <Waveform muted={muted} reduced={reduced} />
+      <span className="text-[13px] font-medium text-[#f5f5f7] tabular-nums">{formatClock(seconds)}</span>
+    </div>
+  );
+}
+
+export function RingingCallCard({
+  video = true,
+  reduced,
+  onAccept,
+  onDecline,
+}: {
+  video?: boolean;
+  reduced: boolean;
+  onAccept: () => void;
+  onDecline: () => void;
+}) {
+  return (
+    <div className="flex h-full w-full items-center gap-3 px-4">
+      <div className="relative grid size-12 shrink-0 place-items-center">
+        <motion.span
+          className="absolute inset-0 rounded-full border-2 border-[#30d158]"
+          animate={reduced ? { scale: 1, opacity: 0.75 } : { scale: [1, 1.18, 1], opacity: [0.85, 0.15, 0.85] }}
+          transition={reduced ? { duration: 0 } : { duration: 1.4, repeat: Infinity, ease: "easeOut" }}
+          aria-hidden="true"
+        />
+        <span className="grid size-11 place-items-center rounded-full bg-[#1e352a] text-[15px] font-semibold text-[#f5f5f7]">
+          NA
+        </span>
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="flex items-center gap-1.5 text-[11px] font-medium text-white/60">
+          {video ? <Video size={12} strokeWidth={2} aria-hidden="true" /> : null}
+          <span>{video ? "Teams · Incoming Video Call" : "Discord · Incoming Call"}</span>
+        </p>
+        <p className="mt-0.5 truncate text-[15px] font-semibold text-white">Nadia Ardiansyah</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          onClick={onDecline}
+          className="grid size-11 place-items-center rounded-full bg-[#ff453a] text-white transition-transform hover:brightness-110 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff]"
+        >
+          <PhoneOff size={18} strokeWidth={2} aria-hidden="true" />
+          <span className="sr-only"><T id="Tolak panggilan" en="Decline call" /></span>
+        </button>
+        <button
+          type="button"
+          onClick={onAccept}
+          className="grid size-11 place-items-center rounded-full bg-[#24a148] text-white transition-transform hover:brightness-110 active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff]"
+        >
+          {video ? <Video size={18} strokeWidth={2} aria-hidden="true" /> : <Phone size={18} strokeWidth={2} aria-hidden="true" />}
+          <span className="sr-only"><T id="Terima panggilan" en="Accept call" /></span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -164,7 +252,7 @@ export function HudPill({ event }: { event: HudEvent }) {
   return (
     <div className="flex h-full w-full items-center gap-2.5 px-4">
       <Icon size={16} strokeWidth={1.9} color={tone} aria-hidden="true" />
-      <span className="w-[88px] shrink-0 truncate text-[13px] font-medium">
+      <span className="w-[104px] shrink-0 truncate text-[13px] font-medium text-[#f5f5f7]">
         <T id={event.label[0]} en={event.label[1]} />
       </span>
       {event.pill ? (
@@ -176,13 +264,21 @@ export function HudPill({ event }: { event: HudEvent }) {
             style={{ background: tone }}
             initial={{ width: 0 }}
             animate={{ width: `${(event.level ?? 0) * 100}%` }}
-            transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
           />
         </span>
       )}
-      <span className="flex w-10 shrink-0 justify-end text-[13px] font-medium tabular-nums">
+      <span className="flex w-11 shrink-0 justify-end text-[13px] font-medium text-[#f5f5f7] tabular-nums">
         {event.pill ? (
-          <span className="rounded-full bg-[#30d158]/20 px-2 py-px text-[11px] font-semibold text-[#30d158]">On</span>
+          <span
+            className="rounded-full px-2 py-px text-[11px] font-semibold"
+            style={{
+              color: event.tone === "positive" ? PALETTE.positive : PALETTE.ink,
+              background: event.tone === "positive" ? "rgb(48 209 88 / 0.2)" : "rgb(255 255 255 / 0.14)",
+            }}
+          >
+            <T id={event.pill[0]} en={event.pill[1]} />
+          </span>
         ) : event.value ? (
           <T id={event.value[0]} en={event.value[1]} />
         ) : null}
@@ -199,9 +295,28 @@ export function SecondaryFocus({ remaining }: { remaining: number }) {
   );
 }
 
-export function PrivacyDot({ kind }: { kind: "camera" | "mic" }) {
+export function SecondaryMusic({ playing, reduced }: { playing: boolean; reduced: boolean }) {
   return (
-    <div className="pointer-events-none absolute" style={{ left: 292, top: 19 }} aria-hidden="true">
+    <div className="grid size-full place-items-center">
+      {playing ? (
+        <Equalizer playing color={PALETTE.cover} reduced={reduced} />
+      ) : (
+        <Cover size={18} dim radius={0.3} />
+      )}
+    </div>
+  );
+}
+
+export function PrivacyDot({ kind, left = 312, top = 19 }: { kind: "camera" | "mic" | "location"; left?: number; top?: number }) {
+  if (kind === "location") {
+    return (
+      <div className="pointer-events-none absolute" style={{ left, top: top - 2 }} aria-hidden="true">
+        <Navigation size={10} strokeWidth={2.2} color={PALETTE.location} fill={PALETTE.location} />
+      </div>
+    );
+  }
+  return (
+    <div className="pointer-events-none absolute" style={{ left, top }} aria-hidden="true">
       <span className="block size-[6px] rounded-full" style={{ background: kind === "camera" ? PALETTE.camera : PALETTE.mic }} />
     </div>
   );
