@@ -390,6 +390,7 @@ pub(super) fn handle_taskbar_created(message: u32) -> bool {
             if let Some(tray) = host.tray_icon.as_ref() {
                 let _ = tray.re_add();
             }
+            dock::on_taskbar_created(&host.runtime);
             handled = true;
         }
     });

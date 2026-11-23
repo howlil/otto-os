@@ -1,5 +1,84 @@
-use super::SpotlightSurface;
+use super::{
+    SpotlightSurface, SpotlightToggleDecision, SpotlightToggleSource, SpotlightVisibility,
+    decide_spotlight_toggle,
+};
 use otto_core::SpotlightMode;
+
+#[test]
+fn toggle_decision_closes_matching_mode_switches_other_mode_and_absorbs_blur_race() {
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Closed,
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            false,
+        ),
+        SpotlightToggleDecision::Open
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Open(SpotlightMode::Search),
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            false,
+        ),
+        SpotlightToggleDecision::Close
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Open(SpotlightMode::Apps),
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            false,
+        ),
+        SpotlightToggleDecision::Open
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Open(SpotlightMode::Apps),
+            SpotlightMode::Search,
+            SpotlightToggleSource::Hotkey,
+            false,
+        ),
+        SpotlightToggleDecision::Close
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Closing,
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            true,
+        ),
+        SpotlightToggleDecision::IgnoreRecentDismiss
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Closed,
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            true,
+        ),
+        SpotlightToggleDecision::IgnoreRecentDismiss
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Closing,
+            SpotlightMode::Search,
+            SpotlightToggleSource::Pointer,
+            false,
+        ),
+        SpotlightToggleDecision::Open
+    );
+    assert_eq!(
+        decide_spotlight_toggle(
+            SpotlightVisibility::Closed,
+            SpotlightMode::Search,
+            SpotlightToggleSource::Hotkey,
+            true,
+        ),
+        SpotlightToggleDecision::Open
+    );
+}
 
 #[test]
 fn surface_query_edits_track_cursor_selection_and_math_result() {

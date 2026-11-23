@@ -1,6 +1,6 @@
 use super::{
-    LPARAM, LRESULT, RuntimeContext, WM_CLOSE, WM_MOUSEMOVE, WPARAM, handle_message,
-    wake_timer_only,
+    Dock, LPARAM, LRESULT, RuntimeContext, WM_CLOSE, WM_MOUSEMOVE, WPARAM, handle_message,
+    visibility::should_assert_topmost, wake_timer_only,
 };
 
 #[test]
@@ -10,6 +10,41 @@ fn wm_close_is_absorbed_without_destroying_surface() {
         handle_message(&runtime, 0, WM_CLOSE, WPARAM(0), LPARAM(0)),
         Some(LRESULT(0))
     );
+}
+
+#[test]
+fn appbar_callback_is_handled_without_panicking_when_unmounted() {
+    let runtime = RuntimeContext::new(false);
+    assert_eq!(
+        handle_message(
+            &runtime,
+            0,
+            otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE,
+            WPARAM(1),
+            LPARAM(0),
+        ),
+        Some(LRESULT(0))
+    );
+    assert_eq!(
+        handle_message(
+            &runtime,
+            0,
+            otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE,
+            WPARAM(2),
+            LPARAM(0),
+        ),
+        Some(LRESULT(0))
+    );
+}
+
+#[test]
+fn dock_topmost_assertion_skips_hidden_dock_and_higher_otto_overlays() {
+    assert!(should_assert_topmost(false, false));
+    assert!(!should_assert_topmost(true, false));
+    assert!(!should_assert_topmost(false, true));
+    assert!(!should_assert_topmost(true, true));
+    let runtime = RuntimeContext::new(false);
+    assert!(!Dock::higher_overlay_open(&runtime));
 }
 
 #[test]

@@ -39,6 +39,10 @@ impl ControlCenterRenderer {
                 | ControlCenterHitTarget::FocusOpenSettings
                 | ControlCenterHitTarget::SoundMuteToggle
                 | ControlCenterHitTarget::HeaderToggle
+                | ControlCenterHitTarget::BackButton
+                | ControlCenterHitTarget::MediaPrev
+                | ControlCenterHitTarget::MediaPlayPause
+                | ControlCenterHitTarget::MediaNext
         ) {
             max_radius
         } else if matches!(
@@ -46,6 +50,23 @@ impl ControlCenterRenderer {
             ControlCenterHitTarget::DisplaySlider | ControlCenterHitTarget::SoundSlider
         ) {
             (slot.height as f32 * 0.5).max(1.0)
+        } else if matches!(
+            target,
+            ControlCenterHitTarget::FocusToggle
+                | ControlCenterHitTarget::BatteryTile
+                | ControlCenterHitTarget::FooterPrimary
+                | ControlCenterHitTarget::FooterSecondary
+        ) {
+            (layout.card_radius as f32).min(max_radius)
+        } else if matches!(
+            target,
+            ControlCenterHitTarget::WifiOpenPage
+                | ControlCenterHitTarget::BluetoothOpenPage
+                | ControlCenterHitTarget::DisplayOpenPage
+                | ControlCenterHitTarget::SoundOpenPage
+                | ControlCenterHitTarget::MediaBody
+        ) {
+            (scale(10, self.dpi) as f32).min(max_radius)
         } else {
             (shape.focus_ring_radius as f32).min(max_radius)
         };
@@ -332,6 +353,7 @@ impl ControlCenterRenderer {
     pub(super) fn draw_footer_button(
         &self,
         rect: Rect,
+        radius: f32,
         label: &str,
         hovered: bool,
         pressed: bool,
@@ -340,7 +362,7 @@ impl ControlCenterRenderer {
         if rect.is_empty() {
             return;
         }
-        self.draw_card(rect, scale(10, self.dpi) as f32, hovered, pressed, palette);
+        self.draw_card(rect, radius, hovered, pressed, palette);
         self.draw_text(
             label,
             &self.center_format,
@@ -497,6 +519,15 @@ impl ControlCenterRenderer {
         }
     }
 
+    pub(super) fn slider_cap_dark_brush(&self) -> ID2D1SolidColorBrush {
+        self.brushes.color_brush(D2D1_COLOR_F {
+            r: 0.10,
+            g: 0.10,
+            b: 0.14,
+            a: 0.88,
+        })
+    }
+
     pub(super) fn draw_capsule_slider_sun(
         &self,
         cap_cx: f32,
@@ -504,12 +535,7 @@ impl ControlCenterRenderer {
         clamped: u8,
         palette: &LiquidGlassPalette,
     ) {
-        let glyph_dark = self.brushes.color_brush(D2D1_COLOR_F {
-            r: 0.10,
-            g: 0.10,
-            b: 0.14,
-            a: 0.88,
-        });
+        let glyph_dark = self.slider_cap_dark_brush();
         let glyph_brush = if clamped > 0 {
             if palette.is_high_contrast {
                 &self.brushes.on_accent
@@ -520,6 +546,19 @@ impl ControlCenterRenderer {
             &self.brushes.text_muted
         };
         self.draw_sun_glyph(cap_cx, cy, scale(5, self.dpi) as f32, glyph_brush);
+    }
+
+    pub(super) fn draw_tabular_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        crate::draw_dwrite_tabular_text(&self.target, text, format, rect, brush);
     }
 
     pub(super) fn draw_text(

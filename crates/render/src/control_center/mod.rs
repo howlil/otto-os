@@ -150,7 +150,7 @@ impl ControlCenterRenderer {
             let value_format = create_text_format(
                 &dwrite,
                 11.0 * scale_f,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_TEXT_ALIGNMENT_TRAILING,
             )?;
             let center_format = create_text_format(

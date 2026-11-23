@@ -215,6 +215,16 @@ pub fn stop(runtime: &RuntimeContext) {
 }
 
 #[must_use]
+pub fn is_open(runtime: &RuntimeContext) -> bool {
+    runtime
+        .menu
+        .try_borrow()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|menu| menu.visible))
+        .unwrap_or(false)
+}
+
+#[must_use]
 pub fn active_top_bar_target(runtime: &RuntimeContext) -> Option<HitTarget> {
     let guard = runtime.menu.try_borrow().ok()?;
     let menu = guard.as_ref()?;

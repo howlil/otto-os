@@ -24,10 +24,56 @@ mod presentation;
 
 const SPOTLIGHT_TICK_MS: u32 = 16;
 const SPOTLIGHT_CATALOG_TTL: Duration = Duration::from_mins(5);
+const SPOTLIGHT_BLUR_TOGGLE_GRACE: Duration = Duration::from_millis(250);
 const SPOTLIGHT_MAX_QUERY_CHARS: usize = 160;
 const SPOTLIGHT_MAX_WIDTH_POINTS: i32 = 1_200;
 const SPOTLIGHT_MAX_HEIGHT_POINTS: i32 = 900;
 const UNICODE_NOCHAR: usize = 0xFFFF;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpotlightVisibility {
+    Closed,
+    Open(SpotlightMode),
+    Closing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpotlightToggleSource {
+    Pointer,
+    Hotkey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpotlightToggleDecision {
+    Open,
+    Close,
+    IgnoreRecentDismiss,
+}
+
+fn decide_spotlight_toggle(
+    visibility: SpotlightVisibility,
+    requested_mode: SpotlightMode,
+    source: SpotlightToggleSource,
+    recently_dismissed_by_blur: bool,
+) -> SpotlightToggleDecision {
+    let absorb_blur = source == SpotlightToggleSource::Pointer && recently_dismissed_by_blur;
+    match visibility {
+        SpotlightVisibility::Open(current_mode) => {
+            if source == SpotlightToggleSource::Hotkey || current_mode == requested_mode {
+                SpotlightToggleDecision::Close
+            } else {
+                SpotlightToggleDecision::Open
+            }
+        }
+        SpotlightVisibility::Closing | SpotlightVisibility::Closed => {
+            if absorb_blur {
+                SpotlightToggleDecision::IgnoreRecentDismiss
+            } else {
+                SpotlightToggleDecision::Open
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct QueryEditorState {
@@ -70,6 +116,7 @@ pub(crate) struct SpotlightSurface {
     morph_target: f32,
     morph_tick_at: Instant,
     closing: bool,
+    blur_dismissed_at: Option<Instant>,
     restore_focus_on_close: bool,
     previous_foreground: isize,
     pending_click: Option<SpotlightHit>,
@@ -122,6 +169,7 @@ impl SpotlightSurface {
             morph_target: 1.0,
             morph_tick_at: Instant::now(),
             closing: false,
+            blur_dismissed_at: None,
             restore_focus_on_close: false,
             previous_foreground: 0,
             pending_click: None,
@@ -146,24 +194,66 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn open_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
-    with_spotlight(runtime, |surface| {
-        surface.open(runtime, SpotlightMode::Search, trigger);
-    });
+pub fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
+    toggle_mode(
+        runtime,
+        SpotlightMode::Search,
+        trigger,
+        SpotlightToggleSource::Pointer,
+    );
 }
 
-pub fn open_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
-    with_spotlight(runtime, |surface| {
-        surface.open(runtime, SpotlightMode::Apps, trigger);
-    });
+pub fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
+    toggle_mode(
+        runtime,
+        SpotlightMode::Apps,
+        trigger,
+        SpotlightToggleSource::Pointer,
+    );
 }
 
 pub fn toggle_from_hotkey(runtime: &RuntimeContext, trigger: Option<Rect>) {
+    toggle_mode(
+        runtime,
+        SpotlightMode::Search,
+        trigger,
+        SpotlightToggleSource::Hotkey,
+    );
+}
+
+fn toggle_mode(
+    runtime: &RuntimeContext,
+    requested_mode: SpotlightMode,
+    trigger: Option<Rect>,
+    source: SpotlightToggleSource,
+) {
     with_spotlight(runtime, |surface| {
-        if surface.visible {
-            surface.request_close(true);
+        let visibility = if !surface.visible {
+            SpotlightVisibility::Closed
+        } else if surface.closing {
+            SpotlightVisibility::Closing
         } else {
-            surface.open(runtime, SpotlightMode::Search, trigger);
+            SpotlightVisibility::Open(surface.mode)
+        };
+        let recently_dismissed_by_blur = surface
+            .blur_dismissed_at
+            .is_some_and(|at| at.elapsed() < SPOTLIGHT_BLUR_TOGGLE_GRACE);
+        match decide_spotlight_toggle(
+            visibility,
+            requested_mode,
+            source,
+            recently_dismissed_by_blur,
+        ) {
+            SpotlightToggleDecision::Open => {
+                surface.open(runtime, requested_mode, trigger);
+            }
+            SpotlightToggleDecision::Close => {
+                surface.blur_dismissed_at = None;
+                surface.request_close(true);
+            }
+            SpotlightToggleDecision::IgnoreRecentDismiss => {
+                surface.blur_dismissed_at = None;
+            }
         }
     });
 }
@@ -181,6 +271,16 @@ pub fn repaint(runtime: &RuntimeContext) {
             surface.present(runtime);
         }
     });
+}
+
+#[must_use]
+pub fn is_open(runtime: &RuntimeContext) -> bool {
+    runtime
+        .spotlight
+        .try_borrow()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|surface| surface.visible))
+        .unwrap_or(false)
 }
 
 pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
@@ -289,7 +389,12 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_KILLFOCUS => {
-            with_spotlight(runtime, |surface| surface.request_close(false));
+            with_spotlight(runtime, |surface| {
+                if surface.visible && !surface.closing {
+                    surface.blur_dismissed_at = Some(Instant::now());
+                    surface.request_close(false);
+                }
+            });
             Some(LRESULT(0))
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {

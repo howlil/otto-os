@@ -104,6 +104,12 @@ pub(super) fn layout_main_page(
     y4 + h4 + pad
 }
 
+const CARD_PAD: i32 = 12;
+const ROW_INSET: i32 = 4;
+const CARD_HEADER_HEIGHT: i32 = 24;
+const SLIDER_HEIGHT: i32 = 26;
+const TILE_CIRCLE_DIAMETER: i32 = 32;
+
 pub(super) fn layout_main_top(
     layout: &mut ControlCenterLayout,
     metrics: &ControlCenterMetrics,
@@ -117,6 +123,8 @@ pub(super) fn layout_main_top(
     let left_w = (inner_w - gap) / 2;
     let right_w = inner_w - gap - left_w;
     let right_x = pad + left_w + gap;
+    let card_pad = scale(CARD_PAD, dpi);
+    let circle_d = scale(TILE_CIRCLE_DIAMETER, dpi);
 
     layout.connectivity_card = Rect {
         x: pad,
@@ -133,20 +141,75 @@ pub(super) fn layout_main_top(
         width: right_w,
         height: split_h,
     };
-    let gear_d = scale(20, dpi);
+    layout.focus_icon = Rect {
+        x: right_x + card_pad,
+        y: y1 + (split_h - circle_d) / 2,
+        width: circle_d,
+        height: circle_d,
+    };
+    let gear_d = scale(24, dpi);
     layout.focus_settings = Rect {
-        x: layout.focus_toggle.right() - gear_d - scale(6, dpi),
-        y: y1 + scale(6, dpi),
+        x: layout.focus_toggle.right() - gear_d - scale(8, dpi),
+        y: y1 + (split_h - gear_d) / 2,
         width: gear_d,
         height: gear_d,
     };
+    let battery_y = layout.focus_toggle.bottom() + gap;
+    let battery_h = h1 - gap - split_h;
     layout.battery_tile = Rect {
         x: right_x,
-        y: layout.focus_toggle.bottom() + gap,
+        y: battery_y,
         width: right_w,
-        height: h1 - gap - split_h,
+        height: battery_h,
+    };
+    layout.battery_icon = Rect {
+        x: right_x + card_pad,
+        y: battery_y + (battery_h - circle_d) / 2,
+        width: circle_d,
+        height: circle_d,
     };
     y1 + h1
+}
+
+pub(super) fn slider_card_parts(
+    dpi: u32,
+    pad: i32,
+    inner_w: i32,
+    y: i32,
+    card_h: i32,
+) -> (Rect, Rect, Rect, Rect) {
+    let card_pad = scale(CARD_PAD, dpi);
+    let row_inset = scale(ROW_INSET, dpi);
+    let card_hdr_h = scale(CARD_HEADER_HEIGHT, dpi);
+    let slider_h = scale(SLIDER_HEIGHT, dpi);
+    let card = Rect {
+        x: pad,
+        y,
+        width: inner_w,
+        height: card_h,
+    };
+    let header = Rect {
+        x: pad + row_inset,
+        y: y + row_inset,
+        width: (inner_w - row_inset * 2).max(1),
+        height: card_hdr_h,
+    };
+    let slider_x = pad + card_pad;
+    let slider_y = header.bottom() + scale(4, dpi);
+    let slider_w = (inner_w - card_pad * 2).max(1);
+    let slider = Rect {
+        x: slider_x,
+        y: slider_y,
+        width: slider_w,
+        height: slider_h,
+    };
+    let cap = Rect {
+        x: slider_x,
+        y: slider_y,
+        width: slider_h,
+        height: slider_h,
+    };
+    (card, header, cap, slider)
 }
 
 pub(super) fn layout_main_sliders(
@@ -158,67 +221,22 @@ pub(super) fn layout_main_sliders(
     inner_w: i32,
     y2: i32,
 ) -> i32 {
-    let card_pad = scale(10, dpi);
-    let card_hdr_h = scale(24, dpi);
-    let slider_h = scale(26, dpi);
-    let slider_x = pad + card_pad;
-    let slider_w = (inner_w - card_pad * 2).max(1);
-
     let h2 = scale(metrics.display_card_height, dpi);
-    let display_row_y = y2 + card_hdr_h + scale(4, dpi);
-    layout.display_card = Rect {
-        x: pad,
-        y: y2,
-        width: inner_w,
-        height: h2,
-    };
-    layout.display_header = Rect {
-        x: pad,
-        y: y2,
-        width: inner_w,
-        height: card_hdr_h,
-    };
-    layout.display_slider = Rect {
-        x: slider_x,
-        y: display_row_y,
-        width: slider_w,
-        height: slider_h,
-    };
-    layout.display_icon = Rect {
-        x: slider_x + scale(2, dpi),
-        y: display_row_y,
-        width: slider_h,
-        height: slider_h,
-    };
+    let (display_card, display_header, display_icon, display_slider) =
+        slider_card_parts(dpi, pad, inner_w, y2, h2);
+    layout.display_card = display_card;
+    layout.display_header = display_header;
+    layout.display_icon = display_icon;
+    layout.display_slider = display_slider;
 
     let y3 = y2 + h2 + gap;
     let h3 = scale(metrics.sound_card_height, dpi);
-    let sound_row_y = y3 + card_hdr_h + scale(4, dpi);
-    layout.sound_card = Rect {
-        x: pad,
-        y: y3,
-        width: inner_w,
-        height: h3,
-    };
-    layout.sound_header = Rect {
-        x: pad,
-        y: y3,
-        width: inner_w,
-        height: card_hdr_h,
-    };
-    let mute_gap = scale(8, dpi);
-    layout.sound_mute = Rect {
-        x: slider_x,
-        y: sound_row_y,
-        width: slider_h,
-        height: slider_h,
-    };
-    layout.sound_slider = Rect {
-        x: slider_x + slider_h + mute_gap,
-        y: sound_row_y,
-        width: (slider_w - slider_h - mute_gap).max(1),
-        height: slider_h,
-    };
+    let (sound_card, sound_header, sound_mute, sound_slider) =
+        slider_card_parts(dpi, pad, inner_w, y3, h3);
+    layout.sound_card = sound_card;
+    layout.sound_header = sound_header;
+    layout.sound_mute = sound_mute;
+    layout.sound_slider = sound_slider;
     y3 + h3
 }
 
@@ -227,12 +245,13 @@ pub(super) fn layout_main_bottom(
     metrics: &ControlCenterMetrics,
     dpi: u32,
     pad: i32,
-    gap: i32,
+    _gap: i32,
     inner_w: i32,
     y4: i32,
 ) -> i32 {
-    let h4 = (scale(metrics.bottom_row_height, dpi) - gap - scale(46, dpi)).max(scale(64, dpi));
-    let media_h = h4;
+    let media_h = scale(metrics.media_card_height, dpi).max(scale(64, dpi));
+    let row_inset = scale(ROW_INSET, dpi);
+    let card_pad = scale(CARD_PAD, dpi);
     layout.media_card = Rect {
         x: pad,
         y: y4,
@@ -240,52 +259,53 @@ pub(super) fn layout_main_bottom(
         height: media_h,
     };
 
-    let btn_d = scale(28, dpi);
-    let btn_gap = scale(6, dpi);
-    let right_pad = scale(10, dpi);
-    let controls_w = btn_d * 3 + btn_gap * 2;
-    let btn_x0 = layout.media_card.right() - right_pad - controls_w;
-    let btn_y = y4 + (media_h - btn_d) / 2;
+    let skip_d = scale(26, dpi);
+    let play_d = scale(TILE_CIRCLE_DIAMETER, dpi);
+    let btn_gap = scale(4, dpi);
+    let controls_w = skip_d * 2 + play_d + btn_gap * 2;
+    let btn_x0 = layout.media_card.right() - card_pad - controls_w;
+    let skip_y = y4 + (media_h - skip_d) / 2;
+    let play_y = y4 + (media_h - play_d) / 2;
 
     layout.media_body = Rect {
-        x: pad,
-        y: y4,
-        width: (btn_x0 - pad - scale(4, dpi)).max(scale(80, dpi)),
-        height: media_h,
+        x: pad + row_inset,
+        y: y4 + row_inset,
+        width: (btn_x0 - (pad + row_inset) - scale(6, dpi)).max(scale(80, dpi)),
+        height: (media_h - row_inset * 2).max(1),
     };
     layout.media_prev = Rect {
         x: btn_x0,
-        y: btn_y,
-        width: btn_d,
-        height: btn_d,
+        y: skip_y,
+        width: skip_d,
+        height: skip_d,
     };
     layout.media_play_pause = Rect {
         x: layout.media_prev.right() + btn_gap,
-        y: btn_y,
-        width: btn_d,
-        height: btn_d,
+        y: play_y,
+        width: play_d,
+        height: play_d,
     };
     layout.media_next = Rect {
         x: layout.media_play_pause.right() + btn_gap,
-        y: btn_y,
-        width: btn_d,
-        height: btn_d,
+        y: skip_y,
+        width: skip_d,
+        height: skip_d,
     };
 
-    h4
+    media_h
 }
 
 pub(super) fn layout_connectivity_rows(layout: &mut ControlCenterLayout, dpi: u32) {
     let card = layout.connectivity_card;
-    let inset = scale(8, dpi);
-    let row_gap = scale(6, dpi);
-    let slot_h = ((card.height - inset * 2 - row_gap) / 2).max(scale(40, dpi));
-    let circle_d = scale(32, dpi).min(slot_h - scale(6, dpi));
-    let row_x = card.x + scale(4, dpi);
-    let row_w = (card.width - scale(8, dpi)).max(1);
-    let circle_x = row_x + scale(6, dpi);
+    let row_inset = scale(ROW_INSET, dpi);
+    let row_gap = scale(4, dpi);
+    let slot_h = ((card.height - row_inset * 2 - row_gap) / 2).max(scale(40, dpi));
+    let circle_d = scale(TILE_CIRCLE_DIAMETER, dpi).min(slot_h - scale(6, dpi));
+    let row_x = card.x + row_inset;
+    let row_w = (card.width - row_inset * 2).max(1);
+    let circle_x = card.x + scale(CARD_PAD, dpi);
 
-    let y0 = card.y + inset;
+    let y0 = card.y + row_inset;
     layout.wifi_row = Rect {
         x: row_x,
         y: y0,
@@ -392,37 +412,11 @@ pub(super) fn layout_subpanel_sound(
     y: i32,
 ) -> i32 {
     let slider_card_h = scale(metrics.slider_card_height, dpi);
-    let card_pad = scale(10, dpi);
-    let card_hdr_h = scale(24, dpi);
-    let slider_h = scale(26, dpi);
-    layout.sound_card = Rect {
-        x: pad,
-        y,
-        width: inner_w,
-        height: slider_card_h,
-    };
-    layout.sound_header = Rect {
-        x: pad,
-        y,
-        width: inner_w,
-        height: card_hdr_h,
-    };
-    let slider_x = pad + card_pad;
-    let slider_w = (inner_w - card_pad * 2).max(1);
-    let mute_gap = scale(8, dpi);
-    let slider_y = y + card_hdr_h + scale(4, dpi);
-    layout.sound_mute = Rect {
-        x: slider_x,
-        y: slider_y,
-        width: slider_h,
-        height: slider_h,
-    };
-    layout.sound_slider = Rect {
-        x: slider_x + slider_h + mute_gap,
-        y: slider_y,
-        width: (slider_w - slider_h - mute_gap).max(1),
-        height: slider_h,
-    };
+    let (card, header, mute, slider) = slider_card_parts(dpi, pad, inner_w, y, slider_card_h);
+    layout.sound_card = card;
+    layout.sound_header = header;
+    layout.sound_mute = mute;
+    layout.sound_slider = slider;
     y + slider_card_h + gap
 }
 
@@ -436,29 +430,11 @@ pub(super) fn layout_subpanel_display(
     y: i32,
 ) -> i32 {
     let slider_card_h = scale(metrics.slider_card_height, dpi);
-    let card_pad = scale(10, dpi);
-    let card_hdr_h = scale(24, dpi);
-    let slider_h = scale(26, dpi);
-    layout.display_card = Rect {
-        x: pad,
-        y,
-        width: inner_w,
-        height: slider_card_h,
-    };
-    let dx = pad + card_pad;
-    let dy = y + card_hdr_h + scale(4, dpi);
-    layout.display_slider = Rect {
-        x: dx,
-        y: dy,
-        width: (inner_w - card_pad * 2).max(1),
-        height: slider_h,
-    };
-    layout.display_icon = Rect {
-        x: dx + scale(2, dpi),
-        y: dy,
-        width: slider_h,
-        height: slider_h,
-    };
+    let (card, header, icon, slider) = slider_card_parts(dpi, pad, inner_w, y, slider_card_h);
+    layout.display_card = card;
+    layout.display_header = header;
+    layout.display_icon = icon;
+    layout.display_slider = slider;
     y + slider_card_h + gap
 }
 

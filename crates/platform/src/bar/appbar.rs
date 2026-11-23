@@ -364,6 +364,20 @@ impl AppBar {
 pub struct DockReservation {
     hwnd: HWND,
     applied: Option<(i32, i32, i32)>,
+    applied_rect: Option<WorkArea>,
+}
+
+const fn dock_reservation_needs_apply(
+    applied: Option<(i32, i32, i32)>,
+    applied_rect: Option<WorkArea>,
+    request: (i32, i32, i32),
+    queried_rect: WorkArea,
+) -> bool {
+    !matches!(applied, Some(prev) if prev.0 == request.0 && prev.1 == request.1 && prev.2 == request.2)
+        || !matches!(applied_rect, Some(prev) if prev[0] == queried_rect[0]
+            && prev[1] == queried_rect[1]
+            && prev[2] == queried_rect[2]
+            && prev[3] == queried_rect[3])
 }
 
 impl DockReservation {
@@ -375,14 +389,27 @@ impl DockReservation {
         (unsafe { SHAppBarMessage(ABM_NEW, &mut data) } != 0).then_some(Self {
             hwnd,
             applied: None,
+            applied_rect: None,
         })
     }
 
-    pub fn reserve(&mut self, screen_width: i32, screen_height: i32, height: i32) {
+    pub fn reserve(&mut self, screen_width: i32, screen_height: i32, height: i32) -> bool {
         let request = (screen_width, screen_height, height);
         if self.applied == Some(request) || height <= 0 || height >= screen_height {
-            return;
+            return false;
         }
+        self.apply(request, true)
+    }
+
+    pub fn reapply(&mut self, screen_width: i32, screen_height: i32, height: i32) -> bool {
+        if height <= 0 || height >= screen_height {
+            return false;
+        }
+        self.apply((screen_width, screen_height, height), false)
+    }
+
+    fn apply(&mut self, request: (i32, i32, i32), force: bool) -> bool {
+        let (screen_width, screen_height, height) = request;
         let mut data = AppBar::data(self.hwnd);
         data.uEdge = ABE_BOTTOM;
         data.rc = RECT {
@@ -394,9 +421,19 @@ impl DockReservation {
         unsafe {
             SHAppBarMessage(ABM_QUERYPOS, &mut data);
             data.rc.top = data.rc.bottom - height;
+        }
+        let queried = rect_to_area(data.rc);
+        if !force
+            && !dock_reservation_needs_apply(self.applied, self.applied_rect, request, queried)
+        {
+            return false;
+        }
+        unsafe {
             SHAppBarMessage(ABM_SETPOS, &mut data);
         }
         self.applied = Some(request);
+        self.applied_rect = Some(rect_to_area(data.rc));
+        true
     }
 }
 
@@ -504,7 +541,8 @@ impl Drop for AppBar {
 mod tests {
     use super::{
         ShellNotification, ShellRecovery, choose_original, classify_shell_notification,
-        is_plausible_work_area, rebase_work_area, recovered_original, restore_plan,
+        dock_reservation_needs_apply, is_plausible_work_area, rebase_work_area, recovered_original,
+        restore_plan,
     };
 
     const FHD: (i32, i32) = (1920, 1080);
@@ -536,6 +574,31 @@ mod tests {
         );
         assert_eq!(classify_shell_notification(0, 0), None);
         assert_eq!(classify_shell_notification(3, 1), None);
+    }
+
+    #[test]
+    fn dock_reservation_reapply_skips_unchanged_rect_and_applies_on_change() {
+        let req = (2240, 1400, 111);
+        let rect = [0, 1289, 2240, 1400];
+        assert!(dock_reservation_needs_apply(None, None, req, rect));
+        assert!(!dock_reservation_needs_apply(
+            Some(req),
+            Some(rect),
+            req,
+            rect
+        ));
+        assert!(dock_reservation_needs_apply(
+            Some(req),
+            Some(rect),
+            (2240, 1400, 120),
+            [0, 1280, 2240, 1400]
+        ));
+        assert!(dock_reservation_needs_apply(
+            Some(req),
+            Some(rect),
+            req,
+            [0, 1240, 2240, 1351]
+        ));
     }
 
     #[test]

@@ -168,7 +168,7 @@ pub(super) fn execute_dock_effect(
 ) {
     match effect {
         DockEffect::Launch if matches!(entry.kind, DockItemKind::Apps) => {
-            crate::spotlight::open_apps(runtime, target);
+            crate::spotlight::toggle_apps(runtime, target);
         }
         DockEffect::ShowWindow(window) => show_window(runtime, window, target),
         other => {

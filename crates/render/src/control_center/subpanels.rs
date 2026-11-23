@@ -36,6 +36,7 @@ impl ControlCenterRenderer {
                 self.draw_scrollable_list(layout, snapshot, state, palette);
                 self.draw_footer_button(
                     layout.footer_primary,
+                    layout.card_radius as f32,
                     "Wi-Fi Settings...",
                     state.hovered == Some(ControlCenterHitTarget::FooterPrimary),
                     state.pressed == Some(ControlCenterHitTarget::FooterPrimary),
@@ -46,6 +47,7 @@ impl ControlCenterRenderer {
                 self.draw_scrollable_list(layout, snapshot, state, palette);
                 self.draw_footer_button(
                     layout.footer_primary,
+                    layout.card_radius as f32,
                     "Bluetooth Settings...",
                     state.hovered == Some(ControlCenterHitTarget::FooterPrimary),
                     state.pressed == Some(ControlCenterHitTarget::FooterPrimary),
@@ -71,39 +73,23 @@ impl ControlCenterRenderer {
             false,
             palette,
         );
-        let hdr = layout.sound_header;
-        let pad = scale(10, self.dpi) as f32;
         let value_text = if snapshot.status.muted || snapshot.status.volume == 0 {
             String::from("Muted")
         } else {
             format!("{}%", snapshot.status.volume)
         };
-        self.draw_text(
+        self.draw_slider_header(
+            layout.sound_card,
+            layout.sound_header,
             "Volume",
-            &self.title_format,
-            D2D_RECT_F {
-                left: hdr.x as f32 + pad,
-                top: hdr.y as f32 + scale(4, self.dpi) as f32,
-                right: hdr.right() as f32 - scale(92, self.dpi) as f32,
-                bottom: hdr.bottom() as f32,
-            },
-            &self.brushes.text_primary,
-        );
-        self.draw_text(
             &value_text,
-            &self.value_format,
-            D2D_RECT_F {
-                left: hdr.right() as f32 - scale(90, self.dpi) as f32,
-                top: hdr.y as f32 + scale(4, self.dpi) as f32,
-                right: hdr.right() as f32 - pad,
-                bottom: hdr.bottom() as f32,
-            },
-            &self.brushes.text_muted,
+            false,
         );
         self.draw_sound_controls(layout, snapshot, state, palette)?;
         self.draw_scrollable_list(layout, snapshot, state, palette);
         self.draw_footer_button(
             layout.footer_primary,
+            layout.card_radius as f32,
             if snapshot.audio_switch_failed {
                 "Open Sound Settings..."
             } else {
@@ -125,32 +111,16 @@ impl ControlCenterRenderer {
     ) {
         let card = layout.display_card;
         self.draw_card(card, layout.card_radius as f32, false, false, palette);
-        let pad = scale(10, self.dpi) as f32;
         let val_text = snapshot
             .status
             .brightness
             .map_or_else(|| String::from("Unavailable"), |pct| format!("{pct}%"));
-        self.draw_text(
+        self.draw_slider_header(
+            layout.display_card,
+            layout.display_header,
             "Brightness",
-            &self.title_format,
-            D2D_RECT_F {
-                left: card.x as f32 + pad,
-                top: card.y as f32 + scale(4, self.dpi) as f32,
-                right: card.right() as f32 - scale(90, self.dpi) as f32,
-                bottom: card.y as f32 + scale(26, self.dpi) as f32,
-            },
-            &self.brushes.text_primary,
-        );
-        self.draw_text(
             &val_text,
-            &self.value_format,
-            D2D_RECT_F {
-                left: card.right() as f32 - scale(90, self.dpi) as f32,
-                top: card.y as f32 + scale(4, self.dpi) as f32,
-                right: card.right() as f32 - pad,
-                bottom: card.y as f32 + scale(26, self.dpi) as f32,
-            },
-            &self.brushes.text_muted,
+            false,
         );
         self.draw_capsule_slider(
             layout.display_slider,
@@ -162,6 +132,7 @@ impl ControlCenterRenderer {
         );
         self.draw_footer_button(
             layout.footer_primary,
+            layout.card_radius as f32,
             "Display Settings...",
             state.hovered == Some(ControlCenterHitTarget::FooterPrimary),
             state.pressed == Some(ControlCenterHitTarget::FooterPrimary),
@@ -169,6 +140,7 @@ impl ControlCenterRenderer {
         );
         self.draw_footer_button(
             layout.footer_secondary,
+            layout.card_radius as f32,
             "Night Light...",
             state.hovered == Some(ControlCenterHitTarget::FooterSecondary),
             state.pressed == Some(ControlCenterHitTarget::FooterSecondary),
@@ -519,15 +491,15 @@ impl ControlCenterRenderer {
         net: &WifiNetwork,
         palette: &LiquidGlassPalette,
     ) {
-        let pad = scale(10, self.dpi) as f32;
+        let pad = scale(12, self.dpi) as f32;
         let label_r = D2D_RECT_F {
             left: rect.x as f32 + pad,
             top: rect.y as f32,
-            right: rect.right() as f32 - scale(76, self.dpi) as f32,
+            right: rect.right() as f32 - scale(88, self.dpi) as f32,
             bottom: rect.bottom() as f32,
         };
         let status_r = D2D_RECT_F {
-            left: rect.right() as f32 - scale(84, self.dpi) as f32,
+            left: rect.right() as f32 - scale(86, self.dpi) as f32,
             top: rect.y as f32,
             right: rect.right() as f32 - pad,
             bottom: rect.bottom() as f32,
@@ -550,7 +522,7 @@ impl ControlCenterRenderer {
         } else {
             self.brushes.text_muted.clone()
         };
-        self.draw_text(&right_label, &self.value_format, status_r, &status_brush);
+        self.draw_tabular_text(&right_label, &self.value_format, status_r, &status_brush);
     }
 
     pub(super) fn draw_bluetooth_device_row(
@@ -559,7 +531,7 @@ impl ControlCenterRenderer {
         device: &BluetoothDevice,
         palette: &LiquidGlassPalette,
     ) {
-        let pad = scale(10, self.dpi) as f32;
+        let pad = scale(12, self.dpi) as f32;
         let kind = match device.kind {
             BluetoothDeviceKind::Headphones => "Audio",
             BluetoothDeviceKind::Speaker => "Speaker",
@@ -571,7 +543,7 @@ impl ControlCenterRenderer {
         let label_r = D2D_RECT_F {
             left: rect.x as f32 + pad,
             top: rect.y as f32,
-            right: rect.right() as f32 - scale(96, self.dpi) as f32,
+            right: rect.right() as f32 - scale(98, self.dpi) as f32,
             bottom: rect.bottom() as f32,
         };
         let right_r = D2D_RECT_F {
@@ -599,7 +571,7 @@ impl ControlCenterRenderer {
         } else {
             self.brushes.text_muted.clone()
         };
-        self.draw_text(&right_text, &self.value_format, right_r, &brush);
+        self.draw_tabular_text(&right_text, &self.value_format, right_r, &brush);
     }
 
     pub(super) fn draw_audio_output_row(
@@ -609,7 +581,7 @@ impl ControlCenterRenderer {
         is_default: bool,
         palette: &LiquidGlassPalette,
     ) {
-        let pad = scale(10, self.dpi) as f32;
+        let pad = scale(12, self.dpi) as f32;
         let dot_r = scale(4, self.dpi) as f32;
         let cx = rect.x as f32 + pad + dot_r;
         let cy = rect.y as f32 + rect.height as f32 * 0.5;
@@ -630,7 +602,7 @@ impl ControlCenterRenderer {
         let label_r = D2D_RECT_F {
             left: cx + dot_r + scale(8, self.dpi) as f32,
             top: rect.y as f32,
-            right: rect.right() as f32 - scale(56, self.dpi) as f32,
+            right: rect.right() as f32 - scale(58, self.dpi) as f32,
             bottom: rect.bottom() as f32,
         };
         let right_r = D2D_RECT_F {

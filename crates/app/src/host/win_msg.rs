@@ -66,7 +66,12 @@ mod tests {
             WM_APP_BAR_BLUETOOTH_HUD,
             WM_APP_BAR_CAPTURE,
         ]));
-        assert!(all_distinct(&[WM_APP_DOCK_KEY, WM_APP_DOCK_BACKDROP]));
+        assert!(all_distinct(&[
+            WM_APP_DOCK_KEY,
+            WM_APP_DOCK_BACKDROP,
+            otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE,
+            otto_platform::WM_APP_UIA_INVOKE,
+        ]));
         assert!(all_distinct(&[WM_APP_WINDOW_SYNC, WM_APP_NATIVE_MINIMIZE]));
     }
 

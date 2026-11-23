@@ -32,8 +32,8 @@ pub use actions::{
     unregister_settings_hotkey, unregister_shell_hotkeys,
 };
 pub use appbar::{
-    APPBAR_CALLBACK_MESSAGE, AppBar, DockReservation, ShellNotification,
-    classify_shell_notification, restore_shell_from_recovery,
+    APPBAR_CALLBACK_MESSAGE, AppBar, DOCK_APPBAR_CALLBACK_MESSAGE, DockReservation,
+    ShellNotification, classify_shell_notification, restore_shell_from_recovery,
 };
 pub use backdrop::{
     BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, capture_wallpaper_now,

@@ -1,7 +1,7 @@
 use crate::appearance::surface::fnv1a_hash;
 use crate::{
     CHARGING_GREEN, CoverArt, LiquidGlassPalette, decode_image_bytes, draw_speaker_glyph,
-    draw_wifi_glyph, rect_to_d2d, scale,
+    draw_wifi_glyph, scale,
 };
 use otto_core::{
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterSnapshot, Rect, focus_row_subtitle,
@@ -50,7 +50,7 @@ impl ControlCenterRenderer {
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
         self.draw_card(layout.connectivity_card, radius, false, false, palette);
-        let row_radius = scale(9, self.dpi) as f32;
+        let row_radius = scale(10, self.dpi) as f32;
 
         self.draw_connectivity_row_hover(
             layout.wifi_row,
@@ -149,7 +149,7 @@ impl ControlCenterRenderer {
         palette: &LiquidGlassPalette,
     ) {
         let div_y = (layout.wifi_row.bottom() + layout.bluetooth_row.y) as f32 * 0.5;
-        let div_x0 = layout.wifi_toggle.right() as f32 + scale(8, self.dpi) as f32;
+        let div_x0 = layout.wifi_toggle.right() as f32 + scale(10, self.dpi) as f32;
         let div_x1 = layout.connectivity_card.right() as f32 - scale(12, self.dpi) as f32;
         if div_x1 > div_x0 {
             let sep = self.brushes.color_brush(palette.menu_separator);
@@ -165,27 +165,21 @@ impl ControlCenterRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_connectivity_row(
+    pub(super) fn draw_circle_badge(
         &self,
         circle: Rect,
-        row: Rect,
         visual: ControlVisualState,
         accent: D2D1_COLOR_F,
-        title: &str,
-        subtitle: &str,
         palette: &LiquidGlassPalette,
-        glyph: impl FnOnce(f32, f32, f32, &ID2D1SolidColorBrush) -> Result<()>,
-    ) -> Result<()> {
+    ) -> (f32, f32, f32, &ID2D1SolidColorBrush) {
         let cx = circle.x as f32 + circle.width as f32 * 0.5;
         let cy = circle.y as f32 + circle.height as f32 * 0.5;
         let rad = circle.width as f32 * 0.5;
-        let bg_color = if visual.active {
+        let bg = self.brushes.color_brush(if visual.active {
             accent
         } else {
             palette.toggle_inactive
-        };
-        let bg = self.brushes.color_brush(bg_color);
+        });
         unsafe {
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
@@ -222,38 +216,77 @@ impl ControlCenterRenderer {
         } else {
             &self.brushes.text_primary
         };
-        glyph(cx, cy, rad * 0.58, glyph_brush)?;
+        (cx, cy, rad, glyph_brush)
+    }
 
-        let text_left = circle.right() as f32 + scale(8, self.dpi) as f32;
-        let text_right = row.right() as f32 - scale(14, self.dpi) as f32;
-        let mid = row.y as f32 + row.height as f32 * 0.5;
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_two_line_label(
+        &self,
+        left: f32,
+        right: f32,
+        center_y: f32,
+        title: &str,
+        subtitle: &str,
+        title_brush: &ID2D1SolidColorBrush,
+        sub_brush: &ID2D1SolidColorBrush,
+        tabular_title: bool,
+    ) {
+        let title_h = scale(16, self.dpi) as f32;
+        let sub_h = scale(14, self.dpi) as f32;
+        let line_gap = scale(2, self.dpi) as f32;
+        let top = center_y - (title_h + line_gap + sub_h) * 0.5;
+        let clamped_right = right.max(left + 1.0);
         let title_rect = D2D_RECT_F {
-            left: text_left,
-            top: row.y as f32 + scale(4, self.dpi) as f32,
-            right: text_right.max(text_left + 1.0),
-            bottom: mid + scale(2, self.dpi) as f32,
+            left,
+            top,
+            right: clamped_right,
+            bottom: top + title_h,
         };
         let sub_rect = D2D_RECT_F {
-            left: text_left,
-            top: mid - scale(1, self.dpi) as f32,
-            right: text_right.max(text_left + 1.0),
-            bottom: row.bottom() as f32 - scale(4, self.dpi) as f32,
+            left,
+            top: top + title_h + line_gap,
+            right: clamped_right,
+            bottom: top + title_h + line_gap + sub_h,
         };
-        self.draw_text(
+        if tabular_title {
+            self.draw_tabular_text(title, &self.title_format, title_rect, title_brush);
+        } else {
+            self.draw_text(title, &self.title_format, title_rect, title_brush);
+        }
+        self.draw_text(subtitle, &self.subtitle_format, sub_rect, sub_brush);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_connectivity_row(
+        &self,
+        circle: Rect,
+        row: Rect,
+        visual: ControlVisualState,
+        accent: D2D1_COLOR_F,
+        title: &str,
+        subtitle: &str,
+        palette: &LiquidGlassPalette,
+        glyph: impl FnOnce(f32, f32, f32, &ID2D1SolidColorBrush) -> Result<()>,
+    ) -> Result<()> {
+        let (cx, cy, rad, glyph_brush) = self.draw_circle_badge(circle, visual, accent, palette);
+        glyph(cx, cy, rad * 0.58, glyph_brush)?;
+
+        let text_left = circle.right() as f32 + scale(10, self.dpi) as f32;
+        let text_right = row.right() as f32 - scale(18, self.dpi) as f32;
+        let mid = row.y as f32 + row.height as f32 * 0.5;
+        self.draw_two_line_label(
+            text_left,
+            text_right,
+            mid,
             title,
-            &self.body_format,
-            title_rect,
-            &self.brushes.text_primary,
-        );
-        self.draw_text(
             subtitle,
-            &self.subtitle_format,
-            sub_rect,
+            &self.brushes.text_primary,
             &self.brushes.text_muted,
+            false,
         );
 
         self.draw_chevron(
-            row.right() as f32 - scale(8, self.dpi) as f32,
+            row.right() as f32 - scale(10, self.dpi) as f32,
             mid,
             scale(4, self.dpi) as f32,
             true,
@@ -278,34 +311,19 @@ impl ControlCenterRenderer {
             state.pressed == Some(ControlCenterHitTarget::FocusToggle),
             palette,
         );
-        let pad = scale(8, self.dpi) as f32;
-        let circle_d = scale(24, self.dpi) as f32;
-        let cx = tile.x as f32 + pad + circle_d * 0.5;
-        let cy = tile.y as f32 + pad + circle_d * 0.5;
-        let rad = circle_d * 0.5;
         let focus_available =
             snapshot.settings.plugins.notch && snapshot.settings.system.focus_module;
         let active = focus_available && snapshot.focus_active;
-        let bg = self.brushes.color_brush(if active {
-            FOCUS_PURPLE
-        } else {
-            palette.toggle_inactive
-        });
-        unsafe {
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(cx, cy),
-                    radiusX: rad,
-                    radiusY: rad,
-                },
-                &bg,
-            );
-        }
-        let moon_fg = if active {
-            &self.brushes.on_accent
-        } else {
-            &self.brushes.text_primary
-        };
+        let (cx, cy, rad, moon_fg) = self.draw_circle_badge(
+            layout.focus_icon,
+            ControlVisualState {
+                active,
+                enabled: focus_available,
+                pointer: PointerState::Normal,
+            },
+            FOCUS_PURPLE,
+            palette,
+        );
         crate::draw_crescent_moon(
             &self.factory,
             &self.target,
@@ -346,28 +364,20 @@ impl ControlCenterRenderer {
         let gear_fg = gear_purple.as_ref().unwrap_or(&self.brushes.text_muted);
         self.draw_more_glyph(gx, gy, scale(5, self.dpi) as f32, gear_fg);
 
-        let text_top = tile.y as f32 + scale(35, self.dpi) as f32;
-        let sub_top = tile.y as f32 + scale(49, self.dpi) as f32;
-        let title_r = D2D_RECT_F {
-            left: tile.x as f32 + pad,
-            top: text_top,
-            right: tile.right() as f32 - pad,
-            bottom: sub_top + scale(2, self.dpi) as f32,
-        };
-        let sub_r = D2D_RECT_F {
-            left: tile.x as f32 + pad,
-            top: sub_top,
-            right: tile.right() as f32 - pad,
-            bottom: tile.bottom() as f32 - scale(5, self.dpi) as f32,
-        };
+        let text_left = layout.focus_icon.right() as f32 + scale(10, self.dpi) as f32;
+        let text_right = gear_btn.x as f32 - scale(4, self.dpi) as f32;
+        let mid = tile.y as f32 + tile.height as f32 * 0.5;
         let sub = focus_row_subtitle(focus_available, snapshot.focus_active);
-        self.draw_text(
+        self.draw_two_line_label(
+            text_left,
+            text_right,
+            mid,
             "Focus",
-            &self.body_format,
-            title_r,
+            sub,
             &self.brushes.text_primary,
+            &self.brushes.text_muted,
+            false,
         );
-        self.draw_text(sub, &self.subtitle_format, sub_r, &self.brushes.text_muted);
         Ok(())
     }
 
@@ -387,36 +397,21 @@ impl ControlCenterRenderer {
             state.pressed == Some(ControlCenterHitTarget::BatteryTile),
             palette,
         );
-        let pad = scale(8, self.dpi) as f32;
-        let circle_d = scale(24, self.dpi) as f32;
-        let cx = tile.x as f32 + pad + circle_d * 0.5;
-        let cy = tile.y as f32 + pad + circle_d * 0.5;
-        let rad = circle_d * 0.5;
         let charging = snapshot.status.battery.charging;
-        let bg = self.brushes.color_brush(if charging {
-            CHARGING_GREEN
-        } else {
-            palette.toggle_inactive
-        });
-        unsafe {
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(cx, cy),
-                    radiusX: rad,
-                    radiusY: rad,
-                },
-                &bg,
-            );
-        }
-        let fg = if charging {
-            &self.brushes.on_accent
-        } else {
-            &self.brushes.text_primary
-        };
+        let (cx, cy, rad, fg) = self.draw_circle_badge(
+            layout.battery_icon,
+            ControlVisualState {
+                active: charging,
+                enabled: true,
+                pointer: PointerState::Normal,
+            },
+            CHARGING_GREEN,
+            palette,
+        );
         self.draw_battery_glyph(
             cx,
             cy,
-            rad * 0.78,
+            rad * 0.62,
             snapshot.status.battery.fill_fraction(),
             fg,
         );
@@ -431,27 +426,69 @@ impl ControlCenterRenderer {
         } else {
             power_mode_label(snapshot.status.power_mode)
         };
-        let text_top = tile.y as f32 + scale(35, self.dpi) as f32;
-        let sub_top = tile.y as f32 + scale(49, self.dpi) as f32;
-        let title_r = D2D_RECT_F {
-            left: tile.x as f32 + pad,
-            top: text_top,
-            right: tile.right() as f32 - pad,
-            bottom: sub_top + scale(2, self.dpi) as f32,
+        let text_left = layout.battery_icon.right() as f32 + scale(10, self.dpi) as f32;
+        let text_right = tile.right() as f32 - scale(12, self.dpi) as f32;
+        let mid = tile.y as f32 + tile.height as f32 * 0.5;
+        self.draw_two_line_label(
+            text_left,
+            text_right,
+            mid,
+            &headline,
+            sub,
+            &self.brushes.text_primary,
+            &self.brushes.text_muted,
+            true,
+        );
+    }
+
+    pub(super) fn draw_slider_header(
+        &self,
+        card: Rect,
+        header: Rect,
+        title: &str,
+        value_label: &str,
+        show_chevron: bool,
+    ) {
+        let pad = scale(12, self.dpi) as f32;
+        let left_w = scale(84, self.dpi) as f32;
+        let right_edge = if show_chevron {
+            card.right() as f32 - scale(24, self.dpi) as f32
+        } else {
+            card.right() as f32 - pad
         };
-        let sub_r = D2D_RECT_F {
-            left: tile.x as f32 + pad,
-            top: sub_top,
-            right: tile.right() as f32 - pad,
-            bottom: tile.bottom() as f32 - scale(5, self.dpi) as f32,
+        let left_r = D2D_RECT_F {
+            left: card.x as f32 + pad,
+            top: header.y as f32,
+            right: (card.x as f32 + pad + left_w).min(right_edge),
+            bottom: header.bottom() as f32,
+        };
+        let right_r = D2D_RECT_F {
+            left: left_r.right + scale(4, self.dpi) as f32,
+            top: header.y as f32,
+            right: right_edge,
+            bottom: header.bottom() as f32,
         };
         self.draw_text(
-            &headline,
-            &self.body_format,
-            title_r,
+            title,
+            &self.title_format,
+            left_r,
             &self.brushes.text_primary,
         );
-        self.draw_text(sub, &self.subtitle_format, sub_r, &self.brushes.text_muted);
+        self.draw_tabular_text(
+            value_label,
+            &self.value_format,
+            right_r,
+            &self.brushes.text_muted,
+        );
+        if show_chevron {
+            self.draw_chevron(
+                card.right() as f32 - scale(14, self.dpi) as f32,
+                header.y as f32 + header.height as f32 * 0.5,
+                scale(4, self.dpi) as f32,
+                true,
+                &self.brushes.text_muted,
+            );
+        }
     }
 
     pub(super) fn draw_display_card(
@@ -468,47 +505,21 @@ impl ControlCenterRenderer {
         {
             self.draw_hover_pill(
                 layout.display_header,
-                scale(7, self.dpi) as f32,
+                scale(10, self.dpi) as f32,
                 state.pressed == Some(ControlCenterHitTarget::DisplayOpenPage),
                 palette,
             );
         }
-        let pad = scale(10, self.dpi) as f32;
-        let hdr = layout.display_header;
         let value_text = snapshot
             .status
             .brightness
             .map_or_else(|| String::from("Unavailable"), |pct| format!("{pct}%"));
-        let left_r = D2D_RECT_F {
-            left: hdr.x as f32 + pad,
-            top: hdr.y as f32 + scale(4, self.dpi) as f32,
-            right: hdr.right() as f32 - scale(90, self.dpi) as f32,
-            bottom: hdr.bottom() as f32,
-        };
-        let right_r = D2D_RECT_F {
-            left: hdr.right() as f32 - scale(100, self.dpi) as f32,
-            top: hdr.y as f32 + scale(4, self.dpi) as f32,
-            right: hdr.right() as f32 - scale(20, self.dpi) as f32,
-            bottom: hdr.bottom() as f32,
-        };
-        self.draw_text(
+        self.draw_slider_header(
+            layout.display_card,
+            layout.display_header,
             "Display",
-            &self.title_format,
-            left_r,
-            &self.brushes.text_primary,
-        );
-        self.draw_text(
             &value_text,
-            &self.value_format,
-            right_r,
-            &self.brushes.text_muted,
-        );
-        self.draw_chevron(
-            hdr.right() as f32 - scale(12, self.dpi) as f32,
-            hdr.y as f32 + hdr.height as f32 * 0.5 + scale(2, self.dpi) as f32,
-            scale(4, self.dpi) as f32,
             true,
-            &self.brushes.text_muted,
         );
 
         self.draw_capsule_slider(
@@ -535,13 +546,11 @@ impl ControlCenterRenderer {
         {
             self.draw_hover_pill(
                 layout.sound_header,
-                scale(7, self.dpi) as f32,
+                scale(10, self.dpi) as f32,
                 state.pressed == Some(ControlCenterHitTarget::SoundOpenPage),
                 palette,
             );
         }
-        let pad = scale(10, self.dpi) as f32;
-        let hdr = layout.sound_header;
         let output_label = snapshot
             .audio_outputs
             .iter()
@@ -553,36 +562,12 @@ impl ControlCenterRenderer {
             format!("{}%", snapshot.status.volume)
         };
         let right_label = format!("{output_label} · {value_text}");
-        let left_r = D2D_RECT_F {
-            left: hdr.x as f32 + pad,
-            top: hdr.y as f32 + scale(4, self.dpi) as f32,
-            right: hdr.x as f32 + scale(72, self.dpi) as f32,
-            bottom: hdr.bottom() as f32,
-        };
-        let right_r = D2D_RECT_F {
-            left: hdr.x as f32 + scale(74, self.dpi) as f32,
-            top: hdr.y as f32 + scale(4, self.dpi) as f32,
-            right: hdr.right() as f32 - scale(20, self.dpi) as f32,
-            bottom: hdr.bottom() as f32,
-        };
-        self.draw_text(
+        self.draw_slider_header(
+            layout.sound_card,
+            layout.sound_header,
             "Sound",
-            &self.title_format,
-            left_r,
-            &self.brushes.text_primary,
-        );
-        self.draw_text(
             &right_label,
-            &self.value_format,
-            right_r,
-            &self.brushes.text_muted,
-        );
-        self.draw_chevron(
-            hdr.right() as f32 - scale(12, self.dpi) as f32,
-            hdr.y as f32 + hdr.height as f32 * 0.5 + scale(2, self.dpi) as f32,
-            scale(4, self.dpi) as f32,
             true,
-            &self.brushes.text_muted,
         );
 
         self.draw_sound_controls(layout, snapshot, state, palette)
@@ -595,75 +580,7 @@ impl ControlCenterRenderer {
         state: ControlCenterPaintState,
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
-        let mute = layout.sound_mute;
-        let mute_r = mute.height as f32 * 0.5;
         let muted = snapshot.status.muted;
-        let mute_rr = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(mute),
-            radiusX: mute_r,
-            radiusY: mute_r,
-        };
-        let mute_bg = self.brushes.color_brush(if muted {
-            D2D1_COLOR_F {
-                r: 0.94,
-                g: 0.28,
-                b: 0.24,
-                a: if palette.is_high_contrast { 1.0 } else { 0.24 },
-            }
-        } else {
-            palette.toggle_inactive
-        });
-        unsafe {
-            self.target.FillRoundedRectangle(&mute_rr, &mute_bg);
-            let border = self.brushes.color_brush(if muted {
-                D2D1_COLOR_F {
-                    r: 0.98,
-                    g: 0.42,
-                    b: 0.36,
-                    a: 0.65,
-                }
-            } else {
-                palette.menu_separator
-            });
-            self.target
-                .DrawRoundedRectangle(&mute_rr, &border, 0.8, None);
-        }
-        self.draw_interaction_overlay(
-            mute,
-            mute_r,
-            state.hovered == Some(ControlCenterHitTarget::SoundMuteToggle),
-            state.pressed == Some(ControlCenterHitTarget::SoundMuteToggle),
-            palette,
-        );
-        let cx = mute.x as f32 + mute.width as f32 * 0.5;
-        let cy = mute.y as f32 + mute.height as f32 * 0.5;
-        let muted_red = self.brushes.color_brush(D2D1_COLOR_F {
-            r: 1.0,
-            g: 0.45,
-            b: 0.40,
-            a: 0.98,
-        });
-        let icon_brush = if muted && !palette.is_high_contrast {
-            &muted_red
-        } else if muted {
-            &self.brushes.on_accent
-        } else {
-            &self.brushes.text_primary
-        };
-        let half_h = scale(4, self.dpi) as f32;
-        draw_speaker_glyph(
-            &self.factory,
-            &self.target,
-            &self.stroke_style,
-            cx - half_h * 0.72,
-            cy,
-            half_h,
-            (scale(2, self.dpi) as f32 * 0.6).max(1.1),
-            snapshot.status.volume,
-            muted,
-            icon_brush,
-        )?;
-
         let effective = if muted { 0 } else { snapshot.status.volume };
         self.draw_capsule_slider(
             layout.sound_slider,
@@ -673,7 +590,88 @@ impl ControlCenterRenderer {
             false,
             palette,
         );
-        Ok(())
+
+        let mute = layout.sound_mute;
+        let mute_r = mute.height as f32 * 0.5;
+        let cx = mute.x as f32 + mute.width as f32 * 0.5;
+        let cy = mute.y as f32 + mute.height as f32 * 0.5;
+        if muted {
+            let mute_bg = self.brushes.color_brush(D2D1_COLOR_F {
+                r: 0.94,
+                g: 0.28,
+                b: 0.24,
+                a: if palette.is_high_contrast { 1.0 } else { 0.24 },
+            });
+            unsafe {
+                self.target.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2::new(cx, cy),
+                        radiusX: mute_r,
+                        radiusY: mute_r,
+                    },
+                    &mute_bg,
+                );
+            }
+        }
+        let mute_hovered = state.hovered == Some(ControlCenterHitTarget::SoundMuteToggle);
+        let mute_pressed = state.pressed == Some(ControlCenterHitTarget::SoundMuteToggle);
+        if mute_hovered || mute_pressed {
+            if effective > 0 && !palette.is_high_contrast {
+                let cap_overlay = self.brushes.color_brush(D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: if mute_pressed { 0.18 } else { 0.10 },
+                });
+                unsafe {
+                    self.target.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: Vector2::new(cx, cy),
+                            radiusX: mute_r,
+                            radiusY: mute_r,
+                        },
+                        &cap_overlay,
+                    );
+                }
+            } else {
+                self.draw_interaction_overlay(mute, mute_r, mute_hovered, mute_pressed, palette);
+            }
+        }
+        let glyph_dark = self.slider_cap_dark_brush();
+        let muted_red = self.brushes.color_brush(D2D1_COLOR_F {
+            r: 1.0,
+            g: 0.45,
+            b: 0.40,
+            a: 0.98,
+        });
+        let icon_brush = if muted {
+            if palette.is_high_contrast {
+                &self.brushes.on_accent
+            } else {
+                &muted_red
+            }
+        } else if effective > 0 {
+            if palette.is_high_contrast {
+                &self.brushes.on_accent
+            } else {
+                &glyph_dark
+            }
+        } else {
+            &self.brushes.text_muted
+        };
+        let half_h = scale(5, self.dpi) as f32;
+        draw_speaker_glyph(
+            &self.factory,
+            &self.target,
+            &self.stroke_style,
+            cx - half_h * 0.86,
+            cy,
+            half_h,
+            (scale(2, self.dpi) as f32 * 0.62).max(1.15),
+            snapshot.status.volume,
+            muted,
+            icon_brush,
+        )
     }
 
     pub(super) fn draw_media_card(
@@ -700,11 +698,11 @@ impl ControlCenterRenderer {
         let pad = scale(12, self.dpi) as f32;
         let art_size = scale(48, self.dpi) as f32;
         let art_top =
-            layout.media_body.y as f32 + (layout.media_body.height as f32 - art_size) * 0.5;
+            layout.media_card.y as f32 + (layout.media_card.height as f32 - art_size) * 0.5;
         let art_rect = D2D_RECT_F {
-            left: layout.media_body.x as f32 + pad,
+            left: layout.media_card.x as f32 + pad,
             top: art_top,
-            right: layout.media_body.x as f32 + pad + art_size,
+            right: layout.media_card.x as f32 + pad + art_size,
             bottom: art_top + art_size,
         };
         let thumb_bytes = if media_enabled {
@@ -717,18 +715,7 @@ impl ControlCenterRenderer {
         let text_left = art_rect.right + scale(10, self.dpi) as f32;
         let text_right =
             (layout.media_body.right() as f32 - scale(6, self.dpi) as f32).max(text_left + 1.0);
-        let title_r = D2D_RECT_F {
-            left: text_left,
-            top: art_top + scale(4, self.dpi) as f32,
-            right: text_right,
-            bottom: art_top + art_size * 0.54,
-        };
-        let artist_r = D2D_RECT_F {
-            left: text_left,
-            top: art_top + art_size * 0.48,
-            right: text_right,
-            bottom: art_rect.bottom - scale(2, self.dpi) as f32,
-        };
+        let mid = layout.media_card.y as f32 + layout.media_card.height as f32 * 0.5;
         let (title, artist, playing) = if media_enabled {
             match &snapshot.media {
                 Some(media) => {
@@ -754,8 +741,16 @@ impl ControlCenterRenderer {
         } else {
             &self.brushes.text_disabled
         };
-        self.draw_text(title, &self.body_format, title_r, title_brush);
-        self.draw_text(artist, &self.subtitle_format, artist_r, sub_brush);
+        self.draw_two_line_label(
+            text_left,
+            text_right,
+            mid,
+            title,
+            artist,
+            title_brush,
+            sub_brush,
+            false,
+        );
 
         self.draw_media_transport_buttons(
             layout,
@@ -825,7 +820,7 @@ impl ControlCenterRenderer {
             } else {
                 &self.brushes.text_primary
             };
-            let size = scale(if kind == 0 { 5 } else { 4 }, self.dpi) as f32;
+            let size = scale(if kind == 0 { 6 } else { 4 }, self.dpi) as f32;
             match kind {
                 -1 => self.draw_skip_glyph(cx, cy, size, false, glyph_brush)?,
                 0 => self.draw_play_pause_glyph(cx, cy, size, playing, glyph_brush)?,

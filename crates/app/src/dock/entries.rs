@@ -194,6 +194,7 @@ impl Dock {
         }
         let target = self.target_for_entry(&entry);
         activate_entry(runtime, &entry, target);
+        self.ensure_topmost(runtime);
     }
 
     pub(super) fn target_for_entry(&self, entry: &DockEntry) -> Option<Rect> {

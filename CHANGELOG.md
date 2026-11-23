@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-23
+
+### Changed
+
+- **Unified Control Center layout and typography**: aligned `Focus` and `Battery` tiles onto the same horizontal `32 pt` circular badge and vertically centered two-line layout as `Wi-Fi` and `Bluetooth`; unified `Display` and `Sound` into matching full-width `328 × 26 pt` capsule sliders with the `Sound` mute toggle embedded in the leading cap; standardized `12 pt` card padding, `68 pt` tile/slider heights, `72 pt` Media card framing with a `32 pt` Play/Pause disc, concentric `10 pt`/`14 pt` hover pills and subpanel footer buttons, and `13 pt SemiBold` card titles paired with `11 pt Medium` tabular (`tnum`) readouts.
+
+### Fixed
+
+- **Prevented Dock occlusion during hover magnification motion**: `OttoDockBar` now handles AppBar notifications (`ABN_POSCHANGED`, `ABN_FULLSCREENAPP`), re-registers on `TaskbarCreated`, and re-asserts `HWND_TOPMOST` on hover/motion entry, unhide, app activation, reservation updates, and window geometry changes (while yielding to active Otto overlays), keeping magnified Dock icons and tooltips above maximized windows.
+- **Fixed Top Bar Search and Dock Apps Spotlight toggle flow**: clicking the Top Bar Search icon or Dock Apps icon while Spotlight is already open in that mode now closes Spotlight cleanly instead of reopening it; switching between `Search` and `Apps` works in one click; a `250 ms` focus-loss grace window absorbs `WM_KILLFOCUS` pointer-trigger races; and opening Tray or Settings from the Top Bar dismisses Spotlight cleanly.
+
 ## [1.3.0] - 2026-11-23
 
 ### Added
@@ -72,7 +83,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Single low-power GPU **Clear Liquid Glass** composition with opaque and Windows High Contrast accessibility fallbacks, UI Automation (`WM_GETOBJECT`) providers, full Bar/Dock/Control Center keyboard traversal, and opt-in **Background Cleanup** throttling.
 - Production Windows 11 22H2+ (build 22621+) packaging: `--quit` and `--restore-shell` lifecycle CLI, crash-safe shell recovery (`shell_recovery.json`), rolling zero-telemetry local logs, per-user Inno Setup installer (`otto-os-setup-1.0.0-x64.exe`), portable ZIP archive, SHA-256 checksums, and WinGet manifests.
 
-[Unreleased]: https://github.com/howlil/otto-os/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/howlil/otto-os/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/howlil/otto-os/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/howlil/otto-os/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/howlil/otto-os/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/howlil/otto-os/compare/v1.0.0...v1.1.0

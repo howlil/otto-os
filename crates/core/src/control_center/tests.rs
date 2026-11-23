@@ -61,13 +61,29 @@ fn main_layout_places_window_within_work_area_across_dpis() {
         assert!(layout.connectivity_card.width > 0);
         assert_eq!(layout.focus_toggle.x, layout.battery_tile.x);
         assert_eq!(layout.focus_toggle.width, layout.battery_tile.width);
+        assert_eq!(layout.focus_toggle.height, layout.battery_tile.height);
+        assert_eq!(layout.focus_toggle.height, layout.display_card.height);
+        assert_eq!(layout.display_card.height, layout.sound_card.height);
         assert!(layout.focus_toggle.bottom() < layout.battery_tile.y);
+        assert_eq!(layout.wifi_toggle.width, layout.bluetooth_toggle.width);
+        assert_eq!(layout.wifi_toggle.width, layout.focus_icon.width);
+        assert_eq!(layout.wifi_toggle.width, layout.battery_icon.width);
+        assert_eq!(layout.wifi_toggle.width, layout.media_play_pause.width);
+        let inset = layout.wifi_toggle.x - layout.connectivity_card.x;
+        assert_eq!(layout.focus_icon.x - layout.focus_toggle.x, inset);
+        assert_eq!(layout.battery_icon.x - layout.battery_tile.x, inset);
+        assert_eq!(layout.display_slider.x - layout.display_card.x, inset);
+        assert_eq!(layout.sound_slider.x - layout.sound_card.x, inset);
         assert!(layout.display_slider.width > 200);
-        assert!(layout.sound_slider.width > 180);
-        assert_eq!(layout.sound_mute.x, layout.display_slider.x);
-        assert!(layout.sound_mute.right() < layout.sound_slider.x);
-        assert_eq!(layout.display_slider.right(), layout.sound_slider.right());
+        assert_eq!(layout.sound_slider.x, layout.display_slider.x);
+        assert_eq!(layout.sound_slider.width, layout.display_slider.width);
+        assert_eq!(layout.sound_slider.height, layout.display_slider.height);
+        assert_eq!(layout.sound_mute.x, layout.sound_slider.x);
+        assert_eq!(layout.sound_mute.y, layout.sound_slider.y);
+        assert_eq!(layout.sound_mute.width, layout.display_icon.width);
+        assert_eq!(layout.sound_mute.height, layout.sound_slider.height);
         assert!(layout.sound_mute.height >= scale(24, dpi));
+        assert!(layout.focus_settings.width >= scale(24, dpi));
         assert!(layout.media_body.right() <= layout.media_prev.x);
     }
 }
@@ -112,6 +128,10 @@ fn hit_test_prioritizes_nested_connectivity_media_and_sound_controls() {
     assert_eq!(
         layout.hit_test(mx, my),
         Some(ControlCenterHitTarget::SoundMuteToggle)
+    );
+    assert_eq!(
+        layout.hit_test(layout.sound_mute.right() + 12, my),
+        Some(ControlCenterHitTarget::SoundSlider)
     );
     let (px, py) = center(layout.media_play_pause);
     assert_eq!(

@@ -97,8 +97,12 @@ impl Dock {
             && y >= self.layout.pill.y - 36;
 
         if near_pill {
+            let started_hover = !self.hovering;
             self.hovering = true;
             self.last_cursor_x = Some(x as f32);
+            if started_hover {
+                self.ensure_topmost(runtime);
+            }
             self.ensure_animating();
         } else if self.hovering {
             self.hovering = false;

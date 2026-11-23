@@ -105,6 +105,7 @@ pub(crate) struct Dock {
     drag: DragState,
     preferences: DockPreferences,
     fullscreen_covered: bool,
+    shell_full_screen: bool,
     window_overlaps: bool,
     reservation: Option<DockReservation>,
     fullscreen_gate: ChangeGate,
@@ -178,6 +179,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         drag: DragState::default(),
         preferences,
         fullscreen_covered: false,
+        shell_full_screen: false,
         window_overlaps: false,
         reservation: None,
         fullscreen_gate: ChangeGate::new(DOCK_BACKDROP_FALLBACK_TICKS),
@@ -203,7 +205,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         last_focus_badge_suppressed: false,
     };
     dock.refresh_cover();
-    dock.sync_reservation();
+    let _ = dock.sync_reservation();
     dock.sync_backdrop(runtime, true);
     dock.place();
     dock.present(runtime);
@@ -240,6 +242,42 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
+fn wake_for_message(runtime: &RuntimeContext, message: u32) {
+    if message == WM_MOUSEMOVE {
+        wake_timer_only(runtime);
+    } else if matches!(
+        message,
+        WM_LBUTTONDOWN
+            | WM_RBUTTONUP
+            | WM_APP_DOCK_KEY
+            | WM_APP_UIA_INVOKE
+            | otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE
+    ) {
+        wake(runtime);
+    }
+}
+
+fn handle_accessible_object(
+    runtime: &RuntimeContext,
+    hwnd: isize,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
+    runtime
+        .dock
+        .try_borrow()
+        .ok()
+        .and_then(|guard| {
+            let dock = guard.as_ref()?;
+            handle_wm_getobject(hwnd, wparam.0, lparam.0, WM_APP_UIA_INVOKE, || {
+                let entries = dock.combined_entries();
+                let labels: Vec<&str> = entries.iter().map(|entry| entry.title.as_str()).collect();
+                build_dock_accessible_tree(&dock.layout, dock.window_origin(), &labels)
+            })
+        })
+        .map(LRESULT)
+}
+
 pub fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
@@ -247,31 +285,11 @@ pub fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
-    if message == WM_MOUSEMOVE {
-        wake_timer_only(runtime);
-    } else if matches!(
-        message,
-        WM_LBUTTONDOWN | WM_RBUTTONUP | WM_APP_DOCK_KEY | WM_APP_UIA_INVOKE
-    ) {
-        wake(runtime);
-    }
+    wake_for_message(runtime, message);
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_CLOSE => Some(LRESULT(0)),
-        WM_GETOBJECT => runtime
-            .dock
-            .try_borrow()
-            .ok()
-            .and_then(|guard| {
-                let dock = guard.as_ref()?;
-                handle_wm_getobject(hwnd, wparam.0, lparam.0, WM_APP_UIA_INVOKE, || {
-                    let entries = dock.combined_entries();
-                    let labels: Vec<&str> =
-                        entries.iter().map(|entry| entry.title.as_str()).collect();
-                    build_dock_accessible_tree(&dock.layout, dock.window_origin(), &labels)
-                })
-            })
-            .map(LRESULT),
+        WM_GETOBJECT => handle_accessible_object(runtime, hwnd, wparam, lparam),
         WM_APP_UIA_INVOKE => {
             with_dock(runtime, |dock| dock.activate_index(runtime, wparam.0));
             Some(LRESULT(0))
@@ -284,6 +302,16 @@ pub fn handle_message(
         }
         WM_APP_DOCK_BACKDROP => {
             with_dock(runtime, |dock| dock.on_backdrop(runtime));
+            Some(LRESULT(0))
+        }
+        otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE => {
+            if let Some(notification) =
+                otto_platform::classify_shell_notification(wparam.0, lparam.0)
+            {
+                with_dock(runtime, |dock| {
+                    dock.on_shell_notification(runtime, notification);
+                });
+            }
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == DOCK_POLL_TIMER => {
@@ -386,6 +414,10 @@ pub fn repaint(runtime: &RuntimeContext) {
         dock.sync_backdrop(runtime, true);
         dock.present(runtime);
     });
+}
+
+pub fn on_taskbar_created(runtime: &RuntimeContext) {
+    with_dock(runtime, |dock| dock.on_taskbar_created(runtime));
 }
 
 fn item_screen_rect(dock: &Dock, index: usize) -> Option<Rect> {

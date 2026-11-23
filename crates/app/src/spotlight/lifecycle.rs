@@ -64,6 +64,7 @@ impl SpotlightSurface {
         self.morph_target = 1.0;
         self.morph_tick_at = Instant::now();
         self.closing = false;
+        self.blur_dismissed_at = None;
         self.restore_focus_on_close = false;
         if !self.visible {
             self.previous_foreground =
@@ -159,7 +160,7 @@ impl SpotlightSurface {
     }
 
     pub(super) fn request_close(&mut self, restore_focus: bool) {
-        if !self.visible {
+        if !self.visible || self.closing {
             return;
         }
         self.dragging = None;

@@ -59,6 +59,14 @@ impl FocusShield {
     }
 }
 
+#[must_use]
+pub(crate) fn is_open(runtime: &RuntimeContext) -> bool {
+    runtime
+        .focus_shield
+        .try_borrow()
+        .is_ok_and(|state| state.shown.is_some())
+}
+
 pub(crate) fn may_block(runtime: &RuntimeContext, window: isize, page: &str) -> bool {
     runtime
         .focus_shield

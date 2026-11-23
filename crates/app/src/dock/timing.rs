@@ -60,21 +60,7 @@ impl Dock {
         }
     }
 
-    pub(super) fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
-        let mut dirty = self.cancel_drag_on_escape();
-        let generations = window_change_generations();
-        if self.refresh_entries_if_changed(generations.map(|changes| changes.topology)) {
-            dirty = true;
-        }
-        if self
-            .fullscreen_gate
-            .should_refresh(generations.map(|changes| changes.geometry))
-        {
-            self.refresh_cover();
-        }
-        self.sync_reservation();
-        dirty |= self.refresh_badges(runtime, dirty);
-
+    pub(super) fn sync_hide_from_pointer(&mut self, runtime: &RuntimeContext) -> bool {
         let (gx, gy) = cursor_position();
         let (_, win_top) = self.window_origin();
         let local_x = gx;
@@ -82,7 +68,7 @@ impl Dock {
 
         let should_auto_hide = dock_should_hide(
             self.preferences,
-            self.fullscreen_covered,
+            self.is_fullscreen_covered(),
             self.window_overlaps,
         );
 
@@ -97,6 +83,8 @@ impl Dock {
             self.anim.should_hide = target_hide;
             if self.anim.should_hide {
                 self.hovering = false;
+            } else {
+                self.ensure_topmost(runtime);
             }
             self.ensure_animating();
         }
@@ -111,10 +99,37 @@ impl Dock {
                     .last_cursor_x
                     .is_none_or(|old| (old - new_cx).abs() > 0.5)
             {
+                let started_hover = !self.hovering;
                 self.hovering = true;
                 self.last_cursor_x = Some(new_cx);
+                if started_hover {
+                    self.ensure_topmost(runtime);
+                }
                 self.ensure_animating();
             }
+        }
+        should_auto_hide
+    }
+
+    pub(super) fn on_poll_timer(&mut self, runtime: &RuntimeContext) {
+        let mut dirty = self.cancel_drag_on_escape();
+        let generations = window_change_generations();
+        if self.refresh_entries_if_changed(generations.map(|changes| changes.topology)) {
+            dirty = true;
+        }
+        let cover_geometry_changed = self
+            .fullscreen_gate
+            .should_refresh(generations.map(|changes| changes.geometry));
+        if cover_geometry_changed {
+            self.refresh_cover();
+        }
+        let reservation_changed = self.sync_reservation();
+        dirty |= self.refresh_badges(runtime, dirty);
+
+        let should_auto_hide = self.sync_hide_from_pointer(runtime);
+        if cover_geometry_changed || reservation_changed || (dirty && self.anim.bounce_phase > 0.0)
+        {
+            self.ensure_topmost(runtime);
         }
 
         if self.sync_focus_badge_suppression(runtime) {

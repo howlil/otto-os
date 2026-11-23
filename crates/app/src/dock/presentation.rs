@@ -22,7 +22,7 @@ impl Dock {
         self.screen = primary_screen();
         self.recompute_layout();
         self.refresh_cover();
-        self.sync_reservation();
+        let _ = self.sync_reservation();
         let all = self.combined_entries();
         if let Ok(mut renderer) = DockRenderer::new(
             self.layout.window_width,

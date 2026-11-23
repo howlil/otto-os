@@ -94,6 +94,7 @@ impl Bar {
                 self.present(runtime);
             }
             BarControlAction::Tray => {
+                crate::spotlight::close(runtime);
                 crate::menu::close(runtime);
                 crate::control_center::close(runtime);
                 let anchor = self
@@ -114,6 +115,7 @@ impl Bar {
             }
             BarControlAction::OpenSettings(action) => {
                 let _ = close_tray_overflow();
+                crate::spotlight::close(runtime);
                 crate::menu::close(runtime);
                 crate::control_center::close(runtime);
                 crate::control_center::open_settings_action(action);
@@ -125,7 +127,7 @@ impl Bar {
                 crate::control_center::close(runtime);
                 let trigger = (self.layout.slots.search_slot.width > 0)
                     .then_some(self.layout.slots.search_slot);
-                crate::spotlight::open_search(runtime, trigger);
+                crate::spotlight::toggle_search(runtime, trigger);
             }
             BarControlAction::Notifications => {
                 let _ = close_tray_overflow();
