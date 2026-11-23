@@ -6,13 +6,45 @@ import path from 'node:path';
 const input = '.github/repo-growth/history.json';
 const output = 'assets/repo-growth.svg';
 const h = JSON.parse(fs.readFileSync(input, 'utf8'));
-const points = (h.points ?? [])
-  .filter((p) => p && /^\d{4}-\d{2}-\d{2}$/.test(p.date))
+// Mirror landing/functions/api/beta-downloads.ts: only executable installers
+// and portable ZIPs are application downloads. Never count manifests/checksums.
+const INSTALLER_NAME = /^otto-os-setup-\d+(?:\.\d+)*-x64\.exe$/i;
+const PORTABLE_ZIP_NAME = /^otto-os-\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?-windows-x64\.zip$/i;
+const isApplicationAsset = (name) =>
+  INSTALLER_NAME.test(name) || PORTABLE_ZIP_NAME.test(name);
+const applicationAssets = Object.values(h.assets ?? {})
+  .filter((asset) => asset?.active !== false && isApplicationAsset(asset?.name ?? ''));
+const countDownloads = (asset) => Math.max(0, Number(asset?.lastSeen ?? asset?.maximumSeen) || 0);
+const total = applicationAssets.reduce((sum, asset) => sum + countDownloads(asset), 0);
+
+// Record a separate daily series because Repo Growth's built-in snapshots
+// include checksums and manifests. Never relabel older raw snapshots.
+const appHistoryPath = '.github/repo-growth/application-history.json';
+const appHistory = fs.existsSync(appHistoryPath)
+  ? JSON.parse(fs.readFileSync(appHistoryPath, 'utf8'))
+  : { version: 1, repository: h.repository, points: [] };
+const snapshotDate = (h.updatedAt ?? '').slice(0, 10);
+if (!/^\d{4}-\d{2}-\d{2}$/.test(snapshotDate)) {
+  throw new Error('Repo Growth history is missing a valid updatedAt date');
+}
+const originalPoint = (h.points ?? []).find((p) => p.date === snapshotDate) ?? (h.points ?? []).at(-1) ?? {};
+const snapshot = {
+  date: snapshotDate,
+  downloads: total,
+  stars: Number(originalPoint.stars) || 0,
+  forks: Number(originalPoint.forks) || 0
+};
+const points = (appHistory.points ?? [])
+  .filter((p) => p && /^\d{4}-\d{2}-\d{2}$/.test(p.date) && Number.isFinite(p.downloads))
+  .filter((p) => p.date !== snapshotDate)
+  .concat(snapshot)
   .sort((a, b) => a.date.localeCompare(b.date));
+fs.writeFileSync(appHistoryPath, JSON.stringify({
+  version: 1, repository: h.repository, points
+}, null, 2) + '\n');
 const last = points.at(-1) ?? {};
-const total = Number(last.downloads ?? h.totals?.downloads ?? 0);
-const stars = Number(last.stars ?? 0);
-const forks = Number(last.forks ?? 0);
+const stars = snapshot.stars;
+const forks = snapshot.forks;
 const number = (n) => Math.max(0, Number(n) || 0).toLocaleString('en-US');
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
@@ -21,9 +53,9 @@ const date = (s) => s
   ? new Date(s + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
   : 'Not collected';
 const releaseTotals = new Map();
-for (const asset of Object.values(h.assets ?? {})) {
+for (const asset of applicationAssets) {
   if (!asset?.release) continue;
-  releaseTotals.set(asset.release, (releaseTotals.get(asset.release) || 0) + Math.max(0, Number(asset.maximumSeen ?? asset.lastSeen) || 0));
+  releaseTotals.set(asset.release, (releaseTotals.get(asset.release) || 0) + countDownloads(asset));
 }
 const releases = [...releaseTotals].sort(([a], [b]) => {
   const parts = (v) => v.replace(/^v/, '').split('.').map((n) => Number(n) || 0);
@@ -41,7 +73,7 @@ const rect = (x, y, w, height, radius, css) =>
 add('<?xml version="1.0" encoding="UTF-8"?>');
 add('<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="510" viewBox="0 0 1000 510" role="img" aria-labelledby="title desc">');
 add('<title id="title">Otto OS adoption and GitHub release statistics</title>');
-add('<desc id="desc">Observed downloads: ' + number(total) + ', stars: ' + number(stars) + ', forks: ' + number(forks) + '. ' + points.length + ' daily snapshots. The bar chart shows download counts by release.</desc>');
+add('<desc id="desc">Observed application downloads: ' + number(total) + ', stars: ' + number(stars) + ', forks: ' + number(forks) + '. ' + points.length + ' daily snapshots. The bar chart shows download counts by release.</desc>');
 add('<style><![CDATA[');
 add('text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}');
 add('.bg{fill:#fff}.border{fill:none;stroke:#e5e7eb;stroke-width:1}.divider,.grid{stroke:#e5e7eb;stroke-width:1}');
@@ -63,7 +95,7 @@ txt(966, 72, 'Updated ' + date(last.date), 'meta', 'text-anchor="end"');
 line(32, 92, 968, 92, 'divider');
 
 const metrics = [
-  { x: 36, label: 'RELEASE ASSET DOWNLOADS', value: total },
+  { x: 36, label: 'APPLICATION DOWNLOADS', value: total },
   { x: 389, label: 'GITHUB STARS', value: stars },
   { x: 703, label: 'FORKS', value: forks }
 ];
@@ -75,7 +107,7 @@ line(32, 198, 968, 198, 'divider');
 txt(36, 232, 'Downloads over time', 'panel');
 txt(36, 251, 'Cumulative, daily snapshots', 'meta');
 txt(700, 232, 'Downloads by release', 'panel');
-txt(700, 251, 'Observed asset totals', 'meta');
+txt(700, 251, 'Installer + portable ZIP only', 'meta');
 line(671, 217, 671, 442, 'divider');
 
 // Timeline: show a single observed point rather than fabricate a trend.
@@ -120,8 +152,8 @@ if (releases.length) {
   txt(700, 345, 'No published releases yet', 'meta');
 }
 line(32, 465, 968, 465, 'divider');
-txt(36, 489, 'SOURCE  ·  GITHUB RELEASE ASSETS', 'eyebrow');
-txt(966, 489, 'Requests include installers, archives, checksums and manifests; not unique installs.', 'tick', 'text-anchor="end"');
+txt(36, 489, 'SOURCE  ·  GITHUB RELEASE EXE + ZIP', 'eyebrow');
+txt(966, 489, 'Installer and portable ZIP requests only; not unique users or installations.', 'tick', 'text-anchor="end"');
 add('</svg>');
 fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, S.join('\n') + '\n');
