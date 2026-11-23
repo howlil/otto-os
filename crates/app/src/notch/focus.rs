@@ -2,10 +2,10 @@ use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    FocusBlocklist, FocusSubMode, HitTarget, MotionMetrics, NotchExpandedTab,
-    POMODORO_PRESETS_MINUTES, PomodoroPeek, PomodoroPeekFrame, PomodoroPhase, PomodoroScene,
-    PomodoroStatus, PomodoroSurface, PomodoroTick, TIMER_PRESETS_MINUTES,
-    warning_threshold_crossed,
+    FocusBlocklist, FocusSessionStatus, FocusStatsRange, FocusSubMode, HitTarget, MotionMetrics,
+    NOTCH_STATS_DAYS, NotchExpandedTab, POMODORO_PRESETS_MINUTES, PomodoroPeek, PomodoroPeekFrame,
+    PomodoroPhase, PomodoroScene, PomodoroStatus, PomodoroSurface, PomodoroTick,
+    TIMER_PRESETS_MINUTES, warning_threshold_crossed,
 };
 
 use super::GLOW_BREATH_FLOOR;
@@ -22,12 +22,115 @@ impl NotchController {
         self.focus_blocklist = blocklist;
     }
 
+    pub(crate) const fn stats_range(&self) -> FocusStatsRange {
+        self.stats_range
+    }
+
+    pub(crate) const fn stats_selected_day(&self) -> Option<usize> {
+        self.stats_selected_day
+    }
+
+    pub(super) fn handle_focus_stats_click(&mut self, target: HitTarget) -> NotchUpdate {
+        match target {
+            HitTarget::FocusStatsRange(range) => {
+                if self.stats_range == range {
+                    return NotchUpdate::default();
+                }
+                self.stats_range = range;
+                self.stats_selected_day = None;
+                NotchUpdate {
+                    changed: true,
+                    effect: None,
+                }
+            }
+            HitTarget::FocusStatsDay(index) => {
+                let idx = usize::from(index);
+                if idx >= NOTCH_STATS_DAYS {
+                    return NotchUpdate::default();
+                }
+                self.stats_selected_day = if self.stats_selected_day == Some(idx) {
+                    None
+                } else {
+                    Some(idx)
+                };
+                NotchUpdate {
+                    changed: true,
+                    effect: None,
+                }
+            }
+            HitTarget::FocusStatsOpenSettings => {
+                self.panel_trigger = PanelTrigger::Closed;
+                self.hover_since = None;
+                self.hover_blocked = true;
+                NotchUpdate {
+                    changed: true,
+                    effect: Some(NotchEffect::OpenFocusActivitySettings),
+                }
+            }
+            _ => NotchUpdate::default(),
+        }
+    }
+
     pub(crate) const fn is_focus_blocking_active(&self) -> bool {
         self.focus_enabled
             && ((matches!(self.pomodoro.status, PomodoroStatus::Running)
                 && matches!(self.pomodoro.phase, PomodoroPhase::Focus))
                 || matches!(self.quick_timer.status, PomodoroStatus::Running)
                 || self.stopwatch.running)
+    }
+
+    pub(crate) const fn focus_session_status(&self) -> FocusSessionStatus {
+        if !self.focus_enabled {
+            return FocusSessionStatus::NotRunning;
+        }
+        if matches!(self.pomodoro.status, PomodoroStatus::Running)
+            && matches!(self.pomodoro.phase, PomodoroPhase::Focus)
+        {
+            return FocusSessionStatus::RunningCountdown {
+                remaining_seconds: self.pomodoro.remaining_seconds,
+            };
+        }
+        if matches!(self.quick_timer.status, PomodoroStatus::Running) {
+            return FocusSessionStatus::RunningCountdown {
+                remaining_seconds: self.quick_timer.remaining_seconds,
+            };
+        }
+        if self.stopwatch.running {
+            let secs = self.stopwatch.elapsed_ms / 1_000;
+            let elapsed_seconds = if secs > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                secs as u32
+            };
+            return FocusSessionStatus::RunningStopwatch { elapsed_seconds };
+        }
+        if matches!(self.pomodoro.status, PomodoroStatus::Running) {
+            return FocusSessionStatus::OnBreak {
+                remaining_seconds: self.pomodoro.remaining_seconds,
+            };
+        }
+        if matches!(self.pomodoro.status, PomodoroStatus::Paused)
+            && matches!(self.pomodoro.phase, PomodoroPhase::Focus)
+        {
+            return FocusSessionStatus::PausedCountdown {
+                remaining_seconds: self.pomodoro.remaining_seconds,
+            };
+        }
+        if matches!(self.quick_timer.status, PomodoroStatus::Paused) {
+            return FocusSessionStatus::PausedCountdown {
+                remaining_seconds: self.quick_timer.remaining_seconds,
+            };
+        }
+        if self.stopwatch.elapsed_ms > 0 {
+            let secs = self.stopwatch.elapsed_ms / 1_000;
+            let elapsed_seconds = if secs > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                secs as u32
+            };
+            return FocusSessionStatus::PausedStopwatch { elapsed_seconds };
+        }
+        FocusSessionStatus::NotRunning
     }
 
     pub(super) fn active_focus_status(&self) -> PomodoroStatus {

@@ -121,6 +121,24 @@ pub trait ControlCenterPort {
         None
     }
 
+    fn poll_update_state(&self) -> crate::UpdateState {
+        crate::UpdateState::Idle
+    }
+
+    fn start_update_install(&self) -> bool {
+        false
+    }
+
+    fn take_ready_installer(&self) -> Option<String> {
+        None
+    }
+
+    fn launch_update_installer(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn mark_update_install_failed(&self, _message: &str) {}
+
     fn open_releases_page(&self) {}
 
     fn read_notifications(&self) -> crate::NotificationCenterSnapshot {
@@ -128,6 +146,10 @@ pub trait ControlCenterPort {
     }
 
     fn dismiss_notification(&self, _id: u32) -> bool {
+        false
+    }
+
+    fn remove_notification(&self, _id: u32) -> bool {
         false
     }
 

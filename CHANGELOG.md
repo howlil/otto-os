@@ -6,6 +6,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-23
+
+### Added
+
+- **Dedicated Notch Screen Time (`Time`) tab**: view Today's total screen time, Focus share ring, Top 3 Most Used apps with real application icons, and an interactive 7-day stacked screen/focus chart directly inside the expanded Notch, with a quick `Details ›` shortcut to Focus Activity in Otto Settings.
+- **Switchable Appearance styles, themes, and accent colors**: choose between `Liquid Glass`, `Frosted`, `Tinted`, and `Solid` surface styles, `Auto | Light | Dark` theme mode, and 7 WCAG-calibrated accent colors (including Windows System accent) with instant live previews in `Otto Settings → Appearance`.
+- **In-app Software Updates**: check for new releases and download/install verified SHA-256 patches directly from `Otto Settings → About` with silent relaunch (`/RELAUNCH`) and zero background polling.
+- **Process & Memory Buffer Audit (`Otto Settings → General`)**: inspect running applications with 3-tier safety classification (`SafeBackground`, `ActiveWindow`, `SystemProtected`), toggle manual `EcoQoS` throttling, and safely end headless background memory hogs.
+- **Redesigned Focus Settings**: split Focus into dedicated `Block apps` and `Activity` tabs with live search, `[Blocked | Recent | All apps]` filters, real app icons, instant toggle switches, and a full 7-day interactive usage breakdown.
+
+### Changed
+
+- **Compact Notification Center redesign**: slimmer `328 pt` shell with concentric radii, adaptive card heights (`50 / 64 / 76 pt`) that remove blank whitespace on short alerts, real Win32 and MSIX/UWP application icons (WinRT `GetLogo` with Shell/catalog fallback), inline `+N` stack badges, tabular timestamps, and quiet borderless-at-rest header/footer actions.
+- **Pure-app Focus blocklist catalog**: filtered out Windows system services, `System32` admin utilities, folders, documentation/help shortcuts, and updaters, while deduplicating MSIX/Win32 entries and scrubbing non-domain filenames from website activity.
+- **Otto Settings native Mica backdrop**: normalized the Settings window to Windows 11 Mica with uniform neutral cards and hairline dividers.
+
+### Fixed
+
+- Eliminated translucent stack-card bleed-through on collapsed Notification Center stacks by clipping recessed stack lips strictly beneath the front card edge.
+- Improved cold-start reliability of Genie restore initialization under heavy GPU load.
+
 ## [1.2.0] - 2026-11-22
 
 ### Added
@@ -51,7 +72,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Single low-power GPU **Clear Liquid Glass** composition with opaque and Windows High Contrast accessibility fallbacks, UI Automation (`WM_GETOBJECT`) providers, full Bar/Dock/Control Center keyboard traversal, and opt-in **Background Cleanup** throttling.
 - Production Windows 11 22H2+ (build 22621+) packaging: `--quit` and `--restore-shell` lifecycle CLI, crash-safe shell recovery (`shell_recovery.json`), rolling zero-telemetry local logs, per-user Inno Setup installer (`otto-os-setup-1.0.0-x64.exe`), portable ZIP archive, SHA-256 checksums, and WinGet manifests.
 
-[Unreleased]: https://github.com/howlil/otto-os/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/howlil/otto-os/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/howlil/otto-os/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/howlil/otto-os/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/howlil/otto-os/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/howlil/otto-os/releases/tag/v1.0.0

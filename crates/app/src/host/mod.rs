@@ -135,7 +135,7 @@ pub fn start(blur: bool) -> Result<()> {
     host.runtime.blur_supported.set(blur);
     host.runtime
         .glass_enabled
-        .set(blur && host.runtime.system_appearance.get().contrast.is_none());
+        .set(blur && crate::theme_state::appearance(&host.runtime).uses_backdrop());
     sync_platform_tasks(&host.config);
     otto_platform::set_volume_hud_hook_enabled(
         host.config.preferences.notch_enabled && host.config.preferences.notch_hud,

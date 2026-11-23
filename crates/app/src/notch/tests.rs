@@ -1963,6 +1963,7 @@ fn toast(id: u32, app: &str, title: &str, body: &str) -> NotificationSummary {
         title: String::from(title),
         body: String::from(body),
         timestamp_label: String::from("now"),
+        icon_bytes: None,
     }
 }
 
@@ -1974,24 +1975,102 @@ fn notch_with_baseline() -> (NotchController, Instant) {
 }
 
 #[test]
-fn a_message_toast_opens_the_banner_and_a_call_toast_rings() {
+fn a_message_toast_peeks_then_opens_banner_and_a_call_toast_rings() {
     let (mut notch, start) = notch_with_baseline();
     let now = start + Duration::from_millis(100);
     assert!(notch.ingest_notifications(&[toast(1, "Mail", "Ayu", "Lunch?")], now));
+    assert!(notch.has_unread_notifications());
     assert_eq!(
         notch.island_mode(now),
+        otto_core::IslandMode::Notification(NotificationStage::Peek)
+    );
+    notch.last_anim_instant = now;
+    let peek = notch.layout_input(true).notification.expect("peek");
+    assert_eq!(peek.stage, NotificationStage::Peek);
+
+    let banner_at = now + Duration::from_millis(otto_core::NOTIFICATION_PEEK_MS);
+    assert_eq!(
+        notch.island_mode(banner_at),
         otto_core::IslandMode::Notification(NotificationStage::Banner)
     );
+    notch.last_anim_instant = banner_at;
     let banner = notch.layout_input(true).notification.expect("banner");
-    assert!(!banner.ringing);
+    assert_eq!(banner.stage, NotificationStage::Banner);
+    assert!(!banner.is_ringing());
+
     let both = [
         toast(1, "Mail", "Ayu", "Lunch?"),
         toast(2, "Zoom", "Budi", "is calling you"),
     ];
-    assert!(notch.ingest_notifications(&both, now));
+    assert!(notch.ingest_notifications(&both, banner_at));
+    assert_eq!(
+        notch.island_mode(banner_at),
+        otto_core::IslandMode::Notification(NotificationStage::Ringing)
+    );
+}
+
+#[test]
+fn hovering_peek_promotes_to_banner_and_gestures_collapse_without_deleting_toast() {
+    let (mut notch, start) = notch_with_baseline();
+    let now = start + Duration::from_millis(100);
+    notch.ingest_notifications(
+        &[
+            toast(2, "Chat", "Budi", "Second"),
+            toast(1, "Mail", "Ayu", ""),
+        ],
+        now,
+    );
     assert_eq!(
         notch.island_mode(now),
-        otto_core::IslandMode::Notification(NotificationStage::Ringing)
+        otto_core::IslandMode::Notification(NotificationStage::Peek)
+    );
+    let _ = notch.advance(
+        now + Duration::from_millis(100),
+        true,
+        false,
+        MotionPreference::Full,
+    );
+    assert_eq!(
+        notch.island_mode(now + Duration::from_millis(100)),
+        otto_core::IslandMode::Notification(NotificationStage::Banner)
+    );
+    let card = notch.layout_input(true).notification.expect("banner");
+    assert!(card.empty_body && card.has_queue);
+
+    let swipe = notch.collapse_from_gesture();
+    assert!(swipe.changed && swipe.effect.is_none());
+    let next = notch
+        .notification_presentation(now + Duration::from_millis(100))
+        .expect("promoted queued message");
+    assert_eq!(next.app_name, "Chat");
+
+    let esc = notch.handle_notification_escape();
+    assert!(esc.changed && esc.effect.is_none());
+    assert_eq!(
+        notch.island_mode(now + Duration::from_millis(100)),
+        IslandMode::Collapsed
+    );
+}
+
+#[test]
+fn dnd_suppresses_message_banners_while_keeping_bell_unread_dot_and_calls() {
+    let (mut notch, start) = notch_with_baseline();
+    let now = start + Duration::from_millis(100);
+    assert!(notch.set_dnd_active(true));
+    notch.ingest_notifications(&[toast(1, "Mail", "Ayu", "Quiet")], now);
+    assert!(notch.has_unread_notifications());
+    assert!(notch.layout_input(true).notification.is_none());
+    let with_call = [
+        toast(1, "Mail", "Ayu", "Quiet"),
+        toast(2, "Zoom", "Budi", "is calling you"),
+    ];
+    notch.ingest_notifications(&with_call, now);
+    notch.last_anim_instant = now;
+    assert!(
+        notch
+            .layout_input(true)
+            .notification
+            .is_some_and(otto_core::NotificationLayoutInput::is_ringing)
     );
 }
 
@@ -2036,7 +2115,7 @@ fn a_focus_session_holds_back_message_banners_but_not_ringing_calls() {
         notch
             .layout_input(true)
             .notification
-            .is_some_and(|card| card.ringing)
+            .is_some_and(otto_core::NotificationLayoutInput::is_ringing)
     );
 }
 
@@ -2410,4 +2489,81 @@ fn disabling_notch_and_submodules_clears_cached_payloads_and_state() {
     assert!(notch.shelf_enabled());
     assert!(notch.clipboard_enabled());
     assert!(notch.media_enabled());
+}
+
+#[test]
+fn focus_session_status_reflects_idle_running_paused_break_and_disabled() {
+    let mut notch = NotchController::new(None, NotchExpandedTab::Pomodoro);
+    assert_eq!(
+        notch.focus_session_status(),
+        otto_core::FocusSessionStatus::NotRunning
+    );
+    let _ = notch.handle_click(HitTarget::PomodoroPlayPause);
+    assert!(matches!(
+        notch.focus_session_status(),
+        otto_core::FocusSessionStatus::RunningCountdown {
+            remaining_seconds: 1500
+        }
+    ));
+    let _ = notch.handle_click(HitTarget::PomodoroPlayPause);
+    assert!(matches!(
+        notch.focus_session_status(),
+        otto_core::FocusSessionStatus::PausedCountdown {
+            remaining_seconds: 1500
+        }
+    ));
+    let _ = notch.handle_click(HitTarget::PomodoroSkip);
+    let _ = notch.handle_click(HitTarget::PomodoroPlayPause);
+    assert!(matches!(
+        notch.focus_session_status(),
+        otto_core::FocusSessionStatus::OnBreak { .. }
+    ));
+    notch.set_focus_enabled(false);
+    assert_eq!(
+        notch.focus_session_status(),
+        otto_core::FocusSessionStatus::NotRunning
+    );
+}
+
+#[test]
+fn focus_stats_tab_switches_ranges_selects_days_morphs_height_and_opens_settings() {
+    let mut notch = idle_notch();
+    let _ = notch.handle_hotkey(NotchHotkey::ToggleNotch);
+    let now = settle(&mut notch, Instant::now());
+    assert!(notch.layout_input(true).stats_progress.abs() < f32::EPSILON);
+    assert_eq!(notch.stats_range(), otto_core::FocusStatsRange::Today);
+
+    let opened = notch.handle_click(HitTarget::NotchTabStats);
+    assert!(opened.changed);
+    assert_eq!(opened.effect, None);
+    assert_eq!(notch.active_tab(), NotchExpandedTab::Stats);
+    let now = settle(&mut notch, now);
+    assert!((notch.layout_input(true).stats_progress - 1.0).abs() < f32::EPSILON);
+
+    let week = notch.handle_click(HitTarget::FocusStatsRange(otto_core::FocusStatsRange::Week));
+    assert!(week.changed);
+    assert_eq!(notch.stats_range(), otto_core::FocusStatsRange::Week);
+    assert_eq!(notch.stats_selected_day(), None);
+
+    assert!(notch.handle_click(HitTarget::FocusStatsDay(4)).changed);
+    assert_eq!(notch.stats_selected_day(), Some(4));
+    assert!(notch.handle_click(HitTarget::FocusStatsDay(4)).changed);
+    assert_eq!(notch.stats_selected_day(), None);
+
+    assert!(notch.handle_click(HitTarget::NotchTabPomodoro).changed);
+    let now = settle(&mut notch, now);
+    assert!(notch.layout_input(true).stats_progress.abs() < f32::EPSILON);
+
+    assert!(notch.handle_click(HitTarget::NotchTabStats).changed);
+    let now = settle(&mut notch, now);
+    assert!((notch.layout_input(true).stats_progress - 1.0).abs() < f32::EPSILON);
+
+    let open_settings = notch.handle_click(HitTarget::FocusStatsOpenSettings);
+    assert!(open_settings.changed);
+    assert_eq!(
+        open_settings.effect,
+        Some(NotchEffect::OpenFocusActivitySettings)
+    );
+    let now = settle(&mut notch, now);
+    assert_eq!(notch.island_mode(now), IslandMode::Collapsed);
 }

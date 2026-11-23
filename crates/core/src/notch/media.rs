@@ -302,6 +302,7 @@ pub enum MediaCommand {
 pub enum NotchExpandedTab {
     #[default]
     Pomodoro,
+    Stats,
     Shelf,
     Clipboard,
     Tasks,
@@ -309,8 +310,9 @@ pub enum NotchExpandedTab {
 }
 
 impl NotchExpandedTab {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Pomodoro,
+        Self::Stats,
         Self::Shelf,
         Self::Clipboard,
         Self::Tasks,
@@ -321,10 +323,11 @@ impl NotchExpandedTab {
     pub const fn index(self) -> usize {
         match self {
             Self::Pomodoro => 0,
-            Self::Shelf => 1,
-            Self::Clipboard => 2,
-            Self::Tasks => 3,
-            Self::Media => 4,
+            Self::Stats => 1,
+            Self::Shelf => 2,
+            Self::Clipboard => 3,
+            Self::Tasks => 4,
+            Self::Media => 5,
         }
     }
 
@@ -332,6 +335,7 @@ impl NotchExpandedTab {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Pomodoro => "Focus",
+            Self::Stats => "Screen Time",
             Self::Shelf => "Shelf",
             Self::Clipboard => "Clipboard",
             Self::Tasks => "Tasks",
@@ -343,6 +347,7 @@ impl NotchExpandedTab {
     pub const fn short_label(self) -> &'static str {
         match self {
             Self::Pomodoro => "Focus",
+            Self::Stats => "Time",
             Self::Shelf => "Shelf",
             Self::Clipboard => "Clip",
             Self::Tasks => "Tasks",
@@ -664,6 +669,8 @@ mod tests {
     fn notch_expanded_tab_defaults_and_labels() {
         assert_eq!(NotchExpandedTab::default(), NotchExpandedTab::Pomodoro);
         assert_eq!(NotchExpandedTab::Pomodoro.label(), "Focus");
+        assert_eq!(NotchExpandedTab::Stats.label(), "Screen Time");
+        assert_eq!(NotchExpandedTab::Stats.short_label(), "Time");
         assert_eq!(NotchExpandedTab::Shelf.label(), "Shelf");
         assert_eq!(NotchExpandedTab::Clipboard.label(), "Clipboard");
         assert_eq!(NotchExpandedTab::Clipboard.short_label(), "Clip");
@@ -672,7 +679,7 @@ mod tests {
         assert_eq!(NotchExpandedTab::Media.short_label(), "Music");
         assert_eq!(
             NotchExpandedTab::ALL.map(NotchExpandedTab::index),
-            [0, 1, 2, 3, 4]
+            [0, 1, 2, 3, 4, 5]
         );
     }
 

@@ -1,5 +1,8 @@
 use crate::layout::{Rect, scale};
-use crate::theme::{ResolvedTheme, Rgba, ThemeMode};
+use crate::theme::{
+    AccentColor, AppearancePreferences, AppearanceStyle, ResolvedAccent, ResolvedTheme, Rgba,
+    ThemeMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterialVariant {
@@ -48,6 +51,13 @@ pub struct SystemAppearance {
     pub dark: bool,
     pub transparency: bool,
     pub contrast: Option<ContrastColors>,
+    pub accent: Option<Rgba>,
+}
+
+impl Default for SystemAppearance {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl SystemAppearance {
@@ -55,13 +65,25 @@ impl SystemAppearance {
         dark: true,
         transparency: true,
         contrast: None,
+        accent: None,
     };
 
     #[must_use]
     pub fn resolve(self, mode: ThemeMode) -> Appearance {
+        self.resolve_preferences(AppearancePreferences {
+            theme: mode,
+            ..AppearancePreferences::default()
+        })
+    }
+
+    #[must_use]
+    pub fn resolve_preferences(self, preferences: AppearancePreferences) -> Appearance {
         Appearance {
-            theme: mode.resolve(self.dark),
-            transparency: self.transparency,
+            theme: preferences.theme.resolve(self.dark),
+            style: preferences.style,
+            accent: preferences.accent,
+            system_accent: self.accent,
+            transparency: self.transparency && preferences.style.uses_glass(),
             contrast: self.contrast,
         }
     }
@@ -70,6 +92,9 @@ impl SystemAppearance {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Appearance {
     pub theme: ResolvedTheme,
+    pub style: AppearanceStyle,
+    pub accent: AccentColor,
+    pub system_accent: Option<Rgba>,
     pub transparency: bool,
     pub contrast: Option<ContrastColors>,
 }
@@ -79,6 +104,9 @@ impl Appearance {
     pub const fn glass(theme: ResolvedTheme) -> Self {
         Self {
             theme,
+            style: AppearanceStyle::LiquidGlass,
+            accent: AccentColor::Blue,
+            system_accent: None,
             transparency: true,
             contrast: None,
         }
@@ -88,7 +116,7 @@ impl Appearance {
     pub const fn variant(&self) -> MaterialVariant {
         if self.contrast.is_some() {
             MaterialVariant::HighContrast
-        } else if self.transparency {
+        } else if self.transparency && self.style.uses_glass() {
             MaterialVariant::Glass
         } else {
             MaterialVariant::Opaque
@@ -107,6 +135,12 @@ impl Appearance {
             Some(_) => ResolvedTheme::Light,
             None => self.theme,
         }
+    }
+
+    #[must_use]
+    pub fn resolved_accent(&self) -> ResolvedAccent {
+        self.accent
+            .resolve(self.content_theme(), self.system_accent)
     }
 
     #[must_use]
@@ -145,16 +179,66 @@ pub struct SemanticColors {
 impl SemanticColors {
     #[must_use]
     pub fn resolve(appearance: &Appearance) -> Self {
-        match (
-            appearance.contrast,
-            appearance.transparency,
-            appearance.theme,
-        ) {
-            (Some(contrast), _, _) => Self::high_contrast(&contrast),
-            (None, true, ResolvedTheme::Dark) => Self::glass_dark(),
-            (None, true, ResolvedTheme::Light) => Self::glass_light(),
-            (None, false, ResolvedTheme::Dark) => Self::opaque_dark(),
-            (None, false, ResolvedTheme::Light) => Self::opaque_light(),
+        if let Some(contrast) = appearance.contrast {
+            return Self::high_contrast(&contrast);
+        }
+        let accent = appearance.resolved_accent();
+        let mut colors = match (appearance.variant(), appearance.theme) {
+            (MaterialVariant::HighContrast, _) => unreachable!(),
+            (MaterialVariant::Glass, ResolvedTheme::Dark) => Self::glass_dark(),
+            (MaterialVariant::Glass, ResolvedTheme::Light) => Self::glass_light(),
+            (MaterialVariant::Opaque, ResolvedTheme::Dark) => Self::opaque_dark(),
+            (MaterialVariant::Opaque, ResolvedTheme::Light) => Self::opaque_light(),
+        };
+        Self::apply_style(&mut colors, appearance, &accent);
+        Self::apply_accent(&mut colors, appearance.theme, &accent);
+        colors
+    }
+
+    fn apply_style(colors: &mut Self, appearance: &Appearance, accent: &ResolvedAccent) {
+        if appearance.variant() != MaterialVariant::Glass {
+            return;
+        }
+        match appearance.style {
+            AppearanceStyle::LiquidGlass | AppearanceStyle::Solid => {}
+            AppearanceStyle::Frosted => match appearance.theme {
+                ResolvedTheme::Dark => {
+                    colors.bar_background = Rgba::new(0.08, 0.08, 0.11, 0.62);
+                    colors.menu_fill = Rgba::new(0.11, 0.11, 0.14, 0.82);
+                    colors.dock_fill = Rgba::new(0.10, 0.10, 0.13, 0.68);
+                    colors.card_fill = Rgba::new(1.0, 1.0, 1.0, 0.09);
+                }
+                ResolvedTheme::Light => {
+                    colors.bar_background = Rgba::new(0.95, 0.96, 0.98, 0.68);
+                    colors.menu_fill = Rgba::new(0.96, 0.97, 0.99, 0.84);
+                    colors.dock_fill = Rgba::new(0.96, 0.97, 0.99, 0.72);
+                    colors.card_fill = Rgba::new(1.0, 1.0, 1.0, 0.56);
+                }
+            },
+            AppearanceStyle::Tinted => {
+                let tint = accent.tint;
+                match appearance.theme {
+                    ResolvedTheme::Dark => {
+                        colors.bar_background = blend_tint(colors.bar_background, tint, 0.24, 0.42);
+                        colors.menu_fill = blend_tint(colors.menu_fill, tint, 0.22, 0.76);
+                        colors.dock_fill = blend_tint(colors.dock_fill, tint, 0.22, 0.58);
+                    }
+                    ResolvedTheme::Light => {
+                        colors.bar_background = blend_tint(colors.bar_background, tint, 0.12, 0.46);
+                        colors.menu_fill = blend_tint(colors.menu_fill, tint, 0.10, 0.76);
+                        colors.dock_fill = blend_tint(colors.dock_fill, tint, 0.12, 0.60);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_accent(colors: &mut Self, theme: ResolvedTheme, accent: &ResolvedAccent) {
+        colors.menu_hover_fill = Rgba::new(accent.fill.r, accent.fill.g, accent.fill.b, 0.96);
+        colors.toggle_active = accent.fill;
+        colors.on_accent = accent.on_accent;
+        if theme.is_light() {
+            colors.slider_fill = Rgba::new(accent.fill.r, accent.fill.g, accent.fill.b, 0.94);
         }
     }
 
@@ -309,6 +393,16 @@ impl SemanticColors {
     }
 }
 
+const fn blend_tint(base: Rgba, tint: [f32; 3], mix: f32, alpha: f32) -> Rgba {
+    let inv = 1.0 - mix;
+    Rgba::new(
+        base.r * inv + tint[0] * mix,
+        base.g * inv + tint[1] * mix,
+        base.b * inv + tint[2] * mix,
+        alpha,
+    )
+}
+
 const fn pressed_alpha(alpha: f32) -> f32 {
     let raised = alpha * 1.6;
     if raised > 1.0 { 1.0 } else { raised }
@@ -382,7 +476,9 @@ mod tests {
         Appearance, ContrastColors, InteractionState, MaterialVariant, Rect, SemanticColors,
         ShapeTokens, SystemAppearance,
     };
-    use crate::theme::{ResolvedTheme, Rgba, ThemeMode};
+    use crate::theme::{
+        AccentColor, AppearancePreferences, AppearanceStyle, ResolvedTheme, Rgba, ThemeMode,
+    };
 
     #[test]
     fn system_appearance_resolves_against_the_user_theme_mode() {
@@ -390,6 +486,7 @@ mod tests {
             dark: false,
             transparency: false,
             contrast: None,
+            accent: None,
         };
         let auto = system.resolve(ThemeMode::Auto);
         assert_eq!(auto.theme, ResolvedTheme::Light);
@@ -405,12 +502,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_preferences_applies_solid_and_fallback_priority() {
+        let base = SystemAppearance {
+            dark: true,
+            transparency: true,
+            contrast: None,
+            accent: Some(Rgba::new(0.8, 0.2, 0.4, 1.0)),
+        };
+        let solid = base.resolve_preferences(AppearancePreferences {
+            style: AppearanceStyle::Solid,
+            theme: ThemeMode::Light,
+            accent: AccentColor::Emerald,
+        });
+        assert_eq!(solid.variant(), MaterialVariant::Opaque);
+        assert!(!solid.uses_backdrop());
+        assert_eq!(solid.theme, ResolvedTheme::Light);
+
+        let no_transparency = SystemAppearance {
+            transparency: false,
+            ..base
+        }
+        .resolve_preferences(AppearancePreferences {
+            style: AppearanceStyle::LiquidGlass,
+            theme: ThemeMode::Auto,
+            accent: AccentColor::System,
+        });
+        assert_eq!(no_transparency.variant(), MaterialVariant::Opaque);
+        assert!(!no_transparency.uses_backdrop());
+
+        let contrast = SystemAppearance {
+            contrast: Some(ContrastColors::WHITE_THEME),
+            ..base
+        }
+        .resolve_preferences(AppearancePreferences {
+            style: AppearanceStyle::Tinted,
+            theme: ThemeMode::Dark,
+            accent: AccentColor::Rose,
+        });
+        assert_eq!(contrast.variant(), MaterialVariant::HighContrast);
+        assert!(!contrast.uses_backdrop());
+    }
+
     const DARK_ACRYLIC: Rgba = Rgba::new(0.13, 0.13, 0.14, 1.0);
     const LIGHT_ACRYLIC: Rgba = Rgba::new(0.93, 0.93, 0.94, 1.0);
 
     fn appearance(theme: ResolvedTheme, transparency: bool) -> Appearance {
         Appearance {
             theme,
+            style: AppearanceStyle::LiquidGlass,
+            accent: AccentColor::Blue,
+            system_accent: None,
             transparency,
             contrast: None,
         }
@@ -425,32 +567,43 @@ mod tests {
     }
 
     fn all_appearances() -> Vec<(Appearance, Rgba)> {
-        vec![
-            (appearance(ResolvedTheme::Dark, true), DARK_ACRYLIC),
-            (appearance(ResolvedTheme::Light, true), LIGHT_ACRYLIC),
-            (
-                appearance(ResolvedTheme::Dark, false),
-                Rgba::new(1.0, 1.0, 1.0, 1.0),
-            ),
-            (
-                appearance(ResolvedTheme::Light, false),
-                Rgba::new(0.0, 0.0, 0.0, 1.0),
-            ),
-            (
-                Appearance {
-                    contrast: Some(ContrastColors::BLACK_THEME),
-                    ..appearance(ResolvedTheme::Light, true)
-                },
-                Rgba::new(1.0, 1.0, 1.0, 1.0),
-            ),
-            (
-                Appearance {
-                    contrast: Some(ContrastColors::WHITE_THEME),
-                    ..appearance(ResolvedTheme::Dark, true)
-                },
-                Rgba::new(0.0, 0.0, 0.0, 1.0),
-            ),
-        ]
+        let mut out = Vec::new();
+        for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+            let backdrop = match theme {
+                ResolvedTheme::Dark => DARK_ACRYLIC,
+                ResolvedTheme::Light => LIGHT_ACRYLIC,
+            };
+            for style in AppearanceStyle::ALL {
+                for accent in AccentColor::ALL {
+                    out.push((
+                        Appearance {
+                            theme,
+                            style,
+                            accent,
+                            system_accent: Some(Rgba::new(0.95, 0.72, 0.10, 1.0)),
+                            transparency: style.uses_glass(),
+                            contrast: None,
+                        },
+                        backdrop,
+                    ));
+                }
+            }
+        }
+        out.push((
+            Appearance {
+                contrast: Some(ContrastColors::BLACK_THEME),
+                ..appearance(ResolvedTheme::Light, true)
+            },
+            Rgba::new(1.0, 1.0, 1.0, 1.0),
+        ));
+        out.push((
+            Appearance {
+                contrast: Some(ContrastColors::WHITE_THEME),
+                ..appearance(ResolvedTheme::Dark, true)
+            },
+            Rgba::new(0.0, 0.0, 0.0, 1.0),
+        ));
+        out
     }
 
     #[test]

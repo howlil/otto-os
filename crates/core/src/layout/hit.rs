@@ -1,3 +1,4 @@
+use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::pomodoro::FocusSubMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +20,11 @@ pub enum HitTarget {
     PomodoroExtendFive,
     PomodoroPreset(u8),
     FocusMode(FocusSubMode),
+    FocusStatsRange(FocusStatsRange),
+    FocusStatsDay(u8),
+    FocusStatsOpenSettings,
     NotchTabPomodoro,
+    NotchTabStats,
     NotchTabShelf,
     NotchTabClipboard,
     NotchTabTasks,
@@ -114,6 +119,7 @@ impl HitTarget {
             Self::Notch
             | Self::NotchSecondary
             | Self::NotchTabPomodoro
+            | Self::NotchTabStats
             | Self::NotchTabShelf
             | Self::NotchTabClipboard
             | Self::NotchTabTasks
@@ -124,7 +130,10 @@ impl HitTarget {
             | Self::PomodoroStartNext
             | Self::PomodoroExtendFive
             | Self::PomodoroPreset(_)
-            | Self::FocusMode(_) => TargetScope::Focus,
+            | Self::FocusMode(_)
+            | Self::FocusStatsRange(_)
+            | Self::FocusStatsDay(_)
+            | Self::FocusStatsOpenSettings => TargetScope::Focus,
             Self::ShelfAdd
             | Self::ShelfClear
             | Self::ShelfPager

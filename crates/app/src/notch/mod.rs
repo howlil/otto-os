@@ -2,10 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
     CallTracker, ClipboardPayload, ClipboardState, ClockTime, CompactContent, CompactSlotKind,
-    FocusBlocklist, FocusSubMode, LyricsStatus, MotionPreference, NotchAction, NotchExpandedTab,
-    NotchHudKind, NotificationQueue, NowPlaying, PendingSeek, PomodoroClock, PomodoroState,
-    PrivacyState, QuickTimerState, ShelfPayload, ShelfState, StopwatchClock, StopwatchState,
-    TasksState, is_openable_shelf_url, is_valid_shelf_file_path,
+    FocusBlocklist, FocusStatsRange, FocusSubMode, LyricsStatus, MotionPreference, NotchAction,
+    NotchExpandedTab, NotchHudKind, NotificationQueue, NowPlaying, PendingSeek, PomodoroClock,
+    PomodoroState, PrivacyState, QuickTimerState, ShelfPayload, ShelfState, StopwatchClock,
+    StopwatchState, TasksState, is_openable_shelf_url, is_valid_shelf_file_path,
 };
 
 mod alerts;
@@ -75,6 +75,7 @@ pub(crate) enum NotchEffect {
     CloseTaskEditor {
         restore_focus: bool,
     },
+    OpenFocusActivitySettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +131,8 @@ pub(crate) struct NotchController {
     panel_trigger: PanelTrigger,
     alert_until: Option<Instant>,
     notifications: NotificationQueue,
+    notification_unread_count: usize,
+    dnd_active: bool,
     call: CallTracker,
     call_shown: bool,
     clock: PomodoroClock,
@@ -143,6 +146,9 @@ pub(crate) struct NotchController {
     anim_phase: f32,
     lyrics_expanded: bool,
     lyrics_progress: f32,
+    stats_progress: f32,
+    stats_range: FocusStatsRange,
+    stats_selected_day: Option<usize>,
     tab_blend: f32,
     motion: MotionPreference,
     lyrics: Option<otto_core::LyricsSheet>,
@@ -218,6 +224,8 @@ impl NotchController {
             panel_trigger: PanelTrigger::Closed,
             alert_until: None,
             notifications: NotificationQueue::default(),
+            notification_unread_count: 0,
+            dnd_active: false,
             call: CallTracker::default(),
             call_shown: false,
             clock: PomodoroClock::default(),
@@ -231,6 +239,9 @@ impl NotchController {
             anim_phase: 0.0,
             lyrics_expanded: false,
             lyrics_progress: 0.0,
+            stats_progress: 0.0,
+            stats_range: FocusStatsRange::Today,
+            stats_selected_day: None,
             tab_blend: 1.0,
             motion: MotionPreference::Full,
             lyrics: None,

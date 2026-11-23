@@ -392,3 +392,49 @@ pub(crate) fn draw_speaker_glyph(
     }
     Ok(())
 }
+
+pub(crate) fn draw_bell_glyph(
+    factory: &ID2D1Factory,
+    target: &ID2D1DCRenderTarget,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
+    let top_y = cy - r * 0.85;
+    let base_y = cy + r * 0.48;
+    let dome_w = r * 0.72;
+    let rim_w = r * 0.96;
+
+    unsafe {
+        let bell = factory.CreatePathGeometry()?;
+        let sink = bell.Open()?;
+        sink.BeginFigure(Vector2::new(cx, top_y), D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddBezier(
+            &windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(cx + dome_w * 0.85, top_y),
+                point2: Vector2::new(cx + dome_w, cy - r * 0.10),
+                point3: Vector2::new(cx + rim_w, base_y),
+            },
+        );
+        sink.AddLine(Vector2::new(cx - rim_w, base_y));
+        sink.AddBezier(
+            &windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                point1: Vector2::new(cx - dome_w, cy - r * 0.10),
+                point2: Vector2::new(cx - dome_w * 0.85, top_y),
+                point3: Vector2::new(cx, top_y),
+            },
+        );
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        target.FillGeometry(&bell, brush, None);
+
+        let clapper = D2D1_ELLIPSE {
+            point: Vector2::new(cx, base_y + r * 0.28),
+            radiusX: r * 0.24,
+            radiusY: r * 0.22,
+        };
+        target.FillEllipse(&clapper, brush);
+    }
+    Ok(())
+}

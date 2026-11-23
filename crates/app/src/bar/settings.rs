@@ -160,6 +160,8 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
             bar.io.seek_drag_hwnd = None;
             bar.touch_swipe = None;
             bar.notch.release_all_resources();
+            bar.stats_icons_attempted.clear();
+            bar.stats_catalog = None;
             if let Some(renderer) = bar.renderer.as_ref() {
                 renderer.release_notch_resources();
             }
@@ -372,6 +374,18 @@ pub fn sync_focus_blocklist(runtime: &RuntimeContext) {
             bar.present(runtime);
         });
     }
+}
+
+#[must_use]
+pub fn focus_session_status(runtime: &RuntimeContext) -> otto_core::FocusSessionStatus {
+    with_bar_result(runtime, |bar| {
+        if bar.notch_enabled {
+            bar.notch.focus_session_status()
+        } else {
+            otto_core::FocusSessionStatus::NotRunning
+        }
+    })
+    .unwrap_or_default()
 }
 
 pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {

@@ -29,6 +29,7 @@ pub(crate) const SPOTLIGHT_TIMER: usize = 32;
 pub(crate) const CC_POLL_TIMER: usize = 31;
 pub(crate) const MENU_POLL_TIMER: usize = 30;
 pub(crate) const UPDATE_TIMER_ID: usize = 0x5E7;
+pub(crate) const AUDIT_TIMER_ID: usize = 0x5E8;
 
 pub(crate) const WM_POINTERUPDATE: u32 = 0x0245;
 pub(crate) const WM_POINTERDOWN: u32 = 0x0246;
@@ -81,5 +82,6 @@ mod tests {
             WINDOW_CONTROLS_ANIM_TIMER,
             GREEN_HOVER_TIMER
         ]));
+        assert!(all_distinct(&[UPDATE_TIMER_ID, AUDIT_TIMER_ID]));
     }
 }

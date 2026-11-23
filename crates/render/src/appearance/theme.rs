@@ -396,31 +396,41 @@ mod tests {
     #[test]
     fn control_center_text_meets_wcag_aa_on_glass_cards_across_adaptive_midtones() {
         for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
-            let appearance = Appearance::glass(theme);
-            let palette = LiquidGlassPalette::for_control_center(&appearance);
-            let glass = GlassParams::for_theme(theme);
-            let levels: &[f32] = match theme {
-                ResolvedTheme::Dark => &[0.0, 0.25, 0.44, 0.5, 0.56],
-                ResolvedTheme::Light => &[0.44, 0.5, 0.56, 0.75, 1.0],
-            };
+            for style in [
+                otto_core::AppearanceStyle::LiquidGlass,
+                otto_core::AppearanceStyle::Frosted,
+                otto_core::AppearanceStyle::Tinted,
+            ] {
+                let appearance = Appearance {
+                    style,
+                    accent: otto_core::AccentColor::Rose,
+                    ..Appearance::glass(theme)
+                };
+                let palette = LiquidGlassPalette::for_control_center(&appearance);
+                let glass = GlassParams::for_appearance(&appearance);
+                let levels: &[f32] = match theme {
+                    ResolvedTheme::Dark => &[0.0, 0.25, 0.44, 0.5, 0.56],
+                    ResolvedTheme::Light => &[0.44, 0.5, 0.56, 0.75, 1.0],
+                };
 
-            for &level in levels {
-                let graded = glass.grade([level; 3], 1.0);
-                let backdrop = Rgba::new(graded[0], graded[1], graded[2], 1.0);
-                let shell = Rgba::new(1.0, 1.0, 1.0, glass.sheen_alpha).blend_over(backdrop);
-                let card = rgba(palette.card_fill).blend_over(shell);
+                for &level in levels {
+                    let graded = glass.grade([level; 3], 1.0);
+                    let backdrop = Rgba::new(graded[0], graded[1], graded[2], 1.0);
+                    let shell = Rgba::new(1.0, 1.0, 1.0, glass.sheen_alpha).blend_over(backdrop);
+                    let card = rgba(palette.card_fill).blend_over(shell);
 
-                for sheen in [0.0, palette.control_center_card_sheen_alpha()] {
-                    let background = Rgba::new(1.0, 1.0, 1.0, sheen).blend_over(card);
-                    for (name, text) in [
-                        ("primary", rgba(palette.text_primary)),
-                        ("muted", rgba(palette.text_muted)),
-                    ] {
-                        let ratio = text.contrast_ratio(background);
-                        assert!(
-                            ratio >= 4.5,
-                            "{theme:?} backdrop {level} sheen {sheen} {name}: {ratio:.2}"
-                        );
+                    for sheen in [0.0, palette.control_center_card_sheen_alpha()] {
+                        let background = Rgba::new(1.0, 1.0, 1.0, sheen).blend_over(card);
+                        for (name, text) in [
+                            ("primary", rgba(palette.text_primary)),
+                            ("muted", rgba(palette.text_muted)),
+                        ] {
+                            let ratio = text.contrast_ratio(background);
+                            assert!(
+                                ratio >= 4.5,
+                                "{theme:?} {style:?} backdrop {level} sheen {sheen} {name}: {ratio:.2}"
+                            );
+                        }
                     }
                 }
             }

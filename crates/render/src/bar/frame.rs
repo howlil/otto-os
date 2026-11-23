@@ -1,9 +1,10 @@
 use crate::appearance::surface::draw_on;
 use crate::{CLEAR, FOREGROUND, LiquidGlassPalette, Renderer};
 use otto_core::{
-    Appearance, BrandIcon, CallScene, ClipboardState, GlassShape, HitTarget, Layout, LyricsView,
-    MediaScene, NotchExpandedTab, NotchHudState, NotificationPresentation, PomodoroScene,
-    PomodoroSurface, PrivacyState, Rect, ShelfState, SystemStatus, TasksState,
+    Appearance, BrandIcon, CallScene, ClipboardState, FocusStatsView, GlassShape, HitTarget,
+    Layout, LyricsView, MediaScene, NotchExpandedTab, NotchHudState, NotificationPresentation,
+    NotificationStage, PomodoroScene, PomodoroSurface, PrivacyState, Rect, ShelfState,
+    SystemStatus, TasksState,
 };
 use windows::core::Result;
 
@@ -50,6 +51,7 @@ pub(crate) struct BarFrameStaticKey {
     brand_icon: BrandIcon,
     bar_background: bool,
     bar_chrome_hidden: bool,
+    notif_unread: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -153,6 +155,7 @@ impl Renderer {
             brand_icon: self.brand_icon.get(),
             bar_background: self.bar_background.get(),
             bar_chrome_hidden: self.bar_chrome_hidden.get(),
+            notif_unread: self.notif_unread.get(),
         })
     }
 
@@ -171,6 +174,7 @@ impl Renderer {
         appearance: Appearance,
         privacy: &PrivacyState,
         call: Option<&CallScene>,
+        notification: Option<&NotificationPresentation>,
     ) -> Result<()> {
         let frame_fields = self.bar_frame_fields(layout, status, hovered, focused, hud, appearance);
         let appearance = self.glass.adaptive_appearance(&appearance);
@@ -240,6 +244,11 @@ impl Renderer {
                     && hud_state.content_alpha > 0.0
                 {
                     self.draw_notch_hud(layout, hud_state)?;
+                } else if let Some(content) = notification
+                    && content.stage == NotificationStage::Peek
+                    && layout.compact_expansion > 0.15
+                {
+                    self.draw_compact_notification_peek(layout, content);
                 } else if layout.compact_expansion > 0.15 {
                     self.draw_compact_notch(layout, pomodoro, media, call, anim_phase)?;
                 }
@@ -365,6 +374,7 @@ impl Renderer {
         tasks_state: &TasksState,
         privacy: &PrivacyState,
         notification: Option<&NotificationPresentation>,
+        focus_stats: &FocusStatsView,
     ) -> Result<()> {
         let draw_size = (layout.panel_window.width, layout.panel_window.height);
         let offset_x = layout.panel_window.x;
@@ -387,6 +397,13 @@ impl Renderer {
         draw_on(&self.target, panel_surface, draw_size, || unsafe {
             let clear = CLEAR;
             self.target.Clear(Some(&raw const clear));
+
+            if layout.panel_expansion > 0.22
+                && let Some(card) = &layout.notification
+                && !card.stack_lip.is_empty()
+            {
+                self.draw_notification_stack_lip(layout, card, offset_x);
+            }
 
             let geom = self.notch_geometry_rect(
                 local_notch,
@@ -427,7 +444,18 @@ impl Renderer {
             if layout.panel_expansion > 0.22
                 && let (Some(card), Some(content)) = (&layout.notification, notification)
             {
-                self.draw_notification_card(layout, card, content, offset_x, hovered, focused)?;
+                let alpha = ((layout.panel_expansion - 0.22) / 0.78).clamp(0.0, 1.0);
+                let rise = if self.reduced_motion.get() {
+                    0.0
+                } else {
+                    ((1.0 - alpha) * crate::scale(crate::PANEL_CONTENT_RISE_PT, self.dpi) as f32)
+                        .round()
+                };
+                self.set_content_offset(0.0, rise);
+                self.draw_notification_card(
+                    layout, card, content, offset_x, hovered, focused, anim_phase,
+                )?;
+                self.set_content_offset(0.0, 0.0);
             } else if layout.panel_expansion > 0.22 {
                 self.draw_panel_open_content(
                     layout,
@@ -442,6 +470,7 @@ impl Renderer {
                     clipboard_state,
                     tasks_state,
                     privacy,
+                    focus_stats,
                 )?;
             }
             Ok(())
@@ -463,6 +492,7 @@ impl Renderer {
         clipboard_state: &ClipboardState,
         tasks_state: &TasksState,
         privacy: &PrivacyState,
+        focus_stats: &FocusStatsView,
     ) -> Result<()> {
         let alpha = ((layout.panel_expansion - 0.22) / 0.78).clamp(0.0, 1.0);
         let rise =
@@ -529,6 +559,7 @@ impl Renderer {
                     shelf_state,
                     clipboard_state,
                     tasks_state,
+                    focus_stats,
                 )?;
             }
             if !transitioning || blend > 0.001 {
@@ -553,6 +584,7 @@ impl Renderer {
                     shelf_state,
                     clipboard_state,
                     tasks_state,
+                    focus_stats,
                 )?;
             }
         }
@@ -581,6 +613,7 @@ impl Renderer {
         shelf_state: &ShelfState,
         clipboard_state: &ClipboardState,
         tasks_state: &TasksState,
+        focus_stats: &FocusStatsView,
     ) -> Result<()> {
         match tab {
             NotchExpandedTab::Pomodoro => self.draw_expanded_pomodoro(
@@ -591,6 +624,9 @@ impl Renderer {
                 pomodoro,
                 tasks_state.active_task().map(|task| task.text.as_str()),
             ),
+            NotchExpandedTab::Stats => {
+                self.draw_expanded_focus_stats(layout, offset_x, alpha, hovered, focus_stats)
+            }
             NotchExpandedTab::Shelf => {
                 self.draw_expanded_shelf(layout, offset_x, alpha, hovered, shelf_state)
             }

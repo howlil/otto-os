@@ -1,3 +1,4 @@
+use crate::appearance::theme::{AccentColor, AppearancePreferences, AppearanceStyle, ThemeMode};
 use crate::bar::menu_bar::{BarHideMode, BarItemSet, MenuBarPreferences};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,6 +33,7 @@ pub struct AppPreferences {
     pub background_cleanup: bool,
     pub menu_bar: MenuBarPreferences,
     pub quick_capture: bool,
+    pub appearance: AppearancePreferences,
 }
 
 impl Default for AppPreferences {
@@ -52,6 +54,7 @@ impl Default for AppPreferences {
             background_cleanup: false,
             menu_bar: MenuBarPreferences::default(),
             quick_capture: false,
+            appearance: AppearancePreferences::default(),
         }
     }
 }
@@ -132,6 +135,18 @@ impl AppPreferences {
                 && let Some(parsed) = parse_bool(value)
             {
                 prefs.quick_capture = parsed;
+            } else if let Some(value) = trimmed.strip_prefix("appearance_style=")
+                && let Some(style) = AppearanceStyle::parse_config(value)
+            {
+                prefs.appearance.style = style;
+            } else if let Some(value) = trimmed.strip_prefix("appearance_theme=")
+                && let Some(theme) = ThemeMode::parse_config(value)
+            {
+                prefs.appearance.theme = theme;
+            } else if let Some(value) = trimmed.strip_prefix("appearance_accent=")
+                && let Some(accent) = AccentColor::parse_config(value)
+            {
+                prefs.appearance.accent = accent;
             }
         }
         prefs
@@ -140,7 +155,7 @@ impl AppPreferences {
     #[must_use]
     pub fn config_lines(&self) -> String {
         format!(
-            "capture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\nnotch_enabled={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}\nbackground_cleanup={}\nmenu_bar_hide={}\nmenu_bar_hidden={}\nmenu_bar_background={}\nmenu_bar_keep_notch={}\nquick_capture={}",
+            "capture_visible={}\nhotkeys_enabled={}\nclassic_logo={}\nnotch_enabled={}\ndynamic_island={}\nonboarding_seen={}\nprivacy_indicators={}\nclipboard_history={}\ndrop_shelf={}\nnotch_hud={}\nmedia_module={}\nfocus_module={}\nbackground_cleanup={}\nmenu_bar_hide={}\nmenu_bar_hidden={}\nmenu_bar_background={}\nmenu_bar_keep_notch={}\nquick_capture={}\nappearance_style={}\nappearance_theme={}\nappearance_accent={}",
             self.capture_visible,
             self.hotkeys_enabled,
             self.classic_logo,
@@ -159,6 +174,9 @@ impl AppPreferences {
             self.menu_bar.show_background,
             self.menu_bar.keep_notch,
             self.quick_capture,
+            self.appearance.style.config_value(),
+            self.appearance.theme.config_value(),
+            self.appearance.accent.config_value(),
         )
     }
 
@@ -238,14 +256,18 @@ mod tests {
                 keep_notch: true,
             },
             quick_capture: true,
+            appearance: AppearancePreferences {
+                style: AppearanceStyle::Tinted,
+                theme: ThemeMode::Auto,
+                accent: AccentColor::Emerald,
+            },
         };
         assert_eq!(prefs.brand_icon(), BrandIcon::ClassicApple);
         assert_eq!(prefs.notch_style(), NotchStyle::DynamicIsland);
         let text = prefs.config_lines();
         assert_eq!(AppPreferences::parse_config(&text), prefs);
 
-        let partial =
-            "theme_mode=light\ncapture_visible=maybe\nhotkeys_enabled=false\nliquid_glass=false\n";
+        let partial = "theme_mode=light\ncapture_visible=maybe\nhotkeys_enabled=false\nliquid_glass=false\nappearance_style=bogus\nappearance_theme=neon\nappearance_accent=chartreuse\n";
         let parsed = AppPreferences::parse_config(partial);
         assert!(!parsed.capture_visible);
         assert!(!parsed.hotkeys_enabled);
@@ -262,6 +284,7 @@ mod tests {
         assert!(!parsed.background_cleanup);
         assert_eq!(parsed.menu_bar, MenuBarPreferences::default());
         assert!(!parsed.quick_capture);
+        assert_eq!(parsed.appearance, AppearancePreferences::default());
     }
 
     #[test]

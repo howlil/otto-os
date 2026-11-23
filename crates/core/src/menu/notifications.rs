@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::commands::CMD_NOTIF_DISMISS_BASE;
 use super::commands::NOTIFICATION_BADGE_COLORS;
 
@@ -5,6 +7,23 @@ use super::commands::NOTIFICATION_BADGE_COLORS;
 pub struct NotificationBadge {
     pub initial: char,
     pub color: [u8; 3],
+}
+
+fn srgb_channel_linear(channel: u8) -> f32 {
+    let c = f32::from(channel) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[must_use]
+pub fn badge_ink_is_dark(color: [u8; 3]) -> bool {
+    let luma = 0.2126 * srgb_channel_linear(color[0])
+        + 0.7152 * srgb_channel_linear(color[1])
+        + 0.0722 * srgb_channel_linear(color[2]);
+    luma > 0.36
 }
 
 #[must_use]
@@ -30,6 +49,7 @@ pub struct NotificationSummary {
     pub title: String,
     pub body: String,
     pub timestamp_label: String,
+    pub icon_bytes: Option<Arc<[u8]>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

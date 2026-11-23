@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{bar, control_center, dock, genie, menu, settings_window, spotlight, window_controls};
-use otto_core::{DockPreferences, MenuBarPreferences};
+use otto_core::{AppearancePreferences, DockPreferences, MenuBarPreferences};
 
 use super::ModalActionGuard;
 use super::plugins::PluginId;
@@ -41,6 +41,7 @@ pub(super) struct PendingPreferences {
     pub(super) menu_bar: Option<MenuBarPreferences>,
     pub(super) quick_capture: Option<bool>,
     pub(super) onboarding_seen: Option<bool>,
+    pub(super) appearance: Option<AppearancePreferences>,
 }
 
 impl PendingPreferences {
@@ -61,6 +62,7 @@ impl PendingPreferences {
             menu_bar: runtime.pending_menu_bar.take(),
             quick_capture: runtime.pending_quick_capture.take(),
             onboarding_seen: runtime.pending_onboarding_seen.take(),
+            appearance: runtime.pending_appearance.take(),
         }
     }
 
@@ -80,6 +82,7 @@ impl PendingPreferences {
             || self.menu_bar.is_some()
             || self.quick_capture.is_some()
             || self.onboarding_seen.is_some()
+            || self.appearance.is_some()
     }
 
     pub(super) fn affects_ui(&self) -> bool {
@@ -97,6 +100,7 @@ impl PendingPreferences {
             || self.background_cleanup.is_some()
             || self.menu_bar.is_some()
             || self.quick_capture.is_some()
+            || self.appearance.is_some()
     }
 }
 
@@ -169,6 +173,9 @@ pub(super) fn dispatch_runtime_message(
         }
     }
     let prefs_changed = apply_pending_preference_changes(&pending.preferences);
+    if pending.preferences.background_cleanup.is_some() {
+        with_host_read(|host| settings_window::refresh_process_audit_if_general(&host.runtime));
+    }
     if had_plugin_toggles || dock_changed || lyrics_changed || prefs_changed {
         with_host_read(|host| control_center::repaint(&host.runtime));
         with_host_read(|host| settings_window::repaint(&host.runtime));
@@ -239,6 +246,9 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             if let Some(seen) = pending.onboarding_seen {
                 prefs.onboarding_seen = seen;
             }
+            if let Some(appearance) = pending.appearance {
+                prefs.appearance = appearance;
+            }
         })
     {
         sync_pending_platform_modules(pending, &updated);
@@ -297,6 +307,10 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             if pending.quick_capture.is_some() {
                 bar::set_quick_capture_enabled(&host.runtime, updated.quick_capture);
             }
+            if pending.appearance.is_some() {
+                host.runtime.appearance_preferences.set(updated.appearance);
+                crate::theme_state::sync_effective_glass(&host.runtime);
+            }
             sync_platform_tasks(&host.config);
             if disabled_any_feature(pending) {
                 reclaim_disabled_memory(host);
@@ -317,6 +331,9 @@ fn disabled_any_feature(pending: &PendingPreferences) -> bool {
         || pending.background_cleanup == Some(false)
         || pending.quick_capture == Some(false)
         || pending.menu_bar.is_some_and(|prefs| !prefs.show_background)
+        || pending
+            .appearance
+            .is_some_and(|prefs| !prefs.style.uses_glass())
 }
 
 pub(super) fn sync_pending_platform_modules(

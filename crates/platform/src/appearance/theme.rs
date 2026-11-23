@@ -169,12 +169,43 @@ impl Drop for PowerNotificationGuard {
     }
 }
 
+fn parse_dwm_accent_abgr(value: u32) -> Rgba {
+    let channel = |shift: u32| f32::from(((value >> shift) & 0xFF) as u8) / 255.0;
+    Rgba::new(channel(0), channel(8), channel(16), 1.0)
+}
+
+#[must_use]
+pub fn read_system_accent_color() -> Option<Rgba> {
+    let mut hkey = HKEY::default();
+    let subkey = w!("Software\\Microsoft\\Windows\\DWM");
+    let open_status =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_READ, &mut hkey) };
+    if open_status.is_err() {
+        return None;
+    }
+    let mut data = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let query_status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            w!("AccentColor"),
+            None,
+            None,
+            Some((&raw mut data).cast()),
+            Some(&mut size),
+        )
+    };
+    let _ = unsafe { RegCloseKey(hkey) };
+    query_status.is_ok().then(|| parse_dwm_accent_abgr(data))
+}
+
 #[must_use]
 pub fn read_system_appearance() -> SystemAppearance {
     SystemAppearance {
         dark: is_system_in_dark_mode(),
         transparency: is_transparency_enabled() && !is_battery_saver_active(),
         contrast: system_contrast_colors(),
+        accent: read_system_accent_color(),
     }
 }
 
@@ -211,5 +242,14 @@ mod tests {
     #[test]
     fn power_notification_registration_rejects_null_window() {
         assert!(PowerNotificationGuard::register(0).is_none());
+    }
+
+    #[test]
+    fn parse_dwm_accent_abgr_decodes_rgb_channels() {
+        let color = super::parse_dwm_accent_abgr(0xFF_33_66_CC);
+        assert!((color.r - (0xCC as f32 / 255.0)).abs() < 1e-4);
+        assert!((color.g - (0x66 as f32 / 255.0)).abs() < 1e-4);
+        assert!((color.b - (0x33 as f32 / 255.0)).abs() < 1e-4);
+        assert!((color.a - 1.0).abs() < 1e-4);
     }
 }

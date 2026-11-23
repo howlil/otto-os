@@ -65,8 +65,14 @@ impl Bar {
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
 
         if self.notch_enabled {
-            self.notch
-                .handle_pointer_move(self.layout.notch.contains(x, y));
+            let inside_notch = self.layout.notch.contains(x, y);
+            self.notch.handle_pointer_move(inside_notch);
+            if inside_notch && self.notch.promote_notification_peek(Instant::now()) {
+                self.recompute_layout();
+                self.sync_panel_visibility();
+                self.ensure_anim_timer();
+                self.present(runtime);
+            }
         }
 
         let target = self.layout.hit_test(x, y);
@@ -108,7 +114,9 @@ impl Bar {
     }
 
     pub(super) fn on_pointer_down(&mut self, pointer_id: u32, x: i32, y: i32) {
-        if self.notch.panel_expansion() <= 0.55 || !self.layout.notch.contains(x, y) {
+        let can_swipe = self.notch.panel_expansion() > 0.55
+            || self.notch.has_collapsible_notification(Instant::now());
+        if !can_swipe || !self.layout.notch.contains(x, y) {
             return;
         }
         if matches!(
@@ -336,6 +344,12 @@ impl Bar {
                 }
             }
             if self.layout.notch.contains(x, y) {
+                if self.notch.collapse_notification_gesture(Instant::now()) {
+                    self.recompute_layout();
+                    self.sync_panel_visibility();
+                    self.present(runtime);
+                    return;
+                }
                 let update = self.notch.dismiss_compact(Instant::now());
                 if update.changed {
                     self.recompute_layout();

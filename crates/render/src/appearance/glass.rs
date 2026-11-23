@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 
 use otto_core::{
-    Appearance, GlassBackdrop, GlassBitmap, GlassParams, GlassShape, LIGHT_DIRECTION, PixelLimits,
-    ResolvedTheme, RgbBuffer, compose_glass_lit, soften_backdrop,
+    Appearance, AppearanceStyle, GlassBackdrop, GlassBitmap, GlassParams, GlassShape,
+    LIGHT_DIRECTION, PixelLimits, ResolvedTheme, RgbBuffer, compose_glass_lit, soften_backdrop,
 };
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
@@ -23,6 +23,8 @@ const LIGHT_QUANT_STEPS: f32 = 24.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SoftKey {
     theme: ResolvedTheme,
+    style: AppearanceStyle,
+    tint_key: u32,
     dpi: u32,
 }
 
@@ -145,15 +147,20 @@ impl GlassComposer {
             return None;
         }
         let capture = self.capture.as_ref()?;
+        let base = GlassParams::for_appearance(appearance).scaled(dpi);
+        let tint_key = base.tint_key();
         let soft_key = SoftKey {
             theme: appearance.theme,
+            style: appearance.style,
+            tint_key,
             dpi,
         };
+        let effective_lens = lens && base.lens_mix > 0.0;
         let key = ComposeKey {
             generation: self.generation,
             soft: soft_key,
             shape,
-            lens,
+            lens: effective_lens,
             light: quantize_light(light_dir),
         };
         let reusable = self
@@ -161,8 +168,11 @@ impl GlassComposer {
             .as_ref()
             .is_some_and(|(cached, _)| *cached == key);
         if !reusable {
-            let base = GlassParams::for_theme(appearance.theme).scaled(dpi);
-            let params = if lens { base } else { base.without_lens() };
+            let params = if effective_lens {
+                base
+            } else {
+                base.without_lens()
+            };
             let factor = soft_factor(dpi);
             let radius = blur_radius(dpi);
             if self.soft.as_ref().is_none_or(|(held, _)| *held != soft_key) {
@@ -183,6 +193,8 @@ impl GlassComposer {
                 generation: self.generation,
                 dpi,
                 theme: appearance.theme,
+                style: appearance.style,
+                tint_key,
             };
             let mut lost = false;
             let mut gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
@@ -241,10 +253,7 @@ pub(crate) struct GlassPainter {
 impl GlassPainter {
     #[allow(clippy::unused_self)]
     pub(crate) fn adaptive_appearance(&self, base: &Appearance) -> Appearance {
-        if base.contrast.is_some() || !base.uses_backdrop() {
-            return *base;
-        }
-        Appearance::glass(ResolvedTheme::Dark)
+        *base
     }
 
     pub(crate) fn set_backdrop(&self, sharp: RgbBuffer, origin: (i32, i32)) {
@@ -523,27 +532,84 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_appearance_locks_clear_glass_to_dark_across_backdrop_luminance() {
+    fn adaptive_appearance_preserves_selected_theme_style_and_accent() {
         let painter = GlassPainter::default();
-        let base = Appearance::glass(ResolvedTheme::Dark);
-        assert_eq!(
-            painter.adaptive_appearance(&base).theme,
-            ResolvedTheme::Dark
-        );
-
         for luma in [0.8, 0.5, 0.2] {
             painter.set_backdrop(RgbBuffer::filled(8, 8, [luma; 3]), (0, 0));
-            assert_eq!(
-                painter.adaptive_appearance(&base).theme,
-                ResolvedTheme::Dark
-            );
-            assert_eq!(
-                painter
-                    .adaptive_appearance(&Appearance::glass(ResolvedTheme::Light))
-                    .theme,
-                ResolvedTheme::Dark
-            );
+            for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+                for style in [
+                    otto_core::AppearanceStyle::LiquidGlass,
+                    otto_core::AppearanceStyle::Frosted,
+                    otto_core::AppearanceStyle::Tinted,
+                ] {
+                    let base = Appearance {
+                        style,
+                        accent: otto_core::AccentColor::Rose,
+                        ..Appearance::glass(theme)
+                    };
+                    assert_eq!(painter.adaptive_appearance(&base), base);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn switching_glass_style_or_tint_accent_composes_distinct_pixels() {
+        let mut composer = GlassComposer::default();
+        composer.set_backdrop(capture(), (0, 0));
+        let liquid = composer
+            .compose(&dark(), 96, pill(200), true)
+            .unwrap()
+            .1
+            .pixels
+            .clone();
+        let frosted = composer
+            .compose(
+                &Appearance {
+                    style: otto_core::AppearanceStyle::Frosted,
+                    ..dark()
+                },
+                96,
+                pill(200),
+                true,
+            )
+            .unwrap()
+            .1
+            .pixels
+            .clone();
+        let tinted_rose = composer
+            .compose(
+                &Appearance {
+                    style: otto_core::AppearanceStyle::Tinted,
+                    accent: otto_core::AccentColor::Rose,
+                    ..dark()
+                },
+                96,
+                pill(200),
+                true,
+            )
+            .unwrap()
+            .1
+            .pixels
+            .clone();
+        let tinted_emerald = composer
+            .compose(
+                &Appearance {
+                    style: otto_core::AppearanceStyle::Tinted,
+                    accent: otto_core::AccentColor::Emerald,
+                    ..dark()
+                },
+                96,
+                pill(200),
+                true,
+            )
+            .unwrap()
+            .1
+            .pixels
+            .clone();
+        assert_ne!(liquid, frosted);
+        assert_ne!(liquid, tinted_rose);
+        assert_ne!(tinted_rose, tinted_emerald);
     }
 
     #[test]

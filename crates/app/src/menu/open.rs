@@ -1,11 +1,12 @@
+use std::collections::BTreeSet;
+
 use crate::host::RuntimeContext;
 use otto_core::DockEntry;
 use otto_core::{
     AppMenuState, CMD_DOCK_OVERFLOW_BASE, DOWNLOADS_STACK_MAX_ITEMS, DockPreferences, HitTarget,
-    MAX_VISIBLE_NOTIFICATIONS, MenuAnchor, MenuContext, MenuRow, Rect, WindowInfo, WindowMenuEntry,
-    WindowMenuState, build_calendar_rows, build_menu_overflow_rows, build_notification_rows,
-    build_top_bar_menu_rows, build_tray_menu_rows, build_window_tiling_menu_rows,
-    dock_settings_rows,
+    MenuAnchor, MenuContext, MenuRow, Rect, WindowInfo, WindowMenuEntry, WindowMenuState,
+    build_calendar_rows, build_menu_overflow_rows, build_top_bar_menu_rows, build_tray_menu_rows,
+    build_window_tiling_menu_rows, dock_settings_rows,
 };
 use otto_platform::{
     ApplicationContext, application_of, build_dock_context_menu_rows, current_process_id,
@@ -262,41 +263,7 @@ pub(super) fn open_calendar_month(
 
 pub fn open_notifications(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
     with_menu(runtime, |menu| {
-        let notifications = menu.control_center.read_notifications();
-        let notification_ids = notifications
-            .items
-            .iter()
-            .take(MAX_VISIBLE_NOTIFICATIONS)
-            .map(|item| item.id)
-            .collect();
-        let rows = build_notification_rows(&notifications);
-        let probe = MenuAnchor::BelowPoint {
-            x: anchor_right - 1,
-            y: anchor_y,
-        };
-        let width = resolve_layout(
-            &menu.metrics,
-            menu.screen.dpi,
-            probe,
-            0,
-            &rows,
-            menu.renderer.as_ref(),
-        )
-        .window
-        .width;
-        menu.open(
-            runtime,
-            MenuAnchor::BelowPoint {
-                x: anchor_right - width,
-                y: anchor_y,
-            },
-            rows,
-            MenuSource::Notifications {
-                anchor_right,
-                anchor_y,
-                notification_ids,
-            },
-        );
+        menu.open_notification_center(runtime, anchor_right, anchor_y, BTreeSet::new(), 0);
     });
 }
 
@@ -312,9 +279,9 @@ pub fn is_calendar_open(runtime: &RuntimeContext) -> bool {
 #[must_use]
 pub fn is_notification_open(runtime: &RuntimeContext) -> bool {
     runtime.menu.try_borrow().ok().is_some_and(|guard| {
-        guard.as_ref().is_some_and(|menu| {
-            menu.visible && matches!(menu.source, Some(MenuSource::Notifications { .. }))
-        })
+        guard
+            .as_ref()
+            .is_some_and(|menu| menu.visible && menu.notif_view.is_some())
     })
 }
 

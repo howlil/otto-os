@@ -304,6 +304,8 @@ impl NotchController {
                 .as_ref()
                 .is_some_and(|media| self.media_enabled && !media.has_known_duration()),
             lyrics_progress: self.lyrics_progress,
+            stats_progress: self.stats_progress,
+            stats_range: self.stats_range,
             tab_blend: self.tab_blend,
             compact_title_points: self.compact_title_points.round() as i32,
             privacy: if self.privacy_enabled {
@@ -324,11 +326,22 @@ impl NotchController {
             },
             clipboard: self.clipboard.layout_input(),
             hidden_items: otto_core::BarItemSet::default(),
-            notification: self
-                .notification_stage(self.last_anim_instant)
-                .map(|stage| NotificationLayoutInput {
-                    ringing: stage == NotificationStage::Ringing,
-                }),
+            notification: self.notification_stage(self.last_anim_instant).map(
+                |stage| match stage {
+                    NotificationStage::Peek => NotificationLayoutInput::peek(),
+                    NotificationStage::Ringing => NotificationLayoutInput::ringing(),
+                    NotificationStage::Banner => {
+                        let empty_body = self
+                            .notifications
+                            .current(self.millis(self.last_anim_instant))
+                            .is_some_and(|(n, _)| n.body.trim().is_empty());
+                        NotificationLayoutInput::banner(
+                            empty_body,
+                            self.notifications.pending_count() > 0,
+                        )
+                    }
+                },
+            ),
             tasks: self.tasks.layout_input(),
         }
     }
@@ -343,6 +356,12 @@ impl NotchController {
     }
 
     pub(crate) fn collapse_from_gesture(&mut self) -> NotchUpdate {
+        if self.collapse_notification_gesture(self.last_anim_instant) {
+            return NotchUpdate {
+                changed: true,
+                effect: None,
+            };
+        }
         if self.is_panel_held_open() || !self.panel_trigger.is_open() {
             return NotchUpdate::default();
         }
@@ -356,8 +375,9 @@ impl NotchController {
     }
 
     pub(crate) fn collapse_from_external_focus_change(&mut self) -> bool {
+        let notif_collapsed = self.collapse_notifications_all();
         if self.is_panel_held_open() || self.has_alert() {
-            return false;
+            return notif_collapsed;
         }
         if self.panel_trigger != PanelTrigger::Closed {
             self.panel_trigger = PanelTrigger::Closed;
@@ -365,7 +385,7 @@ impl NotchController {
             self.hover_blocked = false;
             return true;
         }
-        false
+        notif_collapsed
     }
 
     pub(super) fn handle_notch_click(&mut self) -> NotchUpdate {
@@ -375,6 +395,9 @@ impl NotchController {
                 changed: true,
                 effect: None,
             };
+        }
+        if self.notification_stage(self.last_anim_instant) == Some(NotificationStage::Peek) {
+            return self.handle_notification_click(otto_core::HitTarget::NotificationCard);
         }
         if self.panel_expansion < 0.25 {
             if !self.has_openable_panel() {

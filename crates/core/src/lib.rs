@@ -14,7 +14,7 @@ pub(crate) use appearance::{capture_plan, cover_color, glass, material, pixels, 
 pub(crate) use runtime::{
     change_gate, motion, pointer_edge, ports, process_hog, tick_cadence, uia,
 };
-pub(crate) use settings::{preferences, settings_content, settings_window};
+pub(crate) use settings::{focus_settings, preferences, settings_content, settings_window};
 pub(crate) use window::controls as window_controls;
 pub(crate) use window::{app_model, genie, snapshot_cache};
 
@@ -44,12 +44,15 @@ pub use control_center::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState,
     ControlCenterClickOutcome, ControlCenterCommand, ControlCenterFocus, ControlCenterFocusOutcome,
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterMetrics, ControlCenterPage,
-    ControlCenterPlacement, ControlCenterSnapshot, SLIDER_KEY_STEP_PERCENT, SubPanelGroupLayout,
-    SubPanelGroupSpec, UPDATE_CHECKING_LABEL, WifiNetwork, WifiState,
-    compute_control_center_layout_for_snapshot, control_center_action,
-    control_center_focus_targets, focus_row_subtitle, format_update_status,
-    is_update_available_status, next_dock_icon_size, parse_latest_release_tag, power_mode_label,
-    scroll_offset_for_item, step_slider_percent, subpanel_opener_target,
+    ControlCenterPlacement, ControlCenterSnapshot, RELEASE_CHECKSUMS_ASSET, ReleaseUpdateInfo,
+    SLIDER_KEY_STEP_PERCENT, Sha256, SubPanelGroupLayout, SubPanelGroupSpec, UPDATE_CHECKING_LABEL,
+    UpdateState, WifiNetwork, WifiState, compute_control_center_layout_for_snapshot,
+    control_center_action, control_center_focus_targets, expected_installer_asset_name,
+    focus_row_subtitle, format_update_status, is_allowed_release_asset_url,
+    is_allowed_release_page_url, is_update_available_status, next_dock_icon_size,
+    parse_latest_release_tag, parse_release_update, parse_sha256_for_asset, parse_sha256_hex,
+    power_mode_label, scroll_offset_for_item, sha256_digest, step_slider_percent,
+    subpanel_opener_target,
 };
 pub use cover_color::cover_accent;
 pub use dock::effects::{
@@ -75,6 +78,13 @@ pub use dock::stack::{
     DownloadsStackTile, compute_downloads_stack_layout, downloads_stack_hit_test,
     next_downloads_stack_focus,
 };
+pub use focus_settings::{
+    DayBar, FOCUS_ALL_APPS_INITIAL_LIMIT, FOCUS_ALL_APPS_PAGE_STEP, FOCUS_SEARCH_MAX_CHARS,
+    FOCUS_SEARCH_MAX_RESULTS, FOCUS_WEBSITE_INPUT_MAX_CHARS, FilterChip, FocusAppFilter,
+    FocusCatalogApp, FocusPageState, FocusSessionStatus, FocusSettingsTab, FocusTextField, KpiItem,
+    SegmentedOption, WeeklyChart, build_weekly_chart, format_remaining_brief, previous_day,
+    weekday_short,
+};
 pub use genie::{
     GenieBoundary, GenieClip, GenieDirection, GenieGeometry, GenieStrip, compute_genie_geometry,
     genie_canvas, is_blank_frame,
@@ -85,8 +95,9 @@ pub use glass::{
 };
 pub use layout::{
     HitTarget, Layout, Metrics, NOTIFICATION_BANNER_HEIGHT_POINTS, NOTIFICATION_RING_HEIGHT_POINTS,
-    NotchLayoutInput, NotificationLayout, NotificationLayoutInput, PrivacyLayoutState, Rect,
-    ShelfLayoutInput, TargetScope, compute_layout, compute_layout_for_app, compute_layout_with_hud,
+    NOTIFICATION_STACK_EXTRA_PANEL_POINTS, NOTIFICATION_STACK_LIP_HEIGHT_POINTS, NotchLayoutInput,
+    NotificationLayout, NotificationLayoutInput, PrivacyLayoutState, Rect, ShelfLayoutInput,
+    TargetScope, compute_layout, compute_layout_for_app, compute_layout_with_hud,
     compute_layout_with_notch, scale,
 };
 pub use material::{
@@ -113,11 +124,15 @@ pub use notch::focus_activity::{
     FocusBlocklist, FocusRollingSummary, MAX_BLOCKED_APPS, MAX_BLOCKED_WEBSITES,
     MAX_SEARCH_QUERY_CHARS, MAX_TRACKED_APPS, MAX_TRACKED_SEARCHES, MAX_TRACKED_WEBSITES,
     PRESET_BLOCKED_APPS, PRESET_BLOCKED_WEBSITES, SearchQueryEntry, WebsiteUsageEntry,
-    estimated_words, format_compact_count, format_screen_time, inspect_browser_context,
-    is_browser_executable, normalize_app_key, normalize_domain,
+    clean_app_display_name, compact_app_id, estimated_words, format_compact_count,
+    format_screen_time, inspect_browser_context, is_browser_executable, is_non_trackable_focus_app,
+    normalize_app_key, normalize_domain,
 };
 pub use notch::focus_shield::{
     FocusShieldDismissal, FocusShieldLayout, focus_shield_layout, is_back_hit,
+};
+pub use notch::focus_stats_view::{
+    FocusStatsRange, FocusStatsView, FocusUsageRow, NOTCH_STATS_DAYS, NOTCH_STATS_TOP_APPS,
 };
 pub use notch::hud::{
     HudGeometry, HudGlyph, HudLabel, HudPresentation, HudTone, HudValue, compute_hud_geometry,
@@ -142,11 +157,11 @@ pub use notch::media_view::{
     LIVE_LABEL, MediaPeek, MediaPeekFrame, MediaScene, MediaView, source_label, unsupported_command,
 };
 pub use notch::notch_notification::{
-    CALL_RING_TIMEOUT_MS, NOTIFICATION_BASE_HOLD_MS, NOTIFICATION_COALESCE_MS,
-    NOTIFICATION_HOVER_GRACE_MS, NOTIFICATION_MAX_HOLD_MS, NOTIFICATION_PEEK_MS,
-    NOTIFICATION_QUEUE_LIMIT, NotchNotification, NotificationKind, NotificationPresentation,
-    NotificationQueue, NotificationStage, classify_notification, notification_hold_ms,
-    present_notification,
+    CALL_RING_TIMEOUT_MS, NOTIFICATION_BASE_HOLD_MS, NOTIFICATION_COALESCE_FADE_MS,
+    NOTIFICATION_COALESCE_MS, NOTIFICATION_HOVER_GRACE_MS, NOTIFICATION_MAX_HOLD_MS,
+    NOTIFICATION_PEEK_MS, NOTIFICATION_QUEUE_LIMIT, NotchNotification, NotificationKind,
+    NotificationPresentation, NotificationQueue, NotificationStage, classify_notification,
+    notification_hold_ms, present_notification,
 };
 pub use notch::notch_rect::{NOTCH_RECT_PROPERTY, pack_notch_rect, unpack_notch_rect};
 pub use notch::pomodoro::{
@@ -180,13 +195,22 @@ pub use pixels::{
 pub use pointer_edge::PointerEdgeWatch;
 pub use ports::{ControlCenterAction, ControlCenterPort, DockPort, NotchAction, NotchPort};
 pub use preferences::{AppPreferences, BrandIcon, NotchStyle};
-pub use process_hog::{HOG_SAMPLE_INTERVAL_SECS, HogDecision, HogTracker, ProcessSample};
+pub use process_hog::{
+    AuditedAppGroup, HOG_SAMPLE_INTERVAL_SECS, HogDecision, HogTracker,
+    MEMORY_BUFFER_THRESHOLD_BYTES, ProcessAuditFilter, ProcessAuditReport, ProcessSafety,
+    ProcessSample, ProcessThrottleKind, ProtectionReason, RawProcessAuditSample,
+    SAFE_TO_END_MEMORY_THRESHOLD_BYTES, classify_process_protection, format_cpu_tenths,
+    format_memory_bytes, friendly_process_display_name, summarize_process_audit,
+};
+pub use settings::general_settings::{
+    GeneralPageState, PROCESS_AUDIT_INITIAL_LIMIT, PROCESS_AUDIT_PAGE_STEP,
+};
 pub use settings::model::{
     OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot,
     PluginSettingsState, SystemSettingsState,
 };
 pub use settings_content::{
-    BadgeTone, CardLayout, ContentLayout, DayBar, SettingsAction, SettingsContent, SettingsHero,
+    BadgeTone, CardLayout, ContentLayout, SettingsAction, SettingsContent, SettingsHero,
     SettingsRow, SettingsRowValue, SettingsSection, build_content, compute_content_layout,
 };
 pub use settings_window::{
@@ -201,7 +225,10 @@ pub use spotlight::{
     SpotlightMode, SpotlightMove, SpotlightResultLayout, SpotlightView, compute_spotlight_layout,
     move_spotlight_selection, rank_spotlight_results,
 };
-pub use theme::{ResolvedTheme, Rgba, ThemeMode};
+pub use theme::{
+    AccentColor, AppearancePreferences, AppearanceStyle, ResolvedAccent, ResolvedTheme, Rgba,
+    ThemeMode,
+};
 pub use tick_cadence::TickCadence;
 pub use uia::{
     AccessibleNode, AccessibleRole, AccessibleTree, build_bar_accessible_tree,

@@ -34,7 +34,7 @@ use self::worker::RenderWorker;
 use self::worker::WorkerShared;
 
 const SNAPSHOT_CACHE_MAX_DIMENSION: u32 = 960;
-const FIRST_FRAME0_TIMEOUT: Duration = Duration::from_secs(2);
+const FIRST_FRAME0_TIMEOUT: Duration = Duration::from_secs(4);
 const FRAME0_TIMEOUT: Duration = Duration::from_millis(35);
 const FRAME_WAIT_TIMEOUT_MS: u32 = 50;
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(450);

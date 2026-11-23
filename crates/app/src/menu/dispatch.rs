@@ -1,11 +1,10 @@
 use crate::host::RuntimeContext;
 use otto_core::{
-    CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY, CMD_CC_CALENDAR,
-    CMD_CONTROL_CENTER, CMD_NOTIF_CLEAR_ALL, CMD_NOTIF_REQUEST_ACCESS, CMD_OPEN_LOGS,
-    CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK, CMD_TOGGLE_NOTCH, CMD_TOGGLE_TOP_BAR, Capability,
-    CommandOutcome, ControlCenterAction, ControlCenterPage, DownloadsEffect, WindowCommand,
-    WindowInfo, WindowMenuEffect, dock_overflow_choice, dock_settings_effect, downloads_effect,
-    notification_dismiss_index, overflow_menu_target, shift_month, window_menu_effect,
+    CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY, CMD_CONTROL_CENTER,
+    CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK, CMD_TOGGLE_NOTCH,
+    CMD_TOGGLE_TOP_BAR, Capability, CommandOutcome, ControlCenterAction, ControlCenterPage,
+    DownloadsEffect, WindowCommand, WindowInfo, WindowMenuEffect, dock_overflow_choice,
+    dock_settings_effect, downloads_effect, overflow_menu_target, shift_month, window_menu_effect,
 };
 use otto_platform::{
     current_process_id, execute_top_bar_command, open_downloads_folder, open_path,
@@ -17,7 +16,6 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 use super::MenuSource;
 use super::open::open_calendar;
 use super::open::open_calendar_month;
-use super::open::open_notifications;
 use super::with_menu;
 
 pub(super) fn report(outcome: CommandOutcome) {
@@ -147,37 +145,6 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
                     .execute(ControlCenterAction::OpenCalendarSettings);
             }),
             _ => {}
-        },
-        MenuSource::Notifications {
-            anchor_right,
-            anchor_y,
-            notification_ids,
-        } => match cmd {
-            CMD_NOTIF_CLEAR_ALL => {
-                with_menu(runtime, |menu| {
-                    let _ = menu.control_center.clear_notifications();
-                });
-                open_notifications(runtime, anchor_right, anchor_y);
-            }
-            CMD_NOTIF_REQUEST_ACCESS => {
-                with_menu(runtime, |menu| {
-                    let _ = menu.control_center.request_notification_access();
-                });
-                open_notifications(runtime, anchor_right, anchor_y);
-            }
-            CMD_CC_CALENDAR => with_menu(runtime, |menu| {
-                menu.control_center
-                    .execute(ControlCenterAction::OpenCalendar);
-            }),
-            _ => {
-                if let Some(index) = notification_dismiss_index(cmd, notification_ids.len()) {
-                    let id = notification_ids[index];
-                    with_menu(runtime, |menu| {
-                        let _ = menu.control_center.dismiss_notification(id);
-                    });
-                    open_notifications(runtime, anchor_right, anchor_y);
-                }
-            }
         },
         MenuSource::WindowControls { window } => {
             let _ = execute_window_menu_command(runtime, cmd, Some(&window));

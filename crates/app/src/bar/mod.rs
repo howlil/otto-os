@@ -61,6 +61,7 @@ pub(crate) use self::modal::run_prepared_modal_action;
 pub use self::settings::activate_hidden_target;
 pub use self::settings::apply_appearance;
 pub use self::settings::control_center_anchor;
+pub use self::settings::focus_session_status;
 pub use self::settings::leave_keyboard_focus;
 pub use self::settings::refresh_plugin_layout;
 pub use self::settings::search_slot_trigger;
@@ -135,6 +136,9 @@ pub(crate) struct Bar {
     last_focus_save: Instant,
     last_blocked_window: Option<(isize, Instant)>,
     last_browser_url: Option<(isize, String)>,
+    stats_icon_hints: std::collections::HashMap<String, String>,
+    stats_catalog: Option<std::collections::HashMap<String, (String, String)>>,
+    stats_icons_attempted: std::collections::HashSet<String>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -308,7 +312,14 @@ pub fn start(
         last_focus_save: Instant::now(),
         last_blocked_window: None,
         last_browser_url: None,
+        stats_icon_hints: std::collections::HashMap::new(),
+        stats_catalog: None,
+        stats_icons_attempted: std::collections::HashSet::new(),
     };
+    if let Some(win) = bar.controls.active_window().cloned() {
+        bar.remember_app_icon_hint(&win.executable, &win.executable);
+        bar.remember_app_icon_hint(&win.app.key(), &win.executable);
+    }
     bar.notch.set_clock(status.clock);
     bar.notch
         .set_lyrics_in_compact(bar.io.online_lyrics_enabled && bar.notch.media_enabled());
@@ -678,8 +689,16 @@ fn max_panel_surface_size(dpi: u32) -> (i32, i32) {
         + classic
             .notch_expanded_height
             .max(classic.notch_lyrics_height)
+            .max(classic.notch_stats_height)
         + 4)
-    .max(island.notch_top_inset + island.notch_expanded_height.max(island.notch_lyrics_height) + 4);
+    .max(
+        island.notch_top_inset
+            + island
+                .notch_expanded_height
+                .max(island.notch_lyrics_height)
+                .max(island.notch_stats_height)
+            + 4,
+    );
     (scale(max_pts_w, dpi), scale(max_pts_h, dpi))
 }
 
@@ -694,6 +713,7 @@ fn keyboard_seek_delta(key: BarKey) -> Option<i64> {
 const fn active_notch_tab_target(tab: NotchExpandedTab) -> HitTarget {
     match tab {
         NotchExpandedTab::Pomodoro => HitTarget::NotchTabPomodoro,
+        NotchExpandedTab::Stats => HitTarget::NotchTabStats,
         NotchExpandedTab::Shelf => HitTarget::NotchTabShelf,
         NotchExpandedTab::Clipboard => HitTarget::NotchTabClipboard,
         NotchExpandedTab::Tasks => HitTarget::NotchTabTasks,
@@ -762,13 +782,18 @@ const fn should_wheel_collapse_notch(
             hit,
             Some(
                 HitTarget::NotchTabPomodoro
+                    | HitTarget::NotchTabStats
                     | HitTarget::NotchTabShelf
                     | HitTarget::NotchTabClipboard
                     | HitTarget::NotchTabTasks
                     | HitTarget::NotchTabMedia
             )
         )
-        || (matches!(hit, Some(HitTarget::Notch)) && matches!(active_tab, NotchExpandedTab::Media))
+        || (matches!(hit, Some(HitTarget::Notch))
+            && matches!(
+                active_tab,
+                NotchExpandedTab::Media | NotchExpandedTab::Stats
+            ))
 }
 
 const fn is_upward_touch_swipe(start: (i32, i32), current: (i32, i32), threshold: i32) -> bool {

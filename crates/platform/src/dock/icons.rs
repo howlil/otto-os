@@ -9,6 +9,10 @@ use windows::Win32::Graphics::Gdi::{
     GetObjectW, HGDIOBJ,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_VALUE_TYPE, RegCloseKey,
+    RegOpenKeyExW, RegQueryValueExW,
+};
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
     SHFILEINFOW, SHGFI_SYSICONINDEX, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO,
@@ -52,6 +56,137 @@ pub fn extract_dock_icon(entry: &DockEntry) -> Option<IconBitmap> {
 #[must_use]
 pub fn extract_window_icon(hwnd_val: isize) -> Option<IconBitmap> {
     window_icon_bitmap(hwnd_val).map(|raw| normalize_to_macos_squircle(&raw))
+}
+
+#[must_use]
+pub fn extract_app_icon_bitmap(icon_source: &str, exe_hint: Option<&str>) -> Option<IconBitmap> {
+    let from_shell = |path: &str| {
+        crate::notch::shelf::extract_shell_icon(path, 64).map(|icon| IconBitmap {
+            width: icon.width,
+            height: icon.height,
+            pixels: icon.bgra,
+        })
+    };
+    from_shell(icon_source)
+        .or_else(|| exe_hint.and_then(from_shell))
+        .or_else(|| exe_hint.and_then(file_icon_bitmap))
+        .or_else(|| {
+            (!icon_source.starts_with("shell:")
+                && !icon_source.starts_with("aumid:")
+                && icon_source.contains(['\\', '/', ':']))
+            .then(|| file_icon_bitmap(icon_source))
+            .flatten()
+        })
+        .or_else(|| {
+            (!icon_source.contains(['\\', '/', ':']))
+                .then(|| extract_bare_stem_icon(icon_source))
+                .flatten()
+        })
+}
+
+fn extract_bare_stem_icon(raw_stem: &str) -> Option<IconBitmap> {
+    let stem = otto_core::normalize_app_key(raw_stem);
+    if stem.is_empty() {
+        return None;
+    }
+    let from_shell = |path: &str| {
+        crate::notch::shelf::extract_shell_icon(path, 64).map(|icon| IconBitmap {
+            width: icon.width,
+            height: icon.height,
+            pixels: icon.bgra,
+        })
+    };
+    for win in crate::enumerate_windows(0) {
+        if (otto_core::normalize_app_key(&win.executable) == stem
+            || otto_core::normalize_app_key(&win.app_name) == stem)
+            && let Some(bmp) = (!win.executable.is_empty())
+                .then(|| from_shell(&win.executable).or_else(|| file_icon_bitmap(&win.executable)))
+                .flatten()
+                .or_else(|| window_icon_bitmap(win.identity.hwnd))
+        {
+            return Some(bmp);
+        }
+    }
+    let exe_path = resolve_exe_from_app_paths_or_path(&stem)?;
+    from_shell(&exe_path).or_else(|| file_icon_bitmap(&exe_path))
+}
+
+fn resolve_exe_from_app_paths_or_path(stem: &str) -> Option<String> {
+    let exe_name = format!("{stem}.exe");
+    let subkey = to_wide(&format!(
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
+    ));
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        if let Some(path) = query_app_path_registry(root, &subkey)
+            && Path::new(&path).is_file()
+        {
+            return Some(path);
+        }
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(&exe_name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn query_app_path_registry(root: HKEY, subkey: &[u16]) -> Option<String> {
+    let mut hkey = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            PCWSTR(subkey.as_ptr()),
+            None,
+            KEY_QUERY_VALUE,
+            &raw mut hkey,
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let mut reg_type = REG_VALUE_TYPE::default();
+    let mut bytes = 0u32;
+    let query_len = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR::null(),
+            None,
+            Some(&raw mut reg_type),
+            None,
+            Some(&raw mut bytes),
+        )
+    };
+    if query_len.is_err() || !(2..=4096).contains(&bytes) {
+        let _ = unsafe { RegCloseKey(hkey) };
+        return None;
+    }
+    let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+    let mut actual_bytes = (buf.len() * 2) as u32;
+    let query_val = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR::null(),
+            None,
+            Some(&raw mut reg_type),
+            Some(buf.as_mut_ptr().cast()),
+            Some(&raw mut actual_bytes),
+        )
+    };
+    let _ = unsafe { RegCloseKey(hkey) };
+    if query_val.is_err() {
+        return None;
+    }
+    let units = (actual_bytes as usize / 2).min(buf.len());
+    let len = buf[..units]
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units);
+    let raw = String::from_utf16_lossy(&buf[..len]);
+    let trimmed = raw.trim().trim_matches('"').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 pub(super) fn file_icon_bitmap(path: &str) -> Option<IconBitmap> {

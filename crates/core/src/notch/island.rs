@@ -143,10 +143,15 @@ pub fn island_targets(inputs: &IslandInputs) -> IslandTargets {
     IslandTargets {
         panel: flag(matches!(
             mode,
-            IslandMode::Expanded | IslandMode::Alert | IslandMode::Notification(_)
+            IslandMode::Expanded
+                | IslandMode::Alert
+                | IslandMode::Notification(NotificationStage::Banner | NotificationStage::Ringing)
         )),
         hud: flag(mode == IslandMode::Hud),
-        compact: flag(inputs.compact_content().is_some()),
+        compact: flag(
+            inputs.compact_content().is_some()
+                || mode == IslandMode::Notification(NotificationStage::Peek),
+        ),
         secondary: flag(
             matches!(mode, IslandMode::Compact(_)) && inputs.secondary_compact_content().is_some(),
         ),
@@ -391,6 +396,22 @@ mod tests {
         let targets = island_targets(&inputs);
         assert!((targets.panel - 1.0).abs() < f32::EPSILON);
         assert!(targets.hud.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_message_peek_uses_the_compact_bar_channel_until_it_becomes_a_banner() {
+        let inputs = IslandInputs {
+            notification: Some(NotificationStage::Peek),
+            ..IslandInputs::default()
+        };
+        assert_eq!(
+            resolve_island(&inputs),
+            IslandMode::Notification(NotificationStage::Peek)
+        );
+        let targets = island_targets(&inputs);
+        assert!(targets.panel.abs() < f32::EPSILON);
+        assert!((targets.compact - 1.0).abs() < f32::EPSILON);
+        assert!(targets.secondary.abs() < f32::EPSILON);
     }
 
     #[test]

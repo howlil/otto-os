@@ -1,4 +1,5 @@
-use crate::theme::ResolvedTheme;
+use crate::material::Appearance;
+use crate::theme::{AppearanceStyle, ResolvedTheme};
 
 use super::color::luminance;
 use super::color::mix;
@@ -85,12 +86,106 @@ impl GlassParams {
         dispersion: 0.5,
     };
 
+    pub const FROSTED_DARK: Self = Self {
+        tint: [0.11, 0.12, 0.15],
+        tint_amount: 0.44,
+        luma_floor: 0.04,
+        luma_ceiling: 0.44,
+        saturation: 1.08,
+        sheen_alpha: 0.03,
+        rim_base: 0.04,
+        rim_lit: 0.26,
+        rim_bounce: 0.08,
+        rim_width: 1.0,
+        inner_glow: 0.03,
+        inner_glow_depth: 6.0,
+        outline_alpha: 0.07,
+        shadow_strength: 0.04,
+        shadow_depth: 6.0,
+        lens_band: 0.0,
+        lens_shift: 0.0,
+        lens_mix: 0.0,
+        lens_tint_scale: 0.0,
+        dispersion: 0.0,
+    };
+
+    pub const FROSTED_LIGHT: Self = Self {
+        tint: [0.95, 0.96, 0.98],
+        tint_amount: 0.54,
+        luma_floor: 0.68,
+        luma_ceiling: 0.98,
+        saturation: 1.08,
+        sheen_alpha: 0.04,
+        rim_base: 0.04,
+        rim_lit: 0.28,
+        rim_bounce: 0.08,
+        rim_width: 1.0,
+        inner_glow: 0.04,
+        inner_glow_depth: 6.0,
+        outline_alpha: 0.08,
+        shadow_strength: 0.02,
+        shadow_depth: 5.0,
+        lens_band: 0.0,
+        lens_shift: 0.0,
+        lens_mix: 0.0,
+        lens_tint_scale: 0.0,
+        dispersion: 0.0,
+    };
+
     #[must_use]
     pub const fn for_theme(theme: ResolvedTheme) -> Self {
         match theme {
             ResolvedTheme::Dark => Self::DARK,
             ResolvedTheme::Light => Self::LIGHT,
         }
+    }
+
+    #[must_use]
+    pub fn for_appearance(appearance: &Appearance) -> Self {
+        let theme = appearance.theme;
+        match appearance.style {
+            AppearanceStyle::LiquidGlass => Self::for_theme(theme),
+            AppearanceStyle::Frosted => match theme {
+                ResolvedTheme::Dark => Self::FROSTED_DARK,
+                ResolvedTheme::Light => Self::FROSTED_LIGHT,
+            },
+            AppearanceStyle::Tinted => {
+                let accent = appearance.resolved_accent().tint;
+                match theme {
+                    ResolvedTheme::Dark => Self {
+                        tint: mix([0.07, 0.08, 0.11], accent, 0.48),
+                        tint_amount: 0.34,
+                        luma_floor: 0.02,
+                        luma_ceiling: 0.52,
+                        saturation: 1.24,
+                        rim_lit: 0.44,
+                        rim_bounce: 0.14,
+                        lens_mix: 0.65,
+                        dispersion: 0.25,
+                        ..Self::DARK
+                    },
+                    ResolvedTheme::Light => Self {
+                        tint: mix([0.96, 0.97, 0.99], accent, 0.22),
+                        tint_amount: 0.38,
+                        luma_floor: 0.64,
+                        luma_ceiling: 0.98,
+                        saturation: 1.20,
+                        rim_lit: 0.36,
+                        rim_bounce: 0.12,
+                        lens_mix: 0.65,
+                        dispersion: 0.25,
+                        ..Self::LIGHT
+                    },
+                }
+            }
+            AppearanceStyle::Solid => Self::for_theme(theme).without_lens(),
+        }
+    }
+
+    #[must_use]
+    pub fn tint_key(&self) -> u32 {
+        let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        (channel(self.tint[0]) << 16) | (channel(self.tint[1]) << 8) | channel(self.tint[2])
     }
 
     #[must_use]

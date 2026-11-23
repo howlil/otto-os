@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.2.0"
+  #define MyAppVersion "1.3.0"
 #endif
 
 #ifndef SourceExe
@@ -53,8 +53,24 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\otto-os.exe"; Description: "Launch Otto OS"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\otto-os.exe"; Flags: nowait skipifnotsilent; Check: HasRelaunchSwitch
 
 [Code]
+function HasRelaunchSwitch: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(I), '/RELAUNCH') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
 procedure QuitRunningInstance(const ExePath: string);
 var
   ResultCode: Integer;

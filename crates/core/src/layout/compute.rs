@@ -15,11 +15,12 @@ use super::input::NotchLayoutInput;
 use super::metrics::Metrics;
 use super::model::Layout;
 use super::model::{
-    BarSlotsLayout, ClipboardPanelLayout, MediaPanelLayout, PomodoroPanelLayout,
-    PrivacyPanelLayout, ShelfPanelLayout, TasksPanelLayout,
+    BarSlotsLayout, ClipboardPanelLayout, FocusStatsPanelLayout, MediaPanelLayout,
+    PomodoroPanelLayout, PrivacyPanelLayout, ShelfPanelLayout, TasksPanelLayout,
 };
 use super::notification::NOTIFICATION_BANNER_HEIGHT_POINTS;
 use super::notification::NOTIFICATION_RING_HEIGHT_POINTS;
+use super::notification::NOTIFICATION_STACK_EXTRA_PANEL_POINTS;
 use super::notification::compute_notification_layout;
 use super::panel::ExpandedNotchControls;
 use super::panel::compute_expanded_notch_controls;
@@ -29,6 +30,7 @@ use super::slots::estimate_app_slot_points;
 use super::slots::resolve_left_slots;
 use super::slots::resolve_right_slots;
 use super::tasks::TASK_EDITOR_EXTRA_HEIGHT_POINTS;
+use crate::notch::notch_notification::NotificationStage;
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -74,25 +76,39 @@ pub fn compute_layout_with_notch(
     };
 
     let base_pts = metrics.notch_width + privacy_extra_pts;
-    let compact_target = compact_width_points(
-        metrics,
-        notch_input.compact_title_points,
-        notch_input.media_live,
-        notch_input.compact_primary,
-    ) + privacy_extra_pts;
+    let is_notification_peek = notch_input
+        .notification
+        .is_some_and(|card| card.stage == NotificationStage::Peek);
+    let compact_target = if is_notification_peek {
+        metrics.notch_compact_width + privacy_extra_pts
+    } else {
+        compact_width_points(
+            metrics,
+            notch_input.compact_title_points,
+            notch_input.media_live,
+            notch_input.compact_primary,
+        ) + privacy_extra_pts
+    };
     let compact_pts = lerp_points(base_pts, compact_target, compact_t);
     let hud_pts = lerp_points(base_pts, metrics.notch_hud_width + privacy_extra_pts, hud_t);
     let collapsed_pts = compact_pts.max(hud_pts);
     let lyrics_t = notch_input.lyrics_progress.clamp(0.0, 1.0);
+    let stats_t = notch_input.stats_progress.clamp(0.0, 1.0);
     let target_expanded_h = match notch_input.notification {
-        Some(card) if card.ringing => NOTIFICATION_RING_HEIGHT_POINTS,
+        Some(card) if card.is_ringing() => NOTIFICATION_RING_HEIGHT_POINTS,
         Some(_) => NOTIFICATION_BANNER_HEIGHT_POINTS,
         None => {
-            let base = lerp_points(
+            let lyrics_h = lerp_points(
                 metrics.notch_expanded_height,
                 metrics.notch_lyrics_height,
                 lyrics_t,
             );
+            let stats_h = lerp_points(
+                metrics.notch_expanded_height,
+                metrics.notch_stats_height,
+                stats_t,
+            );
+            let base = lyrics_h.max(stats_h);
             if notch_input.active_tab == NotchExpandedTab::Tasks && notch_input.tasks.editing {
                 base.max(metrics.notch_expanded_height + TASK_EDITOR_EXTRA_HEIGHT_POINTS)
             } else {
@@ -167,7 +183,15 @@ pub fn compute_layout_with_notch(
             height: notch_height,
         };
         let panel_pts_w = metrics.notch_expanded_width + metrics.notch_expanded_ear_radius * 2 + 8;
-        let panel_pts_h = compact_top_inset_pts + target_expanded_h + 4;
+        let extra_panel_pts = if notch_input
+            .notification
+            .is_some_and(|card| card.is_panel_card() && !card.is_ringing() && card.has_queue)
+        {
+            NOTIFICATION_STACK_EXTRA_PANEL_POINTS
+        } else {
+            4
+        };
+        let panel_pts_h = compact_top_inset_pts + target_expanded_h + extra_panel_pts;
         let panel_w = scale(panel_pts_w, dpi);
         let panel_h = scale(panel_pts_h, dpi);
         let panel_window = Rect {
@@ -178,7 +202,8 @@ pub fn compute_layout_with_notch(
         };
         let notification_layout = notch_input
             .notification
-            .map(|card| compute_notification_layout(notch, dpi, card.ringing));
+            .filter(|card| card.is_panel_card())
+            .map(|card| compute_notification_layout(notch, dpi, card));
         let controls = compute_expanded_notch_controls(notch, dpi, &notch_input, metrics);
         let compact = compute_compact_notch_geometry(
             notch,
@@ -361,11 +386,13 @@ pub fn compute_layout_with_notch(
         compact_trailing: compact.trailing,
         notch_tab_strip: controls.notch_tab_strip,
         notch_tab_pomodoro: controls.notch_tab_pomodoro,
+        notch_tab_stats: controls.notch_tab_stats,
         notch_tab_shelf: controls.notch_tab_shelf,
         notch_tab_clipboard: controls.notch_tab_clipboard,
         notch_tab_tasks: controls.notch_tab_tasks,
         notch_tab_media: controls.notch_tab_media,
         lyrics_progress: notch_input.lyrics_progress.clamp(0.0, 1.0),
+        stats_progress: stats_t,
         tab_blend: notch_input.tab_blend.clamp(0.0, 1.0),
         press_progress,
         icon_size,
@@ -387,6 +414,13 @@ pub fn compute_layout_with_notch(
             skip_button: controls.skip_button,
             alert_start_button: controls.alert_start_button,
             alert_extend_button: controls.alert_extend_button,
+        },
+        stats: FocusStatsPanelLayout {
+            body: controls.stats_body,
+            range_today: controls.stats_range_today,
+            range_week: controls.stats_range_week,
+            open_settings: controls.stats_open_settings,
+            days: controls.stats_days,
         },
         shelf: ShelfPanelLayout {
             add_button: controls.shelf_add_button,

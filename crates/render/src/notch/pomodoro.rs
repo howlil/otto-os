@@ -496,6 +496,13 @@ impl Renderer {
                 !layout.notch_tab_pomodoro.is_empty(),
             ),
             (
+                translate_rect(layout.notch_tab_stats, -offset_x),
+                NotchExpandedTab::Stats,
+                HitTarget::NotchTabStats,
+                NotchExpandedTab::Stats.short_label(),
+                !layout.notch_tab_stats.is_empty(),
+            ),
+            (
                 translate_rect(layout.notch_tab_shelf, -offset_x),
                 NotchExpandedTab::Shelf,
                 HitTarget::NotchTabShelf,
@@ -642,6 +649,7 @@ impl Renderer {
         let stroke = (r * 0.24).max(1.25);
         match tab {
             NotchExpandedTab::Pomodoro => self.draw_clock_glyph(center, r, ink),
+            NotchExpandedTab::Stats => self.draw_stats_bars_glyph(center.X, center.Y, r, ink),
             NotchExpandedTab::Shelf => self.draw_tray_glyph(center, r, ink),
             NotchExpandedTab::Clipboard => self.draw_clipboard_glyph(center, r, stroke, ink),
             NotchExpandedTab::Tasks => self.draw_tasks_glyph(center, r, ink),
@@ -764,6 +772,7 @@ impl Renderer {
         self.draw_text(subtitle, &self.text_pomodoro_sub, sub_rect, &muted);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_expanded_pomodoro(
         &self,
         layout: &Layout,

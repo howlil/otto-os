@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::menu::{NotificationBadge, NotificationSummary, notification_badge};
 
-pub const NOTIFICATION_PEEK_MS: u64 = 1_200;
+pub const NOTIFICATION_PEEK_MS: u64 = 1_000;
 pub const NOTIFICATION_BASE_HOLD_MS: u64 = 4_500;
 pub const NOTIFICATION_HOLD_PER_CHAR_MS: u64 = 40;
 pub const NOTIFICATION_MAX_HOLD_MS: u64 = 9_000;
 pub const NOTIFICATION_HOVER_GRACE_MS: u64 = 1_500;
 pub const NOTIFICATION_COALESCE_MS: u64 = 3_000;
+pub const NOTIFICATION_COALESCE_FADE_MS: u64 = 180;
 pub const CALL_RING_TIMEOUT_MS: u64 = 60_000;
 pub const NOTIFICATION_QUEUE_LIMIT: usize = 4;
 const HOLD_FREE_CHARS: usize = 60;
@@ -66,17 +68,24 @@ pub struct NotchNotification {
     pub kind: NotificationKind,
     pub title: String,
     pub body: String,
+    pub timestamp_label: String,
     pub badge: NotificationBadge,
+    pub icon_bytes: Option<Arc<[u8]>>,
     pub count: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationPresentation {
+    pub stage: NotificationStage,
     pub app_name: String,
     pub headline: String,
     pub subtitle: String,
+    pub timestamp_label: String,
     pub badge: NotificationBadge,
+    pub icon_bytes: Option<Arc<[u8]>>,
     pub count: u16,
+    pub pending_count: u8,
+    pub video: bool,
     pub accept_label: Option<&'static str>,
     pub decline_label: Option<&'static str>,
 }
@@ -109,20 +118,36 @@ pub fn notification_hold_ms(body: &str) -> u64 {
 pub fn present_notification(
     notification: &NotchNotification,
     stage: NotificationStage,
+    pending_count: usize,
 ) -> NotificationPresentation {
     let ringing = stage == NotificationStage::Ringing;
+    let video = ringing && notification.kind == NotificationKind::VideoCall;
     let subtitle = match notification.kind {
         NotificationKind::Call if ringing => String::from("Incoming Call"),
         NotificationKind::VideoCall if ringing => String::from("Incoming Video Call"),
         _ => notification.body.clone(),
     };
+    let accept_label = if ringing {
+        Some(if video {
+            "Open Video Call Window"
+        } else {
+            "Open Call Window"
+        })
+    } else {
+        None
+    };
     NotificationPresentation {
+        stage,
         app_name: notification.app_name.clone(),
         headline: notification.title.clone(),
         subtitle,
+        timestamp_label: notification.timestamp_label.clone(),
         badge: notification.badge,
+        icon_bytes: notification.icon_bytes.clone(),
         count: notification.count,
-        accept_label: ringing.then_some("Open Call Window"),
+        pending_count: u8::try_from(pending_count).unwrap_or(u8::MAX),
+        video,
+        accept_label,
         decline_label: ringing.then_some("Dismiss Call Alert"),
     }
 }
@@ -132,6 +157,8 @@ struct Active {
     notification: NotchNotification,
     started_ms: u64,
     deadline_ms: u64,
+    coalesced_at_ms: Option<u64>,
+    peek_promoted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -194,10 +221,76 @@ impl NotificationQueue {
         false
     }
 
+    pub fn promote_peek(&mut self, now_ms: u64) -> bool {
+        let Some(active) = self.current.as_mut() else {
+            return false;
+        };
+        if active.notification.kind.is_call()
+            || active.peek_promoted
+            || now_ms >= active.started_ms + NOTIFICATION_PEEK_MS
+        {
+            return false;
+        }
+        active.peek_promoted = true;
+        active.deadline_ms = active
+            .deadline_ms
+            .max(now_ms + notification_hold_ms(&active.notification.body));
+        true
+    }
+
     pub fn dismiss_current(&mut self, now_ms: u64) -> Option<u32> {
         let id = self.current.take().map(|active| active.notification.id);
         self.promote(now_ms);
         id
+    }
+
+    pub fn collapse_current(&mut self, now_ms: u64) -> bool {
+        if self
+            .current
+            .as_ref()
+            .is_none_or(|active| active.notification.kind.is_call())
+        {
+            return false;
+        }
+        self.current = None;
+        self.promote(now_ms);
+        true
+    }
+
+    pub fn collapse_all(&mut self) -> bool {
+        let mut changed = false;
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|active| !active.notification.kind.is_call())
+        {
+            self.current = None;
+            changed = true;
+        }
+        let before = self.pending.len();
+        self.pending
+            .retain(|notification| notification.kind.is_call());
+        if self.pending.len() != before {
+            changed = true;
+        }
+        changed
+    }
+
+    #[must_use]
+    pub fn coalesce_progress(&self, now_ms: u64) -> f32 {
+        let Some(at) = self
+            .current
+            .as_ref()
+            .and_then(|active| active.coalesced_at_ms)
+        else {
+            return 1.0;
+        };
+        let elapsed = now_ms.saturating_sub(at);
+        if elapsed >= NOTIFICATION_COALESCE_FADE_MS {
+            1.0
+        } else {
+            (elapsed as f32 / NOTIFICATION_COALESCE_FADE_MS as f32).clamp(0.0, 1.0)
+        }
     }
 
     #[must_use]
@@ -205,7 +298,7 @@ impl NotificationQueue {
         let active = self.current.as_ref()?;
         let stage = if active.notification.kind.is_call() {
             NotificationStage::Ringing
-        } else if now_ms < active.started_ms + NOTIFICATION_PEEK_MS {
+        } else if !active.peek_promoted && now_ms < active.started_ms + NOTIFICATION_PEEK_MS {
             NotificationStage::Peek
         } else {
             NotificationStage::Banner
@@ -224,7 +317,7 @@ impl NotificationQueue {
         let peek_end = active.started_ms + NOTIFICATION_PEEK_MS;
         Some(if active.notification.kind.is_call() {
             active.started_ms + CALL_RING_TIMEOUT_MS
-        } else if now_ms < peek_end {
+        } else if !active.peek_promoted && now_ms < peek_end {
             peek_end
         } else {
             active.deadline_ms
@@ -255,6 +348,7 @@ impl NotificationQueue {
             if same_thread {
                 let count = active.notification.count + 1;
                 active.deadline_ms = now_ms + notification_hold_ms(&notification.body);
+                active.coalesced_at_ms = Some(now_ms);
                 active.notification = NotchNotification {
                     count,
                     ..notification
@@ -304,6 +398,8 @@ impl NotificationQueue {
             notification,
             started_ms: now_ms,
             deadline_ms,
+            coalesced_at_ms: None,
+            peek_promoted: false,
         });
     }
 }
@@ -322,7 +418,9 @@ fn build_notification(item: &NotificationSummary, show_previews: bool) -> NotchN
         kind,
         title,
         body,
+        timestamp_label: item.timestamp_label.clone(),
         badge: notification_badge(&item.app_name),
+        icon_bytes: item.icon_bytes.clone(),
         count: 1,
     }
 }
@@ -331,6 +429,7 @@ fn missed_call(call: &NotchNotification) -> NotchNotification {
     NotchNotification {
         kind: NotificationKind::Message,
         body: String::from(MISSED_CALL_LABEL),
+        timestamp_label: String::from("now"),
         ..call.clone()
     }
 }
@@ -338,10 +437,10 @@ fn missed_call(call: &NotchNotification) -> NotchNotification {
 #[cfg(test)]
 mod tests {
     use super::{
-        CALL_RING_TIMEOUT_MS, NOTIFICATION_BASE_HOLD_MS, NOTIFICATION_HOVER_GRACE_MS,
-        NOTIFICATION_MAX_HOLD_MS, NOTIFICATION_PEEK_MS, NOTIFICATION_QUEUE_LIMIT, NotificationKind,
-        NotificationQueue, NotificationStage, classify_notification, notification_hold_ms,
-        present_notification,
+        CALL_RING_TIMEOUT_MS, NOTIFICATION_BASE_HOLD_MS, NOTIFICATION_COALESCE_FADE_MS,
+        NOTIFICATION_HOVER_GRACE_MS, NOTIFICATION_MAX_HOLD_MS, NOTIFICATION_PEEK_MS,
+        NOTIFICATION_QUEUE_LIMIT, NotificationKind, NotificationQueue, NotificationStage,
+        classify_notification, notification_hold_ms, present_notification,
     };
     use crate::menu::NotificationSummary;
 
@@ -353,6 +452,7 @@ mod tests {
             title: String::from(title),
             body: String::from(body),
             timestamp_label: String::from("now"),
+            icon_bytes: None,
         }
     }
 
@@ -550,10 +650,73 @@ mod tests {
         let mut queue = primed();
         queue.ingest(&[item(1, "Zoom", "Ayu", "Incoming video call")], 0, true);
         let (call, stage) = queue.current(0).expect("call");
-        let ringing = present_notification(call, stage);
+        let ringing = present_notification(call, stage, 2);
         assert_eq!(ringing.subtitle, "Incoming Video Call");
-        assert!(ringing.accept_label.is_some() && ringing.decline_label.is_some());
-        let banner = present_notification(call, NotificationStage::Banner);
+        assert!(ringing.video);
+        assert_eq!(ringing.accept_label, Some("Open Video Call Window"));
+        assert!(ringing.decline_label.is_some());
+        assert_eq!(ringing.pending_count, 2);
+        let banner = present_notification(call, NotificationStage::Banner, 0);
         assert!(banner.accept_label.is_none());
+        assert!(!banner.video);
+    }
+
+    #[test]
+    fn hover_promotes_peek_to_banner_and_collapse_preserves_queue_semantics() {
+        let mut queue = primed();
+        queue.ingest(&[item(1, "Mail", "Ayu", "One")], 1_000, true);
+        assert_eq!(
+            queue.current(1_100).map(|(_, stage)| stage),
+            Some(NotificationStage::Peek)
+        );
+        assert!(queue.promote_peek(1_100));
+        assert_eq!(
+            queue.current(1_100).map(|(_, stage)| stage),
+            Some(NotificationStage::Banner)
+        );
+        assert!(!queue.promote_peek(1_100));
+
+        queue.ingest(
+            &[
+                item(3, "Docs", "Cici", "Three"),
+                item(2, "Chat", "Budi", "Two"),
+                item(1, "Mail", "Ayu", "One"),
+            ],
+            1_200,
+            true,
+        );
+        assert_eq!(queue.pending_count(), 2);
+        assert!(queue.collapse_current(1_300));
+        assert_eq!(queue.current(1_300).map(|(n, _)| n.id), Some(2));
+        assert_eq!(queue.pending_count(), 1);
+        assert!(queue.collapse_all());
+        assert!(queue.current(1_400).is_none());
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn coalescing_tracks_fade_progress_and_preserves_timestamp() {
+        let mut queue = primed();
+        queue.ingest(&[item(1, "Chat", "Ayu", "First")], 0, true);
+        assert!((queue.coalesce_progress(0) - 1.0).abs() < f32::EPSILON);
+        queue.ingest(
+            &[
+                item(1, "Chat", "Ayu", "First"),
+                NotificationSummary {
+                    timestamp_label: String::from("1m"),
+                    ..item(2, "Chat", "Ayu", "Second")
+                },
+            ],
+            1_000,
+            true,
+        );
+        assert!(queue.coalesce_progress(1_000) < 0.01);
+        assert!(queue.coalesce_progress(1_000 + NOTIFICATION_COALESCE_FADE_MS / 2) > 0.4);
+        assert!(
+            (queue.coalesce_progress(1_000 + NOTIFICATION_COALESCE_FADE_MS) - 1.0).abs()
+                < f32::EPSILON
+        );
+        let (shown, _) = queue.current(1_000).expect("current");
+        assert_eq!(shown.timestamp_label, "1m");
     }
 }

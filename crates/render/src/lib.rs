@@ -22,18 +22,20 @@ pub use control_center::{ControlCenterPaintState, ControlCenterRenderer};
 pub use dock::renderer::{DockRenderItem, DockRenderer};
 pub use dock::stack::DownloadsStackRenderer;
 pub use focus_shield::FocusShieldRenderer;
-pub(crate) use kit::glyphs::{draw_speaker_glyph, draw_wifi_glyph};
+pub(crate) use kit::glyphs::{draw_bell_glyph, draw_speaker_glyph, draw_wifi_glyph};
 pub use popup::menu::{MenuHover, PopupMenuRenderer};
 pub use settings::{SettingsPaintState, SettingsRenderer};
 pub use spotlight::{SpotlightPaintEntry, SpotlightPaintState, SpotlightRenderer};
 pub use window::controls::WindowControlsRenderer;
 pub use window::genie::{GenieRenderer, build_fallback_card_snapshot};
 
-use appearance::surface::{DibSurface, create_dc_render_target, draw_with_recovery};
+use appearance::surface::{
+    DibSurface, create_dc_render_target, draw_with_recovery, upload_bgra_bitmap,
+};
 use otto_core::{
-    Appearance, BrandIcon, ClipboardState, HitTarget, Layout, LyricsView, MediaScene,
-    NotchHudState, PixelLimits, PomodoroScene, PrivacyState, Rect, ShelfState, SystemStatus,
-    TasksState, bgra_layout, cover_accent, scale,
+    Appearance, BrandIcon, ClipboardState, FocusStatsView, HitTarget, Layout, LyricsView,
+    MediaScene, NotchHudState, PixelLimits, PomodoroScene, PrivacyState, Rect, ShelfState,
+    SystemStatus, TasksState, bgra_layout, cover_accent, scale,
 };
 use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -51,8 +53,8 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
     DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
@@ -137,10 +139,10 @@ pub(crate) struct CoverArt {
     pub accent: Option<D2D1_COLOR_F>,
 }
 
-struct CachedCoverArt {
-    hash: u64,
-    bytes_len: usize,
-    art: CoverArt,
+pub(crate) struct CachedCoverArt {
+    pub(crate) hash: u64,
+    pub(crate) bytes_len: usize,
+    pub(crate) art: CoverArt,
 }
 
 pub struct Renderer {
@@ -163,7 +165,15 @@ pub struct Renderer {
     text_caption: IDWriteTextFormat,
     text_caption_center: IDWriteTextFormat,
     text_alert_title: IDWriteTextFormat,
+    text_notif_body: IDWriteTextFormat,
+    text_notif_caller: IDWriteTextFormat,
+    text_notif_badge: IDWriteTextFormat,
+    text_notif_badge_sm: IDWriteTextFormat,
     text_lyric: IDWriteTextFormat,
+    text_stats_hero: IDWriteTextFormat,
+    text_stats_value: IDWriteTextFormat,
+    text_stats_trailing: IDWriteTextFormat,
+    text_stats_badge: IDWriteTextFormat,
     lyric_layouts: RefCell<notch::lyrics::LyricLayoutCache>,
     content_offset: Cell<(f32, f32)>,
     bar_surface: DibSurface,
@@ -174,16 +184,22 @@ pub struct Renderer {
     cached_bar_notch: RefCell<Option<CachedNotchGeometry>>,
     cached_panel_notch: RefCell<Option<CachedNotchGeometry>>,
     cached_cover_art: RefCell<Option<CachedCoverArt>>,
+    cached_notif_icons: RefCell<Vec<CachedCoverArt>>,
     cached_shelf_bitmaps: RefCell<Vec<notch::shelf::CachedShelfBitmap>>,
+    pub(crate) cached_stats_icons: RefCell<Vec<(String, ID2D1Bitmap)>>,
     last_bar_frame: RefCell<Option<bar::frame::BarFrameKey>>,
     last_bar_target: Cell<Option<(isize, (i32, i32))>>,
     glass: appearance::glass::GlassPainter,
     brand_icon: Cell<BrandIcon>,
     bar_background: Cell<bool>,
     bar_chrome_hidden: Cell<bool>,
+    notif_unread: Cell<bool>,
+    reduced_motion: Cell<bool>,
+    notif_coalesce: Cell<f32>,
 }
 
 const SQUIRCLE_CACHE_CAPACITY: usize = 64;
+const MAX_STATS_APP_ICONS: usize = 24;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SquircleCacheKey {
@@ -297,7 +313,33 @@ pub(crate) fn shared_tabular_typography() -> Result<IDWriteTypography> {
     })
 }
 
+const RAW_BGRA_ICON_MAGIC: &[u8; 4] = b"BGRA";
+const RAW_BGRA_HEADER_LEN: usize = 12;
+
+fn decode_raw_bgra_bytes(target: &ID2D1DCRenderTarget, bytes: &[u8]) -> Option<Result<CoverArt>> {
+    if bytes.len() < RAW_BGRA_HEADER_LEN || &bytes[..4] != RAW_BGRA_ICON_MAGIC {
+        return None;
+    }
+    let width = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let height = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let pixels = &bytes[RAW_BGRA_HEADER_LEN..];
+    Some(
+        upload_bgra_bitmap(target, width, height, pixels, PixelLimits::ICON).map(|bitmap| {
+            let accent = cover_accent(pixels, width, height).map(|colour| D2D1_COLOR_F {
+                r: colour.r,
+                g: colour.g,
+                b: colour.b,
+                a: 1.0,
+            });
+            CoverArt { bitmap, accent }
+        }),
+    )
+}
+
 pub(crate) fn decode_image_bytes(target: &ID2D1DCRenderTarget, bytes: &[u8]) -> Result<CoverArt> {
+    if let Some(decoded) = decode_raw_bgra_bytes(target, bytes) {
+        return decoded;
+    }
     unsafe {
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
@@ -483,11 +525,61 @@ impl Renderer {
                 DWRITE_FONT_WEIGHT_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
             )?;
+            let text_notif_body = create_text_format(
+                &dwrite,
+                scale(12, dpi) as f32,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            text_notif_body.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            text_notif_body.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+            let text_notif_caller = create_text_format(
+                &dwrite,
+                scale(15, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_notif_badge = create_text_format(
+                &dwrite,
+                scale(18, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
+            let text_notif_badge_sm = create_text_format(
+                &dwrite,
+                scale(11, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
             let text_lyric = create_text_format(
                 &dwrite,
                 scale(notch::lyrics::LYRIC_FONT_PT, dpi) as f32,
                 DWRITE_FONT_WEIGHT_BOLD,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_stats_hero = create_text_format(
+                &dwrite,
+                scale(22, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_stats_value = create_text_format(
+                &dwrite,
+                scale(12, dpi) as f32,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?;
+            let text_stats_trailing = create_text_format(
+                &dwrite,
+                scale(10, dpi) as f32,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+            )?;
+            let text_stats_badge = create_text_format(
+                &dwrite,
+                scale(9, dpi) as f32,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
 
             let panel_surface_size = (panel_width.max(1), panel_height.max(1));
@@ -522,7 +614,15 @@ impl Renderer {
                 text_caption,
                 text_caption_center,
                 text_alert_title,
+                text_notif_body,
+                text_notif_caller,
+                text_notif_badge,
+                text_notif_badge_sm,
                 text_lyric,
+                text_stats_hero,
+                text_stats_value,
+                text_stats_trailing,
+                text_stats_badge,
                 lyric_layouts: RefCell::default(),
                 content_offset: Cell::new((0.0, 0.0)),
                 bar_surface,
@@ -533,13 +633,18 @@ impl Renderer {
                 cached_bar_notch,
                 cached_panel_notch,
                 cached_cover_art: RefCell::new(None),
+                cached_notif_icons: RefCell::default(),
                 cached_shelf_bitmaps: RefCell::default(),
+                cached_stats_icons: RefCell::default(),
                 last_bar_frame: RefCell::new(None),
                 last_bar_target: Cell::new(None),
                 glass: appearance::glass::GlassPainter::default(),
                 brand_icon: Cell::new(BrandIcon::Otto),
                 bar_background: Cell::new(true),
                 bar_chrome_hidden: Cell::new(false),
+                notif_unread: Cell::new(false),
+                reduced_motion: Cell::new(false),
+                notif_coalesce: Cell::new(1.0),
             })
         }
     }
@@ -567,6 +672,22 @@ impl Renderer {
         }
     }
 
+    pub fn set_notification_unread(&self, unread: bool) {
+        if self.notif_unread.replace(unread) != unread
+            && let Ok(mut frame) = self.last_bar_frame.try_borrow_mut()
+        {
+            frame.take();
+        }
+    }
+
+    pub fn set_reduced_motion(&self, reduced: bool) {
+        self.reduced_motion.set(reduced);
+    }
+
+    pub fn set_notification_coalesce(&self, blend: f32) {
+        self.notif_coalesce.set(blend.clamp(0.0, 1.0));
+    }
+
     fn recreate_target(&mut self) -> Result<()> {
         let target = create_dc_render_target(&self.factory)?;
         let brushes = BrushPalette::new(&target)?;
@@ -576,8 +697,14 @@ impl Renderer {
         if let Ok(mut cover) = self.cached_cover_art.try_borrow_mut() {
             cover.take();
         }
+        if let Ok(mut icons) = self.cached_notif_icons.try_borrow_mut() {
+            icons.clear();
+        }
         if let Ok(mut shelf) = self.cached_shelf_bitmaps.try_borrow_mut() {
             shelf.clear();
+        }
+        if let Ok(mut stats_icons) = self.cached_stats_icons.try_borrow_mut() {
+            stats_icons.clear();
         }
         if let Ok(mut frame) = self.last_bar_frame.try_borrow_mut() {
             frame.take();
@@ -603,6 +730,7 @@ impl Renderer {
         appearance: Appearance,
         privacy: &PrivacyState,
         call: Option<&otto_core::CallScene>,
+        notification: Option<&otto_core::NotificationPresentation>,
     ) -> Result<()> {
         if let Some(fields) =
             self.bar_frame_fields(layout, status, hovered, focused, hud, appearance)
@@ -619,8 +747,19 @@ impl Renderer {
             self,
             |renderer| {
                 renderer.draw_bar(
-                    layout, status, app_name, hovered, focused, hud, pomodoro, media, anim_phase,
-                    appearance, privacy, call,
+                    layout,
+                    status,
+                    app_name,
+                    hovered,
+                    focused,
+                    hud,
+                    pomodoro,
+                    media,
+                    anim_phase,
+                    appearance,
+                    privacy,
+                    call,
+                    notification,
                 )
             },
             Self::recreate_target,
@@ -706,9 +845,51 @@ impl Renderer {
         self.release_panel_surface();
         self.clear_media_caches();
         self.clear_shelf_caches();
+        if let Ok(mut icons) = self.cached_notif_icons.try_borrow_mut() {
+            icons.clear();
+        }
+        if let Ok(mut stats_icons) = self.cached_stats_icons.try_borrow_mut() {
+            stats_icons.clear();
+        }
         if let Ok(mut cached) = self.cached_bar_notch.try_borrow_mut() {
             cached.take();
         }
+    }
+
+    #[must_use]
+    pub fn has_stats_app_icon(&self, app_key: &str) -> bool {
+        self.cached_stats_icons
+            .try_borrow()
+            .ok()
+            .is_some_and(|cache| cache.iter().any(|(k, _)| k == app_key))
+    }
+
+    pub fn set_stats_app_icon(
+        &self,
+        app_key: String,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<()> {
+        let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
+        if let Ok(mut cache) = self.cached_stats_icons.try_borrow_mut() {
+            if let Some(pos) = cache.iter().position(|(k, _)| k == &app_key) {
+                cache.remove(pos);
+            } else if cache.len() >= MAX_STATS_APP_ICONS {
+                cache.remove(0);
+            }
+            cache.push((app_key, bitmap));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stats_app_icon(&self, app_key: &str) -> Option<ID2D1Bitmap> {
+        self.cached_stats_icons
+            .try_borrow()
+            .ok()?
+            .iter()
+            .find(|(k, _)| k == app_key)
+            .map(|(_, bmp)| bmp.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -727,6 +908,7 @@ impl Renderer {
         tasks_state: &TasksState,
         privacy: &PrivacyState,
         notification: Option<&otto_core::NotificationPresentation>,
+        focus_stats: &FocusStatsView,
     ) -> Result<()> {
         draw_with_recovery(
             self,
@@ -744,6 +926,7 @@ impl Renderer {
                     tasks_state,
                     privacy,
                     notification,
+                    focus_stats,
                 )
             },
             Self::recreate_target,

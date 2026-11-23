@@ -37,6 +37,7 @@ pub use self::drop::enable_drag_accept_files;
 pub use self::drop::extract_dropped_files;
 pub use self::drop::open_file_with_dock_entry;
 use self::icons::classify_apple_icon;
+pub use self::icons::extract_app_icon_bitmap;
 pub use self::icons::extract_dock_icon;
 pub use self::icons::extract_window_icon;
 pub use self::pins::PinnedApp;

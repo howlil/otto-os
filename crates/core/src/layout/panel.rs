@@ -1,4 +1,5 @@
 use crate::notch::clipboard::CLIPBOARD_PAGE_SIZE;
+use crate::notch::focus_stats_view::{FocusStatsRange, NOTCH_STATS_DAYS};
 use crate::notch::media::NotchExpandedTab;
 use crate::notch::pomodoro::FocusSubMode;
 use crate::notch::pomodoro_view::PomodoroSurface;
@@ -31,7 +32,13 @@ pub(super) struct ExpandedNotchControls {
     pub(super) skip_button: Rect,
     pub(super) alert_start_button: Rect,
     pub(super) alert_extend_button: Rect,
+    pub(super) stats_body: Rect,
+    pub(super) stats_range_today: Rect,
+    pub(super) stats_range_week: Rect,
+    pub(super) stats_open_settings: Rect,
+    pub(super) stats_days: [Rect; NOTCH_STATS_DAYS],
     pub(super) notch_tab_pomodoro: Rect,
+    pub(super) notch_tab_stats: Rect,
     pub(super) notch_tab_shelf: Rect,
     pub(super) notch_tab_clipboard: Rect,
     pub(super) notch_tab_tasks: Rect,
@@ -132,12 +139,19 @@ pub(super) const PANEL_BUTTON_GAP_POINTS: i32 = 8;
 pub(super) const PANEL_PROGRESS_TOP_POINTS: i32 = 98;
 pub(super) const PANEL_PROGRESS_HEIGHT_POINTS: i32 = 4;
 pub(super) const PANEL_SEGMENT_GAP_POINTS: i32 = 6;
-pub(super) const PANEL_FOOTER_TOP_POINTS: i32 = 108;
-pub(super) const PANEL_FOOTER_HEIGHT_POINTS: i32 = 20;
-pub(super) const PANEL_FOOTER_LEFT_SHARE_PERCENT: i32 = 64;
+pub(super) const PANEL_FOOTER_TOP_POINTS: i32 = 110;
+pub(super) const PANEL_FOOTER_HEIGHT_POINTS: i32 = 18;
+pub(super) const PANEL_FOOTER_LEFT_SHARE_PERCENT: i32 = 55;
 pub(super) const PANEL_PRESET_TOP_POINTS: i32 = 98;
 pub(super) const PANEL_PRESET_WIDTH_POINTS: i32 = 58;
 pub(super) const PANEL_PRESET_HEIGHT_POINTS: i32 = 24;
+pub(super) const PANEL_STATS_BODY_TOP_POINTS: i32 = 42;
+pub(super) const PANEL_STATS_INNER_PAD_X_POINTS: i32 = 14;
+pub(super) const PANEL_STATS_INNER_PAD_BOTTOM_POINTS: i32 = 10;
+pub(super) const PANEL_STATS_SEGMENT_WIDTH_POINTS: i32 = 48;
+pub(super) const PANEL_STATS_DETAILS_WIDTH_POINTS: i32 = 60;
+pub(super) const PANEL_STATS_PLOT_TOP_OFFSET_POINTS: i32 = 34;
+pub(super) const PANEL_STATS_DAY_GAP_POINTS: i32 = 6;
 pub(super) const MEDIA_LYRICS_TOGGLE_POINTS: i32 = 24;
 pub(super) const MEDIA_SOURCE_LABEL_WIDTH_POINTS: i32 = 96;
 pub(super) const MEDIA_TITLE_HEIGHT_POINTS: i32 = 20;
@@ -241,6 +255,7 @@ pub(super) fn compute_expanded_notch_controls(
     };
 
     let notch_tab_pomodoro = allocate_tab(NotchExpandedTab::Pomodoro, notch_input.focus_enabled);
+    let notch_tab_stats = allocate_tab(NotchExpandedTab::Stats, notch_input.focus_enabled);
     let notch_tab_shelf = allocate_tab(NotchExpandedTab::Shelf, notch_input.shelf_enabled);
     let notch_tab_clipboard =
         allocate_tab(NotchExpandedTab::Clipboard, notch_input.clipboard_enabled);
@@ -412,6 +427,74 @@ pub(super) fn compute_expanded_notch_controls(
         }
     }
 
+    let stats_body_top = oy + scale(PANEL_STATS_BODY_TOP_POINTS, dpi);
+    let stats_body_bottom = notch.bottom() - pad_x;
+    let stats_body = if !alert && stats_body_bottom > stats_body_top {
+        Rect {
+            x: content_left,
+            y: stats_body_top,
+            width: content_width,
+            height: stats_body_bottom - stats_body_top,
+        }
+    } else {
+        Rect::default()
+    };
+    let mut stats_range_today = Rect::default();
+    let mut stats_range_week = Rect::default();
+    let mut stats_open_settings = Rect::default();
+    let mut stats_days = [Rect::default(); NOTCH_STATS_DAYS];
+    if !alert {
+        let seg_w = scale(PANEL_STATS_SEGMENT_WIDTH_POINTS, dpi);
+        let details_w = scale(PANEL_STATS_DETAILS_WIDTH_POINTS, dpi);
+        stats_open_settings = Rect {
+            x: content_right - details_w,
+            y: tab_y,
+            width: details_w,
+            height: tab_h,
+        };
+        stats_range_week = Rect {
+            x: stats_open_settings.x - btn_gap - seg_w,
+            y: tab_y,
+            width: seg_w,
+            height: tab_h,
+        };
+        stats_range_today = Rect {
+            x: stats_range_week.x - tab_gap - seg_w,
+            y: tab_y,
+            width: seg_w,
+            height: tab_h,
+        };
+        if notch_input.stats_range == FocusStatsRange::Week && !stats_body.is_empty() {
+            let inner_pad_x = scale(PANEL_STATS_INNER_PAD_X_POINTS, dpi);
+            let inner_left = stats_body.x + inner_pad_x;
+            let inner_right = stats_body.right() - inner_pad_x;
+            let plot_top = stats_body.y + scale(PANEL_STATS_PLOT_TOP_OFFSET_POINTS, dpi);
+            let plot_bottom = stats_body.bottom() - scale(PANEL_STATS_INNER_PAD_BOTTOM_POINTS, dpi);
+            let plot_h = (plot_bottom - plot_top).max(0);
+            let inner_w = (inner_right - inner_left).max(0);
+            let col_gap = scale(PANEL_STATS_DAY_GAP_POINTS, dpi);
+            let col_w = ((inner_w - col_gap * (NOTCH_STATS_DAYS as i32 - 1))
+                / NOTCH_STATS_DAYS as i32)
+                .max(0);
+            if plot_h >= scale(24, dpi) && col_w > 0 {
+                for (index, day_rect) in stats_days.iter_mut().enumerate() {
+                    let x = inner_left + (col_w + col_gap) * index as i32;
+                    let width = if index + 1 == NOTCH_STATS_DAYS {
+                        (inner_right - x).max(0)
+                    } else {
+                        col_w
+                    };
+                    *day_rect = Rect {
+                        x,
+                        y: plot_top,
+                        width,
+                        height: plot_h,
+                    };
+                }
+            }
+        }
+    }
+
     let alert_btn_h = scale(PANEL_ALERT_BUTTON_HEIGHT_POINTS, dpi);
     let alert_start_w = scale(PANEL_ALERT_START_WIDTH_POINTS, dpi);
     let alert_extend_w = scale(PANEL_ALERT_EXTEND_WIDTH_POINTS, dpi);
@@ -562,7 +645,13 @@ pub(super) fn compute_expanded_notch_controls(
         skip_button,
         alert_start_button,
         alert_extend_button,
+        stats_body,
+        stats_range_today,
+        stats_range_week,
+        stats_open_settings,
+        stats_days,
         notch_tab_pomodoro,
+        notch_tab_stats,
         notch_tab_shelf,
         notch_tab_clipboard,
         notch_tab_tasks,

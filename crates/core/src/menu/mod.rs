@@ -1,6 +1,7 @@
 mod builders;
 mod commands;
 mod layout;
+mod notification_center;
 mod notifications;
 mod rows;
 mod top_bar;
@@ -35,9 +36,15 @@ pub use self::layout::{
     EstimatedMenuText, MenuAnchor, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement,
     PopupMenuRowLayout, compute_popup_menu_layout,
 };
+pub use self::notification_center::{
+    NOTIFICATION_CENTER_CARD_HEIGHT, NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_PAD,
+    NOTIFICATION_CENTER_WIDTH, NotificationCardKind, NotificationCardLayout, NotificationCenterHit,
+    NotificationCenterLayout, NotificationCenterStateCardLayout, NotificationGroup,
+    NotificationGroupHeaderLayout, compute_notification_center_layout, group_notifications,
+};
 pub use self::notifications::{
     NotificationAccess, NotificationBadge, NotificationCenterSnapshot, NotificationSummary,
-    format_relative_age, notification_badge, notification_dismiss_index,
+    badge_ink_is_dark, format_relative_age, notification_badge, notification_dismiss_index,
 };
 pub use self::rows::MenuRow;
 pub use self::top_bar::{

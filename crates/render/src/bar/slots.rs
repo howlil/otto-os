@@ -435,7 +435,21 @@ impl Renderer {
         let slot = layout.slots.notification_slot;
         let cx = slot.x as f32 + slot.width as f32 * 0.5;
         let cy = slot.height as f32 * 0.5;
-        self.draw_bell_icon(cx, cy, layout.icon_size as f32 * 0.42, fg)
+        let r = layout.icon_size as f32 * 0.42;
+        self.draw_bell_icon(cx, cy, r, fg)?;
+        if self.notif_unread.get() {
+            let dot_r = (scale(5, self.dpi) as f32 * 0.5).max(2.2);
+            let dot = D2D1_ELLIPSE {
+                point: Vector2::new(cx + r * 0.72, cy - r * 0.64),
+                radiusX: dot_r,
+                radiusY: dot_r,
+            };
+            let accent = self.brushes.alpha_brush(crate::rgb(255, 69, 58, 1.0), 1.0);
+            unsafe {
+                self.target.FillEllipse(&dot, &accent);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn draw_bell_icon(
@@ -445,37 +459,6 @@ impl Renderer {
         r: f32,
         brush: &ID2D1SolidColorBrush,
     ) -> Result<()> {
-        let top_y = cy - r * 0.85;
-        let base_y = cy + r * 0.48;
-        let dome_w = r * 0.72;
-        let rim_w = r * 0.96;
-
-        unsafe {
-            let bell = self.factory.CreatePathGeometry()?;
-            let sink = bell.Open()?;
-            sink.BeginFigure(Vector2::new(cx, top_y), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                point1: Vector2::new(cx + dome_w * 0.85, top_y),
-                point2: Vector2::new(cx + dome_w, cy - r * 0.10),
-                point3: Vector2::new(cx + rim_w, base_y),
-            });
-            sink.AddLine(Vector2::new(cx - rim_w, base_y));
-            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                point1: Vector2::new(cx - dome_w, cy - r * 0.10),
-                point2: Vector2::new(cx - dome_w * 0.85, top_y),
-                point3: Vector2::new(cx, top_y),
-            });
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            self.target.FillGeometry(&bell, brush, None);
-
-            let clapper = D2D1_ELLIPSE {
-                point: Vector2::new(cx, base_y + r * 0.28),
-                radiusX: r * 0.24,
-                radiusY: r * 0.22,
-            };
-            self.target.FillEllipse(&clapper, brush);
-        }
-        Ok(())
+        crate::draw_bell_glyph(&self.factory, &self.target, cx, cy, r, brush)
     }
 }

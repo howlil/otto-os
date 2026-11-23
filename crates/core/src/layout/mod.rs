@@ -22,7 +22,8 @@ pub use self::input::{NotchLayoutInput, PrivacyLayoutState, ShelfLayoutInput};
 pub use self::metrics::Metrics;
 pub use self::model::Layout;
 pub use self::notification::{
-    NOTIFICATION_BANNER_HEIGHT_POINTS, NOTIFICATION_RING_HEIGHT_POINTS, NotificationLayout,
-    NotificationLayoutInput,
+    NOTIFICATION_BANNER_HEIGHT_POINTS, NOTIFICATION_RING_HEIGHT_POINTS,
+    NOTIFICATION_STACK_EXTRA_PANEL_POINTS, NOTIFICATION_STACK_LIP_HEIGHT_POINTS,
+    NotificationLayout, NotificationLayoutInput,
 };
 pub use self::slots::{compute_layout, compute_layout_for_app, compute_layout_with_hud};

@@ -308,6 +308,7 @@ fn shelf_render_and_thumbnail_churn_releases_bitmaps_and_gdi_handles() {
                 &otto_core::TasksState::default(),
                 &privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("shelf draw");
     };
@@ -464,9 +465,8 @@ fn exercise_batch_1_2_bars_for_dpi(
         otto_core::ResolvedTheme::Light,
     ] {
         let appearance = otto_core::Appearance {
-            theme,
             transparency: false,
-            contrast: None,
+            ..otto_core::Appearance::glass(theme)
         };
         for hud in huds {
             let mut input = otto_core::NotchLayoutInput {
@@ -495,6 +495,7 @@ fn exercise_batch_1_2_bars_for_dpi(
                     0.45,
                     appearance,
                     privacy,
+                    None,
                     None,
                 )
                 .expect("batch 1-2 bar draw");
@@ -558,6 +559,7 @@ fn exercise_batch_1_focus_and_alert(
                 &otto_core::TasksState::default(),
                 privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("focus submode draw");
     }
@@ -595,6 +597,7 @@ fn exercise_batch_1_focus_and_alert(
             &otto_core::TasksState::default(),
             privacy,
             None,
+            &otto_core::FocusStatsView::default(),
         )
         .expect("pomodoro alert draw");
 }
@@ -660,6 +663,7 @@ fn exercise_batch_2_shelf(
                 &otto_core::TasksState::default(),
                 privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("shelf tab draw");
     }
@@ -750,6 +754,7 @@ fn exercise_batch_3_clipboard(
                 &otto_core::TasksState::default(),
                 privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("clipboard tab draw");
     }
@@ -824,12 +829,13 @@ fn exercise_tasks_tab(
                 tasks_state,
                 privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("tasks tab draw");
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn exercise_batch_4_notifications(
     renderer: &Renderer,
     metrics: &otto_core::Metrics,
@@ -844,16 +850,72 @@ fn exercise_batch_4_notifications(
         status: otto_core::LyricsStatus::Idle,
         animated: false,
     };
-    for (kind, stage, ringing) in [
+    let peek_notification = otto_core::NotchNotification {
+        id: 1,
+        app_id: String::from("Teams.App"),
+        app_name: String::from("Teams"),
+        kind: otto_core::NotificationKind::Message,
+        title: String::from("Ayu Lestari"),
+        body: String::from("Are we still meeting at three? I have the slides ready."),
+        timestamp_label: String::from("now"),
+        badge: otto_core::notification_badge("Teams"),
+        icon_bytes: None,
+        count: 2,
+    };
+    let peek_content =
+        otto_core::present_notification(&peek_notification, otto_core::NotificationStage::Peek, 1);
+    let peek_layout = otto_core::compute_layout_with_notch(
+        metrics,
+        1920,
+        dpi,
+        "Finder",
+        otto_core::NotchLayoutInput {
+            compact_expansion: 1.0,
+            notification: Some(otto_core::NotificationLayoutInput::peek()),
+            ..otto_core::NotchLayoutInput::default()
+        },
+    );
+    renderer.set_notification_unread(true);
+    renderer
+        .draw_bar(
+            &peek_layout,
+            otto_core::SystemStatus::default(),
+            "Finder",
+            None,
+            None,
+            None,
+            pomodoro,
+            None,
+            0.3,
+            otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
+            privacy,
+            None,
+            Some(&peek_content),
+        )
+        .expect("notification peek draw");
+    renderer.set_notification_unread(false);
+
+    for (kind, stage, layout_input, body, pending) in [
         (
             otto_core::NotificationKind::Message,
             otto_core::NotificationStage::Banner,
-            false,
+            otto_core::NotificationLayoutInput::banner(false, true),
+            "Are we still meeting at three? I have the slides ready.",
+            2,
+        ),
+        (
+            otto_core::NotificationKind::Message,
+            otto_core::NotificationStage::Banner,
+            otto_core::NotificationLayoutInput::banner(true, false),
+            "",
+            0,
         ),
         (
             otto_core::NotificationKind::VideoCall,
             otto_core::NotificationStage::Ringing,
-            true,
+            otto_core::NotificationLayoutInput::ringing(),
+            "Incoming video call",
+            0,
         ),
     ] {
         let notification = otto_core::NotchNotification {
@@ -862,11 +924,13 @@ fn exercise_batch_4_notifications(
             app_name: String::from("Teams"),
             kind,
             title: String::from("Ayu Lestari"),
-            body: String::from("Are we still meeting at three? I have the slides ready."),
+            body: String::from(body),
+            timestamp_label: String::from("2m"),
             badge: otto_core::notification_badge("Teams"),
+            icon_bytes: None,
             count: 2,
         };
-        let content = otto_core::present_notification(&notification, stage);
+        let content = otto_core::present_notification(&notification, stage, pending);
         let layout = otto_core::compute_layout_with_notch(
             metrics,
             1920,
@@ -874,11 +938,11 @@ fn exercise_batch_4_notifications(
             "Finder",
             otto_core::NotchLayoutInput {
                 panel_expansion: 1.0,
-                notification: Some(otto_core::NotificationLayoutInput { ringing }),
+                notification: Some(layout_input),
                 ..otto_core::NotchLayoutInput::default()
             },
         );
-        let hovered = if ringing {
+        let hovered = if layout_input.is_ringing() {
             otto_core::HitTarget::NotificationAccept
         } else {
             otto_core::HitTarget::NotificationClose
@@ -897,6 +961,7 @@ fn exercise_batch_4_notifications(
                 &otto_core::TasksState::default(),
                 privacy,
                 Some(&content),
+                &otto_core::FocusStatsView::default(),
             )
             .expect("notification card draw");
     }
@@ -962,6 +1027,7 @@ fn exercise_batch_1_2_panels_for_dpi(
                 &otto_core::TasksState::default(),
                 privacy,
                 None,
+                &otto_core::FocusStatsView::default(),
             )
             .expect("media tab draw");
     }
@@ -1351,6 +1417,7 @@ fn renderer_recreate_target_keeps_drawing_and_gui_counts_flat() {
             otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
             &privacy,
             None,
+            None,
         )
         .expect("draw bar");
     };
@@ -1400,6 +1467,7 @@ fn calendar_and_notification_menus_render_across_dpi_without_resource_growth() {
                 title: String::from("Design review starting in 10 minutes"),
                 body: String::from("Thread in #otto-ui with updated spacing tokens"),
                 timestamp_label: String::from("2m"),
+                icon_bytes: None,
             },
             otto_core::NotificationSummary {
                 id: 2,
@@ -1408,6 +1476,7 @@ fn calendar_and_notification_menus_render_across_dpi_without_resource_growth() {
                 title: String::from("Weekly build summary"),
                 body: String::new(),
                 timestamp_label: String::from("1h"),
+                icon_bytes: None,
             },
         ],
     };
@@ -1666,6 +1735,7 @@ fn floating_notch_squircle_tabular_rim_and_secondary_circle_do_not_leak() {
                     appearance,
                     &privacy,
                     None,
+                    None,
                 )
                 .expect("floating bar draw");
             let rect = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
@@ -1739,7 +1809,8 @@ fn draw_test_bar(
     let status = otto_core::SystemStatus::default();
     let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
     renderer.draw_bar(
-        layout, status, "Finder", None, None, hud, &pomodoro, None, 0.0, appearance, &privacy, None,
+        layout, status, "Finder", None, None, hud, &pomodoro, None, 0.0, appearance, &privacy,
+        None, None,
     )
 }
 
@@ -1774,7 +1845,13 @@ fn compact_call_activity_draws_for_voice_video_and_muted_calls() {
     let privacy = otto_core::PrivacyState::default();
     let status = otto_core::SystemStatus::default();
     let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
-    for (video, muted) in [(false, false), (true, false), (false, true)] {
+    for (video, muted, reduced) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        renderer.set_reduced_motion(reduced);
         let scene = otto_core::CallScene {
             video,
             muted,
@@ -1794,9 +1871,11 @@ fn compact_call_activity_draws_for_voice_video_and_muted_calls() {
                 appearance,
                 &privacy,
                 Some(&scene),
+                None,
             )
             .expect("call compact draw");
     }
+    renderer.set_reduced_motion(false);
 }
 
 #[test]
@@ -1869,6 +1948,7 @@ fn bar_frame_key_memoizes_when_panel_open_and_skips_present() {
             appearance,
             &privacy,
             None,
+            None,
         )
         .expect("memoized present skips UpdateLayeredWindow");
 
@@ -1929,6 +2009,10 @@ fn bar_frame_key_invalidates_on_backdrop_brand_recreate_closed_and_hud() {
 
     draw_open(&renderer);
     renderer.set_brand_icon(otto_core::BrandIcon::ClassicApple);
+    assert!(renderer.last_bar_frame.borrow().is_none());
+
+    draw_open(&renderer);
+    renderer.set_notification_unread(true);
     assert!(renderer.last_bar_frame.borrow().is_none());
 
     draw_open(&renderer);
@@ -2013,13 +2097,210 @@ fn panel_surface_allocates_lazily_and_releases_gdi_objects_on_release() {
             &tasks,
             &privacy,
             None,
+            &otto_core::FocusStatsView::default(),
         )
         .expect("draw panel");
     assert!(renderer.panel_surface.borrow().is_some());
+
+    renderer
+        .set_stats_app_icon(String::from("code"), 2, 2, &[0xFF; 16])
+        .expect("stats icon");
+    assert!(renderer.has_stats_app_icon("code"));
 
     renderer.release_notch_resources();
     assert!(renderer.panel_surface.borrow().is_none());
     assert!(renderer.cached_cover_art.borrow().is_none());
     assert!(renderer.cached_shelf_bitmaps.borrow().is_empty());
+    assert!(renderer.cached_stats_icons.borrow().is_empty());
     baseline.assert_no_growth("panel surface release");
+}
+
+fn sample_focus_stats_activity() -> otto_core::FocusActivityState {
+    let mut activity = otto_core::FocusActivityState::default();
+    activity.today = otto_core::DailyActivityRecord {
+        day: otto_core::DayKey {
+            year: 2026,
+            month: 11,
+            day: 22,
+        },
+        total_active_ms: 3 * 3_600_000 + 25 * 60_000,
+        focus_session_ms: 95 * 60_000,
+        blocked_attempts: 3,
+        apps: vec![
+            otto_core::AppUsageEntry {
+                app_key: String::from("code"),
+                display_name: String::from("VS Code"),
+                active_ms: 120 * 60_000,
+                open_count: 2,
+                click_count: 50,
+                keystroke_count: 400,
+            },
+            otto_core::AppUsageEntry {
+                app_key: String::from("chrome"),
+                display_name: String::from("Chrome"),
+                active_ms: 60 * 60_000,
+                open_count: 4,
+                click_count: 40,
+                keystroke_count: 90,
+            },
+            otto_core::AppUsageEntry {
+                app_key: String::from("windowsterminal"),
+                display_name: String::from("Terminal"),
+                active_ms: 25 * 60_000,
+                open_count: 1,
+                click_count: 10,
+                keystroke_count: 120,
+            },
+        ],
+        websites: vec![otto_core::WebsiteUsageEntry {
+            domain: String::from("github.com"),
+            active_ms: 30 * 60_000,
+            visit_count: 3,
+        }],
+        ..otto_core::DailyActivityRecord::default()
+    };
+    activity.history.push(otto_core::DailyActivityRecord {
+        day: otto_core::DayKey {
+            year: 2026,
+            month: 11,
+            day: 21,
+        },
+        total_active_ms: 2 * 3_600_000,
+        focus_session_ms: 60 * 60_000,
+        ..otto_core::DailyActivityRecord::default()
+    });
+    activity
+}
+
+fn focus_stats_test_layout(range: otto_core::FocusStatsRange, dpi: u32) -> otto_core::Layout {
+    otto_core::compute_layout_with_notch(
+        &otto_core::Metrics::DYNAMIC_ISLAND,
+        1920,
+        dpi,
+        "Finder",
+        otto_core::NotchLayoutInput {
+            panel_expansion: 1.0,
+            active_tab: otto_core::NotchExpandedTab::Stats,
+            previous_tab: otto_core::NotchExpandedTab::Stats,
+            pomodoro_surface: otto_core::PomodoroSurface::Running,
+            stats_progress: 1.0,
+            stats_range: range,
+            ..otto_core::NotchLayoutInput::default()
+        },
+    )
+}
+
+fn draw_focus_stats_case(
+    renderer: &Renderer,
+    layout: &otto_core::Layout,
+    stats: &otto_core::FocusStatsView,
+    hover: Option<otto_core::HitTarget>,
+    focused: Option<otto_core::HitTarget>,
+) {
+    let pomodoro = otto_core::PomodoroScene::steady(
+        otto_core::PomodoroState::new(),
+        otto_core::ClockTime::default(),
+    );
+    let lyrics = otto_core::LyricsView {
+        sheet: None,
+        status: otto_core::LyricsStatus::Idle,
+        animated: false,
+    };
+    renderer
+        .draw_panel(
+            layout,
+            hover,
+            focused,
+            &pomodoro,
+            None,
+            0.0,
+            lyrics,
+            &otto_core::ShelfState::default(),
+            &otto_core::ClipboardState::default(),
+            &otto_core::TasksState::default(),
+            &otto_core::PrivacyState::default(),
+            None,
+            stats,
+        )
+        .expect("focus stats draw");
+}
+
+#[test]
+fn focus_stats_tab_renders_today_and_week_without_leaks() {
+    let _serial = SerialResourceTest::begin();
+    let metrics = otto_core::Metrics::DYNAMIC_ISLAND;
+    let activity = sample_focus_stats_activity();
+    let empty_stats = otto_core::FocusStatsView::default();
+    let today_stats = otto_core::FocusStatsView::resolve(
+        &activity,
+        otto_core::FocusStatsRange::Today,
+        None,
+        None,
+    );
+    let week_stats = otto_core::FocusStatsView::resolve(
+        &activity,
+        otto_core::FocusStatsRange::Week,
+        Some(5),
+        Some(6),
+    );
+
+    for dpi in [96, 144] {
+        let week_layout = focus_stats_test_layout(otto_core::FocusStatsRange::Week, dpi);
+        let today_layout = focus_stats_test_layout(otto_core::FocusStatsRange::Today, dpi);
+        let renderer = Renderer::new(
+            1920,
+            otto_core::scale(metrics.bar_height, dpi),
+            week_layout.panel_window.width,
+            week_layout.panel_window.height,
+            dpi,
+            0.0,
+        )
+        .expect("renderer");
+        renderer
+            .set_stats_app_icon(String::from("code"), 2, 2, &[0xFF; 16])
+            .expect("stats icon");
+        for (layout, stats, hover) in [
+            (
+                &today_layout,
+                &empty_stats,
+                Some(otto_core::HitTarget::NotchTabStats),
+            ),
+            (
+                &today_layout,
+                &today_stats,
+                Some(otto_core::HitTarget::FocusStatsOpenSettings),
+            ),
+            (
+                &week_layout,
+                &week_stats,
+                Some(otto_core::HitTarget::FocusStatsDay(6)),
+            ),
+        ] {
+            draw_focus_stats_case(
+                &renderer,
+                layout,
+                stats,
+                hover,
+                Some(otto_core::HitTarget::NotchTabStats),
+            );
+        }
+        let baseline = GuiCounts::now();
+        for _ in 0..10 {
+            draw_focus_stats_case(
+                &renderer,
+                &today_layout,
+                &today_stats,
+                Some(otto_core::HitTarget::FocusStatsOpenSettings),
+                None,
+            );
+            draw_focus_stats_case(
+                &renderer,
+                &week_layout,
+                &week_stats,
+                Some(otto_core::HitTarget::FocusStatsDay(6)),
+                None,
+            );
+        }
+        baseline.assert_no_growth("focus stats tab draw loop");
+    }
 }

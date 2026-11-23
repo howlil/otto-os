@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use crate::host::{PluginId, RuntimeContext};
 use otto_core::{
-    BarItem, DockSettingsChange, OttoSettingKind, OttoSettingsSnapshot, PluginSettingsState,
-    SystemSettingsState, next_dock_icon_size,
+    AccentColor, AppearanceStyle, BarItem, DockSettingsChange, OttoSettingKind,
+    OttoSettingsSnapshot, PluginSettingsState, SystemSettingsState, ThemeMode, next_dock_icon_size,
 };
 
 fn toggle_flag(flag: &Cell<bool>, pending: &Cell<Option<bool>>) {
@@ -65,6 +65,9 @@ pub(crate) fn settings_snapshot(
         dock: runtime.dock_preferences.get(),
         menu_bar: runtime.menu_bar.get(),
         focus_activity,
+        process_audit: otto_core::GeneralPageState::default(),
+        appearance: runtime.appearance_preferences.get(),
+        system_appearance: runtime.system_appearance.get(),
         plugins: PluginSettingsState {
             top_bar: runtime.top_bar_enabled.get(),
             notch: runtime.notch_enabled.get(),
@@ -100,6 +103,33 @@ pub(super) fn cycle_menu_bar_hide(runtime: &RuntimeContext) {
     let mut prefs = runtime.menu_bar.get();
     prefs.hide_mode = prefs.hide_mode.next();
     runtime.pending_menu_bar.set(Some(prefs));
+}
+
+pub(super) fn set_appearance_style(runtime: &RuntimeContext, style: AppearanceStyle) {
+    let mut prefs = runtime
+        .pending_appearance
+        .get()
+        .unwrap_or_else(|| runtime.appearance_preferences.get());
+    prefs.style = style;
+    runtime.pending_appearance.set(Some(prefs));
+}
+
+pub(super) fn set_appearance_theme(runtime: &RuntimeContext, theme: ThemeMode) {
+    let mut prefs = runtime
+        .pending_appearance
+        .get()
+        .unwrap_or_else(|| runtime.appearance_preferences.get());
+    prefs.theme = theme;
+    runtime.pending_appearance.set(Some(prefs));
+}
+
+pub(super) fn set_appearance_accent(runtime: &RuntimeContext, accent: AccentColor) {
+    let mut prefs = runtime
+        .pending_appearance
+        .get()
+        .unwrap_or_else(|| runtime.appearance_preferences.get());
+    prefs.accent = accent;
+    runtime.pending_appearance.set(Some(prefs));
 }
 
 #[allow(clippy::too_many_lines)]

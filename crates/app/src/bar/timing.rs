@@ -304,6 +304,12 @@ impl Bar {
             dirty = true;
         }
         self.notch.set_clock(latest.clock);
+        if self
+            .notch
+            .set_dnd_active(latest.dnd_active.unwrap_or(false))
+        {
+            dirty = true;
+        }
         if self.controls.apply_status(latest) {
             dirty = true;
         }
@@ -343,7 +349,14 @@ impl Bar {
     pub(super) fn on_deadline(&mut self, runtime: &RuntimeContext) {
         let now = Instant::now();
         let (cx, cy) = cursor_position();
-        let hovered = self.layout.notch.contains(cx, cy);
+        let hovered = self.layout.notch.contains(cx, cy)
+            || matches!(
+                self.focus.current(),
+                Some(
+                    otto_core::HitTarget::NotificationCard
+                        | otto_core::HitTarget::NotificationClose
+                )
+            );
         let mut update = self.notch.sync_clock(now);
         if self.notch.sync_notifications(now, hovered) {
             update.changed = true;
@@ -391,6 +404,10 @@ impl Bar {
         if (foreground_changed || title_changed)
             && let Some(foreground) = foreground_application(self.own_pid)
         {
+            if let Some(win) = foreground.window.as_ref() {
+                self.remember_app_icon_hint(&win.executable, &win.executable);
+                self.remember_app_icon_hint(&win.app.key(), &win.executable);
+            }
             let change = self
                 .controls
                 .apply_foreground(foreground.name, foreground.window);
@@ -473,6 +490,11 @@ impl Bar {
                 || (fa.current_app_key().is_none() && active_window.is_some())
             {
                 if let Some(win) = active_window.as_ref() {
+                    let app_key = if win.executable.is_empty() {
+                        win.app.key()
+                    } else {
+                        win.executable.clone()
+                    };
                     let cached_url = self
                         .last_browser_url
                         .as_ref()
@@ -480,7 +502,7 @@ impl Bar {
                         .map(|(_, url)| url.as_str());
                     let browser_info =
                         is_browser.then(|| inspect_browser_context(cached_url, &win.title));
-                    fa.observe_foreground(day, &win.executable, &win.app_name, browser_info);
+                    fa.observe_foreground(day, &app_key, &win.app_name, browser_info);
                 } else {
                     fa.observe_foreground(day, "", "", None);
                 }
@@ -502,7 +524,12 @@ impl Bar {
                         win.executable.clone()
                     };
                     if focus_shield::may_block(runtime, win.identity.hwnd, &page) {
-                        fa.evaluate_block(true, &win.executable, &win.app_name, domain.as_deref())
+                        let block_key = if win.executable.is_empty() {
+                            win.app.key()
+                        } else {
+                            win.executable.clone()
+                        };
+                        fa.evaluate_block(true, &block_key, &win.app_name, domain.as_deref())
                             .map(|enforcement| (enforcement, page))
                     } else {
                         None
@@ -534,8 +561,12 @@ impl Bar {
         if let Some(target) = block_target {
             focus_shield::block(runtime, target);
         }
+        let mut notch_stats_dirty = false;
         if stats_updated && self.periodic_due(MAINTAIN_EVERY_TICKS) {
             crate::settings_window::repaint_if_focus_page(runtime);
+            if self.panel_visible && self.notch.active_tab() == otto_core::NotchExpandedTab::Stats {
+                notch_stats_dirty = true;
+            }
         }
         if let Some(kind) = blocked_hud {
             if self.notch.hud_enabled() {
@@ -543,6 +574,6 @@ impl Bar {
             }
             return true;
         }
-        false
+        notch_stats_dirty
     }
 }

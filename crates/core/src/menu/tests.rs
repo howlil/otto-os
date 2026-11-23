@@ -493,6 +493,7 @@ fn notification_rows_group_apps_and_cover_access_modes() {
                 title: format!("Message {i}"),
                 body: String::from("Body preview"),
                 timestamp_label: format_relative_age(120),
+                icon_bytes: None,
             })
             .collect(),
     };
@@ -572,6 +573,28 @@ fn notification_badge_uses_a_stable_initial_and_color_per_app() {
     assert_eq!(notification_badge("  slack").initial, 'S');
     assert_eq!(notification_badge("").initial, '?');
     assert_eq!(notification_badge("!!").initial, '?');
+}
+
+#[test]
+fn notification_badge_ink_meets_wcag_aa_for_all_palette_colors() {
+    let linear = |v: u8| {
+        let c = f32::from(v) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    for color in super::commands::NOTIFICATION_BADGE_COLORS {
+        let bg = 0.2126 * linear(color[0]) + 0.7152 * linear(color[1]) + 0.0722 * linear(color[2]);
+        let fg = if badge_ink_is_dark(color) { 0.0 } else { 1.0 };
+        let (hi, lo) = if fg > bg { (fg, bg) } else { (bg, fg) };
+        let ratio = (hi + 0.05) / (lo + 0.05);
+        assert!(
+            ratio >= 3.2,
+            "color {color:?} ratio {ratio:.2} below accessible threshold"
+        );
+    }
 }
 
 #[test]

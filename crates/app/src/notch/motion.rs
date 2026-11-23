@@ -183,6 +183,12 @@ impl NotchController {
                 .is_some_and(|media| media.playing && !media.has_known_duration());
         let countdown_running = self.pomodoro.status == PomodoroStatus::Running
             || self.quick_timer.status == PomodoroStatus::Running;
+        let ringing = self.notification_stage(self.last_anim_instant)
+            == Some(otto_core::NotificationStage::Ringing);
+        let coalescing = self
+            .notifications
+            .coalesce_progress(self.millis(self.last_anim_instant))
+            < 0.999;
         self.presented
             && self.motion.allows_motion()
             && (self.compact_expansion > GLOW_SCENE_VISIBLE
@@ -191,7 +197,9 @@ impl NotchController {
                 || self.peek.is_some()
                 || self.media_peek.is_some()
                 || panel_live_media
-                || self.call_shown)
+                || self.call_shown
+                || ringing
+                || coalescing)
     }
 
     pub(crate) fn anim_phase(&self) -> f32 {
@@ -215,6 +223,9 @@ impl NotchController {
 
         let (mut changed, effect) = self.step_pomodoro_clock(now);
         if self.step_scene_at(now, motion) {
+            changed = true;
+        }
+        if cursor_inside_notch && self.promote_notification_peek(now) {
             changed = true;
         }
         if self
@@ -310,6 +321,11 @@ impl NotchController {
         } else {
             0.0
         };
+        let stats_target = if self.notch_tab == NotchExpandedTab::Stats && !self.has_alert() {
+            1.0
+        } else {
+            0.0
+        };
         let next_tab_blend =
             animate_value(self.tab_blend, 1.0, morph.notch_tab_morph_rate, dt, motion);
         let next_lyrics_progress = animate_value(
@@ -319,8 +335,16 @@ impl NotchController {
             dt,
             motion,
         );
+        let next_stats_progress = animate_value(
+            self.stats_progress,
+            stats_target,
+            morph.notch_lyrics_morph_rate,
+            dt,
+            motion,
+        );
         let resolved_tab_blend = Self::snap_to_target(next_tab_blend, 1.0);
         let resolved_lyrics_progress = Self::snap_to_target(next_lyrics_progress, lyrics_target);
+        let resolved_stats_progress = Self::snap_to_target(next_stats_progress, stats_target);
         if (resolved_tab_blend - self.tab_blend).abs() > f32::EPSILON {
             self.tab_blend = resolved_tab_blend;
             changed = true;
@@ -331,6 +355,10 @@ impl NotchController {
         }
         if (resolved_lyrics_progress - self.lyrics_progress).abs() > f32::EPSILON {
             self.lyrics_progress = resolved_lyrics_progress;
+            changed = true;
+        }
+        if (resolved_stats_progress - self.stats_progress).abs() > f32::EPSILON {
+            self.stats_progress = resolved_stats_progress;
             changed = true;
         }
         if self.lyrics_is_live() {

@@ -1,12 +1,16 @@
+mod appearance;
+mod focus;
 mod palette;
 mod rows;
 #[cfg(test)]
 mod tests;
 mod tiles;
 
+use std::collections::{HashMap, HashSet};
+
 use otto_core::{
-    Appearance, ContentLayout, GlassShape, Rect, ResolvedTheme, RgbBuffer, SettingsContent,
-    SettingsHit, SettingsLayout, SettingsPage, scale,
+    ContentLayout, PixelLimits, Rect, Rgba, SettingsContent, SettingsHit, SettingsLayout,
+    SettingsPage, scale,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -15,8 +19,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_STROKE_STYLE_PROPERTIES, ID2D1HwndRenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Bitmap,
+    ID2D1HwndRenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
@@ -26,13 +30,15 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 
-use crate::appearance::glass::GlassPainter;
+use crate::appearance::surface::upload_bgra_bitmap;
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
 use self::palette::{
-    HERO_TILE_POINTS, Palette, ROW_PAD_POINTS, SIDEBAR_RADIUS_POINTS, SIDEBAR_TILE_POINTS, WHITE,
-    d2d, rgba,
+    HERO_TILE_POINTS, Palette, ROW_PAD_POINTS, SIDEBAR_RADIUS_POINTS, SIDEBAR_TILE_POINTS, d2d,
+    rgba,
 };
+
+const MAX_SETTINGS_APP_ICONS: usize = 64;
 
 pub struct SettingsPaintState<'a> {
     pub layout: &'a SettingsLayout,
@@ -43,6 +49,9 @@ pub struct SettingsPaintState<'a> {
     pub hovered: Option<SettingsHit>,
     pub dark: bool,
     pub glass: bool,
+    pub high_contrast: bool,
+    pub accent: Rgba,
+    pub on_accent: Rgba,
 }
 
 pub(super) struct Formats {
@@ -54,6 +63,10 @@ pub(super) struct Formats {
     pub(super) sidebar: IDWriteTextFormat,
     pub(super) value: IDWriteTextFormat,
     pub(super) keycap: IDWriteTextFormat,
+    pub(super) chip: IDWriteTextFormat,
+    pub(super) kpi_value: IDWriteTextFormat,
+    pub(super) caption_center: IDWriteTextFormat,
+    pub(super) caption_leading: IDWriteTextFormat,
     pub(super) hero_title: IDWriteTextFormat,
     pub(super) hero_subtitle: IDWriteTextFormat,
 }
@@ -97,6 +110,18 @@ impl Formats {
                     DWRITE_TEXT_ALIGNMENT_TRAILING,
                 )?,
                 keycap: make(11, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                chip: make(12, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                kpi_value: make(
+                    20,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_TEXT_ALIGNMENT_LEADING,
+                )?,
+                caption_center: make(10, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                caption_leading: make(
+                    10,
+                    DWRITE_FONT_WEIGHT_REGULAR,
+                    DWRITE_TEXT_ALIGNMENT_LEADING,
+                )?,
                 hero_title: make(
                     22,
                     DWRITE_FONT_WEIGHT_SEMI_BOLD,
@@ -114,7 +139,7 @@ pub struct SettingsRenderer {
     pub(super) stroke: ID2D1StrokeStyle,
     pub(super) formats: Formats,
     pub(super) dpi: u32,
-    glass: GlassPainter,
+    pub(super) app_icons: HashMap<String, ID2D1Bitmap>,
 }
 
 impl SettingsRenderer {
@@ -158,18 +183,33 @@ impl SettingsRenderer {
                 stroke,
                 formats: Formats::new(dpi)?,
                 dpi,
-                glass: GlassPainter::default(),
+                app_icons: HashMap::new(),
             })
         }
     }
 
-    pub fn set_backdrop(&self, capture: RgbBuffer, origin: (i32, i32)) {
-        self.glass.set_backdrop(capture, origin);
+    #[must_use]
+    pub fn has_app_icon(&self, key: &str) -> bool {
+        self.app_icons.contains_key(key)
     }
 
-    #[must_use]
-    pub fn has_backdrop(&self) -> bool {
-        self.glass.has_backdrop()
+    pub fn set_app_icon(
+        &mut self,
+        key: String,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<()> {
+        if self.app_icons.len() >= MAX_SETTINGS_APP_ICONS && !self.app_icons.contains_key(&key) {
+            self.app_icons.clear();
+        }
+        let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
+        self.app_icons.insert(key, bitmap);
+        Ok(())
+    }
+
+    pub fn retain_app_icons(&mut self, keys: &HashSet<&str>) {
+        self.app_icons.retain(|key, _| keys.contains(key.as_str()));
     }
 
     pub fn resize(&self, width: i32, height: i32) -> Result<()> {
@@ -190,7 +230,13 @@ impl SettingsRenderer {
     }
 
     pub fn draw(&mut self, state: &SettingsPaintState<'_>) -> Result<()> {
-        let palette = Palette::pick(state.dark, state.glass);
+        let palette = Palette::pick(
+            state.dark,
+            state.glass,
+            state.high_contrast,
+            state.accent,
+            state.on_accent,
+        );
         let clear = if palette.glass {
             rgba(0, 0.0)
         } else {
@@ -200,40 +246,8 @@ impl SettingsRenderer {
             self.target.BeginDraw();
             self.target.Clear(Some(&clear));
         }
-        if palette.glass {
-            let full_rect = Rect {
-                x: 0,
-                y: 0,
-                width: state.layout.sidebar.width + state.layout.content.width,
-                height: state.layout.sidebar.height,
-            };
-            let appearance = Appearance::glass(if state.dark {
-                ResolvedTheme::Dark
-            } else {
-                ResolvedTheme::Light
-            });
-            let drawn = self
-                .glass
-                .draw(
-                    &self.target,
-                    &appearance,
-                    self.dpi,
-                    GlassShape::from_rect(full_rect, 0.0),
-                    false,
-                )
-                .unwrap_or(false);
-            let veil = if drawn {
-                if state.dark {
-                    rgba(0x08_0A10, 0.18)
-                } else {
-                    rgba(0xF6_F7FB, 0.16)
-                }
-            } else {
-                palette.background
-            };
-            self.fill(full_rect, veil);
-        }
         self.draw_body(state, &palette);
+        self.draw_hover_detail_bar(state, &palette);
         self.draw_toolbar(state, &palette);
         self.draw_sidebar(state, &palette);
         unsafe { self.target.EndDraw(None, None) }
@@ -327,7 +341,11 @@ impl SettingsRenderer {
                         width: slot.rect.right() - text_x,
                         ..slot.rect
                     },
-                    if selected { WHITE } else { palette.text },
+                    if selected {
+                        palette.on_accent
+                    } else {
+                        palette.text
+                    },
                 );
             }
         }

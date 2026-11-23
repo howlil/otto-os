@@ -1,11 +1,11 @@
 use std::mem::size_of;
 
 use otto_core::{Rect, SettingsMetrics, scale, settings_background, settings_text};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect};
+use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -88,24 +88,27 @@ pub fn create_settings_window(wnd_proc: WNDPROC) -> Result<isize> {
 #[must_use]
 pub fn settings_glass_available() -> bool {
     !crate::theme::is_high_contrast_active()
+        && crate::theme::is_transparency_enabled()
+        && !crate::theme::is_battery_saver_active()
 }
 
-pub fn apply_settings_chrome(hwnd: isize, dark: bool, glass: bool) {
+#[must_use]
+pub fn apply_settings_chrome(hwnd: isize, dark: bool, glass: bool) -> bool {
     let dark_mode = i32::from(dark);
     let solid = colorref(settings_background(dark));
     let text = colorref(settings_text(dark));
-    let glass = glass && apply_backdrop_material(hwnd, BackdropMaterial::Acrylic);
-    if !glass {
+    let mica = glass && apply_backdrop_material(hwnd, BackdropMaterial::Mica);
+    if !mica {
         let _ = apply_backdrop_material(hwnd, BackdropMaterial::None);
     }
-    let margin = if glass { -1 } else { 0 };
+    let margin = if mica { -1 } else { 0 };
     let margins = MARGINS {
         cxLeftWidth: margin,
         cxRightWidth: margin,
         cyTopHeight: margin,
         cyBottomHeight: margin,
     };
-    let (caption, border) = if glass {
+    let (caption, border) = if mica {
         (DWMWA_COLOR_NONE, DWMWA_COLOR_DEFAULT)
     } else {
         (solid, solid)
@@ -132,6 +135,7 @@ pub fn apply_settings_chrome(hwnd: isize, dark: bool, glass: bool) {
             );
         }
     }
+    mica
 }
 
 pub fn present_settings_window(hwnd: isize) {
@@ -176,30 +180,6 @@ pub fn settings_client_size(hwnd: isize) -> (i32, i32) {
         let _ = GetClientRect(handle(hwnd), &raw mut rect);
     }
     (rect.right - rect.left, rect.bottom - rect.top)
-}
-
-#[must_use]
-pub fn settings_client_screen_rect(hwnd: isize) -> Option<Rect> {
-    if hwnd == 0 {
-        return None;
-    }
-    let window = handle(hwnd);
-    let mut rect = RECT::default();
-    let mut origin = POINT::default();
-    unsafe {
-        GetClientRect(window, &raw mut rect).ok()?;
-        if !ClientToScreen(window, &raw mut origin).as_bool() {
-            return None;
-        }
-    }
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    (width > 0 && height > 0).then_some(Rect {
-        x: origin.x,
-        y: origin.y,
-        width,
-        height,
-    })
 }
 
 pub fn apply_settings_min_track(hwnd: isize, lparam: LPARAM) {

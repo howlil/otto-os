@@ -276,3 +276,68 @@ impl Renderer {
         draw_dwrite_tabular_text(&self.target, text, format, rect, brush);
     }
 }
+
+pub(crate) fn fill_squircle_bitmap(
+    factory: &windows::Win32::Graphics::Direct2D::ID2D1Factory,
+    target: &windows::Win32::Graphics::Direct2D::ID2D1DCRenderTarget,
+    rect: Rect,
+    circular: bool,
+    radius: f32,
+    bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap,
+    alpha: f32,
+) -> bool {
+    let d2d_rect = rect_to_d2d(rect);
+    unsafe {
+        let size = bitmap.GetSize();
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return false;
+        }
+        let properties = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES {
+            opacity: alpha,
+            transform: Matrix3x2 {
+                M11: rect.width as f32 / size.width,
+                M12: 0.0,
+                M21: 0.0,
+                M22: rect.height as f32 / size.height,
+                M31: rect.x as f32,
+                M32: rect.y as f32,
+            },
+        };
+        let bitmap_properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES {
+            extendModeX: D2D1_EXTEND_MODE_CLAMP,
+            extendModeY: D2D1_EXTEND_MODE_CLAMP,
+            interpolationMode:
+                windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        };
+        let Ok(brush) = target.CreateBitmapBrush(
+            bitmap,
+            Some(&raw const bitmap_properties),
+            Some(&raw const properties),
+        ) else {
+            return false;
+        };
+        if circular {
+            let cx = rect.x as f32 + rect.width as f32 * 0.5;
+            let cy = rect.y as f32 + rect.height as f32 * 0.5;
+            let r = rect.width as f32 * 0.5;
+            target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2::new(cx, cy),
+                    radiusX: r,
+                    radiusY: r,
+                },
+                &brush,
+            );
+        } else if let Ok(geom) = build_squircle_path(factory, d2d_rect, radius) {
+            target.FillGeometry(&geom, &brush, None);
+        } else {
+            let shape = D2D1_ROUNDED_RECT {
+                rect: d2d_rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            target.FillRoundedRectangle(&shape, &brush);
+        }
+    }
+    true
+}

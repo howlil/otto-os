@@ -1,5 +1,6 @@
 use crate::bar::menu_bar::BarItemSet;
 use crate::notch::clipboard::ClipboardLayoutInput;
+use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::island::CompactSlotKind;
 use crate::notch::media::NotchExpandedTab;
 use crate::notch::pomodoro::FocusSubMode;
@@ -47,6 +48,8 @@ pub struct NotchLayoutInput {
     pub tasks_enabled: bool,
     pub media_present: bool,
     pub lyrics_progress: f32,
+    pub stats_progress: f32,
+    pub stats_range: FocusStatsRange,
     pub tab_blend: f32,
     pub compact_title_points: i32,
     pub media_live: bool,
@@ -82,6 +85,8 @@ impl Default for NotchLayoutInput {
             tasks_enabled: true,
             media_present: true,
             lyrics_progress: 0.0,
+            stats_progress: 0.0,
+            stats_range: FocusStatsRange::Today,
             tab_blend: 1.0,
             compact_title_points: 0,
             media_live: false,

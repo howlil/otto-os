@@ -19,10 +19,12 @@ use crate::bar::status::{read_system_status, set_display_brightness};
 use crate::notch::media::read_now_playing;
 
 pub(crate) use self::updates::resume_update_check_task;
-pub use self::updates::shutdown_update_check_task;
 use self::updates::{
-    check_for_updates_sync, open_releases_page, poll_async_update_status, start_async_update_check,
+    check_for_updates_sync, launch_staged_installer, mark_update_install_failed,
+    open_releases_page, poll_async_update_state, poll_async_update_status,
+    start_async_update_check, start_async_update_install, take_ready_installer_path,
 };
+pub use self::updates::{cleanup_stale_updates, shutdown_update_check_task};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsControlCenter;
@@ -78,6 +80,26 @@ impl ControlCenterPort for WindowsControlCenter {
 
     fn poll_update_status(&self) -> Option<String> {
         poll_async_update_status()
+    }
+
+    fn poll_update_state(&self) -> otto_core::UpdateState {
+        poll_async_update_state()
+    }
+
+    fn start_update_install(&self) -> bool {
+        start_async_update_install()
+    }
+
+    fn take_ready_installer(&self) -> Option<String> {
+        take_ready_installer_path()
+    }
+
+    fn launch_update_installer(&self, path: &str) -> bool {
+        launch_staged_installer(path)
+    }
+
+    fn mark_update_install_failed(&self, message: &str) {
+        mark_update_install_failed(message);
     }
 
     fn open_releases_page(&self) {
@@ -150,6 +172,10 @@ impl ControlCenterPort for WindowsControlCenter {
 
     fn dismiss_notification(&self, id: u32) -> bool {
         crate::notch::notifications::dismiss_notification(id)
+    }
+
+    fn remove_notification(&self, id: u32) -> bool {
+        crate::notch::notifications::remove_notification(id)
     }
 
     fn clear_notifications(&self) -> bool {

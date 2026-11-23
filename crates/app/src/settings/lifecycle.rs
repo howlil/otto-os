@@ -1,13 +1,18 @@
-use otto_core::{ContentLayout, SettingsContent, SettingsPage};
+use otto_core::{
+    ContentLayout, ControlCenterPort, FocusSettingsTab, FocusTextField, SettingsContent,
+    SettingsPage,
+};
 use otto_platform::{
-    apply_settings_chrome, create_settings_window, destroy_settings_window, hide_settings_window,
-    invalidate_settings_window, is_settings_window_foreground, is_settings_window_visible,
-    present_settings_window, read_launch_at_login, settings_glass_available,
+    WindowsControlCenter, apply_settings_chrome, create_settings_window, destroy_settings_window,
+    hide_settings_window, invalidate_settings_window, is_settings_window_foreground,
+    is_settings_window_visible, present_settings_window, read_launch_at_login,
+    settings_glass_available,
 };
 
 use crate::host::RuntimeContext;
 
-use super::{SettingsWindow, refresh_model, with_window};
+use super::actions::{arm_update_timer, disarm_audit_timer, sync_audit_timer};
+use super::{CatalogLoadState, SettingsWindow, refresh_model, with_window};
 
 fn ensure_window(runtime: &RuntimeContext) -> Option<isize> {
     if let Some(hwnd) = with_window(runtime, |window| window.hwnd) {
@@ -25,7 +30,23 @@ fn ensure_window(runtime: &RuntimeContext) -> Option<isize> {
     }
 }
 
+pub(crate) fn open_focus_activity(runtime: &RuntimeContext) {
+    open_with_focus_tab(
+        runtime,
+        Some(SettingsPage::Focus),
+        Some(FocusSettingsTab::Activity),
+    );
+}
+
 pub(crate) fn open(runtime: &RuntimeContext, page: Option<SettingsPage>) {
+    open_with_focus_tab(runtime, page, None);
+}
+
+fn open_with_focus_tab(
+    runtime: &RuntimeContext,
+    page: Option<SettingsPage>,
+    focus_tab: Option<FocusSettingsTab>,
+) {
     let _ = otto_platform::close_tray_overflow();
     crate::menu::close(runtime);
     crate::control_center::close(runtime);
@@ -33,19 +54,36 @@ pub(crate) fn open(runtime: &RuntimeContext, page: Option<SettingsPage>) {
         otto_platform::signal_command_failure();
         return;
     };
+    let update_state = WindowsControlCenter.poll_update_state();
+    let busy_update = update_state.is_busy();
     with_window(runtime, |window| {
         window.launch_at_login = read_launch_at_login();
+        window.update_state = update_state;
         if let Some(page) = page {
             window.select_page(page);
         }
+        if let Some(tab) = focus_tab {
+            window.focus_state.select_tab(tab);
+        }
         window.relayout();
     });
+    if busy_update {
+        arm_update_timer(hwnd);
+    }
     refresh_model(runtime);
-    let glass = settings_glass_available();
-    apply_settings_chrome(hwnd, otto_platform::is_system_in_dark_mode(), glass);
+    if let Some(active_page) = with_window(runtime, |window| window.page) {
+        sync_audit_timer(hwnd, active_page);
+    }
+    let app = crate::theme_state::appearance(runtime);
+    let glass = apply_settings_chrome(
+        hwnd,
+        app.content_theme().is_dark(),
+        app.uses_backdrop() && settings_glass_available(),
+    );
     with_window(runtime, |window| {
         window.glass = glass;
         window.renderer = None;
+        window.icons_attempted.clear();
     });
     present_settings_window(hwnd);
     invalidate_settings_window(hwnd);
@@ -65,7 +103,7 @@ pub(crate) fn toggle(runtime: &RuntimeContext) {
 }
 
 pub(super) fn close(runtime: &RuntimeContext) {
-    let closed = with_window(runtime, |window| {
+    let closed_hwnd = with_window(runtime, |window| {
         hide_settings_window(window.hwnd);
         window.renderer = None;
         window.content = SettingsContent::default();
@@ -73,12 +111,42 @@ pub(super) fn close(runtime: &RuntimeContext) {
         window.hovered = None;
         window.pressed = None;
         window.tracking_leave = false;
-    })
-    .is_some();
-    if closed {
+        window.icons_attempted.clear();
+        window.focus_state.focused_field = FocusTextField::None;
+        window.focus_state.website_error = None;
+        window.focus_state.catalog.clear();
+        window.focus_catalog = CatalogLoadState::Unloaded;
+        window.audit_loaded = CatalogLoadState::Unloaded;
+        window.general_state.status_note = None;
+        window.general_state.audit.groups.clear();
+        window.pending_high_surrogate = None;
+        window.hwnd
+    });
+    if let Some(hwnd) = closed_hwnd {
+        disarm_audit_timer(hwnd);
         crate::window_controls::notify_own_window_change(runtime);
         otto_platform::trim_working_set();
     }
+}
+
+pub(crate) fn refresh_appearance(runtime: &RuntimeContext) {
+    let Some(hwnd) = with_window(runtime, |window| {
+        is_settings_window_visible(window.hwnd).then_some(window.hwnd)
+    })
+    .flatten() else {
+        return;
+    };
+    refresh_model(runtime);
+    let app = crate::theme_state::appearance(runtime);
+    let glass = apply_settings_chrome(
+        hwnd,
+        app.content_theme().is_dark(),
+        app.uses_backdrop() && settings_glass_available(),
+    );
+    with_window(runtime, |window| {
+        window.glass = glass;
+        invalidate_settings_window(window.hwnd);
+    });
 }
 
 pub(crate) fn repaint(runtime: &RuntimeContext) {
@@ -89,6 +157,14 @@ pub(crate) fn repaint(runtime: &RuntimeContext) {
     }
     refresh_model(runtime);
     with_window(runtime, |window| invalidate_settings_window(window.hwnd));
+}
+
+pub(crate) fn refresh_process_audit_if_general(runtime: &RuntimeContext) {
+    with_window(runtime, |window| {
+        if window.page == SettingsPage::General && is_settings_window_visible(window.hwnd) {
+            window.refresh_process_audit();
+        }
+    });
 }
 
 pub(crate) fn repaint_if_focus_page(runtime: &RuntimeContext) {

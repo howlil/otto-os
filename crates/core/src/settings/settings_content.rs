@@ -1,17 +1,30 @@
+use super::appearance_settings::{accent_for_part, build_appearance_page, style_for_part};
+use super::focus_settings::{
+    FilterChip, FocusAppFilter, FocusPageState, FocusSettingsTab, FocusTextField, KpiItem,
+    SegmentedOption, WeeklyChart, build_focus_page,
+};
+use super::general_settings::build_general_page;
 use super::model::{OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot};
-use crate::control_center::{UPDATE_CHECKING_LABEL, is_update_available_status};
+use crate::appearance::theme::{AccentColor, AppearanceStyle, ThemeMode};
+use crate::control_center::UpdateState;
 use crate::dock::layout::{DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL};
 use crate::layout::{Rect, scale};
-use crate::notch::focus_activity::{
-    PRESET_BLOCKED_APPS, PRESET_BLOCKED_WEBSITES, estimated_words, format_compact_count,
-    format_screen_time, normalize_app_key,
-};
+use crate::runtime::process_hog::ProcessAuditFilter;
 use crate::settings_window::{
     ModuleGroup, ModuleId, ModuleRow, ModuleStatus, SettingsPage, modules_running,
 };
 
 const ROW_HEIGHT_POINTS: i32 = 52;
 const COMPACT_ROW_HEIGHT_POINTS: i32 = 44;
+const SEGMENTED_ROW_HEIGHT_POINTS: i32 = 48;
+const FILTER_CHIPS_ROW_HEIGHT_POINTS: i32 = 42;
+const INPUT_ROW_HEIGHT_POINTS: i32 = 52;
+const INPUT_ERROR_ROW_HEIGHT_POINTS: i32 = 70;
+const KPI_ROW_HEIGHT_POINTS: i32 = 86;
+const WEEKLY_CHART_ROW_HEIGHT_POINTS: i32 = 188;
+const USAGE_BAR_ROW_HEIGHT_POINTS: i32 = 56;
+const STYLE_PICKER_ROW_HEIGHT_POINTS: i32 = 114;
+const ACCENT_SWATCHES_ROW_HEIGHT_POINTS: i32 = 54;
 const SECTION_HEADER_POINTS: i32 = 28;
 const SECTION_GAP_POINTS: i32 = 14;
 const FOOTER_LINE_POINTS: i32 = 16;
@@ -21,6 +34,7 @@ const FOOTER_CHAR_POINTS: i32 = 6;
 const HERO_HEIGHT_POINTS: i32 = 168;
 const TOP_PAD_POINTS: i32 = 8;
 const BOTTOM_PAD_POINTS: i32 = 28;
+const ROW_INSET_POINTS: i32 = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsAction {
@@ -30,14 +44,30 @@ pub enum SettingsAction {
     Open(SettingsPage),
     OpenLogs,
     CheckForUpdates,
+    InstallUpdate,
     OpenReleases,
     ToggleFocusBlockNotifications,
     ToggleFocusAllowCalls,
     ToggleBlockedApp(String),
     ToggleBlockedWebsite(String),
     PickBlockedAppFile,
-    AddBlockedWebsiteFromClipboard,
     ResetFocusActivityStats,
+    SetFocusTab(FocusSettingsTab),
+    SetFocusAppFilter(FocusAppFilter),
+    FocusInput(FocusTextField),
+    ClearFocusInput(FocusTextField),
+    SubmitBlockedWebsite,
+    ExpandFocusAllApps,
+    SelectFocusChartDay(usize),
+    ToggleFocusActivityDetails,
+    SetAppearanceStyle(AppearanceStyle),
+    SetAppearanceTheme(ThemeMode),
+    SetAppearanceAccent(AccentColor),
+    SetProcessAuditFilter(ProcessAuditFilter),
+    RefreshProcessAudit,
+    ExpandProcessAuditList,
+    ToggleProcessThrottle(String),
+    TerminateProcessGroup(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,12 +78,6 @@ pub enum BadgeTone {
     Bad,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DayBar {
-    pub active_percent: u8,
-    pub focus_percent: u8,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettingsRowValue {
     Toggle(bool),
@@ -61,12 +85,58 @@ pub enum SettingsRowValue {
     Detail(&'static str),
     Text(String),
     Keys(&'static str),
-    Bars(Vec<DayBar>),
+    Segmented {
+        options: Vec<SegmentedOption>,
+        selected: usize,
+    },
+    FilterChips {
+        chips: Vec<FilterChip>,
+        selected: usize,
+    },
+    TextInput {
+        field: FocusTextField,
+        text: String,
+        placeholder: &'static str,
+        button_label: Option<&'static str>,
+        focused: bool,
+        error: Option<String>,
+    },
+    KpiStrip([KpiItem; 3]),
+    WeeklyChart(WeeklyChart),
+    UsageBar {
+        duration: String,
+        percent: u8,
+        blocked: bool,
+    },
+    Disclosure {
+        expanded: bool,
+    },
+    StylePicker {
+        selected: AppearanceStyle,
+        dark: bool,
+        accent_rgb: u32,
+    },
+    AccentSwatches {
+        selected: AccentColor,
+        system_accent_rgb: Option<u32>,
+    },
+    ProcessAudit {
+        status_label: &'static str,
+        status_tone: BadgeTone,
+        throttle_label: Option<&'static str>,
+        throttle_action: Option<SettingsAction>,
+        throttled: bool,
+        terminate_label: Option<&'static str>,
+        terminate_action: Option<SettingsAction>,
+        recommended_end: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettingsRow {
     pub icon: Option<SettingsPage>,
+    pub app_icon: Option<String>,
+    pub detail_hint: Option<String>,
     pub label: String,
     pub subtitle: String,
     pub value: SettingsRowValue,
@@ -76,9 +146,15 @@ pub struct SettingsRow {
 }
 
 impl SettingsRow {
-    fn new(label: impl Into<String>, subtitle: impl Into<String>, value: SettingsRowValue) -> Self {
+    pub(crate) fn new(
+        label: impl Into<String>,
+        subtitle: impl Into<String>,
+        value: SettingsRowValue,
+    ) -> Self {
         Self {
             icon: None,
+            app_icon: None,
+            detail_hint: None,
             label: label.into(),
             subtitle: subtitle.into(),
             value,
@@ -88,21 +164,41 @@ impl SettingsRow {
         }
     }
 
-    fn with_icon(mut self, icon: SettingsPage) -> Self {
+    pub(crate) fn with_icon(mut self, icon: SettingsPage) -> Self {
         self.icon = Some(icon);
         self
     }
 
-    fn with_action(mut self, action: SettingsAction) -> Self {
+    pub(crate) fn with_action(mut self, action: SettingsAction) -> Self {
         self.action = Some(action);
         self
     }
 
     const fn height_points(&self) -> i32 {
-        if self.subtitle.is_empty() {
-            COMPACT_ROW_HEIGHT_POINTS
-        } else {
-            ROW_HEIGHT_POINTS
+        match &self.value {
+            SettingsRowValue::Segmented { .. } => SEGMENTED_ROW_HEIGHT_POINTS,
+            SettingsRowValue::FilterChips { .. } => FILTER_CHIPS_ROW_HEIGHT_POINTS,
+            SettingsRowValue::TextInput { error, .. } => {
+                if error.is_some() {
+                    INPUT_ERROR_ROW_HEIGHT_POINTS
+                } else {
+                    INPUT_ROW_HEIGHT_POINTS
+                }
+            }
+            SettingsRowValue::KpiStrip(_) => KPI_ROW_HEIGHT_POINTS,
+            SettingsRowValue::WeeklyChart(_) => WEEKLY_CHART_ROW_HEIGHT_POINTS,
+            SettingsRowValue::UsageBar { .. } | SettingsRowValue::ProcessAudit { .. } => {
+                USAGE_BAR_ROW_HEIGHT_POINTS
+            }
+            SettingsRowValue::StylePicker { .. } => STYLE_PICKER_ROW_HEIGHT_POINTS,
+            SettingsRowValue::AccentSwatches { .. } => ACCENT_SWATCHES_ROW_HEIGHT_POINTS,
+            _ => {
+                if self.subtitle.is_empty() {
+                    COMPACT_ROW_HEIGHT_POINTS
+                } else {
+                    ROW_HEIGHT_POINTS
+                }
+            }
         }
     }
 }
@@ -136,6 +232,50 @@ impl SettingsContent {
     pub fn row(&self, section: usize, row: usize) -> Option<&SettingsRow> {
         self.sections.get(section)?.rows.get(row)
     }
+
+    #[must_use]
+    pub fn part_action(&self, section: usize, row: usize, part: usize) -> Option<SettingsAction> {
+        let row = self.row(section, row)?;
+        match &row.value {
+            SettingsRowValue::Segmented { options, .. } => {
+                options.get(part).map(|option| option.action.clone())
+            }
+            SettingsRowValue::FilterChips { chips, .. } => {
+                chips.get(part).map(|chip| chip.action.clone())
+            }
+            SettingsRowValue::TextInput {
+                field,
+                text,
+                button_label,
+                ..
+            } => match part {
+                0 => Some(SettingsAction::FocusInput(*field)),
+                1 if button_label.is_some() => Some(SettingsAction::SubmitBlockedWebsite),
+                1 if !text.is_empty() => Some(SettingsAction::ClearFocusInput(*field)),
+                _ => None,
+            },
+            SettingsRowValue::WeeklyChart(chart) => {
+                (part < chart.days.len()).then_some(SettingsAction::SelectFocusChartDay(part))
+            }
+            SettingsRowValue::StylePicker { .. } => {
+                style_for_part(part).map(SettingsAction::SetAppearanceStyle)
+            }
+            SettingsRowValue::AccentSwatches { .. } => {
+                accent_for_part(part).map(SettingsAction::SetAppearanceAccent)
+            }
+            SettingsRowValue::ProcessAudit {
+                throttle_action,
+                terminate_action,
+                ..
+            } => match part {
+                0 => throttle_action.clone().or_else(|| terminate_action.clone()),
+                1 => terminate_action.clone(),
+                _ => None,
+            },
+            SettingsRowValue::KpiStrip(_) => None,
+            _ => row.action.clone(),
+        }
+    }
 }
 
 const fn dock_size_label(size: i32) -> &'static str {
@@ -156,7 +296,7 @@ const fn status_tone(status: ModuleStatus) -> BadgeTone {
     }
 }
 
-const fn module_badge(row: ModuleRow) -> (&'static str, BadgeTone) {
+pub(crate) const fn module_badge(row: ModuleRow) -> (&'static str, BadgeTone) {
     if row.paused_by.is_some() {
         ("Paused", BadgeTone::Neutral)
     } else {
@@ -197,7 +337,7 @@ fn module_link_row(row: ModuleRow) -> SettingsRow {
     out
 }
 
-fn setting_row(
+pub(crate) fn setting_row(
     snapshot: &OttoSettingsSnapshot,
     item: OttoSettingItem,
     page: SettingsPage,
@@ -245,9 +385,6 @@ const fn section_footer(page: SettingsPage, section: OttoSettingSection) -> Opti
         (SettingsPage::Appearance, OttoSettingSection::Main) => {
             Some("Liquid Glass falls back to solid surfaces when Windows transparency is off.")
         }
-        (SettingsPage::General, OttoSettingSection::Main) => Some(
-            "Background Cleanup slows apps that keep using the CPU in the background. It never closes them.",
-        ),
         (SettingsPage::Shortcuts, OttoSettingSection::Main) => Some(
             "Ctrl+Alt+, Ctrl+Alt+B and Ctrl+Alt+D keep working when this is off, so you can always get back here.",
         ),
@@ -423,33 +560,128 @@ fn surface_page(
     }
 }
 
-fn update_row(update_status: Option<&str>) -> SettingsRow {
-    let checking = update_status == Some(UPDATE_CHECKING_LABEL);
-    let (subtitle, action) = if checking {
-        (UPDATE_CHECKING_LABEL.to_owned(), None)
-    } else if is_update_available_status(update_status) {
-        (
-            update_status.unwrap_or_default().to_owned(),
-            Some(SettingsAction::OpenReleases),
-        )
-    } else {
-        (
-            update_status.map_or_else(|| String::from("Look for a newer release"), str::to_owned),
-            Some(SettingsAction::CheckForUpdates),
-        )
-    };
-    let mut row = SettingsRow::new("Check for Updates", subtitle, SettingsRowValue::Detail(""));
-    row.action = action;
-    row
+fn update_rows(version: &str, update: &UpdateState) -> Vec<SettingsRow> {
+    match update {
+        UpdateState::Idle => vec![
+            SettingsRow::new(
+                "Check for Updates",
+                "Look for a newer release on GitHub",
+                SettingsRowValue::Detail("Check"),
+            )
+            .with_action(SettingsAction::CheckForUpdates),
+        ],
+        UpdateState::Checking => vec![SettingsRow::new(
+            "Checking for Updates...",
+            "Contacting GitHub Releases",
+            SettingsRowValue::Text(String::from("Checking...")),
+        )],
+        UpdateState::UpToDate => vec![
+            SettingsRow::new(
+                "Otto OS is Up to Date",
+                format!("Version {version} is the latest release"),
+                SettingsRowValue::Detail("Check Again"),
+            )
+            .with_action(SettingsAction::CheckForUpdates),
+        ],
+        UpdateState::NoReleases => vec![
+            SettingsRow::new(
+                "No Releases Yet",
+                "No published releases found on GitHub",
+                SettingsRowValue::Detail("Check Again"),
+            )
+            .with_action(SettingsAction::CheckForUpdates),
+        ],
+        UpdateState::Available(info) if info.can_auto_install() => vec![
+            SettingsRow::new(
+                format!("Update to v{}", info.version),
+                "Download, verify SHA-256, and install automatically",
+                SettingsRowValue::Detail("Install"),
+            )
+            .with_action(SettingsAction::InstallUpdate),
+            SettingsRow::new(
+                "Release Notes on GitHub",
+                format!("View {} changes or download manually", info.tag),
+                SettingsRowValue::Detail("Open"),
+            )
+            .with_action(SettingsAction::OpenReleases),
+        ],
+        UpdateState::Available(info) => vec![
+            SettingsRow::new(
+                format!("Update v{} Available", info.version),
+                "Verified installer unavailable — download from GitHub",
+                SettingsRowValue::Detail("Open"),
+            )
+            .with_action(SettingsAction::OpenReleases),
+        ],
+        UpdateState::Downloading {
+            version: target,
+            percent,
+        } => {
+            let progress = percent.map_or_else(|| String::from("..."), |pct| format!("{pct}%"));
+            vec![SettingsRow::new(
+                format!("Downloading v{target}..."),
+                "Fetching verified installer from GitHub Releases",
+                SettingsRowValue::Text(progress),
+            )]
+        }
+        UpdateState::Verifying { version: target } => vec![SettingsRow::new(
+            format!("Verifying v{target}..."),
+            "Checking SHA-256 integrity before installing",
+            SettingsRowValue::Text(String::from("Verifying")),
+        )],
+        UpdateState::Installing { version: target } => vec![SettingsRow::new(
+            format!("Installing v{target}..."),
+            "Otto OS will close, apply the patch, and relaunch",
+            SettingsRowValue::Text(String::from("Installing")),
+        )],
+        UpdateState::Failed {
+            message,
+            retry_available: Some(info),
+        } if info.can_auto_install() => vec![
+            SettingsRow::new(
+                format!("Update to v{} Failed", info.version),
+                message.clone(),
+                SettingsRowValue::Detail("Retry"),
+            )
+            .with_action(SettingsAction::InstallUpdate),
+            SettingsRow::new(
+                "Release Notes on GitHub",
+                "Download the installer manually instead",
+                SettingsRowValue::Detail("Open"),
+            )
+            .with_action(SettingsAction::OpenReleases),
+        ],
+        UpdateState::Failed { message, .. } => vec![
+            SettingsRow::new(
+                "Update Check Failed",
+                message.clone(),
+                SettingsRowValue::Detail("Retry"),
+            )
+            .with_action(SettingsAction::CheckForUpdates),
+        ],
+    }
 }
 
-fn about_page(version: &str, update_status: Option<&str>) -> SettingsContent {
+fn about_page(version: &str, update: &UpdateState) -> SettingsContent {
+    let hero_subtitle = match update {
+        UpdateState::Available(info) => {
+            format!("Version {version} · Update v{} available", info.version)
+        }
+        _ => format!("Version {version}"),
+    };
     SettingsContent {
         hero: Some(SettingsHero {
             title: String::from("Otto OS"),
-            subtitle: format!("Version {version}"),
+            subtitle: hero_subtitle,
         }),
         sections: vec![
+            SettingsSection {
+                title: "Software Update",
+                footer: Some(
+                    "Updates are downloaded only when you click Install and verified with SHA-256.",
+                ),
+                rows: update_rows(version, update),
+            },
             SettingsSection {
                 title: "Details",
                 footer: None,
@@ -468,7 +700,6 @@ fn about_page(version: &str, update_status: Option<&str>) -> SettingsContent {
                     "If Otto exits unexpectedly, run it with --restore-shell to bring back the Windows taskbar.",
                 ),
                 rows: vec![
-                    update_row(update_status),
                     SettingsRow::new("Open Logs Folder", "", SettingsRowValue::Detail(""))
                         .with_action(SettingsAction::OpenLogs),
                 ],
@@ -477,341 +708,8 @@ fn about_page(version: &str, update_status: Option<&str>) -> SettingsContent {
     }
 }
 
-fn focus_activity_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let today = &activity.today;
-    let summary = activity.rolling_summary();
-    let average_active_ms =
-        summary.total_active_ms / u64::try_from(summary.days_counted.max(1)).unwrap_or(1);
-    vec![
-        SettingsRow::new(
-            "Screen Time, Last 7 Days",
-            format!(
-                "Avg {}/day · darker part is Focus",
-                format_screen_time(average_active_ms)
-            ),
-            SettingsRowValue::Bars(activity_week_bars(activity)),
-        ),
-        SettingsRow::new(
-            "Clicks & Keys Today",
-            format!(
-                "7-day: {} clicks · {} keys (~{}w)",
-                format_compact_count(summary.total_clicks),
-                format_compact_count(summary.total_keystrokes),
-                format_compact_count(estimated_words(summary.total_keystrokes))
-            ),
-            SettingsRowValue::Text(format!(
-                "{} clicks · {} keys",
-                format_compact_count(today.total_clicks),
-                format_compact_count(today.total_keystrokes)
-            )),
-        ),
-    ]
-}
-
-fn activity_week_bars(activity: &crate::FocusActivityState) -> Vec<DayBar> {
-    let days: Vec<(u64, u64)> = activity
-        .history
-        .iter()
-        .take(crate::notch::focus_activity::FOCUS_HISTORY_DAYS.saturating_sub(1))
-        .rev()
-        .map(|day| (day.total_active_ms, day.focus_session_ms))
-        .chain(std::iter::once((
-            activity.today.total_active_ms,
-            activity.today.focus_session_ms,
-        )))
-        .collect();
-    let peak = days
-        .iter()
-        .map(|(active, _)| *active)
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    days.into_iter()
-        .map(|(active, focus)| DayBar {
-            active_percent: percent_of(active, peak),
-            focus_percent: percent_of(focus.min(active), peak),
-        })
-        .collect()
-}
-
-fn percent_of(value: u64, peak: u64) -> u8 {
-    u8::try_from(value.min(peak).saturating_mul(100) / peak).unwrap_or(100)
-}
-
-fn focus_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let mut rows: Vec<SettingsRow> = activity
-        .today
-        .sorted_apps()
-        .into_iter()
-        .take(10)
-        .map(|app| {
-            let blocked = activity
-                .blocklist
-                .is_app_blocked(&app.app_key, &app.display_name);
-            let words = estimated_words(app.keystroke_count);
-            SettingsRow::new(
-                app.display_name,
-                format!(
-                    "{} open · {}x opened · {} clicks · {} keys (~{}w)",
-                    format_screen_time(app.active_ms),
-                    app.open_count,
-                    format_compact_count(app.click_count),
-                    format_compact_count(app.keystroke_count),
-                    format_compact_count(words)
-                ),
-                SettingsRowValue::Text(String::from(if blocked { "Blocked" } else { "Allowed" })),
-            )
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(SettingsRow::new(
-            "No app activity recorded yet",
-            "Use your apps normally to see hours, opens, clicks, and typing counts",
-            SettingsRowValue::Text(String::from("Idle")),
-        ));
-    }
-    rows
-}
-
-fn focus_sites_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let mut rows: Vec<SettingsRow> = activity
-        .today
-        .sorted_websites()
-        .into_iter()
-        .take(10)
-        .map(|site| {
-            let blocked = activity.blocklist.is_website_blocked(&site.domain);
-            SettingsRow::new(
-                site.domain,
-                format!(
-                    "{} active · {} visits",
-                    format_screen_time(site.active_ms),
-                    site.visit_count
-                ),
-                SettingsRowValue::Text(String::from(if blocked { "Blocked" } else { "Allowed" })),
-            )
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(SettingsRow::new(
-            "No websites recorded yet",
-            "Visit sites in Chrome, Edge, Brave, Firefox, or Arc to track domains",
-            SettingsRowValue::Text(String::from("Waiting")),
-        ));
-    }
-    rows
-}
-
-fn focus_searches_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let mut rows: Vec<SettingsRow> = activity
-        .today
-        .sorted_searches()
-        .into_iter()
-        .take(8)
-        .map(|search| {
-            SettingsRow::new(
-                search.query,
-                format!("{} search", search.engine),
-                SettingsRowValue::Text(format!("{}x", search.search_count)),
-            )
-        })
-        .collect();
-    if rows.is_empty() {
-        rows.push(SettingsRow::new(
-            "No searches recorded yet",
-            "Searches on Google, Bing, DuckDuckGo, YouTube, and GitHub appear here",
-            SettingsRowValue::Text(String::from("0")),
-        ));
-    }
-    rows
-}
-
-fn focus_blocked_apps_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let blocklist = &activity.blocklist;
-    let mut rows = vec![
-        SettingsRow::new(
-            "+ Block App from File...",
-            "Choose an .exe to cover with a Back overlay during Focus",
-            SettingsRowValue::Detail(""),
-        )
-        .with_action(SettingsAction::PickBlockedAppFile),
-    ];
-    for custom_app in &blocklist.blocked_apps {
-        if PRESET_BLOCKED_APPS
-            .iter()
-            .any(|(preset_key, _)| *preset_key == custom_app)
-        {
-            continue;
-        }
-        rows.push(
-            SettingsRow::new(
-                format!("App: {custom_app}"),
-                "Custom app covered with a Back overlay during Focus",
-                SettingsRowValue::Toggle(true),
-            )
-            .with_action(SettingsAction::ToggleBlockedApp(custom_app.clone())),
-        );
-    }
-    for (preset_key, preset_label) in PRESET_BLOCKED_APPS {
-        let key = normalize_app_key(preset_key);
-        let blocked = blocklist.is_app_blocked(&key, preset_label);
-        rows.push(
-            SettingsRow::new(
-                format!("App: {preset_label}"),
-                "Covered with a Back overlay while Focus runs",
-                SettingsRowValue::Toggle(blocked),
-            )
-            .with_action(SettingsAction::ToggleBlockedApp(key)),
-        );
-    }
-    rows
-}
-
-fn focus_blocked_sites_rows(activity: &crate::FocusActivityState) -> Vec<SettingsRow> {
-    let blocklist = &activity.blocklist;
-    let mut rows = vec![
-        SettingsRow::new(
-            "+ Block Website from Clipboard",
-            "Paste a copied URL or domain into the Focus blocklist",
-            SettingsRowValue::Detail(""),
-        )
-        .with_action(SettingsAction::AddBlockedWebsiteFromClipboard),
-    ];
-    for custom_site in &blocklist.blocked_websites {
-        if PRESET_BLOCKED_WEBSITES
-            .iter()
-            .any(|(preset_domain, _)| *preset_domain == custom_site)
-        {
-            continue;
-        }
-        rows.push(
-            SettingsRow::new(
-                format!("Site: {custom_site}"),
-                "Custom website covered with a Back overlay during Focus",
-                SettingsRowValue::Toggle(true),
-            )
-            .with_action(SettingsAction::ToggleBlockedWebsite(custom_site.clone())),
-        );
-    }
-    for (preset_domain, preset_label) in PRESET_BLOCKED_WEBSITES {
-        let blocked = blocklist.is_website_blocked(preset_domain);
-        rows.push(
-            SettingsRow::new(
-                format!("{preset_label} ({preset_domain})"),
-                "Tabs on this domain get a Back overlay during Focus",
-                SettingsRowValue::Toggle(blocked),
-            )
-            .with_action(SettingsAction::ToggleBlockedWebsite(String::from(
-                preset_domain,
-            ))),
-        );
-    }
-    rows
-}
-
-fn focus_page(snapshot: &OttoSettingsSnapshot, modules: &[ModuleRow]) -> SettingsContent {
-    let activity = &snapshot.focus_activity;
-    let today = &activity.today;
-    let blocklist = &activity.blocklist;
-
-    let mut focus_toggle = setting_row(
-        snapshot,
-        OttoSettingItem::Toggle(OttoSettingKind::FocusModule),
-        SettingsPage::Focus,
-    );
-    if let Some(module_row) = modules
-        .iter()
-        .find(|row| row.id == ModuleId::Focus)
-        .copied()
-    {
-        focus_toggle.badge = Some(module_badge(module_row));
-        focus_toggle.muted = module_row.paused_by.is_some();
-    }
-
-    SettingsContent {
-        hero: Some(SettingsHero {
-            title: String::from("Focus & Screen Time"),
-            subtitle: format!(
-                "{} today · {} in Focus · {} blocked",
-                format_screen_time(today.total_active_ms),
-                format_screen_time(today.focus_session_ms),
-                today.blocked_attempts,
-            ),
-        }),
-        sections: vec![
-            SettingsSection {
-                title: "",
-                footer: Some(
-                    "Blocking applies while a Focus session is active. Screen time pauses after 3 minutes of inactivity.",
-                ),
-                rows: vec![
-                    focus_toggle,
-                    SettingsRow::new(
-                        "Block Notifications in Focus",
-                        "Suppress Notch notification banners and Dock badges during Focus",
-                        SettingsRowValue::Toggle(blocklist.block_notifications),
-                    )
-                    .with_action(SettingsAction::ToggleFocusBlockNotifications),
-                    SettingsRow::new(
-                        "Allow Incoming Calls in Focus",
-                        "Let ringing calls through unless the calling app is blocked",
-                        SettingsRowValue::Toggle(blocklist.allow_calls_during_focus),
-                    )
-                    .with_action(SettingsAction::ToggleFocusAllowCalls),
-                ],
-            },
-            SettingsSection {
-                title: "Activity",
-                footer: Some(
-                    "Clicks and keystrokes count totals only. Typed characters and passwords are never recorded.",
-                ),
-                rows: focus_activity_rows(activity),
-            },
-            SettingsSection {
-                title: "Most Used Apps Today",
-                footer: Some(
-                    "Status shows whether an app is blocked. Change blocks in the Focus Blocklist below.",
-                ),
-                rows: focus_apps_rows(activity),
-            },
-            SettingsSection {
-                title: "Top Websites Today",
-                footer: Some(
-                    "Detected natively from browser tabs and address bars with zero extensions.",
-                ),
-                rows: focus_sites_rows(activity),
-            },
-            SettingsSection {
-                title: "Most Searched Topics",
-                footer: None,
-                rows: focus_searches_rows(activity),
-            },
-            SettingsSection {
-                title: "Blocked Apps",
-                footer: Some("Covered apps get a Back overlay during Focus. Nothing is closed."),
-                rows: focus_blocked_apps_rows(activity),
-            },
-            SettingsSection {
-                title: "Blocked Websites",
-                footer: Some(
-                    "Covered tabs get a Back overlay. Back returns you to the previous page.",
-                ),
-                rows: focus_blocked_sites_rows(activity),
-            },
-            SettingsSection {
-                title: "Activity Data",
-                footer: Some("Saved locally in %LOCALAPPDATA%\\otto-os\\focus_activity.txt."),
-                rows: vec![
-                    SettingsRow::new(
-                        "Reset Activity & Screen Time Stats",
-                        "Clear Today and 7-day history while keeping your blocklist",
-                        SettingsRowValue::Detail("Clear"),
-                    )
-                    .with_action(SettingsAction::ResetFocusActivityStats),
-                ],
-            },
-        ],
-    }
+pub(crate) fn percent_of(value: u64, peak: u64) -> u8 {
+    u8::try_from(value.min(peak).saturating_mul(100) / peak.max(1)).unwrap_or(100)
 }
 
 #[must_use]
@@ -820,14 +718,17 @@ pub fn build_content(
     page: SettingsPage,
     modules: &[ModuleRow],
     version: &str,
-    update_status: Option<&str>,
+    update: &UpdateState,
+    focus: &FocusPageState,
 ) -> SettingsContent {
     match page {
         SettingsPage::Overview => overview(modules, version),
         SettingsPage::Modules => modules_page(modules),
-        SettingsPage::Focus => focus_page(snapshot, modules),
+        SettingsPage::Focus => build_focus_page(snapshot, modules, focus),
+        SettingsPage::Appearance => build_appearance_page(snapshot),
         SettingsPage::Shortcuts => shortcuts_page(snapshot),
-        SettingsPage::About => about_page(version, update_status),
+        SettingsPage::General => build_general_page(snapshot, modules),
+        SettingsPage::About => about_page(version, update),
         SettingsPage::Spotlight => surface_page(
             modules,
             ModuleId::Spotlight,
@@ -856,6 +757,7 @@ pub struct CardLayout {
     pub header: Rect,
     pub card: Rect,
     pub rows: Vec<Rect>,
+    pub row_parts: Vec<Vec<Rect>>,
     pub footer: Rect,
 }
 
@@ -875,6 +777,336 @@ impl ContentLayout {
                 .position(|rect| rect.contains(x, y))
                 .map(|row| (section, row))
         })
+    }
+
+    #[must_use]
+    pub fn part_at(&self, x: i32, y: i32) -> Option<(usize, usize, usize)> {
+        self.cards.iter().enumerate().find_map(|(section, card)| {
+            card.row_parts.iter().enumerate().find_map(|(row, parts)| {
+                parts
+                    .iter()
+                    .position(|rect| rect.contains(x, y))
+                    .map(|part| (section, row, part))
+            })
+        })
+    }
+}
+
+fn segmented_parts(rect: Rect, count: usize, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
+    if count == 0 || inner_w <= 0 {
+        return Vec::new();
+    }
+    let track_pad = scale(3, dpi);
+    let gap = scale(4, dpi);
+    let y = rect.y + scale(7, dpi);
+    let h = (rect.height - scale(14, dpi)).max(scale(26, dpi));
+    let usable = (inner_w - track_pad * 2 - gap * (count as i32 - 1)).max(count as i32);
+    let seg_w = usable / count as i32;
+    (0..count)
+        .map(|index| {
+            let x = inner_x + track_pad + index as i32 * (seg_w + gap);
+            let width = if index + 1 == count {
+                (inner_x + inner_w - track_pad - x).max(seg_w)
+            } else {
+                seg_w
+            };
+            Rect {
+                x,
+                y,
+                width,
+                height: h,
+            }
+        })
+        .collect()
+}
+
+fn filter_chip_parts(
+    rect: Rect,
+    chips: &[FilterChip],
+    inner_x: i32,
+    inner_w: i32,
+    dpi: u32,
+) -> Vec<Rect> {
+    let count = chips.len();
+    if count == 0 || inner_w <= 0 {
+        return Vec::new();
+    }
+    let gap = scale(8, dpi);
+    let y = rect.y + scale(6, dpi);
+    let h = (rect.height - scale(12, dpi)).max(scale(26, dpi));
+    let desired: Vec<i32> = chips
+        .iter()
+        .map(|chip| {
+            let chars = i32::try_from(chip.label.chars().count()).unwrap_or(8);
+            scale((chars * 7 + 24).max(70), dpi)
+        })
+        .collect();
+    let total_gaps = gap * (count as i32 - 1);
+    let total_desired: i32 = desired.iter().sum::<i32>() + total_gaps;
+    let mut x = inner_x;
+    let mut out = Vec::with_capacity(count);
+    for (index, width) in desired.into_iter().enumerate() {
+        let final_w = if total_desired > inner_w && total_desired > total_gaps {
+            let available = (inner_w - total_gaps).max(count as i32);
+            (width * available / (total_desired - total_gaps).max(1)).max(scale(44, dpi))
+        } else {
+            width
+        };
+        let clamped = final_w.min((inner_x + inner_w - x).max(0));
+        out.push(Rect {
+            x,
+            y,
+            width: clamped,
+            height: h,
+        });
+        x += clamped;
+        if index + 1 < count {
+            x += gap;
+        }
+    }
+    out
+}
+
+fn text_input_parts(
+    rect: Rect,
+    text: &str,
+    button_label: Option<&str>,
+    inner_x: i32,
+    inner_w: i32,
+    dpi: u32,
+) -> Vec<Rect> {
+    if inner_w <= 0 {
+        return Vec::new();
+    }
+    let y = rect.y + scale(8, dpi);
+    let h = scale(36, dpi);
+    if let Some(label) = button_label {
+        let chars = i32::try_from(label.chars().count()).unwrap_or(3);
+        let btn_w = scale((chars * 9 + 30).max(64), dpi).min(inner_w / 3);
+        let gap = scale(8, dpi);
+        let input_w = (inner_w - btn_w - gap).max(0);
+        vec![
+            Rect {
+                x: inner_x,
+                y,
+                width: input_w,
+                height: h,
+            },
+            Rect {
+                x: inner_x + input_w + gap,
+                y,
+                width: btn_w,
+                height: h,
+            },
+        ]
+    } else if !text.is_empty() {
+        let clear_size = scale(28, dpi).min(h);
+        let clear_pad = scale(4, dpi);
+        let clear_x = (inner_x + inner_w - clear_size - clear_pad).max(inner_x);
+        let input_w = (clear_x - inner_x).max(0);
+        vec![
+            Rect {
+                x: inner_x,
+                y,
+                width: input_w,
+                height: h,
+            },
+            Rect {
+                x: clear_x,
+                y: y + (h - clear_size) / 2,
+                width: clear_size,
+                height: clear_size,
+            },
+        ]
+    } else {
+        vec![Rect {
+            x: inner_x,
+            y,
+            width: inner_w,
+            height: h,
+        }]
+    }
+}
+
+fn kpi_parts(rect: Rect, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
+    if inner_w <= 0 {
+        return Vec::new();
+    }
+    let gap = scale(10, dpi);
+    let y = rect.y + scale(10, dpi);
+    let h = (rect.height - scale(20, dpi)).max(0);
+    let col_w = (inner_w - gap * 2).max(3) / 3;
+    (0..3)
+        .map(|index| {
+            let x = inner_x + index * (col_w + gap);
+            let width = if index == 2 {
+                (inner_x + inner_w - x).max(col_w)
+            } else {
+                col_w
+            };
+            Rect {
+                x,
+                y,
+                width,
+                height: h,
+            }
+        })
+        .collect()
+}
+
+fn weekly_chart_parts(rect: Rect, count: usize, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
+    if count == 0 || inner_w <= 0 {
+        return Vec::new();
+    }
+    let plot_top = rect.y + scale(58, dpi);
+    let plot_bottom = rect.bottom() - scale(10, dpi);
+    let plot_h = (plot_bottom - plot_top).max(scale(48, dpi));
+    let gap = scale(6, dpi);
+    let usable = (inner_w - gap * (count as i32 - 1)).max(count as i32);
+    let col_w = usable / count as i32;
+    (0..count)
+        .map(|index| {
+            let x = inner_x + index as i32 * (col_w + gap);
+            let width = if index + 1 == count {
+                (inner_x + inner_w - x).max(col_w)
+            } else {
+                col_w
+            };
+            Rect {
+                x,
+                y: plot_top,
+                width,
+                height: plot_h,
+            }
+        })
+        .collect()
+}
+
+fn style_picker_parts(rect: Rect, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
+    let count = AppearanceStyle::ALL.len();
+    if inner_w <= 0 {
+        return Vec::new();
+    }
+    let gap = scale(10, dpi);
+    let pad_y = scale(12, dpi);
+    let h = (rect.height - pad_y * 2).max(scale(60, dpi));
+    let usable = (inner_w - gap * (count as i32 - 1)).max(count as i32);
+    let col_w = usable / count as i32;
+    (0..count)
+        .map(|index| {
+            let x = inner_x + index as i32 * (col_w + gap);
+            let width = if index + 1 == count {
+                (inner_x + inner_w - x).max(col_w)
+            } else {
+                col_w
+            };
+            Rect {
+                x,
+                y: rect.y + pad_y,
+                width,
+                height: h,
+            }
+        })
+        .collect()
+}
+
+fn accent_swatch_parts(rect: Rect, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
+    let count = AccentColor::ALL.len();
+    if inner_w <= 0 {
+        return Vec::new();
+    }
+    let label_reserve = scale(84, dpi);
+    let usable_w = (inner_w - label_reserve).max(scale(140, dpi)).min(inner_w);
+    let slot = scale(32, dpi).min((usable_w / count as i32).max(scale(20, dpi)));
+    let gap =
+        scale(8, dpi).min(((usable_w - slot * count as i32).max(0)) / (count as i32 - 1).max(1));
+    let y = rect.y + (rect.height - slot) / 2;
+    (0..count)
+        .map(|index| Rect {
+            x: inner_x + index as i32 * (slot + gap),
+            y,
+            width: slot,
+            height: slot,
+        })
+        .collect()
+}
+
+fn process_audit_parts(
+    rect: Rect,
+    has_throttle: bool,
+    has_terminate: bool,
+    inner_x: i32,
+    inner_w: i32,
+    dpi: u32,
+) -> Vec<Rect> {
+    if inner_w <= 0 || (!has_throttle && !has_terminate) {
+        return Vec::new();
+    }
+    let gap = scale(6, dpi);
+    let btn_w = scale(72, dpi);
+    let btn_h = scale(26, dpi);
+    let y = rect.y + (rect.height - btn_h) / 2;
+    let right = inner_x + inner_w;
+    if has_throttle && has_terminate {
+        let terminate_x = (right - btn_w).max(inner_x);
+        let throttle_x = (terminate_x - gap - btn_w).max(inner_x);
+        vec![
+            Rect {
+                x: throttle_x,
+                y,
+                width: btn_w,
+                height: btn_h,
+            },
+            Rect {
+                x: terminate_x,
+                y,
+                width: btn_w,
+                height: btn_h,
+            },
+        ]
+    } else {
+        vec![Rect {
+            x: (right - btn_w).max(inner_x),
+            y,
+            width: btn_w,
+            height: btn_h,
+        }]
+    }
+}
+
+fn compute_row_parts(rect: Rect, value: &SettingsRowValue, dpi: u32) -> Vec<Rect> {
+    let pad = scale(ROW_INSET_POINTS, dpi);
+    let inner_x = rect.x + pad;
+    let inner_w = (rect.width - pad * 2).max(0);
+    match value {
+        SettingsRowValue::Segmented { options, .. } => {
+            segmented_parts(rect, options.len(), inner_x, inner_w, dpi)
+        }
+        SettingsRowValue::FilterChips { chips, .. } => {
+            filter_chip_parts(rect, chips, inner_x, inner_w, dpi)
+        }
+        SettingsRowValue::TextInput {
+            text, button_label, ..
+        } => text_input_parts(rect, text, *button_label, inner_x, inner_w, dpi),
+        SettingsRowValue::KpiStrip(_) => kpi_parts(rect, inner_x, inner_w, dpi),
+        SettingsRowValue::WeeklyChart(chart) => {
+            weekly_chart_parts(rect, chart.days.len(), inner_x, inner_w, dpi)
+        }
+        SettingsRowValue::StylePicker { .. } => style_picker_parts(rect, inner_x, inner_w, dpi),
+        SettingsRowValue::AccentSwatches { .. } => accent_swatch_parts(rect, inner_x, inner_w, dpi),
+        SettingsRowValue::ProcessAudit {
+            throttle_action,
+            terminate_action,
+            ..
+        } => process_audit_parts(
+            rect,
+            throttle_action.is_some(),
+            terminate_action.is_some(),
+            inner_x,
+            inner_w,
+            dpi,
+        ),
+        _ => Vec::new(),
     }
 }
 
@@ -921,14 +1153,17 @@ pub fn compute_content_layout(
         }
         let card_top = y;
         let mut rows = Vec::with_capacity(section.rows.len());
+        let mut row_parts = Vec::with_capacity(section.rows.len());
         for row in &section.rows {
             let height = scale(row.height_points(), dpi);
-            rows.push(Rect {
+            let rect = Rect {
                 x: viewport.x,
                 y,
                 width: viewport.width,
                 height,
-            });
+            };
+            row_parts.push(compute_row_parts(rect, &row.value, dpi));
+            rows.push(rect);
             y += height;
         }
         let card = Rect {
@@ -954,6 +1189,7 @@ pub fn compute_content_layout(
             header,
             card,
             rows,
+            row_parts,
             footer,
         });
     }
@@ -998,7 +1234,14 @@ mod tests {
 
     fn content(snapshot: &OttoSettingsSnapshot, page: SettingsPage) -> super::SettingsContent {
         let modules = resolve_modules(snapshot, |_| None);
-        build_content(snapshot, page, &modules, "1.0.0", None)
+        build_content(
+            snapshot,
+            page,
+            &modules,
+            "1.0.0",
+            &super::UpdateState::Idle,
+            &super::FocusPageState::default(),
+        )
     }
 
     #[test]
@@ -1026,8 +1269,6 @@ mod tests {
             SettingsPage::Notch,
             SettingsPage::Dock,
             SettingsPage::WindowControls,
-            SettingsPage::Appearance,
-            SettingsPage::General,
         ] {
             let content = content(&snapshot, page);
             assert_eq!(
@@ -1133,28 +1374,102 @@ mod tests {
         );
     }
 
-    fn update_action(status: Option<&str>) -> Option<SettingsAction> {
+    fn update_actions(state: &super::UpdateState) -> Vec<Option<SettingsAction>> {
         let snapshot = snapshot();
         let modules = resolve_modules(&snapshot, |_| None);
-        build_content(&snapshot, SettingsPage::About, &modules, "1.0.0", status)
-            .sections
-            .iter()
-            .flat_map(|section| &section.rows)
-            .find(|row| row.label == "Check for Updates")
-            .and_then(|row| row.action.clone())
+        build_content(
+            &snapshot,
+            SettingsPage::About,
+            &modules,
+            "1.0.0",
+            state,
+            &super::FocusPageState::default(),
+        )
+        .sections
+        .into_iter()
+        .find(|section| section.title == "Software Update")
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.action)
+        .collect()
     }
 
     #[test]
-    fn the_update_row_checks_waits_or_opens_the_release_page() {
-        assert_eq!(update_action(None), Some(SettingsAction::CheckForUpdates));
-        assert_eq!(update_action(Some("Checking...")), None);
+    fn the_update_section_covers_check_install_progress_and_retry_states() {
+        use crate::control_center::{ReleaseUpdateInfo, UpdateState};
+
         assert_eq!(
-            update_action(Some("Up to date")),
-            Some(SettingsAction::CheckForUpdates)
+            update_actions(&UpdateState::Idle),
+            vec![Some(SettingsAction::CheckForUpdates)]
+        );
+        assert_eq!(update_actions(&UpdateState::Checking), vec![None]);
+        assert_eq!(
+            update_actions(&UpdateState::UpToDate),
+            vec![Some(SettingsAction::CheckForUpdates)]
+        );
+        let installable = ReleaseUpdateInfo {
+            version: String::from("1.2.1"),
+            tag: String::from("v1.2.1"),
+            installer_name: String::from("otto-os-setup-1.2.1-x64.exe"),
+            installer_url: String::from(
+                "https://github.com/howlil/otto-os/releases/download/v1.2.1/otto-os-setup-1.2.1-x64.exe",
+            ),
+            checksums_url: Some(String::from(
+                "https://github.com/howlil/otto-os/releases/download/v1.2.1/SHA256SUMS.txt",
+            )),
+            release_url: String::from("https://github.com/howlil/otto-os/releases/tag/v1.2.1"),
+        };
+        assert_eq!(
+            update_actions(&UpdateState::Available(installable.clone())),
+            vec![
+                Some(SettingsAction::InstallUpdate),
+                Some(SettingsAction::OpenReleases),
+            ]
+        );
+        let without_checksum = ReleaseUpdateInfo {
+            checksums_url: None,
+            ..installable.clone()
+        };
+        assert_eq!(
+            update_actions(&UpdateState::Available(without_checksum)),
+            vec![Some(SettingsAction::OpenReleases)]
         );
         assert_eq!(
-            update_action(Some("Update v9.9.9")),
-            Some(SettingsAction::OpenReleases)
+            update_actions(&UpdateState::Downloading {
+                version: String::from("1.2.1"),
+                percent: Some(45),
+            }),
+            vec![None]
+        );
+        assert_eq!(
+            update_actions(&UpdateState::Verifying {
+                version: String::from("1.2.1"),
+            }),
+            vec![None]
+        );
+        assert_eq!(
+            update_actions(&UpdateState::Installing {
+                version: String::from("1.2.1"),
+            }),
+            vec![None]
+        );
+        assert_eq!(
+            update_actions(&UpdateState::Failed {
+                message: String::from("Download failed"),
+                retry_available: Some(installable),
+            }),
+            vec![
+                Some(SettingsAction::InstallUpdate),
+                Some(SettingsAction::OpenReleases),
+            ]
+        );
+        assert_eq!(
+            update_actions(&UpdateState::Failed {
+                message: String::from("Could not reach GitHub Releases"),
+                retry_available: None,
+            }),
+            vec![Some(SettingsAction::CheckForUpdates)]
         );
     }
 
@@ -1225,7 +1540,8 @@ mod tests {
     }
 
     #[test]
-    fn focus_page_renders_analytics_and_blocklist_controls() {
+    fn focus_page_supports_tabs_hit_tested_parts_and_activity_chart() {
+        use super::{FocusPageState, FocusSettingsTab};
         use crate::notch::focus_activity::{DayKey, inspect_browser_context};
 
         let mut snap = snapshot();
@@ -1246,11 +1562,45 @@ mod tests {
             .record_sample(day, 6_000, 0, true, 4, 25);
         assert!(snap.focus_activity.blocklist.add_website("reddit.com"));
 
-        let page = content(&snap, SettingsPage::Focus);
-        let hero = page.hero.as_ref().expect("focus hero");
-        assert_eq!(hero.title, "Focus & Screen Time");
-        assert!(hero.subtitle.contains("blocked"));
-        let labels: Vec<&str> = page
+        let modules = resolve_modules(&snap, |_| None);
+        let block_page = build_content(
+            &snap,
+            SettingsPage::Focus,
+            &modules,
+            "1.0.0",
+            &super::UpdateState::Idle,
+            &FocusPageState::default(),
+        );
+        let block_layout = compute_content_layout(viewport(), &block_page, 96, 0);
+        let tab_parts = &block_layout.cards[0].row_parts[1];
+        assert_eq!(tab_parts.len(), 2);
+        let second_tab = tab_parts[1];
+        assert_eq!(
+            block_layout.part_at(second_tab.x + 4, second_tab.y + 4),
+            Some((0, 1, 1))
+        );
+        assert_eq!(
+            block_page.part_action(0, 1, 1),
+            Some(SettingsAction::SetFocusTab(FocusSettingsTab::Activity))
+        );
+
+        let activity_state = FocusPageState {
+            tab: FocusSettingsTab::Activity,
+            details_expanded: true,
+            ..FocusPageState::default()
+        };
+        let activity_page = build_content(
+            &snap,
+            SettingsPage::Focus,
+            &modules,
+            "1.0.0",
+            &super::UpdateState::Idle,
+            &activity_state,
+        );
+        let activity_layout = compute_content_layout(viewport(), &activity_page, 96, 0);
+        assert_eq!(activity_layout.cards[1].row_parts[0].len(), 3);
+        assert_eq!(activity_layout.cards[2].row_parts[0].len(), 7);
+        let labels: Vec<&str> = activity_page
             .sections
             .iter()
             .flat_map(|section| section.rows.iter().map(|row| row.label.as_str()))
@@ -1259,21 +1609,16 @@ mod tests {
         assert!(labels.contains(&"google.com"));
         assert!(labels.contains(&"otto focus"));
         assert!(labels.contains(&"Reset Activity & Screen Time Stats"));
-        let row = |label: &str| {
-            page.sections
-                .iter()
-                .flat_map(|section| section.rows.iter())
-                .find(|row| row.label == label)
-                .unwrap_or_else(|| panic!("missing row {label}"))
-        };
+        let clicks_row = activity_page
+            .sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .find(|row| row.label == "Clicks & keys today")
+            .expect("clicks row");
         assert_eq!(
-            row("Clicks & Keys Today").value,
+            clicks_row.value,
             SettingsRowValue::Text(String::from("16 clicks · 85 keys"))
         );
-        assert!(matches!(
-            &row("Screen Time, Last 7 Days").value,
-            SettingsRowValue::Bars(days) if days.len() == 1
-        ));
     }
 
     #[test]
@@ -1281,5 +1626,85 @@ mod tests {
         assert_eq!(percent_of(0, 200), 0);
         assert_eq!(percent_of(50, 200), 25);
         assert_eq!(percent_of(400, 200), 100);
+    }
+
+    #[test]
+    fn general_page_supports_audit_filters_and_action_parts() {
+        use crate::runtime::process_hog::{
+            ProcessAuditFilter, ProcessThrottleKind, RawProcessAuditSample, summarize_process_audit,
+        };
+        use crate::settings::general_settings::GeneralPageState;
+
+        let mut snap = snapshot();
+        snap.system.background_cleanup = true;
+        snap.process_audit = GeneralPageState {
+            filter: ProcessAuditFilter::Background,
+            audit: summarize_process_audit(&[
+                RawProcessAuditSample {
+                    pid: 42,
+                    exe_name: String::from("discord.exe"),
+                    exe_path: Some(String::from(r"C:\Apps\Discord.exe")),
+                    memory_bytes: 180 * 1024 * 1024,
+                    cpu_tenths_percent: 12,
+                    session_id: 1,
+                    is_critical: false,
+                    controllable: true,
+                    terminatable: true,
+                    is_foreground: false,
+                    has_visible_window: false,
+                    throttle_kind: ProcessThrottleKind::None,
+                },
+                RawProcessAuditSample {
+                    pid: 55,
+                    exe_name: String::from("svchost.exe"),
+                    exe_path: Some(String::from(r"C:\Windows\System32\svchost.exe")),
+                    memory_bytes: 200 * 1024 * 1024,
+                    cpu_tenths_percent: 4,
+                    session_id: 0,
+                    is_critical: false,
+                    controllable: false,
+                    terminatable: false,
+                    is_foreground: false,
+                    has_visible_window: false,
+                    throttle_kind: ProcessThrottleKind::None,
+                },
+            ]),
+            ..GeneralPageState::default()
+        };
+
+        let modules = resolve_modules(&snap, |_| None);
+        let page = build_content(
+            &snap,
+            SettingsPage::General,
+            &modules,
+            "1.0.0",
+            &super::UpdateState::Idle,
+            &super::FocusPageState::default(),
+        );
+        let layout = compute_content_layout(viewport(), &page, 96, 0);
+        let audit_section = 2;
+        let discord_row = page.sections[audit_section]
+            .rows
+            .iter()
+            .position(|row| row.label == "Discord")
+            .expect("discord row");
+        let parts = &layout.cards[audit_section].row_parts[discord_row];
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            layout.part_at(parts[0].x + 2, parts[0].y + 2),
+            Some((audit_section, discord_row, 0))
+        );
+        assert_eq!(
+            page.part_action(audit_section, discord_row, 0),
+            Some(SettingsAction::ToggleProcessThrottle(String::from(
+                "discord.exe"
+            )))
+        );
+        assert_eq!(
+            page.part_action(audit_section, discord_row, 1),
+            Some(SettingsAction::TerminateProcessGroup(String::from(
+                "discord.exe"
+            )))
+        );
     }
 }

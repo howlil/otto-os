@@ -138,7 +138,7 @@ impl NotchController {
 
     pub(crate) fn is_tab_enabled(&self, tab: NotchExpandedTab) -> bool {
         match tab {
-            NotchExpandedTab::Pomodoro => self.focus_enabled,
+            NotchExpandedTab::Pomodoro | NotchExpandedTab::Stats => self.focus_enabled,
             NotchExpandedTab::Shelf => self.shelf_enabled,
             NotchExpandedTab::Clipboard => self.clipboard_enabled,
             NotchExpandedTab::Tasks => self.tasks_enabled,
@@ -157,6 +157,7 @@ impl NotchController {
     pub(crate) fn first_enabled_tab(&self) -> Option<NotchExpandedTab> {
         [
             NotchExpandedTab::Pomodoro,
+            NotchExpandedTab::Stats,
             NotchExpandedTab::Shelf,
             NotchExpandedTab::Clipboard,
             NotchExpandedTab::Tasks,
@@ -219,6 +220,8 @@ impl NotchController {
             self.glow_presence = 0.0;
             self.dim_presence = 0.0;
             self.pulse_presence = 0.0;
+            self.stats_progress = 0.0;
+            self.stats_selected_day = None;
             self.clear_compact_slot(CompactSlotKind::Focus);
             self.ensure_valid_tab();
         }
@@ -313,6 +316,8 @@ impl NotchController {
         self.lyrics_status = LyricsStatus::Idle;
         self.lyrics_expanded = false;
         self.lyrics_progress = 0.0;
+        self.stats_progress = 0.0;
+        self.stats_selected_day = None;
         self.pending_seek = None;
         self.media_paused_at = None;
         self.media_peek = None;

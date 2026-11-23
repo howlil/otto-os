@@ -82,7 +82,7 @@ impl SpotlightRenderer {
             );
         }
         let label_color = if selected {
-            palette.text_primary
+            palette.on_accent
         } else {
             palette.text_muted
         };

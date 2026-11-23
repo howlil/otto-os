@@ -3,6 +3,7 @@ use std::time::Instant;
 use windows::Storage::Streams::{Buffer, DataReader, IInputStream, InputStreamOptions};
 
 const READ_CHUNK_BYTES: u32 = 16 * 1024;
+const DOWNLOAD_CHUNK_BYTES: u32 = 64 * 1024;
 
 pub(crate) struct MtaResult<T>(pub(crate) T);
 
@@ -94,6 +95,45 @@ pub(crate) fn read_stream_bounded(
         if !body.push(&chunk) {
             return None;
         }
+    }
+}
+
+pub(crate) fn copy_stream_bounded(
+    stream: &IInputStream,
+    limit: u64,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+    mut on_chunk: impl FnMut(&[u8]) -> bool,
+) -> Option<u64> {
+    let mut received = 0u64;
+    let buffer = Buffer::Create(DOWNLOAD_CHUNK_BYTES).ok()?;
+    let mut chunk = Vec::new();
+    loop {
+        if cancelled() || Instant::now() >= deadline {
+            return None;
+        }
+        let _ = buffer.SetLength(0);
+        let filled = await_until!(
+            stream.ReadAsync(&buffer, DOWNLOAD_CHUNK_BYTES, InputStreamOptions::Partial),
+            deadline
+        )?;
+        let length = filled.Length().ok()? as usize;
+        if length == 0 {
+            return Some(received);
+        }
+        let next_total = received.checked_add(length as u64)?;
+        if next_total > limit {
+            return None;
+        }
+        chunk.resize(length, 0);
+        DataReader::FromBuffer(&filled)
+            .ok()?
+            .ReadBytes(&mut chunk)
+            .ok()?;
+        if !on_chunk(&chunk) {
+            return None;
+        }
+        received = next_total;
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::notch::clipboard::CLIPBOARD_PAGE_SIZE;
+use crate::notch::focus_stats_view::{FocusStatsRange, NOTCH_STATS_DAYS};
 use crate::notch::hud::HudGeometry;
 use crate::notch::island::CompactSlotKind;
 use crate::notch::media::NotchExpandedTab;
@@ -37,17 +38,20 @@ pub struct Layout {
     pub compact_trailing: Rect,
     pub notch_tab_strip: Rect,
     pub notch_tab_pomodoro: Rect,
+    pub notch_tab_stats: Rect,
     pub notch_tab_shelf: Rect,
     pub notch_tab_clipboard: Rect,
     pub notch_tab_tasks: Rect,
     pub notch_tab_media: Rect,
     pub lyrics_progress: f32,
+    pub stats_progress: f32,
     pub tab_blend: f32,
     pub press_progress: f32,
     pub icon_size: i32,
     pub notification: Option<NotificationLayout>,
     pub hud: HudGeometry,
     pub pomodoro: PomodoroPanelLayout,
+    pub stats: FocusStatsPanelLayout,
     pub shelf: ShelfPanelLayout,
     pub clipboard: ClipboardPanelLayout,
     pub tasks: TasksPanelLayout,
@@ -73,6 +77,15 @@ pub struct PomodoroPanelLayout {
     pub skip_button: Rect,
     pub alert_start_button: Rect,
     pub alert_extend_button: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusStatsPanelLayout {
+    pub body: Rect,
+    pub range_today: Rect,
+    pub range_week: Rect,
+    pub open_settings: Rect,
+    pub days: [Rect; NOTCH_STATS_DAYS],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +239,7 @@ impl Layout {
         }
         for (rect, target) in [
             (self.notch_tab_pomodoro, HitTarget::NotchTabPomodoro),
+            (self.notch_tab_stats, HitTarget::NotchTabStats),
             (self.notch_tab_shelf, HitTarget::NotchTabShelf),
             (self.notch_tab_clipboard, HitTarget::NotchTabClipboard),
             (self.notch_tab_tasks, HitTarget::NotchTabTasks),
@@ -270,6 +284,28 @@ impl Layout {
                 for (index, preset) in self.pomodoro.presets.iter().enumerate() {
                     if preset.contains(x, y) {
                         return HitTarget::PomodoroPreset(index as u8);
+                    }
+                }
+            }
+            NotchExpandedTab::Stats => {
+                for (rect, target) in [
+                    (
+                        self.stats.range_today,
+                        HitTarget::FocusStatsRange(FocusStatsRange::Today),
+                    ),
+                    (
+                        self.stats.range_week,
+                        HitTarget::FocusStatsRange(FocusStatsRange::Week),
+                    ),
+                    (self.stats.open_settings, HitTarget::FocusStatsOpenSettings),
+                ] {
+                    if rect.contains(x, y) {
+                        return target;
+                    }
+                }
+                for (index, day) in self.stats.days.iter().enumerate() {
+                    if day.contains(x, y) {
+                        return HitTarget::FocusStatsDay(index as u8);
                     }
                 }
             }
@@ -406,7 +442,11 @@ impl Layout {
             | HitTarget::PomodoroExtendFive
             | HitTarget::PomodoroPreset(_)
             | HitTarget::FocusMode(_)
+            | HitTarget::FocusStatsRange(_)
+            | HitTarget::FocusStatsDay(_)
+            | HitTarget::FocusStatsOpenSettings
             | HitTarget::NotchTabPomodoro
+            | HitTarget::NotchTabStats
             | HitTarget::NotchTabShelf
             | HitTarget::NotchTabClipboard
             | HitTarget::NotchTabTasks
@@ -473,6 +513,7 @@ impl Layout {
         }
         let rect = match target {
             HitTarget::NotchTabPomodoro => self.notch_tab_pomodoro,
+            HitTarget::NotchTabStats => self.notch_tab_stats,
             HitTarget::NotchTabShelf => self.notch_tab_shelf,
             HitTarget::NotchTabClipboard => self.notch_tab_clipboard,
             HitTarget::NotchTabTasks => self.notch_tab_tasks,
@@ -491,6 +532,22 @@ impl Layout {
             }
             HitTarget::PomodoroSkip if self.active_tab == NotchExpandedTab::Pomodoro => {
                 self.pomodoro.skip_button
+            }
+            HitTarget::FocusStatsRange(FocusStatsRange::Today)
+                if self.active_tab == NotchExpandedTab::Stats =>
+            {
+                self.stats.range_today
+            }
+            HitTarget::FocusStatsRange(FocusStatsRange::Week)
+                if self.active_tab == NotchExpandedTab::Stats =>
+            {
+                self.stats.range_week
+            }
+            HitTarget::FocusStatsOpenSettings if self.active_tab == NotchExpandedTab::Stats => {
+                self.stats.open_settings
+            }
+            HitTarget::FocusStatsDay(index) if self.active_tab == NotchExpandedTab::Stats => {
+                *self.stats.days.get(usize::from(index))?
             }
             HitTarget::ShelfAdd if self.active_tab == NotchExpandedTab::Shelf => {
                 self.shelf.add_button

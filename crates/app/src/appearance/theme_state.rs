@@ -1,17 +1,10 @@
 use crate::host::RuntimeContext;
-use otto_core::{Appearance, ResolvedTheme, ThemeMode};
+use otto_core::Appearance;
 
 pub fn appearance(runtime: &RuntimeContext) -> Appearance {
     let system = runtime.system_appearance.get();
-    if system.contrast.is_none() {
-        Appearance::glass(ResolvedTheme::Dark)
-    } else {
-        Appearance {
-            theme: ThemeMode::Auto.resolve(system.dark),
-            transparency: false,
-            contrast: system.contrast,
-        }
-    }
+    let preferences = runtime.appearance_preferences.get();
+    system.resolve_preferences(preferences)
 }
 
 pub fn refresh_system_appearance(runtime: &RuntimeContext) {
@@ -23,8 +16,7 @@ pub fn refresh_system_appearance(runtime: &RuntimeContext) {
 }
 
 pub fn sync_effective_glass(runtime: &RuntimeContext) {
-    let effective =
-        runtime.blur_supported.get() && runtime.system_appearance.get().contrast.is_none();
+    let effective = runtime.blur_supported.get() && appearance(runtime).uses_backdrop();
     if effective != runtime.glass_enabled.get() {
         runtime.glass_enabled.set(effective);
         crate::bar::set_glass_enabled(runtime, effective);
@@ -43,54 +35,109 @@ pub fn refresh_theme(runtime: &RuntimeContext) {
     crate::menu::repaint(runtime);
     crate::control_center::repaint(runtime);
     crate::spotlight::repaint(runtime);
+    crate::settings_window::refresh_appearance(runtime);
     crate::window_controls::apply_appearance(runtime, appearance);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use otto_core::{
+        AccentColor, AppearancePreferences, AppearanceStyle, ContrastColors, MaterialVariant,
+        ResolvedTheme, Rgba, SystemAppearance, ThemeMode,
+    };
 
     #[test]
-    fn appearance_uses_clear_dark_glass_without_high_contrast() {
+    fn default_appearance_uses_dark_liquid_glass_with_blue_accent() {
         let runtime = RuntimeContext::new(false);
-        runtime.system_appearance.set(otto_core::SystemAppearance {
+        runtime.system_appearance.set(SystemAppearance {
             dark: false,
-            transparency: false,
+            transparency: true,
             contrast: None,
+            accent: None,
         });
         let resolved = appearance(&runtime);
         assert_eq!(resolved.theme, ResolvedTheme::Dark);
-        assert_eq!(resolved.variant(), otto_core::MaterialVariant::Glass);
+        assert_eq!(resolved.style, AppearanceStyle::LiquidGlass);
+        assert_eq!(resolved.accent, AccentColor::Blue);
+        assert_eq!(resolved.variant(), MaterialVariant::Glass);
+    }
+
+    #[test]
+    fn user_preferences_drive_theme_style_and_accent_resolution() {
+        let runtime = RuntimeContext::new(false);
+        runtime.system_appearance.set(SystemAppearance {
+            dark: false,
+            transparency: true,
+            contrast: None,
+            accent: Some(Rgba::new(0.85, 0.25, 0.35, 1.0)),
+        });
+        runtime.appearance_preferences.set(AppearancePreferences {
+            style: AppearanceStyle::Tinted,
+            theme: ThemeMode::Auto,
+            accent: AccentColor::System,
+        });
+        let resolved = appearance(&runtime);
+        assert_eq!(resolved.theme, ResolvedTheme::Light);
+        assert_eq!(resolved.style, AppearanceStyle::Tinted);
+        assert_eq!(resolved.accent, AccentColor::System);
+        assert_eq!(resolved.variant(), MaterialVariant::Glass);
     }
 
     #[test]
     fn appearance_falls_back_to_high_contrast_when_contrast_theme_is_active() {
         let runtime = RuntimeContext::new(false);
-        runtime.system_appearance.set(otto_core::SystemAppearance {
+        runtime.system_appearance.set(SystemAppearance {
             dark: true,
             transparency: true,
-            contrast: Some(otto_core::ContrastColors::BLACK_THEME),
+            contrast: Some(ContrastColors::BLACK_THEME),
+            accent: None,
         });
         let contrast = appearance(&runtime);
-        assert_eq!(contrast.variant(), otto_core::MaterialVariant::HighContrast);
+        assert_eq!(contrast.variant(), MaterialVariant::HighContrast);
     }
 
     #[test]
-    fn sync_effective_glass_tracks_blur_support_and_contrast_ignoring_system_transparency() {
+    fn sync_effective_glass_respects_solid_style_system_transparency_and_high_contrast() {
         let runtime = RuntimeContext::new(false);
         runtime.blur_supported.set(true);
-        runtime.system_appearance.set(otto_core::SystemAppearance {
-            dark: false,
-            transparency: false,
+        runtime.system_appearance.set(SystemAppearance {
+            dark: true,
+            transparency: true,
             contrast: None,
+            accent: None,
         });
         sync_effective_glass(&runtime);
         assert!(runtime.glass_enabled.get());
 
-        runtime.system_appearance.set(otto_core::SystemAppearance {
+        runtime.appearance_preferences.set(AppearancePreferences {
+            style: AppearanceStyle::Solid,
+            ..AppearancePreferences::default()
+        });
+        sync_effective_glass(&runtime);
+        assert!(!runtime.glass_enabled.get());
+
+        runtime.appearance_preferences.set(AppearancePreferences {
+            style: AppearanceStyle::Frosted,
+            ..AppearancePreferences::default()
+        });
+        sync_effective_glass(&runtime);
+        assert!(runtime.glass_enabled.get());
+
+        runtime.system_appearance.set(SystemAppearance {
+            dark: true,
+            transparency: false,
+            contrast: None,
+            accent: None,
+        });
+        sync_effective_glass(&runtime);
+        assert!(!runtime.glass_enabled.get());
+
+        runtime.system_appearance.set(SystemAppearance {
             dark: true,
             transparency: true,
-            contrast: Some(otto_core::ContrastColors::BLACK_THEME),
+            contrast: Some(ContrastColors::BLACK_THEME),
+            accent: None,
         });
         sync_effective_glass(&runtime);
         assert!(!runtime.glass_enabled.get());

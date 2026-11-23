@@ -81,6 +81,7 @@ fn main() -> Result<()> {
         }
     };
     let _ = otto_platform::restore_hidden_windows();
+    otto_platform::cleanup_stale_updates();
     if command == StartupCommand::RestoreShell {
         let _ = otto_platform::restore_shell_from_recovery();
         otto_platform::log_info("app", "restored shell via --restore-shell");

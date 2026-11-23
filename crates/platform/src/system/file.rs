@@ -44,18 +44,22 @@ pub fn data_dir() -> Option<PathBuf> {
     )
 }
 
-pub fn replace_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, contents).map_err(io_error)?;
-    let source = wide_path(&temp_path);
-    let destination = wide_path(path);
-    let result = unsafe {
+pub(crate) fn move_file_atomically(source_path: &Path, destination_path: &Path) -> Result<()> {
+    let source = wide_path(source_path);
+    let destination = wide_path(destination_path);
+    unsafe {
         MoveFileExW(
             PCWSTR(source.as_ptr()),
             PCWSTR(destination.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
-    };
+    }
+}
+
+pub fn replace_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, contents).map_err(io_error)?;
+    let result = move_file_atomically(&temp_path, path);
     if result.is_err() {
         let _ = fs::remove_file(temp_path);
     }

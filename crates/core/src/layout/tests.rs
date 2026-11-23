@@ -63,7 +63,7 @@ fn expanded_notch_uses_apple_dynamic_island_dimensions() {
         },
     );
     assert_eq!(layout.bar.height, 32);
-    assert_eq!(layout.notch.width, 380);
+    assert_eq!(layout.notch.width, 416);
     assert_eq!(layout.notch.height, 144);
     assert_eq!(layout.notch_corner_radius, 22);
     assert_eq!(layout.notch_ear_radius, 8);
@@ -664,6 +664,7 @@ fn pomodoro_layout(surface: PomodoroSurface, dpi: u32) -> Layout {
 fn pomodoro_hit_rects(layout: &Layout) -> Vec<Rect> {
     let mut rects = vec![
         layout.notch_tab_pomodoro,
+        layout.notch_tab_stats,
         layout.notch_tab_shelf,
         layout.notch_tab_media,
     ];
@@ -754,6 +755,76 @@ fn presets_exist_only_in_setup_and_resolve_to_their_index() {
             .iter()
             .all(|segment| !segment.is_empty())
     );
+}
+
+#[test]
+fn focus_stats_tab_layouts_header_card_and_week_columns_across_dpis() {
+    use crate::notch::focus_stats_view::FocusStatsRange;
+
+    for dpi in [96, 120, 144, 192] {
+        let gap = scale(4, dpi);
+        let minimum = scale(24, dpi);
+        for range in [FocusStatsRange::Today, FocusStatsRange::Week] {
+            let layout = compute_layout_with_notch(
+                &M,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    pomodoro_surface: PomodoroSurface::Running,
+                    active_tab: NotchExpandedTab::Stats,
+                    stats_progress: 1.0,
+                    stats_range: range,
+                    ..NotchLayoutInput::default()
+                },
+            );
+            assert_eq!(layout.notch.height, scale(M.notch_stats_height, dpi));
+            assert!(layout.notch.contains_rect(&layout.stats.body));
+            assert!(layout.notch_tab_strip.right() + gap <= layout.stats.range_today.x);
+            assert!(layout.notch_tab_stats.bottom() + gap <= layout.stats.body.y);
+            let header_targets = [
+                (
+                    layout.stats.range_today,
+                    HitTarget::FocusStatsRange(FocusStatsRange::Today),
+                ),
+                (
+                    layout.stats.range_week,
+                    HitTarget::FocusStatsRange(FocusStatsRange::Week),
+                ),
+                (
+                    layout.stats.open_settings,
+                    HitTarget::FocusStatsOpenSettings,
+                ),
+            ];
+            for (rect, hit) in header_targets {
+                assert!(layout.notch.contains_rect(&rect));
+                assert!(rect.width >= minimum && rect.height >= minimum);
+                assert_eq!(
+                    layout.hit_test(rect.x + rect.width / 2, rect.y + rect.height / 2),
+                    Some(hit)
+                );
+                assert_eq!(layout.notch_control_rect(hit), Some(rect));
+            }
+            assert!(layout.stats.range_today.right() + gap <= layout.stats.range_week.x);
+            assert!(layout.stats.range_week.right() + gap <= layout.stats.open_settings.x);
+            if range == FocusStatsRange::Week {
+                for (index, day) in layout.stats.days.iter().enumerate() {
+                    assert!(layout.stats.body.contains_rect(day));
+                    assert!(day.width >= minimum && day.height >= minimum);
+                    assert_eq!(
+                        layout.hit_test(day.x + day.width / 2, day.y + day.height / 2),
+                        Some(HitTarget::FocusStatsDay(index as u8))
+                    );
+                    if let Some(next) = layout.stats.days.get(index + 1) {
+                        assert!(day.right() + gap <= next.x);
+                    }
+                }
+            } else {
+                assert!(layout.stats.days.iter().all(Rect::is_empty));
+            }
+        }
+    }
 }
 
 #[test]
@@ -1048,6 +1119,11 @@ fn four_adaptive_tabs_fit_without_overlapping_header_labels_across_dpis() {
                     HitTarget::NotchTabPomodoro,
                 ),
                 (
+                    NotchExpandedTab::Stats,
+                    layout.notch_tab_stats,
+                    HitTarget::NotchTabStats,
+                ),
+                (
                     NotchExpandedTab::Shelf,
                     layout.notch_tab_shelf,
                     HitTarget::NotchTabShelf,
@@ -1080,7 +1156,8 @@ fn four_adaptive_tabs_fit_without_overlapping_header_labels_across_dpis() {
                 }
             }
             for pair in [
-                (layout.notch_tab_pomodoro, layout.notch_tab_shelf),
+                (layout.notch_tab_pomodoro, layout.notch_tab_stats),
+                (layout.notch_tab_stats, layout.notch_tab_shelf),
                 (layout.notch_tab_shelf, layout.notch_tab_clipboard),
                 (layout.notch_tab_clipboard, layout.notch_tab_tasks),
                 (layout.notch_tab_tasks, layout.notch_tab_media),
@@ -1089,6 +1166,7 @@ fn four_adaptive_tabs_fit_without_overlapping_header_labels_across_dpis() {
             }
             assert!(layout.notch_tab_strip.right() + gap < layout.pomodoro.focus_modes[0].x);
             assert!(layout.notch_tab_strip.right() + gap < layout.pomodoro.session_label.x);
+            assert!(layout.notch_tab_strip.right() + gap <= layout.stats.range_today.x);
             assert!(layout.notch_tab_strip.right() + gap < layout.media.source_label.x);
         }
     }
@@ -1755,7 +1833,7 @@ fn dynamic_island_expands_floating_card_without_ears() {
     );
     assert_eq!(expanded.bar.height, 40);
     assert_eq!(expanded.notch.y, 4);
-    assert_eq!(expanded.notch.width, 380);
+    assert_eq!(expanded.notch.width, 416);
     assert_eq!(expanded.notch.height, 254);
     assert_eq!(expanded.notch_corner_radius, 28);
     assert_eq!(expanded.notch_ear_radius, 0);
@@ -1988,7 +2066,11 @@ fn notification_layout_for(ringing: bool) -> Layout {
         "Finder",
         NotchLayoutInput {
             panel_expansion: 1.0,
-            notification: Some(NotificationLayoutInput { ringing }),
+            notification: Some(if ringing {
+                NotificationLayoutInput::ringing()
+            } else {
+                NotificationLayoutInput::banner(false, false)
+            }),
             ..NotchLayoutInput::default()
         },
     )
@@ -2013,9 +2095,16 @@ fn a_ringing_card_is_taller_and_hits_accept_decline_and_the_card() {
     );
     let (tx, ty) = center(card.title);
     assert_eq!(layout.hit_test(tx, ty), Some(HitTarget::NotificationCard));
-    assert!(card.decline.right() < card.accept.x);
+    assert_eq!(card.accept.x - card.decline.right(), 12);
     assert!(card.accept.right() <= card.card.right());
     assert!(card.accept.width >= 44 && card.decline.width >= 44);
+    let card_mid = card.card.y + card.card.height / 2;
+    let badge_mid = card.badge.y + card.badge.height / 2;
+    let text_mid = i32::midpoint(card.meta.y, card.title.bottom());
+    let button_mid = card.accept.y + card.accept.height / 2;
+    assert_eq!(badge_mid, card_mid);
+    assert_eq!(text_mid, card_mid);
+    assert_eq!(button_mid, card_mid);
     assert_eq!(
         layout.keyboard_targets_with_media(true),
         vec![
@@ -2026,23 +2115,87 @@ fn a_ringing_card_is_taller_and_hits_accept_decline_and_the_card() {
 }
 
 #[test]
-fn a_banner_card_has_a_close_control_and_no_call_buttons() {
-    let layout = notification_layout_for(false);
-    let card = layout.notification.expect("card");
-    assert_eq!(layout.notch.height, NOTIFICATION_BANNER_HEIGHT_POINTS);
-    assert!(card.accept.is_empty() && card.decline.is_empty());
-    let (cx, cy) = center(card.close);
-    assert_eq!(layout.hit_test(cx, cy), Some(HitTarget::NotificationClose));
-    let (bx, by) = center(card.badge);
-    assert_eq!(layout.hit_test(bx, by), Some(HitTarget::NotificationCard));
-    assert!(card.close.right() <= card.card.right());
+fn a_banner_card_has_a_close_control_zero_overlap_and_optional_queue_lip() {
+    for metrics in [Metrics::MACBOOK_PRO_14, Metrics::DYNAMIC_ISLAND] {
+        for dpi in [96, 120, 144, 192] {
+            let layout = compute_layout_with_notch(
+                &metrics,
+                1920,
+                dpi,
+                "Finder",
+                NotchLayoutInput {
+                    panel_expansion: 1.0,
+                    notification: Some(NotificationLayoutInput::banner(false, true)),
+                    ..NotchLayoutInput::default()
+                },
+            );
+            let card = layout.notification.expect("card");
+            assert_eq!(
+                layout.notch.height,
+                scale(NOTIFICATION_BANNER_HEIGHT_POINTS, dpi)
+            );
+            assert!(card.accept.is_empty() && card.decline.is_empty());
+            assert!(card.close.bottom() <= card.title.y);
+            assert!(card.meta.right() < card.close.x);
+            assert!(card.close.width >= scale(24, dpi));
+            assert!(card.close.height >= scale(24, dpi));
+            assert!(card.close.right() <= card.card.right());
+            assert!(!card.stack_lip.is_empty());
+            assert!(card.stack_lip.bottom() <= layout.panel_window.bottom());
+            let (cx, cy) = center(card.close);
+            assert_eq!(layout.hit_test(cx, cy), Some(HitTarget::NotificationClose));
+            let (bx, by) = center(card.badge);
+            assert_eq!(layout.hit_test(bx, by), Some(HitTarget::NotificationCard));
+        }
+    }
+    let empty_layout = compute_layout_with_notch(
+        &Metrics::DYNAMIC_ISLAND,
+        1920,
+        96,
+        "Finder",
+        NotchLayoutInput {
+            panel_expansion: 1.0,
+            notification: Some(NotificationLayoutInput::banner(true, false)),
+            ..NotchLayoutInput::default()
+        },
+    );
+    let empty_card = empty_layout.notification.expect("empty banner");
+    assert!(empty_card.subtitle.is_empty());
+    assert!(empty_card.stack_lip.is_empty());
+    assert!(empty_card.close.bottom() <= empty_card.title.y);
+    assert!(empty_card.meta.y > empty_card.badge.y);
     assert_eq!(
-        layout.keyboard_targets_with_media(false),
+        empty_layout.keyboard_targets_with_media(false),
         vec![HitTarget::NotificationCard, HitTarget::NotificationClose]
     );
     assert_eq!(
-        layout.notch_control_rect(HitTarget::NotificationAccept),
+        empty_layout.notch_control_rect(HitTarget::NotificationAccept),
         None
+    );
+}
+
+#[test]
+fn a_notification_peek_uses_compact_bar_width_without_opening_panel_card() {
+    let layout = compute_layout_with_notch(
+        &Metrics::DYNAMIC_ISLAND,
+        1920,
+        96,
+        "Finder",
+        NotchLayoutInput {
+            compact_expansion: 1.0,
+            panel_expansion: 0.0,
+            notification: Some(NotificationLayoutInput::peek()),
+            ..NotchLayoutInput::default()
+        },
+    );
+    assert!(layout.notification.is_none());
+    assert_eq!(
+        layout.notch.width,
+        Metrics::DYNAMIC_ISLAND.notch_compact_width
+    );
+    assert_eq!(
+        layout.notch.height,
+        Metrics::DYNAMIC_ISLAND.notch_compact_height
     );
 }
 

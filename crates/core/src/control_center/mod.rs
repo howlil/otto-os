@@ -3,6 +3,7 @@ mod commands;
 mod layout;
 mod layout_types;
 mod model;
+mod sha256;
 mod snapshot;
 mod update;
 
@@ -27,5 +28,10 @@ pub use self::model::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState, ControlCenterPage,
     SLIDER_KEY_STEP_PERCENT, UPDATE_CHECKING_LABEL, WifiNetwork, WifiState,
 };
+pub use self::sha256::{Sha256, parse_sha256_for_asset, parse_sha256_hex, sha256_digest};
 pub use self::snapshot::{ControlCenterSnapshot, SubPanelGroupLayout, SubPanelGroupSpec};
-pub use self::update::{format_update_status, parse_latest_release_tag};
+pub use self::update::{
+    RELEASE_CHECKSUMS_ASSET, ReleaseUpdateInfo, UpdateState, expected_installer_asset_name,
+    format_update_status, is_allowed_release_asset_url, is_allowed_release_page_url,
+    parse_latest_release_tag, parse_release_update,
+};

@@ -1,7 +1,10 @@
+use std::cell::RefCell;
+
 use otto_core::{
     Appearance, CalendarControl, EstimatedMenuText, GlassShape, MenuRow, MenuTextMeasure,
-    PopupMenuLayout, PopupMenuRowLayout, Rect, RgbBuffer, compute_calendar_layout, month_name,
-    notification_badge, scale,
+    NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_WIDTH, PopupMenuLayout, PopupMenuRowLayout,
+    Rect, RgbBuffer, badge_ink_is_dark, compute_calendar_layout, month_name, notification_badge,
+    scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
@@ -38,7 +41,10 @@ use crate::appearance::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery,
 };
 use crate::appearance::theme::{BrushPalette, LiquidGlassPalette};
-use crate::{create_text_format, rect_to_d2d, shared_d2d_factory, shared_dwrite_factory};
+use crate::{
+    BLACK, CachedCoverArt, create_text_format, rect_to_d2d, shared_d2d_factory,
+    shared_dwrite_factory,
+};
 
 const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
@@ -72,28 +78,115 @@ pub struct MenuHover {
 }
 
 pub struct PopupMenuRenderer {
-    factory: ID2D1Factory,
-    target: ID2D1DCRenderTarget,
-    brushes: BrushPalette,
-    stroke_style: ID2D1StrokeStyle,
+    pub(super) factory: ID2D1Factory,
+    pub(super) target: ID2D1DCRenderTarget,
+    pub(super) brushes: BrushPalette,
+    pub(super) stroke_style: ID2D1StrokeStyle,
     label_format: IDWriteTextFormat,
     shortcut_format: IDWriteTextFormat,
-    month_format: IDWriteTextFormat,
+    pub(super) month_format: IDWriteTextFormat,
     year_format: IDWriteTextFormat,
     weekday_format: IDWriteTextFormat,
     day_format: IDWriteTextFormat,
     today_format: IDWriteTextFormat,
-    notif_title_format: IDWriteTextFormat,
-    notif_body_format: IDWriteTextFormat,
-    surface: DibSurface,
+    pub(super) notif_header_format: IDWriteTextFormat,
+    pub(super) notif_title_format: IDWriteTextFormat,
+    pub(super) notif_body_format: IDWriteTextFormat,
+    pub(super) notif_meta_format: IDWriteTextFormat,
+    pub(super) notif_meta_trailing_format: IDWriteTextFormat,
+    pub(super) notif_count_format: IDWriteTextFormat,
+    pub(super) notif_pill_format: IDWriteTextFormat,
+    pub(super) notif_badge_format: IDWriteTextFormat,
+    pub(super) cached_notif_icons: RefCell<Vec<CachedCoverArt>>,
+    pub(super) surface: DibSurface,
+    pub(super) dpi: u32,
+    pub(super) glass: GlassPainter,
+}
+
+struct NotifFormats {
+    header: IDWriteTextFormat,
+    title: IDWriteTextFormat,
+    body: IDWriteTextFormat,
+    meta: IDWriteTextFormat,
+    meta_trailing: IDWriteTextFormat,
+    count: IDWriteTextFormat,
+    pill: IDWriteTextFormat,
+    badge: IDWriteTextFormat,
+}
+
+fn create_notif_formats(
+    dwrite: &windows::Win32::Graphics::DirectWrite::IDWriteFactory,
     dpi: u32,
-    glass: GlassPainter,
+) -> Result<NotifFormats> {
+    let dpi_scale = dpi as f32 / 96.0;
+    unsafe {
+        let header = create_text_format(
+            dwrite,
+            scale(13, dpi) as f32,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        let title = create_text_format(
+            dwrite,
+            12.5 * dpi_scale,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        let body = create_text_format(
+            dwrite,
+            11.5 * dpi_scale,
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        body.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+        body.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+        let meta = create_text_format(
+            dwrite,
+            10.5 * dpi_scale,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        let meta_trailing = create_text_format(
+            dwrite,
+            10.5 * dpi_scale,
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_TEXT_ALIGNMENT_TRAILING,
+        )?;
+        let count = create_text_format(
+            dwrite,
+            scale(10, dpi) as f32,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        )?;
+        let pill = create_text_format(
+            dwrite,
+            scale(11, dpi) as f32,
+            DWRITE_FONT_WEIGHT_MEDIUM,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        )?;
+        let badge = create_text_format(
+            dwrite,
+            scale(14, dpi) as f32,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        )?;
+        Ok(NotifFormats {
+            header,
+            title,
+            body,
+            meta,
+            meta_trailing,
+            count,
+            pill,
+            badge,
+        })
+    }
 }
 
 impl PopupMenuRenderer {
     pub fn new(dpi: u32) -> Result<Self> {
-        let max_w = scale(360, dpi);
-        let max_h = scale(520, dpi);
+        let max_w = scale(NOTIFICATION_CENTER_WIDTH + 8, dpi);
+        let max_h = scale(NOTIFICATION_CENTER_MAX_HEIGHT + 8, dpi);
         unsafe {
             let factory = shared_d2d_factory()?;
             let target = create_dc_render_target(&factory)?;
@@ -158,20 +251,7 @@ impl PopupMenuRenderer {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
-            let notif_title_format = create_text_format(
-                &dwrite,
-                scale(13, dpi) as f32,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
-            )?;
-            let notif_body_format = create_text_format(
-                &dwrite,
-                scale(12, dpi) as f32,
-                DWRITE_FONT_WEIGHT_REGULAR,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
-            )?;
-            notif_body_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
-            notif_body_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+            let notif = create_notif_formats(&dwrite, dpi)?;
 
             let surface = DibSurface::new(max_w, max_h)?;
 
@@ -187,8 +267,15 @@ impl PopupMenuRenderer {
                 weekday_format,
                 day_format,
                 today_format,
-                notif_title_format,
-                notif_body_format,
+                notif_header_format: notif.header,
+                notif_title_format: notif.title,
+                notif_body_format: notif.body,
+                notif_meta_format: notif.meta,
+                notif_meta_trailing_format: notif.meta_trailing,
+                notif_count_format: notif.count,
+                notif_pill_format: notif.pill,
+                notif_badge_format: notif.badge,
+                cached_notif_icons: RefCell::new(Vec::new()),
                 surface,
                 dpi,
                 glass: GlassPainter::default(),
@@ -214,6 +301,7 @@ impl PopupMenuRenderer {
         let brushes = BrushPalette::new(&target)?;
         self.target = target;
         self.brushes = brushes;
+        self.cached_notif_icons.borrow_mut().clear();
         self.glass.invalidate_gpu();
         Ok(())
     }
@@ -323,7 +411,7 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn measure(text: &str, format: &IDWriteTextFormat) -> Option<i32> {
+    pub(super) fn measure(text: &str, format: &IDWriteTextFormat) -> Option<i32> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe {
@@ -635,7 +723,7 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn fill_shape(
+    pub(super) fn fill_shape(
         &self,
         rect: D2D_RECT_F,
         radius: f32,
@@ -658,7 +746,7 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn draw_shape(
+    pub(super) fn draw_shape(
         &self,
         rect: D2D_RECT_F,
         radius: f32,
@@ -683,7 +771,7 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn draw_shell(
+    pub(super) fn draw_shell(
         &self,
         width: i32,
         height: i32,
@@ -894,10 +982,15 @@ impl PopupMenuRenderer {
         self.fill_shape(rect, radius, geom.as_ref(), &fill);
         let mut buffer = [0u8; 4];
         let initial = badge.initial.encode_utf8(&mut buffer);
-        self.draw_clipped_text(&self.today_format, initial, &rect, &self.brushes.on_accent);
+        let ink = if badge_ink_is_dark(badge.color) {
+            self.brushes.alpha_brush(BLACK, 0.88)
+        } else {
+            self.brushes.on_accent.clone()
+        };
+        self.draw_clipped_text(&self.today_format, initial, &rect, &ink);
     }
 
-    fn draw_notification_close(&self, area: D2D_RECT_F, palette: &LiquidGlassPalette) {
+    pub(super) fn draw_notification_close(&self, area: D2D_RECT_F, palette: &LiquidGlassPalette) {
         let radius = scale(8, self.dpi) as f32;
         let center = Vector2::new(area.right - radius, (area.top + area.bottom) * 0.5);
         let disc = self.brushes.alpha_brush(palette.text_primary, 0.16);
@@ -923,7 +1016,7 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn draw_clipped_text(
+    pub(super) fn draw_clipped_text(
         &self,
         format: &IDWriteTextFormat,
         text: &str,

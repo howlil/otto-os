@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use crate::backdrop_feed::BackdropFeed;
@@ -5,10 +6,12 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{MENU_POLL_TIMER, WM_APP_MENU_BACKDROP};
 use otto_core::{
     BACKDROP_PADDING_PT, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, CalendarControl,
-    CaptureRegion, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
-    EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure, PopupMenuLayout,
-    PopupMenuMetrics, PopupMenuPlacement, Rect, WindowInfo, capture_interval_for, capture_wanted,
-    compute_downloads_stack_layout, compute_popup_menu_layout, downloads_stack_hit_test,
+    CaptureRegion, ControlCenterAction, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit,
+    DownloadsStackLayout, EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure,
+    NotificationAccess, NotificationCenterHit, NotificationCenterLayout, NotificationGroup,
+    PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, WindowInfo, capture_interval_for,
+    capture_wanted, compute_downloads_stack_layout, compute_notification_center_layout,
+    compute_popup_menu_layout, downloads_stack_hit_test, group_notifications,
     next_downloads_stack_focus, scale,
 };
 use otto_core::{DockEntry, StackItem};
@@ -77,11 +80,6 @@ enum MenuSource {
         anchor_right: i32,
         anchor_y: i32,
     },
-    Notifications {
-        anchor_right: i32,
-        anchor_y: i32,
-        notification_ids: Vec<u32>,
-    },
     DownloadsStack {
         items: Vec<StackItem>,
     },
@@ -101,11 +99,29 @@ struct DownloadsStackView {
     active_hit: DownloadsStackHit,
 }
 
+pub(super) struct NotificationCenterView {
+    anchor_right: i32,
+    anchor_y: i32,
+    access: NotificationAccess,
+    groups: Vec<NotificationGroup>,
+    expanded_apps: BTreeSet<String>,
+    layout: NotificationCenterLayout,
+    active_hit: NotificationCenterHit,
+    keyboard_focus: bool,
+    scroll_offset: i32,
+}
+
+enum PopupAction {
+    Menu(Box<MenuSource>, usize),
+    NotificationCenter(NotificationCenterHit),
+}
+
 pub(crate) struct PopupMenu {
     hwnd: isize,
     renderer: Option<PopupMenuRenderer>,
     stack_renderer: Option<DownloadsStackRenderer>,
     stack_view: Option<DownloadsStackView>,
+    notif_view: Option<NotificationCenterView>,
     control_center: Box<dyn ControlCenterPort>,
     screen: PrimaryScreen,
     metrics: PopupMenuMetrics,
@@ -164,6 +180,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         renderer: None,
         stack_renderer: None,
         stack_view: None,
+        notif_view: None,
         control_center: Box::new(WindowsControlCenter),
         screen,
         layout: resolve_layout(&metrics, screen.dpi, anchor, 0, &[], None),
@@ -253,8 +270,8 @@ pub fn handle_message(
         WM_TIMER if wparam.0 == MENU_POLL_TIMER => {
             let mut selected = None;
             with_menu(runtime, |menu| selected = menu.on_poll_timer(runtime));
-            if let Some((source, cmd)) = selected {
-                dispatch_selection(runtime, source, cmd);
+            if let Some(action) = selected {
+                dispatch_action(runtime, action);
             }
             Some(LRESULT(0))
         }
@@ -274,8 +291,8 @@ pub fn handle_message(
             with_menu(runtime, |menu| {
                 selected = menu.on_click(x, y);
             });
-            if let Some((source, cmd)) = selected {
-                dispatch_selection(runtime, source, cmd);
+            if let Some(action) = selected {
+                dispatch_action(runtime, action);
             }
             Some(LRESULT(0))
         }
@@ -330,6 +347,7 @@ impl PopupMenu {
         self.screen = primary_screen();
         self.stack_view = None;
         self.stack_renderer = None;
+        self.notif_view = None;
         let _ = self.ensure_renderer();
         self.rows = rows;
         self.anchor = anchor;
@@ -372,6 +390,7 @@ impl PopupMenu {
         self.hovered_row = None;
         self.source = None;
         self.renderer = None;
+        self.notif_view = None;
 
         let entries: Vec<DownloadsStackEntry> = items
             .iter()
@@ -463,16 +482,42 @@ impl PopupMenu {
     }
 
     fn on_wheel(&mut self, runtime: &RuntimeContext, delta: i16) {
-        if !self.visible || !self.layout.is_scrollable() {
+        if !self.visible {
             return;
         }
-        let row_height = scale(self.metrics.row_height, self.screen.dpi);
         let notches = i32::from(delta) / 120;
         let step = if notches == 0 {
             -i32::from(delta.signum())
         } else {
             -notches
         };
+        if let Some(notif) = self.notif_view.as_mut() {
+            if !notif.layout.is_scrollable() {
+                return;
+            }
+            let scroll_step = scale(36, self.screen.dpi);
+            let offset = notif.layout.scrolled_by(step * scroll_step);
+            if offset != notif.scroll_offset {
+                notif.scroll_offset = offset;
+                let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
+                notif.layout = compute_notification_center_layout(
+                    notif.access,
+                    &notif.groups,
+                    bounds,
+                    self.screen.dpi,
+                    notif.anchor_right,
+                    notif.anchor_y,
+                    notif.scroll_offset,
+                );
+                notif.scroll_offset = notif.layout.scroll_offset;
+                self.present(runtime);
+            }
+            return;
+        }
+        if !self.layout.is_scrollable() {
+            return;
+        }
+        let row_height = scale(self.metrics.row_height, self.screen.dpi);
         let offset = self
             .layout
             .scrolled_by(step * row_height * WHEEL_ROWS_PER_NOTCH);
@@ -511,6 +556,7 @@ impl PopupMenu {
         self.source = None;
         self.stack_view = None;
         self.stack_renderer = None;
+        self.notif_view = None;
         self.backdrop = None;
         self.renderer = None;
         unsafe {
@@ -681,12 +727,212 @@ impl PopupMenu {
         }
     }
 
-    fn on_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<(MenuSource, usize)> {
+    fn open_notification_center(
+        &mut self,
+        runtime: &RuntimeContext,
+        anchor_right: i32,
+        anchor_y: i32,
+        expanded_apps: BTreeSet<String>,
+        scroll_offset: i32,
+    ) {
+        crate::spotlight::close(runtime);
+        crate::control_center::close(runtime);
+        self.screen = primary_screen();
+        self.rows.clear();
+        self.hovered_row = None;
+        self.hovered_calendar = None;
+        self.source = None;
+        self.stack_view = None;
+        self.stack_renderer = None;
+        let _ = self.ensure_renderer();
+
+        let snapshot = self.control_center.read_notifications();
+        let groups = group_notifications(&snapshot.items, &expanded_apps);
+        let bounds = monitor_work_area_at(anchor_right - 1, anchor_y);
+        let layout = compute_notification_center_layout(
+            snapshot.access,
+            &groups,
+            bounds,
+            self.screen.dpi,
+            anchor_right,
+            anchor_y,
+            scroll_offset,
+        );
+        self.layout.window = layout.window;
+        self.notif_view = Some(NotificationCenterView {
+            anchor_right,
+            anchor_y,
+            access: snapshot.access,
+            groups,
+            expanded_apps,
+            scroll_offset: layout.scroll_offset,
+            layout,
+            active_hit: NotificationCenterHit::None,
+            keyboard_focus: false,
+        });
+        self.opened_at = Instant::now();
+        self.outside_since = None;
+        self.was_mouse_down = true;
+        self.last_cursor = cursor_position();
+        self.visible = true;
+
+        self.prime_backdrop(runtime);
+        self.place();
+        self.sync_backdrop(runtime, true);
+        self.present(runtime);
+        unsafe {
+            SetTimer(
+                Some(HWND(self.hwnd as *mut _)),
+                MENU_POLL_TIMER,
+                MENU_POLL_MS,
+                None,
+            );
+        }
+    }
+
+    fn relayout_notification_center(&mut self, runtime: &RuntimeContext) {
+        let Some(notif) = self.notif_view.as_mut() else {
+            return;
+        };
+        for group in &mut notif.groups {
+            group.expanded = notif.expanded_apps.contains(&group.app_key);
+        }
+        let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
+        notif.layout = compute_notification_center_layout(
+            notif.access,
+            &notif.groups,
+            bounds,
+            self.screen.dpi,
+            notif.anchor_right,
+            notif.anchor_y,
+            notif.scroll_offset,
+        );
+        notif.scroll_offset = notif.layout.scroll_offset;
+        let size_changed = self.layout.window != notif.layout.window;
+        self.layout.window = notif.layout.window;
+        if size_changed {
+            self.place();
+            self.sync_backdrop(runtime, true);
+        }
+        self.present(runtime);
+    }
+
+    fn step_notif_focus(&mut self, runtime: &RuntimeContext, forward: bool) {
+        let Some(notif) = self.notif_view.as_mut() else {
+            return;
+        };
+        let next = if forward {
+            notif.layout.next_hit(notif.active_hit)
+        } else {
+            notif.layout.prev_hit(notif.active_hit)
+        };
+        notif.active_hit = next;
+        notif.keyboard_focus = true;
+        let scroll = notif.layout.scroll_revealing(next);
+        if scroll != notif.scroll_offset {
+            notif.scroll_offset = scroll;
+            let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
+            notif.layout = compute_notification_center_layout(
+                notif.access,
+                &notif.groups,
+                bounds,
+                self.screen.dpi,
+                notif.anchor_right,
+                notif.anchor_y,
+                notif.scroll_offset,
+            );
+        }
+        self.present(runtime);
+    }
+
+    fn on_notif_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<PopupAction> {
+        let cursor = cursor_position();
+        let (gx, gy) = cursor;
+        let (inside, pointed_hit, changed) = {
+            let notif = self.notif_view.as_mut()?;
+            let inside = notif.layout.window.contains(gx, gy);
+            let mut changed = false;
+            if cursor != self.last_cursor {
+                self.last_cursor = cursor;
+                let hit = if inside {
+                    notif
+                        .layout
+                        .hit_test(gx - notif.layout.window.x, gy - notif.layout.window.y)
+                } else {
+                    NotificationCenterHit::None
+                };
+                if hit != notif.active_hit || notif.keyboard_focus {
+                    notif.active_hit = hit;
+                    notif.keyboard_focus = false;
+                    changed = true;
+                }
+            }
+            (inside, notif.active_hit, changed)
+        };
+        if changed {
+            self.present(runtime);
+        }
+
+        let (mouse_down, nav_event) = poll_menu_events();
+        match nav_event {
+            Some(MenuNavEvent::Escape) => {
+                self.hide();
+                return None;
+            }
+            Some(MenuNavEvent::Enter) => {
+                if pointed_hit != NotificationCenterHit::None {
+                    return Some(PopupAction::NotificationCenter(pointed_hit));
+                }
+            }
+            Some(MenuNavEvent::Up | MenuNavEvent::BackTab) => {
+                self.step_notif_focus(runtime, false);
+            }
+            Some(MenuNavEvent::Down | MenuNavEvent::Tab) => {
+                self.step_notif_focus(runtime, true);
+            }
+            _ => {}
+        }
+
+        let released = !mouse_down
+            && self.was_mouse_down
+            && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
+            && inside;
+        if released {
+            self.was_mouse_down = false;
+            let hit = self
+                .notif_view
+                .as_ref()
+                .map_or(NotificationCenterHit::None, |n| {
+                    n.layout
+                        .hit_test(gx - n.layout.window.x, gy - n.layout.window.y)
+                });
+            if hit != NotificationCenterHit::None {
+                return Some(PopupAction::NotificationCenter(hit));
+            }
+        }
+        if mouse_down
+            && !self.was_mouse_down
+            && self.opened_at.elapsed() >= OPEN_CLICK_GRACE
+            && !inside
+        {
+            self.hide();
+            return None;
+        }
+        self.was_mouse_down = mouse_down;
+        None
+    }
+
+    fn on_poll_timer(&mut self, runtime: &RuntimeContext) -> Option<PopupAction> {
         if !self.visible {
             return None;
         }
+        if self.notif_view.is_some() {
+            return self.on_notif_poll_timer(runtime);
+        }
         if self.stack_view.is_some() {
-            return self.on_stack_poll_timer(runtime);
+            return self
+                .on_stack_poll_timer(runtime)
+                .map(|(source, cmd)| PopupAction::Menu(Box::new(source), cmd));
         }
         self.sync_backdrop(runtime, false);
         let cursor = cursor_position();
@@ -718,7 +964,7 @@ impl PopupMenu {
                     CalendarControl::Next
                 };
                 if let Some(selection) = self.take_calendar_selection(control) {
-                    return Some(selection);
+                    return Some(PopupAction::Menu(Box::new(selection.0), selection.1));
                 }
             }
             None => {}
@@ -734,7 +980,7 @@ impl PopupMenu {
                 if let Some(row) = self.hovered_row
                     && let Some(selection) = self.take_selection(row)
                 {
-                    return Some(selection);
+                    return Some(PopupAction::Menu(Box::new(selection.0), selection.1));
                 }
             }
         }
@@ -747,7 +993,7 @@ impl PopupMenu {
         if released && let Some(control) = self.calendar_control_at(local_x, local_y) {
             self.was_mouse_down = false;
             if let Some(selection) = self.take_calendar_selection(control) {
-                return Some(selection);
+                return Some(PopupAction::Menu(Box::new(selection.0), selection.1));
             }
         }
         if released
@@ -756,7 +1002,7 @@ impl PopupMenu {
         {
             self.was_mouse_down = false;
             if let Some(selection) = self.take_selection(row) {
-                return Some(selection);
+                return Some(PopupAction::Menu(Box::new(selection.0), selection.1));
             }
         }
         if self.should_auto_close_window_controls(gx, gy) {
@@ -779,6 +1025,15 @@ impl PopupMenu {
         if !self.visible {
             return;
         }
+        if let Some(notif) = self.notif_view.as_mut() {
+            let next = notif.layout.hit_test(x, y);
+            if next != notif.active_hit || notif.keyboard_focus {
+                notif.active_hit = next;
+                notif.keyboard_focus = false;
+                self.present(runtime);
+            }
+            return;
+        }
         if let Some(stack) = self.stack_view.as_mut() {
             let next = downloads_stack_hit_test(&stack.layout, x, y);
             if next != stack.active_hit {
@@ -796,16 +1051,24 @@ impl PopupMenu {
         }
     }
 
-    fn on_click(&mut self, x: i32, y: i32) -> Option<(MenuSource, usize)> {
+    fn on_click(&mut self, x: i32, y: i32) -> Option<PopupAction> {
         if !self.visible {
             return None;
         }
+        if let Some(notif) = self.notif_view.as_ref() {
+            let hit = notif.layout.hit_test(x, y);
+            return (hit != NotificationCenterHit::None)
+                .then_some(PopupAction::NotificationCenter(hit));
+        }
         if let Some(stack) = self.stack_view.as_ref() {
             let hit = downloads_stack_hit_test(&stack.layout, x, y);
-            return self.take_stack_selection(hit);
+            return self
+                .take_stack_selection(hit)
+                .map(|(source, cmd)| PopupAction::Menu(Box::new(source), cmd));
         }
         let row = self.layout.hit_test(x, y)?;
         self.take_selection(row)
+            .map(|(source, cmd)| PopupAction::Menu(Box::new(source), cmd))
     }
 
     fn prime_backdrop(&self, runtime: &RuntimeContext) {
@@ -941,6 +1204,19 @@ impl PopupMenu {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        if let Some(notif) = self.notif_view.as_ref() {
+            crate::host::log_present_error(
+                "notification_center",
+                renderer.present_notification_center(
+                    self.hwnd,
+                    &notif.layout,
+                    notif.active_hit,
+                    notif.keyboard_focus,
+                    appearance,
+                ),
+            );
+            return;
+        }
         crate::host::log_present_error(
             "menu",
             renderer.present(
@@ -954,5 +1230,96 @@ impl PopupMenu {
                 appearance,
             ),
         );
+    }
+}
+
+fn dispatch_action(runtime: &RuntimeContext, action: PopupAction) {
+    match action {
+        PopupAction::Menu(source, cmd) => dispatch_selection(runtime, *source, cmd),
+        PopupAction::NotificationCenter(hit) => dispatch_notification_hit(runtime, hit),
+    }
+}
+
+fn refresh_notification_center(runtime: &RuntimeContext, reset_view: bool) {
+    with_menu(runtime, |menu| {
+        if let Some(notif) = menu.notif_view.as_ref() {
+            let (anchor_right, anchor_y) = (notif.anchor_right, notif.anchor_y);
+            let (expanded, scroll) = if reset_view {
+                (BTreeSet::new(), 0)
+            } else {
+                (notif.expanded_apps.clone(), notif.scroll_offset)
+            };
+            menu.open_notification_center(runtime, anchor_right, anchor_y, expanded, scroll);
+        }
+    });
+}
+
+fn toggle_notification_group(runtime: &RuntimeContext, group_index: usize, expand: bool) {
+    with_menu(runtime, |menu| {
+        if let Some(notif) = menu.notif_view.as_mut()
+            && let Some(group) = notif.groups.get(group_index)
+        {
+            if expand {
+                notif.expanded_apps.insert(group.app_key.clone());
+            } else {
+                notif.expanded_apps.remove(&group.app_key);
+            }
+        }
+        menu.relayout_notification_center(runtime);
+    });
+}
+
+fn dispatch_notification_hit(runtime: &RuntimeContext, hit: NotificationCenterHit) {
+    match hit {
+        NotificationCenterHit::None => {}
+        NotificationCenterHit::ExpandGroup(idx) => toggle_notification_group(runtime, idx, true),
+        NotificationCenterHit::CollapseGroup(idx) => toggle_notification_group(runtime, idx, false),
+        NotificationCenterHit::OpenCard(id) => {
+            with_menu(runtime, |menu| {
+                menu.hide();
+                let _ = menu.control_center.dismiss_notification(id);
+            });
+        }
+        NotificationCenterHit::CloseCard(id) => {
+            with_menu(runtime, |menu| {
+                let _ = menu.control_center.remove_notification(id);
+            });
+            refresh_notification_center(runtime, false);
+        }
+        NotificationCenterHit::ClearGroup(group_index) => {
+            with_menu(runtime, |menu| {
+                let Some(notif) = menu.notif_view.as_mut() else {
+                    return;
+                };
+                let Some(group) = notif.groups.get(group_index) else {
+                    return;
+                };
+                notif.expanded_apps.remove(&group.app_key);
+                let ids: Vec<u32> = group.items.iter().map(|item| item.id).collect();
+                for id in ids {
+                    let _ = menu.control_center.remove_notification(id);
+                }
+            });
+            refresh_notification_center(runtime, false);
+        }
+        NotificationCenterHit::ClearAll => {
+            with_menu(runtime, |menu| {
+                let _ = menu.control_center.clear_notifications();
+            });
+            refresh_notification_center(runtime, true);
+        }
+        NotificationCenterHit::AccessAction => {
+            with_menu(runtime, |menu| {
+                let _ = menu.control_center.request_notification_access();
+            });
+            refresh_notification_center(runtime, false);
+        }
+        NotificationCenterHit::OpenWindowsNotifications => {
+            with_menu(runtime, |menu| {
+                menu.hide();
+                menu.control_center
+                    .execute(ControlCenterAction::OpenCalendar);
+            });
+        }
     }
 }

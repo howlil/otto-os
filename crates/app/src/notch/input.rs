@@ -110,6 +110,9 @@ impl NotchController {
         self.press_active = false;
         match target {
             HitTarget::FocusMode(mode) => self.handle_focus_mode_click(mode),
+            HitTarget::FocusStatsRange(_)
+            | HitTarget::FocusStatsDay(_)
+            | HitTarget::FocusStatsOpenSettings => self.handle_focus_stats_click(target),
             HitTarget::PomodoroPlayPause
             | HitTarget::PomodoroReset
             | HitTarget::PomodoroSkip
@@ -117,6 +120,7 @@ impl NotchController {
             | HitTarget::PomodoroStartNext
             | HitTarget::PomodoroExtendFive => self.handle_pomodoro_click(target),
             HitTarget::NotchTabPomodoro
+            | HitTarget::NotchTabStats
             | HitTarget::NotchTabShelf
             | HitTarget::NotchTabClipboard
             | HitTarget::NotchTabTasks
@@ -158,6 +162,7 @@ impl NotchController {
     pub(super) fn handle_tab_click(&mut self, target: HitTarget) -> NotchUpdate {
         let tab = match target {
             HitTarget::NotchTabPomodoro => NotchExpandedTab::Pomodoro,
+            HitTarget::NotchTabStats => NotchExpandedTab::Stats,
             HitTarget::NotchTabShelf => NotchExpandedTab::Shelf,
             HitTarget::NotchTabClipboard => NotchExpandedTab::Clipboard,
             HitTarget::NotchTabTasks => NotchExpandedTab::Tasks,
@@ -221,7 +226,7 @@ impl NotchController {
             NotchExpandedTab::Shelf => self.shelf.step_page(-step),
             NotchExpandedTab::Clipboard => self.clipboard.step_page((-step) as isize),
             NotchExpandedTab::Tasks => self.tasks.step_page((-step) as isize),
-            NotchExpandedTab::Media => false,
+            NotchExpandedTab::Stats | NotchExpandedTab::Media => false,
         };
         NotchUpdate {
             changed,

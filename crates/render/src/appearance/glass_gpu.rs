@@ -55,6 +55,8 @@ pub(crate) struct SoftCacheKey {
     pub(crate) generation: u64,
     pub(crate) dpi: u32,
     pub(crate) theme: otto_core::ResolvedTheme,
+    pub(crate) style: otto_core::AppearanceStyle,
+    pub(crate) tint_key: u32,
 }
 
 struct RenderTarget {
@@ -683,6 +685,8 @@ mod tests {
                     generation: 1,
                     dpi: 96,
                     theme: ResolvedTheme::Dark,
+                    style: otto_core::AppearanceStyle::LiquidGlass,
+                    tint_key: params.tint_key(),
                 },
                 &params,
                 &shape,
@@ -733,6 +737,8 @@ mod tests {
             generation,
             dpi: 96,
             theme: ResolvedTheme::Dark,
+            style: otto_core::AppearanceStyle::LiquidGlass,
+            tint_key: params.tint_key(),
         };
         first
             .compose(1, key(1), &params, &shape, &backdrop, light)
@@ -780,6 +786,8 @@ mod tests {
             generation: 1,
             dpi: 96,
             theme: ResolvedTheme::Dark,
+            style: otto_core::AppearanceStyle::LiquidGlass,
+            tint_key: params.tint_key(),
         };
 
         let shapes = [

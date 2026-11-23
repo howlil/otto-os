@@ -198,7 +198,7 @@ impl Bar {
             }
         };
         let _ = release_capture_if_owned(hwnd);
-        self.apply_notch_effect(update.effect);
+        self.apply_notch_effect(runtime, update.effect);
         self.present(runtime);
     }
 
@@ -236,7 +236,11 @@ impl Bar {
         dirty
     }
 
-    pub(super) fn apply_notch_effect(&mut self, effect: Option<NotchEffect>) -> bool {
+    pub(super) fn apply_notch_effect(
+        &mut self,
+        runtime: &RuntimeContext,
+        effect: Option<NotchEffect>,
+    ) -> bool {
         let Some(effect) = effect else {
             return false;
         };
@@ -263,6 +267,10 @@ impl Bar {
                 self.io.hide_quick_capture(restore_focus);
                 false
             }
+            NotchEffect::OpenFocusActivitySettings => {
+                crate::settings_window::open_focus_activity(runtime);
+                false
+            }
             NotchEffect::CopyClipboard(payload) => {
                 if let Some(seq) = self.notch_port.copy_clipboard(&payload) {
                     self.io.suppress_own_copy(seq);
@@ -286,7 +294,7 @@ impl Bar {
             }) => Some((initial_text.clone(), *allow_keep_open)),
             _ => None,
         };
-        let effect_changed = self.apply_notch_effect(update.effect);
+        let effect_changed = self.apply_notch_effect(runtime, update.effect);
         if update.changed || effect_changed {
             self.recompute_layout();
             self.sync_panel_visibility();
@@ -309,7 +317,7 @@ impl Bar {
             self.panel_visible,
             self.motion,
         );
-        let effect_changed = self.apply_notch_effect(update.effect);
+        let effect_changed = self.apply_notch_effect(runtime, update.effect);
         if update.changed || effect_changed {
             self.settle_ticks = 10;
             self.recompute_layout();
@@ -329,7 +337,7 @@ impl Bar {
         let update = self
             .notch
             .handle_seek_step(delta_ms, crate::notch::unix_now_ms());
-        let effect_changed = self.apply_notch_effect(update.effect);
+        let effect_changed = self.apply_notch_effect(runtime, update.effect);
         if update.changed || effect_changed {
             self.present(runtime);
         }

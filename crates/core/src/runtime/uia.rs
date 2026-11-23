@@ -4,6 +4,7 @@ use crate::control_center::{
 };
 use crate::dock::layout::DockLayout;
 use crate::layout::{HitTarget, Layout, Rect};
+use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::pomodoro::FocusSubMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,10 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::TasksAdd => 47,
         HitTarget::TasksClearDone => 48,
         HitTarget::TasksPager => 49,
+        HitTarget::NotchTabStats => 50,
+        HitTarget::FocusStatsRange(FocusStatsRange::Today) => 51,
+        HitTarget::FocusStatsRange(FocusStatsRange::Week) => 52,
+        HitTarget::FocusStatsOpenSettings => 53,
         HitTarget::PomodoroPreset(i) => 100 + i as i32,
         HitTarget::FocusMode(mode) => 200 + mode.index() as i32,
         HitTarget::ShelfItem(i) => 300 + i as i32,
@@ -96,6 +101,7 @@ pub const fn encode_bar_hit_target(target: HitTarget) -> i32 {
         HitTarget::TaskCheck(i) => 900 + i as i32,
         HitTarget::TaskRemove(i) => 1000 + i as i32,
         HitTarget::TaskEdit(i) => 1100 + i as i32,
+        HitTarget::FocusStatsDay(i) => 1200 + i as i32,
     }
 }
 
@@ -151,6 +157,10 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         47 => Some(HitTarget::TasksAdd),
         48 => Some(HitTarget::TasksClearDone),
         49 => Some(HitTarget::TasksPager),
+        50 => Some(HitTarget::NotchTabStats),
+        51 => Some(HitTarget::FocusStatsRange(FocusStatsRange::Today)),
+        52 => Some(HitTarget::FocusStatsRange(FocusStatsRange::Week)),
+        53 => Some(HitTarget::FocusStatsOpenSettings),
         100..=199 => Some(HitTarget::PomodoroPreset((tag - 100) as u8)),
         200 => Some(HitTarget::FocusMode(FocusSubMode::Pomodoro)),
         201 => Some(HitTarget::FocusMode(FocusSubMode::Timer)),
@@ -164,6 +174,7 @@ pub const fn decode_bar_hit_target(tag: i32) -> Option<HitTarget> {
         900..=999 => Some(HitTarget::TaskCheck((tag - 900) as u8)),
         1000..=1099 => Some(HitTarget::TaskRemove((tag - 1000) as u8)),
         1100..=1199 => Some(HitTarget::TaskEdit((tag - 1100) as u8)),
+        1200..=1206 => Some(HitTarget::FocusStatsDay((tag - 1200) as u8)),
         _ => None,
     }
 }
@@ -242,10 +253,12 @@ fn bar_target_rect(layout: &Layout, target: HitTarget) -> Option<Rect> {
 fn bar_target_role(target: HitTarget) -> AccessibleRole {
     match target {
         HitTarget::NotchTabPomodoro
+        | HitTarget::NotchTabStats
         | HitTarget::NotchTabShelf
         | HitTarget::NotchTabClipboard
         | HitTarget::NotchTabTasks
-        | HitTarget::NotchTabMedia => AccessibleRole::Tab,
+        | HitTarget::NotchTabMedia
+        | HitTarget::FocusStatsRange(_) => AccessibleRole::Tab,
         HitTarget::MediaSeekbar => AccessibleRole::Slider,
         _ => AccessibleRole::Button,
     }
@@ -368,9 +381,25 @@ fn bar_notch_target_metadata(target: HitTarget) -> Option<(String, String)> {
             format!("otto.notch.focus.mode.{}", mode.index()),
             format!("{mode:?}"),
         ),
+        HitTarget::FocusStatsRange(range) => (
+            format!("otto.notch.focus.stats.range.{}", range.index()),
+            String::from(range.label()),
+        ),
+        HitTarget::FocusStatsOpenSettings => (
+            String::from("otto.notch.focus.stats.details"),
+            String::from("Open Focus Activity Details"),
+        ),
+        HitTarget::FocusStatsDay(i) => (
+            format!("otto.notch.focus.stats.day.{i}"),
+            format!("Screen Time Day {}", i + 1),
+        ),
         HitTarget::NotchTabPomodoro => {
             (String::from("otto.notch.tab.focus"), String::from("Focus"))
         }
+        HitTarget::NotchTabStats => (
+            String::from("otto.notch.tab.stats"),
+            String::from("Screen Time"),
+        ),
         HitTarget::NotchTabShelf => (String::from("otto.notch.tab.shelf"), String::from("Shelf")),
         HitTarget::NotchTabClipboard => (
             String::from("otto.notch.tab.clipboard"),
@@ -756,6 +785,7 @@ mod tests {
     };
     use crate::dock::layout::{DockInput, DockMetrics, compute_dock_layout};
     use crate::layout::{HitTarget, Metrics, Rect, compute_layout_for_app};
+    use crate::notch::focus_stats_view::FocusStatsRange;
     use crate::notch::pomodoro::FocusSubMode;
 
     #[test]
@@ -765,6 +795,11 @@ mod tests {
             HitTarget::Notch,
             HitTarget::PomodoroPreset(2),
             HitTarget::FocusMode(FocusSubMode::Timer),
+            HitTarget::NotchTabStats,
+            HitTarget::FocusStatsRange(FocusStatsRange::Today),
+            HitTarget::FocusStatsRange(FocusStatsRange::Week),
+            HitTarget::FocusStatsOpenSettings,
+            HitTarget::FocusStatsDay(4),
             HitTarget::ShelfCopyItem(3),
             HitTarget::ShelfRemoveItem(4),
             HitTarget::ClipboardRemoveItem(1),

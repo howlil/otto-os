@@ -1,4 +1,4 @@
-use otto_core::{BadgeTone, Rect, SettingsPage, settings_background, settings_text};
+use otto_core::{BadgeTone, Rect, Rgba, SettingsPage, settings_background, settings_text};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 
 pub(super) const CARD_RADIUS_POINTS: i32 = 10;
@@ -12,10 +12,6 @@ pub(super) const BADGE_WIDTH_POINTS: i32 = 84;
 pub(super) const DOT_POINTS: i32 = 8;
 pub(super) const KEYCAP_HEIGHT_POINTS: i32 = 22;
 pub(super) const KEYCAP_GAP_POINTS: i32 = 4;
-pub(super) const BAR_WIDTH_POINTS: i32 = 8;
-pub(super) const BAR_GAP_POINTS: i32 = 4;
-pub(super) const BAR_INSET_POINTS: i32 = 14;
-pub(super) const BAR_TRACK_ALPHA: f32 = 0.35;
 pub(super) const HERO_TILE_POINTS: i32 = 76;
 
 pub(super) const fn rgba(hex: u32, alpha: f32) -> D2D1_COLOR_F {
@@ -32,14 +28,20 @@ pub(super) const WHITE: D2D1_COLOR_F = rgba(0xFF_FFFF, 1.0);
 #[derive(Clone, Copy)]
 pub(super) struct Palette {
     pub(super) glass: bool,
-    pub(super) rim: D2D1_COLOR_F,
     pub(super) background: D2D1_COLOR_F,
     pub(super) sidebar: D2D1_COLOR_F,
     pub(super) card: D2D1_COLOR_F,
+    pub(super) surface: D2D1_COLOR_F,
+    pub(super) track: D2D1_COLOR_F,
+    pub(super) segment_active: D2D1_COLOR_F,
+    pub(super) chip: D2D1_COLOR_F,
+    pub(super) bar_total: D2D1_COLOR_F,
+    pub(super) bar_total_stroke: D2D1_COLOR_F,
     pub(super) hairline: D2D1_COLOR_F,
     pub(super) text: D2D1_COLOR_F,
     pub(super) secondary: D2D1_COLOR_F,
     pub(super) accent: D2D1_COLOR_F,
+    pub(super) on_accent: D2D1_COLOR_F,
     pub(super) hover: D2D1_COLOR_F,
     pub(super) switch_on: D2D1_COLOR_F,
     pub(super) switch_off: D2D1_COLOR_F,
@@ -50,62 +52,126 @@ pub(super) struct Palette {
     pub(super) bad: D2D1_COLOR_F,
 }
 
+pub(super) const fn from_rgba(color: Rgba) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: color.a,
+    }
+}
+
 impl Palette {
-    pub(super) const fn pick(dark: bool, glass: bool) -> Self {
-        let base = Self::solid(dark);
-        if !glass {
+    pub(super) const fn pick(
+        dark: bool,
+        glass: bool,
+        high_contrast: bool,
+        accent: Rgba,
+        on_accent: Rgba,
+    ) -> Self {
+        let mut base = Self::solid(dark, high_contrast);
+        if !high_contrast {
+            base.accent = from_rgba(accent);
+            base.on_accent = from_rgba(on_accent);
+        }
+        if !glass || high_contrast {
             return base;
         }
         Self {
             glass: true,
-            rim: if dark {
-                rgba(0xFF_FFFF, 0.22)
-            } else {
-                rgba(0xFF_FFFF, 0.76)
-            },
-            background: rgba(settings_background(dark), 0.24),
+            background: rgba(0, 0.0),
             sidebar: if dark {
-                rgba(0x06_080E, 0.34)
+                rgba(0x00_0000, 0.14)
             } else {
-                rgba(0xFF_FFFF, 0.34)
+                rgba(0x00_0000, 0.03)
             },
             card: if dark {
-                rgba(0x0D_1018, 0.38)
+                rgba(0xFF_FFFF, 0.055)
             } else {
-                rgba(0xFF_FFFF, 0.56)
+                rgba(0xFF_FFFF, 0.72)
             },
-            hairline: if dark {
+            surface: if dark {
+                rgba(0x00_0000, 0.22)
+            } else {
+                rgba(0xFF_FFFF, 0.88)
+            },
+            track: if dark {
+                rgba(0xFF_FFFF, 0.07)
+            } else {
+                rgba(0x00_0000, 0.055)
+            },
+            segment_active: if dark {
                 rgba(0xFF_FFFF, 0.14)
             } else {
-                rgba(0x00_0000, 0.10)
+                rgba(0xFF_FFFF, 0.94)
             },
-            hover: if dark {
-                rgba(0xFF_FFFF, 0.10)
+            chip: if dark {
+                rgba(0xFF_FFFF, 0.08)
             } else {
-                rgba(0x00_0000, 0.06)
+                rgba(0x00_0000, 0.05)
             },
-            keycap: if dark {
+            bar_total: if dark {
                 rgba(0xFF_FFFF, 0.16)
             } else {
-                rgba(0xFF_FFFF, 0.80)
+                rgba(0x00_0000, 0.12)
+            },
+            bar_total_stroke: if dark {
+                rgba(0xFF_FFFF, 0.30)
+            } else {
+                rgba(0x00_0000, 0.26)
+            },
+            hairline: if dark {
+                rgba(0xFF_FFFF, 0.09)
+            } else {
+                rgba(0x00_0000, 0.09)
+            },
+            hover: if dark {
+                rgba(0xFF_FFFF, 0.08)
+            } else {
+                rgba(0x00_0000, 0.05)
+            },
+            keycap: if dark {
+                rgba(0xFF_FFFF, 0.12)
+            } else {
+                rgba(0xFF_FFFF, 0.85)
             },
             ..base
         }
     }
 
-    const fn solid(dark: bool) -> Self {
+    const fn solid(dark: bool, high_contrast: bool) -> Self {
         if dark {
             Self {
                 glass: false,
-                rim: rgba(0, 0.0),
-                background: rgba(settings_background(true), 1.0),
-                sidebar: rgba(0x28_282B, 1.0),
-                card: rgba(0x2C_2C2F, 1.0),
-                hairline: rgba(0xFF_FFFF, 0.09),
-                text: rgba(settings_text(true), 1.0),
-                secondary: rgba(0xA1_A1A6, 1.0),
+                background: rgba(
+                    if high_contrast {
+                        0x00_0000
+                    } else {
+                        settings_background(true)
+                    },
+                    1.0,
+                ),
+                sidebar: rgba(if high_contrast { 0x0A_0A0C } else { 0x26_2629 }, 1.0),
+                card: rgba(if high_contrast { 0x10_1014 } else { 0x2B_2B2E }, 1.0),
+                surface: rgba(if high_contrast { 0x00_0000 } else { 0x20_2023 }, 1.0),
+                track: rgba(if high_contrast { 0x1E_1E24 } else { 0x36_363A }, 1.0),
+                segment_active: rgba(if high_contrast { 0x24_242B } else { 0x3D_3D42 }, 1.0),
+                chip: rgba(if high_contrast { 0x1A_1A20 } else { 0x36_363A }, 1.0),
+                bar_total: rgba(if high_contrast { 0x3E_3E46 } else { 0x48_484E }, 1.0),
+                bar_total_stroke: rgba(if high_contrast { 0xFF_FFFF } else { 0x7A_7A82 }, 1.0),
+                hairline: rgba(0xFF_FFFF, if high_contrast { 0.45 } else { 0.10 }),
+                text: rgba(
+                    if high_contrast {
+                        0xFF_FFFF
+                    } else {
+                        settings_text(true)
+                    },
+                    1.0,
+                ),
+                secondary: rgba(if high_contrast { 0xD8_D8DE } else { 0xA1_A1A6 }, 1.0),
                 accent: rgba(0x0A_84FF, 1.0),
-                hover: rgba(0xFF_FFFF, 0.06),
+                on_accent: WHITE,
+                hover: rgba(0xFF_FFFF, if high_contrast { 0.16 } else { 0.07 }),
                 switch_on: rgba(0x30_D158, 1.0),
                 switch_off: rgba(0x5A_5A5F, 1.0),
                 keycap: rgba(0x3E_3E42, 1.0),
@@ -117,15 +183,35 @@ impl Palette {
         } else {
             Self {
                 glass: false,
-                rim: rgba(0, 0.0),
-                background: rgba(settings_background(false), 1.0),
-                sidebar: rgba(0xE6_E6EB, 1.0),
+                background: rgba(
+                    if high_contrast {
+                        0xFF_FFFF
+                    } else {
+                        settings_background(false)
+                    },
+                    1.0,
+                ),
+                sidebar: rgba(if high_contrast { 0xF4_F4F6 } else { 0xEA_EAEF }, 1.0),
                 card: rgba(0xFF_FFFF, 1.0),
-                hairline: rgba(0x00_0000, 0.10),
-                text: rgba(settings_text(false), 1.0),
-                secondary: rgba(0x6E_6E73, 1.0),
+                surface: rgba(if high_contrast { 0xFF_FFFF } else { 0xF7_F7FA }, 1.0),
+                track: rgba(if high_contrast { 0xE2_E2E8 } else { 0xEB_EBF0 }, 1.0),
+                segment_active: rgba(0xFF_FFFF, 1.0),
+                chip: rgba(if high_contrast { 0xEC_ECF2 } else { 0xEF_EFF4 }, 1.0),
+                bar_total: rgba(if high_contrast { 0xC8_C8D0 } else { 0xD5_D5DC }, 1.0),
+                bar_total_stroke: rgba(if high_contrast { 0x00_0000 } else { 0x8E_8E96 }, 1.0),
+                hairline: rgba(0x00_0000, if high_contrast { 0.45 } else { 0.10 }),
+                text: rgba(
+                    if high_contrast {
+                        0x00_0000
+                    } else {
+                        settings_text(false)
+                    },
+                    1.0,
+                ),
+                secondary: rgba(if high_contrast { 0x26_262A } else { 0x63_6366 }, 1.0),
                 accent: rgba(0x00_7AFF, 1.0),
-                hover: rgba(0x00_0000, 0.05),
+                on_accent: WHITE,
+                hover: rgba(0x00_0000, if high_contrast { 0.10 } else { 0.05 }),
                 switch_on: rgba(0x34_C759, 1.0),
                 switch_off: rgba(0xD1_D1D6, 1.0),
                 keycap: rgba(0xE9_E9EE, 1.0),

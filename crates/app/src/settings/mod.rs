@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+
 use otto_core::{
-    ContentLayout, ModuleRow, OttoSettingsSnapshot, Rect, SettingsContent, SettingsHit,
-    SettingsLayout, SettingsPage, build_content, compute_content_layout, compute_settings_layout,
-    resolve_modules,
+    ContentLayout, FocusAppFilter, FocusPageState, FocusTextField, GeneralPageState, ModuleRow,
+    OttoSettingsSnapshot, SettingsContent, SettingsHit, SettingsLayout, SettingsPage, UpdateState,
+    build_content, compute_content_layout, compute_settings_layout, resolve_modules,
 };
 use otto_platform::{
-    capture_wallpaper_now, settings_client_screen_rect, settings_client_size, settings_window_dpi,
+    collect_focus_catalog_apps, collect_process_audit, current_process_id, extract_app_icon_bitmap,
+    settings_client_size, settings_window_dpi,
 };
 use otto_render::{SettingsPaintState, SettingsRenderer};
 use windows::Win32::Foundation::HWND;
@@ -18,10 +21,19 @@ mod lifecycle;
 mod state;
 
 pub(crate) use self::input::handle_message;
-pub(crate) use self::lifecycle::{open, repaint, repaint_if_focus_page, take_hwnd, toggle};
+pub(crate) use self::lifecycle::{
+    open, open_focus_activity, refresh_appearance, refresh_process_audit_if_general, repaint,
+    repaint_if_focus_page, take_hwnd, toggle,
+};
 pub(crate) use self::state::settings_snapshot;
 #[cfg(test)]
 pub(crate) use self::state::toggle_setting;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CatalogLoadState {
+    Unloaded,
+    Loaded,
+}
 
 pub(crate) struct SettingsWindow {
     pub(super) hwnd: isize,
@@ -35,8 +47,13 @@ pub(crate) struct SettingsWindow {
     pub(super) dpi: u32,
     pub(super) launch_at_login: bool,
     pub(super) glass: bool,
-    pub(super) backdrop_rect: Option<Rect>,
-    pub(super) update_status: Option<String>,
+    pub(super) update_state: UpdateState,
+    pub(super) focus_state: FocusPageState,
+    pub(super) focus_catalog: CatalogLoadState,
+    pub(super) general_state: GeneralPageState,
+    pub(super) audit_loaded: CatalogLoadState,
+    pub(super) icons_attempted: HashSet<String>,
+    pub(super) pending_high_surrogate: Option<u16>,
     pub(super) tracking_leave: bool,
     pub(super) renderer: Option<SettingsRenderer>,
 }
@@ -57,34 +74,74 @@ impl SettingsWindow {
             dpi,
             launch_at_login: false,
             glass: false,
-            backdrop_rect: None,
-            update_status: None,
+            update_state: UpdateState::Idle,
+            focus_state: FocusPageState::default(),
+            focus_catalog: CatalogLoadState::Unloaded,
+            general_state: GeneralPageState::default(),
+            audit_loaded: CatalogLoadState::Unloaded,
+            icons_attempted: HashSet::new(),
+            pending_high_surrogate: None,
             tracking_leave: false,
             renderer: None,
         }
     }
 
-    pub(super) fn sync_backdrop(&mut self) {
-        if !self.glass {
-            self.backdrop_rect = None;
+    pub(super) fn ensure_focus_catalog(&mut self, has_recent_activity: bool) {
+        if self.focus_catalog == CatalogLoadState::Loaded {
             return;
         }
-        let Some(renderer) = self.renderer.as_ref() else {
-            return;
-        };
-        let Some(rect) = settings_client_screen_rect(self.hwnd) else {
-            return;
-        };
-        if renderer.has_backdrop() && self.backdrop_rect == Some(rect) {
+        self.focus_state.catalog = collect_focus_catalog_apps();
+        self.focus_catalog = CatalogLoadState::Loaded;
+        if !has_recent_activity && self.focus_state.app_filter == FocusAppFilter::Recent {
+            self.focus_state.app_filter = FocusAppFilter::AllApps;
+        }
+    }
+
+    pub(super) fn refresh_process_audit(&mut self) {
+        self.general_state.audit = collect_process_audit(current_process_id());
+        self.audit_loaded = CatalogLoadState::Loaded;
+    }
+
+    pub(super) fn ensure_process_audit(&mut self) {
+        if self.audit_loaded != CatalogLoadState::Loaded {
+            self.refresh_process_audit();
+        }
+    }
+
+    pub(super) fn sync_visible_app_icons(&mut self) {
+        if !matches!(self.page, SettingsPage::Focus | SettingsPage::General) {
             return;
         }
-        if let Some(pixels) = capture_wallpaper_now(
-            (rect.x, rect.y),
-            rect.width.max(1) as u32,
-            rect.height.max(1) as u32,
-        ) {
-            renderer.set_backdrop(pixels, (0, 0));
-            self.backdrop_rect = Some(rect);
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        let viewport = self.layout.viewport;
+        let mut visible_keys: HashSet<String> = HashSet::new();
+        let mut pending: Vec<(String, Option<String>)> = Vec::new();
+        for (section, card) in self.content.sections.iter().zip(&self.blocks.cards) {
+            for (row, rect) in section.rows.iter().zip(&card.rows) {
+                if rect.bottom() < viewport.y || rect.y > viewport.bottom() {
+                    continue;
+                }
+                let Some(icon_key) = row.app_icon.as_deref() else {
+                    continue;
+                };
+                visible_keys.insert(icon_key.to_owned());
+                if !renderer.has_app_icon(icon_key)
+                    && self.icons_attempted.insert(icon_key.to_owned())
+                {
+                    pending.push((icon_key.to_owned(), row.detail_hint.clone()));
+                }
+            }
+        }
+        let visible_refs: HashSet<&str> = visible_keys.iter().map(String::as_str).collect();
+        renderer.retain_app_icons(&visible_refs);
+        self.icons_attempted
+            .retain(|key| visible_refs.contains(key.as_str()));
+        for (icon_key, detail) in pending {
+            if let Some(icon) = extract_app_icon_bitmap(&icon_key, detail.as_deref()) {
+                let _ = renderer.set_app_icon(icon_key, icon.width, icon.height, &icon.pixels);
+            }
         }
     }
 
@@ -110,6 +167,13 @@ impl SettingsWindow {
         self.scroll = 0;
         self.hovered = None;
         self.pressed = None;
+        self.focus_state.focused_field = FocusTextField::None;
+        self.focus_state.website_error = None;
+        self.general_state.status_note = None;
+        if page == SettingsPage::General {
+            self.audit_loaded = CatalogLoadState::Unloaded;
+        }
+        self.pending_high_surrogate = None;
     }
 
     pub(super) fn hit(&self, x: i32, y: i32) -> Option<SettingsHit> {
@@ -139,14 +203,41 @@ pub(super) fn refresh_model(runtime: &RuntimeContext) {
     else {
         return;
     };
-    let (modules, snapshot) = modules_for(runtime, launch);
-    let update_status = with_window(runtime, |window| window.update_status.clone()).flatten();
+    let (modules, mut snapshot) = modules_for(runtime, launch);
+    let session = if page == SettingsPage::Focus {
+        crate::bar::focus_session_status(runtime)
+    } else {
+        otto_core::FocusSessionStatus::NotRunning
+    };
+    let has_recent = !snapshot.focus_activity.today.apps.is_empty()
+        || snapshot
+            .focus_activity
+            .history
+            .iter()
+            .any(|day| !day.apps.is_empty());
+    let Some((update_state, focus_state, general_state)) = with_window(runtime, |window| {
+        if page == SettingsPage::Focus {
+            window.ensure_focus_catalog(has_recent);
+            window.focus_state.session = session;
+        } else if page == SettingsPage::General {
+            window.ensure_process_audit();
+        }
+        (
+            window.update_state.clone(),
+            window.focus_state.clone(),
+            window.general_state.clone(),
+        )
+    }) else {
+        return;
+    };
+    snapshot.process_audit = general_state;
     let content = build_content(
         &snapshot,
         page,
         &modules,
         env!("CARGO_PKG_VERSION"),
-        update_status.as_deref(),
+        &update_state,
+        &focus_state,
     );
     with_window(runtime, |window| {
         window.content = content;
@@ -159,9 +250,11 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
         if window.renderer.is_none() {
             let (width, height) = settings_client_size(hwnd);
             window.renderer = SettingsRenderer::new(hwnd, width, height, window.dpi).ok();
-            window.backdrop_rect = None;
+            window.icons_attempted.clear();
         }
-        window.sync_backdrop();
+        window.sync_visible_app_icons();
+        let app = crate::theme_state::appearance(runtime);
+        let accent = app.resolved_accent();
         let drawn = window.renderer.as_mut().map(|renderer| {
             renderer.draw(&SettingsPaintState {
                 layout: &window.layout,
@@ -170,12 +263,16 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
                 page: window.page,
                 scroll: window.scroll,
                 hovered: window.hovered,
-                dark: otto_platform::is_system_in_dark_mode(),
+                dark: app.content_theme().is_dark(),
                 glass: window.glass,
+                high_contrast: app.contrast.is_some(),
+                accent: accent.fill,
+                on_accent: accent.on_accent,
             })
         });
         if !matches!(drawn, Some(Ok(()))) {
             window.renderer = None;
+            window.icons_attempted.clear();
         }
     });
     unsafe {

@@ -1,4 +1,5 @@
 use crate::layout::{HitTarget, Layout};
+use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::media::NotchExpandedTab;
 use crate::notch::pomodoro::FocusSubMode;
 
@@ -69,6 +70,7 @@ impl Layout {
                 .filter(|target| self.notch_control_rect(*target).is_some())
                 .filter(|target| match target {
                     HitTarget::NotchTabPomodoro
+                    | HitTarget::NotchTabStats
                     | HitTarget::NotchTabShelf
                     | HitTarget::NotchTabClipboard
                     | HitTarget::PomodoroExtendFive
@@ -80,6 +82,9 @@ impl Layout {
                     | HitTarget::PomodoroReset
                     | HitTarget::PomodoroPlayPause
                     | HitTarget::PomodoroSkip => self.active_tab == NotchExpandedTab::Pomodoro,
+                    HitTarget::FocusStatsRange(_)
+                    | HitTarget::FocusStatsOpenSettings
+                    | HitTarget::FocusStatsDay(_) => self.active_tab == NotchExpandedTab::Stats,
                     HitTarget::ShelfPager
                     | HitTarget::ShelfAdd
                     | HitTarget::ShelfClear
@@ -107,8 +112,9 @@ impl Layout {
     }
 }
 
-const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 73] = [
+const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 84] = [
     HitTarget::NotchTabPomodoro,
+    HitTarget::NotchTabStats,
     HitTarget::NotchTabShelf,
     HitTarget::NotchTabClipboard,
     HitTarget::NotchTabMedia,
@@ -122,6 +128,16 @@ const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 73] = [
     HitTarget::PomodoroReset,
     HitTarget::PomodoroPlayPause,
     HitTarget::PomodoroSkip,
+    HitTarget::FocusStatsRange(FocusStatsRange::Today),
+    HitTarget::FocusStatsRange(FocusStatsRange::Week),
+    HitTarget::FocusStatsOpenSettings,
+    HitTarget::FocusStatsDay(0),
+    HitTarget::FocusStatsDay(1),
+    HitTarget::FocusStatsDay(2),
+    HitTarget::FocusStatsDay(3),
+    HitTarget::FocusStatsDay(4),
+    HitTarget::FocusStatsDay(5),
+    HitTarget::FocusStatsDay(6),
     HitTarget::PomodoroExtendFive,
     HitTarget::PomodoroStartNext,
     HitTarget::PrivacyMicMute,
@@ -369,9 +385,10 @@ mod tests {
         let media = open_media_layout(true);
         let targets = media.keyboard_targets_with_media(true);
         assert_eq!(
-            &targets[targets.len() - 9..],
+            &targets[targets.len() - 10..],
             &[
                 HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabStats,
                 HitTarget::NotchTabShelf,
                 HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
@@ -386,6 +403,7 @@ mod tests {
         assert!(!without_media.contains(&HitTarget::MediaPlayPause));
         assert!(!without_media.contains(&HitTarget::NotchTabMedia));
         assert!(without_media.contains(&HitTarget::NotchTabPomodoro));
+        assert!(without_media.contains(&HitTarget::NotchTabStats));
         assert!(without_media.contains(&HitTarget::NotchTabShelf));
         assert!(without_media.contains(&HitTarget::NotchTabClipboard));
 
@@ -426,10 +444,11 @@ mod tests {
         assert_eq!(
             notch_tail(
                 &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Setup),
-                12
+                13
             ),
             [
                 HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabStats,
                 HitTarget::NotchTabShelf,
                 HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
@@ -446,10 +465,11 @@ mod tests {
         assert_eq!(
             notch_tail(
                 &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Running),
-                10
+                11
             ),
             [
                 HitTarget::NotchTabPomodoro,
+                HitTarget::NotchTabStats,
                 HitTarget::NotchTabShelf,
                 HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
@@ -468,6 +488,43 @@ mod tests {
             ),
             [HitTarget::PomodoroExtendFive, HitTarget::PomodoroStartNext]
         );
+    }
+
+    #[test]
+    fn focus_stats_tab_controls_join_keyboard_order_only_on_the_stats_tab() {
+        let week_open = compute_layout_with_notch(
+            &Metrics::MACBOOK_PRO_14,
+            1920,
+            96,
+            "Finder",
+            NotchLayoutInput {
+                panel_expansion: 1.0,
+                pomodoro_surface: PomodoroSurface::Setup,
+                active_tab: NotchExpandedTab::Stats,
+                stats_progress: 1.0,
+                stats_range: crate::notch::focus_stats_view::FocusStatsRange::Week,
+                ..NotchLayoutInput::default()
+            },
+        );
+        let targets = week_open.keyboard_targets_with_media(false);
+        assert!(targets.contains(&HitTarget::NotchTabStats));
+        assert!(targets.contains(&HitTarget::FocusStatsRange(
+            crate::notch::focus_stats_view::FocusStatsRange::Today
+        )));
+        assert!(targets.contains(&HitTarget::FocusStatsRange(
+            crate::notch::focus_stats_view::FocusStatsRange::Week
+        )));
+        assert!(targets.contains(&HitTarget::FocusStatsOpenSettings));
+        for day in 0..7 {
+            assert!(targets.contains(&HitTarget::FocusStatsDay(day)));
+        }
+        assert!(!targets.contains(&HitTarget::PomodoroPlayPause));
+
+        let pomodoro_targets = open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Setup)
+            .keyboard_targets_with_media(false);
+        assert!(pomodoro_targets.contains(&HitTarget::NotchTabStats));
+        assert!(!pomodoro_targets.contains(&HitTarget::FocusStatsOpenSettings));
+        assert!(!pomodoro_targets.contains(&HitTarget::FocusStatsDay(0)));
     }
 
     #[test]

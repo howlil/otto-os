@@ -39,7 +39,10 @@ pub use backdrop::{
     BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, capture_wallpaper_now,
     exclude_from_capture, include_in_capture, is_surface_visible, release_backdrop_capture_cache,
 };
-pub use background_cleanup::set_background_cleanup;
+pub use background_cleanup::{
+    collect_process_audit, set_background_cleanup, shutdown_background_cleanup,
+    terminate_process_group, toggle_process_group_throttle,
+};
 pub use bar::audio::{
     set_system_mute, set_system_volume, shutdown_audio_task, step_system_volume,
     stop_idle_audio_task, toggle_system_mute,
@@ -55,18 +58,18 @@ pub use bar::status::{
 pub use bar::tray_icon::{TrayIcon, TrayIconEvent, WM_APP_TRAY_ICON, classify_tray_icon_message};
 pub use capture::release_capture_if_owned;
 pub use com::{ComGuard, OleGuard};
-pub use control_center::{WindowsControlCenter, shutdown_update_check_task};
+pub use control_center::{WindowsControlCenter, cleanup_stale_updates, shutdown_update_check_task};
 pub use diagnostics::{log_error, log_info, logs_dir, open_logs_folder};
 pub use dock::trash::{
     empty_recycle_bin, is_recycle_bin_full, resume_recycle_bin_task, shutdown_recycle_bin_task,
 };
 pub use dock::{
     PinnedApp, WindowsDockPort, build_dock_context_menu_rows, collect_dock_entries,
-    collect_dock_entries_with_options, enable_drag_accept_files, extract_dock_icon,
-    extract_dropped_files, extract_window_icon, focus_window_hwnd, launch_new_instance,
-    open_file_with_dock_entry, overflow_dock_entry, read_downloads_active_progress,
-    read_downloads_stack_items, read_downloads_stack_thumbnails, remove_pinned_app,
-    reorder_pinned_apps, toggle_pin_entry,
+    collect_dock_entries_with_options, enable_drag_accept_files, extract_app_icon_bitmap,
+    extract_dock_icon, extract_dropped_files, extract_window_icon, focus_window_hwnd,
+    launch_new_instance, open_file_with_dock_entry, overflow_dock_entry,
+    read_downloads_active_progress, read_downloads_stack_items, read_downloads_stack_thumbnails,
+    remove_pinned_app, reorder_pinned_apps, toggle_pin_entry,
 };
 pub use file::{DATA_DIR_OVERRIDE, data_dir, replace_file_atomically};
 pub use idle_wake::{
@@ -126,10 +129,9 @@ pub use settings_window::{
     apply_settings_chrome, apply_settings_min_track, create_settings_window,
     destroy_settings_window, hide_settings_window, invalidate_settings_window,
     is_settings_window_foreground, is_settings_window_visible, present_settings_window,
-    settings_client_screen_rect, settings_client_size, settings_glass_available,
-    settings_window_dpi, suggested_dpi_rect,
+    settings_client_size, settings_glass_available, settings_window_dpi, suggested_dpi_rect,
 };
-pub use spotlight::collect_spotlight_apps;
+pub use spotlight::{collect_focus_catalog_apps, collect_spotlight_apps};
 pub use startup::{read_launch_at_login, set_launch_at_login};
 pub use theme::{
     PowerNotificationGuard, is_battery_saver_active, is_high_contrast_active,
@@ -179,7 +181,7 @@ pub fn resume_background_tasks() {
 }
 
 pub fn shutdown_background_tasks() {
-    background_cleanup::set_background_cleanup(false);
+    background_cleanup::shutdown_background_cleanup();
     backdrop::release_backdrop_capture_cache();
     notch::focus_activity::shutdown_focus_uia_task();
     notch::media::shutdown_media_task();

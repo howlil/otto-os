@@ -485,7 +485,15 @@ pub struct SettingsLayout {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsHit {
     Page(SettingsPage),
-    Row { section: usize, row: usize },
+    Row {
+        section: usize,
+        row: usize,
+    },
+    Part {
+        section: usize,
+        row: usize,
+        part: usize,
+    },
     Content,
 }
 
@@ -599,10 +607,13 @@ impl SettingsLayout {
         if let Some(slot) = self.pages.iter().find(|slot| slot.rect.contains(x, y)) {
             return Some(SettingsHit::Page(slot.page));
         }
-        if self.viewport.contains(x, y)
-            && let Some((section, row)) = content.row_at(x, y)
-        {
-            return Some(SettingsHit::Row { section, row });
+        if self.viewport.contains(x, y) {
+            if let Some((section, row, part)) = content.part_at(x, y) {
+                return Some(SettingsHit::Part { section, row, part });
+            }
+            if let Some((section, row)) = content.row_at(x, y) {
+                return Some(SettingsHit::Row { section, row });
+            }
         }
         self.content.contains(x, y).then_some(SettingsHit::Content)
     }

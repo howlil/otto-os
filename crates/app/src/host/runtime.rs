@@ -5,7 +5,8 @@ use windows::core::{Error, Result};
 
 use crate::{bar, control_center, dock, genie, menu, settings_window, spotlight, window_controls};
 use otto_core::{
-    AppPreferences, BrandIcon, DockPreferences, MenuBarPreferences, NotchStyle, SystemAppearance,
+    AppPreferences, AppearancePreferences, BrandIcon, DockPreferences, MenuBarPreferences,
+    NotchStyle, SystemAppearance,
 };
 
 use super::plugins::PluginId;
@@ -81,6 +82,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) dock_hwnd: Cell<isize>,
     pub(crate) window_controls_hwnd: Cell<isize>,
     pub(crate) system_appearance: Cell<SystemAppearance>,
+    pub(crate) appearance_preferences: Cell<AppearancePreferences>,
     pub(crate) blur_supported: Cell<bool>,
     pub(crate) glass_enabled: Cell<bool>,
     pub(crate) online_lyrics_enabled: Cell<bool>,
@@ -123,6 +125,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) pending_menu_bar: Cell<Option<MenuBarPreferences>>,
     pub(crate) pending_quick_capture: Cell<Option<bool>>,
     pub(crate) pending_onboarding_seen: Cell<Option<bool>>,
+    pub(crate) pending_appearance: Cell<Option<AppearancePreferences>>,
     pub(crate) pending_end_session: Cell<bool>,
     pub(crate) pending_modal_action: RefCell<Option<bar::DeferredModalAction>>,
     pub(crate) pending_destroy_hwnds: RefCell<Vec<isize>>,
@@ -145,6 +148,7 @@ impl RuntimeContext {
             dock_hwnd: Cell::new(0),
             window_controls_hwnd: Cell::new(0),
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
+            appearance_preferences: Cell::new(AppearancePreferences::default()),
             blur_supported: Cell::new(false),
             glass_enabled: Cell::new(false),
             online_lyrics_enabled: Cell::new(online_lyrics_enabled),
@@ -187,6 +191,7 @@ impl RuntimeContext {
             pending_menu_bar: Cell::new(None),
             pending_quick_capture: Cell::new(None),
             pending_onboarding_seen: Cell::new(None),
+            pending_appearance: Cell::new(None),
             pending_end_session: Cell::new(false),
             pending_modal_action: RefCell::new(None),
             pending_destroy_hwnds: RefCell::new(Vec::new()),
@@ -261,5 +266,6 @@ impl RuntimeContext {
         self.menu_bar.set(preferences.menu_bar);
         self.quick_capture_enabled.set(preferences.quick_capture);
         self.onboarding_seen.set(preferences.onboarding_seen);
+        self.appearance_preferences.set(preferences.appearance);
     }
 }

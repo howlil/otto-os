@@ -280,6 +280,75 @@ fn update_status_reports_newer_matching_unreleased_and_errors() {
 }
 
 #[test]
+fn release_update_parser_extracts_verified_assets_and_rejects_untrusted_urls() {
+    let json = r#"{
+        "html_url": "https://github.com/howlil/otto-os/releases/tag/v1.2.1",
+        "assets": [
+            {
+                "name": "otto-os-1.2.1-windows-x64.zip",
+                "uploader": { "name": "bot", "browser_download_url": "https://evil.example/a.exe" },
+                "browser_download_url": "https://github.com/howlil/otto-os/releases/download/v1.2.1/otto-os-1.2.1-windows-x64.zip"
+            },
+            {
+                "name": "otto-os-setup-1.2.1-x64.exe",
+                "uploader": { "login": "github-actions" },
+                "browser_download_url": "https://github.com/howlil/otto-os/releases/download/v1.2.1/otto-os-setup-1.2.1-x64.exe"
+            },
+            {
+                "name": "SHA256SUMS.txt",
+                "browser_download_url": "https://github.com/howlil/otto-os/releases/download/v1.2.1/SHA256SUMS.txt"
+            }
+        ],
+        "tag_name": "v1.2.1"
+    }"#;
+    let parsed = parse_release_update("1.2.0", 200, Some(json));
+    let UpdateState::Available(info) = parsed else {
+        panic!("expected Available, got {parsed:?}");
+    };
+    assert_eq!(info.version, "1.2.1");
+    assert_eq!(info.tag, "v1.2.1");
+    assert_eq!(info.installer_name, "otto-os-setup-1.2.1-x64.exe");
+    assert!(info.can_auto_install());
+    assert_eq!(
+        info.release_url,
+        "https://github.com/howlil/otto-os/releases/tag/v1.2.1"
+    );
+
+    let untrusted = r#"{
+        "tag_name": "v1.2.1",
+        "html_url": "https://evil.example/phish",
+        "assets": [
+            {
+                "name": "otto-os-setup-1.2.1-x64.exe",
+                "browser_download_url": "https://evil.example/otto-os-setup-1.2.1-x64.exe"
+            },
+            {
+                "name": "SHA256SUMS.txt",
+                "browser_download_url": "https://github.com/howlil/otto-os/releases/download/v1.2.1/SHA256SUMS.txt"
+            }
+        ]
+    }"#;
+    let UpdateState::Available(blocked) = parse_release_update("1.2.0", 200, Some(untrusted))
+    else {
+        panic!("expected Available");
+    };
+    assert!(!blocked.can_auto_install());
+    assert_eq!(
+        blocked.release_url,
+        "https://github.com/howlil/otto-os/releases"
+    );
+    assert!(!is_allowed_release_asset_url(
+        "https://github.com/howlil/otto-os/releases/download/../evil/otto-os-setup-1.2.1-x64.exe",
+        "../evil",
+        "otto-os-setup-1.2.1-x64.exe"
+    ));
+    assert_eq!(
+        expected_installer_asset_name("v1.2.1-beta.2").as_deref(),
+        Some("otto-os-setup-1.2.1-x64.exe")
+    );
+}
+
+#[test]
 fn focus_targets_respect_page_and_capabilities() {
     let mut snap = ControlCenterSnapshot::default();
     let layout = compute_control_center_layout_for_snapshot(

@@ -1,3 +1,5 @@
+use crate::appearance::material::SystemAppearance;
+use crate::appearance::theme::AppearancePreferences;
 use crate::bar::menu_bar::{BarHideMode, BarItem, MenuBarPreferences};
 use crate::dock::layout::{DOCK_ICON_LARGE, DOCK_ICON_SMALL, DockPreferences};
 
@@ -298,6 +300,9 @@ pub struct OttoSettingsSnapshot {
     pub system: SystemSettingsState,
     pub menu_bar: MenuBarPreferences,
     pub focus_activity: crate::FocusActivityState,
+    pub process_audit: crate::GeneralPageState,
+    pub appearance: AppearancePreferences,
+    pub system_appearance: SystemAppearance,
 }
 
 impl OttoSettingsSnapshot {

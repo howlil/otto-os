@@ -1,4 +1,5 @@
 pub(crate) mod clipboard;
+pub(crate) mod focus_stats;
 pub(crate) mod glow;
 pub(crate) mod hud;
 pub(crate) mod lyrics;

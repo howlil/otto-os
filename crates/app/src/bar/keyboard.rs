@@ -151,8 +151,23 @@ impl Bar {
             return None;
         }
         match self.focus.handle(key, &targets) {
-            BarFocusOutcome::Moved(_) => self.present(runtime),
-            BarFocusOutcome::Exited => self.leave_keyboard_focus(runtime),
+            BarFocusOutcome::Moved(target) => {
+                if matches!(
+                    target,
+                    HitTarget::NotificationCard | HitTarget::NotificationClose
+                ) {
+                    self.notch
+                        .hold_notification_focus(std::time::Instant::now());
+                }
+                self.present(runtime);
+            }
+            BarFocusOutcome::Exited => {
+                let update = self.notch.handle_notification_escape();
+                if update.changed {
+                    self.apply_notch_update(runtime, update);
+                }
+                self.leave_keyboard_focus(runtime);
+            }
             BarFocusOutcome::Unchanged | BarFocusOutcome::Activate(HitTarget::MediaSeekbar) => {}
             BarFocusOutcome::Activate(target) if is_notch_target(target) => {
                 let was_collapsed = self.layout.panel_expansion <= 0.55;

@@ -299,7 +299,7 @@ impl SpotlightRenderer {
         }
         let pill_brush = self
             .brushes
-            .color_brush(with_opacity(palette.text_primary, opacity));
+            .color_brush(with_opacity(palette.on_accent, opacity));
         self.draw_text(&self.label_format, &pill_text, &pill_rect, &pill_brush);
         (pill_left - scale(10, self.dpi) as f32).max(text_rect.left)
     }
@@ -365,7 +365,7 @@ impl SpotlightRenderer {
                 .FillRoundedRectangle(&shape, &self.brushes.color_brush(fill));
         }
         let text_color = if active {
-            palette.text_primary
+            palette.on_accent
         } else {
             palette.text_muted
         };
@@ -396,7 +396,7 @@ impl SpotlightRenderer {
                 .FillRoundedRectangle(&shape, &self.brushes.color_brush(fill));
         }
         let text_color = if active {
-            palette.text_primary
+            palette.on_accent
         } else {
             palette.text_muted
         };
