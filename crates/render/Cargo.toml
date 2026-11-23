@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-windows-numerics = "0.3"
+windows-numerics = "0.100"
 otto-core.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
