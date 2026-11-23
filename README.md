@@ -34,7 +34,7 @@
 
 The [official Otto OS website](https://otto-os-landing.pages.dev) includes interactive demonstrations of the Dynamic Island, top bar, Dock/Genie motion, Focus, Spotlight, and appearance settings.
 
-> **Product visuals:** Actual Windows desktop screenshots and recordings are being prepared. The [media capture guide](docs/media/README.md) describes the required shots and safe capture settings. We do not substitute concept renders for real application screenshots.
+> **Product visuals:** No real Windows desktop screenshots or recordings are checked into this repository yet. The [media capture guide](docs/media/README.md) describes the required shots and safe capture settings. We do not substitute concept renders for real application screenshots.
 
 ## Why Otto OS?
 
