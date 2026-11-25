@@ -1,10 +1,10 @@
 {
   "version": 1,
   "repository": "howlil/otto-os",
-  "updatedAt": "2026-11-24T14:58:27.821Z",
+  "updatedAt": "2026-11-25T14:34:07.724Z",
   "backfilledAt": "",
   "totals": {
-    "downloads": 186,
+    "downloads": 199,
     "clones": 0
   },
   "assets": {
@@ -200,8 +200,8 @@
     "783371311": {
       "name": "otto-os-1.3.1-windows-x64.zip",
       "release": "v1.3.1",
-      "lastSeen": 4,
-      "maximumSeen": 4,
+      "lastSeen": 5,
+      "maximumSeen": 5,
       "active": true
     },
     "783371313": {
@@ -214,8 +214,8 @@
     "783371321": {
       "name": "otto-os-setup-1.3.1-x64.exe",
       "release": "v1.3.1",
-      "lastSeen": 105,
-      "maximumSeen": 105,
+      "lastSeen": 117,
+      "maximumSeen": 117,
       "active": true
     }
   },
@@ -234,6 +234,12 @@
       "stars": 1,
       "forks": 1,
       "downloads": 186
+    },
+    {
+      "date": "2026-11-25",
+      "stars": 1,
+      "forks": 1,
+      "downloads": 199
     }
   ]
 }
