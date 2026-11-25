@@ -176,20 +176,25 @@ pub fn is_recycle_bin_full() -> bool {
 }
 
 pub fn empty_recycle_bin() {
+    let _ = try_empty_recycle_bin();
+}
+
+#[must_use]
+pub(crate) fn try_empty_recycle_bin() -> bool {
     if SHUTTING_DOWN.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     invalidate_cache();
     let Ok(mut task) = TRASH_TASK.lock() else {
-        return;
+        return false;
     };
     if SHUTTING_DOWN.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     if let Some(handle) = task.take() {
         if !handle.is_finished() {
             *task = Some(handle);
-            return;
+            return false;
         }
         let _ = handle.join();
     }
@@ -209,6 +214,9 @@ pub fn empty_recycle_bin() {
         })
     {
         *task = Some(handle);
+        true
+    } else {
+        false
     }
 }
 

@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use otto_core::{
     ENTRY_FLAG_HIDDEN, ENTRY_FLAG_READ_ONLY, ENTRY_FLAG_SYMLINK, FinderEntry, FinderEntryKind,
-    FinderListing, FinderLocation, FinderPreviewData, FinderPreviewKind, FinderSidebarIcon,
-    FinderSidebarItem, FinderSidebarSection, FinderTag, classify_entry_kind, format_file_size,
-    format_tag_mask, format_unix_timestamp, is_text_preview_extension, parse_tag_mask,
-    path_display_name,
+    FinderListing, FinderListingStatus, FinderLocation, FinderPreviewData, FinderPreviewKind,
+    FinderSidebarIcon, FinderSidebarItem, FinderSidebarSection, FinderTag, classify_entry_kind,
+    format_file_size, format_tag_mask, format_unix_timestamp, is_text_preview_extension,
+    parse_tag_mask, path_display_name,
 };
 
 use crate::file::{data_dir, replace_file_atomically};
@@ -155,35 +155,80 @@ pub(super) fn entry_from_path(path: &Path) -> Option<FinderEntry> {
 }
 
 #[must_use]
-pub(super) fn list_directory(dir: &Path, recursive_query: Option<&str>) -> Vec<FinderEntry> {
+pub(super) fn list_directory(
+    dir: &Path,
+    recursive_query: Option<&str>,
+) -> (Vec<FinderEntry>, FinderListingStatus) {
     if let Some(query) = recursive_query {
         let needle = query.trim().to_ascii_lowercase();
         if !needle.is_empty() {
             let mut results = Vec::new();
-            search_recursive(dir, &needle, 0, &mut results);
-            return results;
+            let mut skipped = 0usize;
+            search_recursive(dir, &needle, 0, &mut results, &mut skipped);
+            let status = if skipped > 0 {
+                FinderListingStatus::Partial {
+                    skipped_entries: skipped,
+                }
+            } else {
+                FinderListingStatus::Ok
+            };
+            return (results, status);
         }
     }
-    let Ok(read) = fs::read_dir(dir) else {
-        return Vec::new();
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(err) => {
+            let status = match err.kind() {
+                std::io::ErrorKind::NotFound => FinderListingStatus::NotFound,
+                std::io::ErrorKind::PermissionDenied => FinderListingStatus::AccessDenied,
+                _ => FinderListingStatus::Unavailable,
+            };
+            return (Vec::new(), status);
+        }
     };
     let mut entries = Vec::new();
-    for item in read.flatten() {
-        if let Some(entry) = entry_from_path(&item.path()) {
-            entries.push(entry);
+    let mut skipped = 0usize;
+    for item in read {
+        match item {
+            Ok(item) => {
+                if let Some(entry) = entry_from_path(&item.path()) {
+                    entries.push(entry);
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(_) => skipped += 1,
         }
     }
-    entries
+    let status = if skipped > 0 {
+        FinderListingStatus::Partial {
+            skipped_entries: skipped,
+        }
+    } else {
+        FinderListingStatus::Ok
+    };
+    (entries, status)
 }
 
-fn search_recursive(dir: &Path, needle: &str, depth: usize, out: &mut Vec<FinderEntry>) {
+fn search_recursive(
+    dir: &Path,
+    needle: &str,
+    depth: usize,
+    out: &mut Vec<FinderEntry>,
+    skipped: &mut usize,
+) {
     if depth > MAX_RECURSIVE_DEPTH || out.len() >= MAX_RECURSIVE_RESULTS {
         return;
     }
     let Ok(read) = fs::read_dir(dir) else {
+        *skipped += 1;
         return;
     };
-    for item in read.flatten() {
+    for item in read {
+        let Ok(item) = item else {
+            *skipped += 1;
+            continue;
+        };
         if out.len() >= MAX_RECURSIVE_RESULTS {
             break;
         }
@@ -202,7 +247,7 @@ fn search_recursive(dir: &Path, needle: &str, depth: usize, out: &mut Vec<Finder
             && !name.eq_ignore_ascii_case("target")
             && !name.eq_ignore_ascii_case(".git")
         {
-            search_recursive(&path, needle, depth + 1, out);
+            search_recursive(&path, needle, depth + 1, out, skipped);
         }
     }
 }
@@ -231,115 +276,6 @@ pub(super) fn list_recents() -> Vec<FinderEntry> {
 }
 
 #[must_use]
-pub(super) fn list_trash_entries(drive_roots: &[String]) -> Vec<FinderEntry> {
-    let mut out = Vec::new();
-    for root in drive_roots {
-        let bin = Path::new(root).join("$Recycle.Bin");
-        let Ok(owners) = fs::read_dir(&bin) else {
-            continue;
-        };
-        for owner in owners.flatten() {
-            let owner_dir = owner.path();
-            let Ok(files) = fs::read_dir(&owner_dir) else {
-                continue;
-            };
-            for file in files.flatten() {
-                let name = file.file_name().to_string_lossy().into_owned();
-                if let Some(suffix) = name.strip_prefix("$I")
-                    && let Some(entry) = parse_recycle_metadata(&owner_dir, &file.path(), suffix)
-                {
-                    out.push(entry);
-                }
-            }
-        }
-    }
-    out.sort_by_key(|entry| std::cmp::Reverse(entry.modified_unix));
-    out
-}
-
-fn parse_recycle_metadata(owner_dir: &Path, info_path: &Path, suffix: &str) -> Option<FinderEntry> {
-    let data = fs::read(info_path).ok()?;
-    if data.len() < 28 {
-        return None;
-    }
-    let version = u64::from_le_bytes(data.get(0..8)?.try_into().ok()?);
-    let size_bytes = u64::from_le_bytes(data.get(8..16)?.try_into().ok()?);
-    let deleted_ft = u64::from_le_bytes(data.get(16..24)?.try_into().ok()?);
-    let utf16_offset = if version >= 2 { 28 } else { 24 };
-    let raw_bytes = data.get(utf16_offset..)?;
-    let mut u16s = Vec::with_capacity(raw_bytes.len() / 2);
-    for chunk in raw_bytes.chunks_exact(2) {
-        let code = u16::from_le_bytes([chunk[0], chunk[1]]);
-        if code == 0 {
-            break;
-        }
-        u16s.push(code);
-    }
-    let original_path = String::from_utf16_lossy(&u16s);
-    if original_path.is_empty() {
-        return None;
-    }
-    let payload_path = owner_dir.join(format!("$R{suffix}"));
-    if !payload_path.exists() {
-        return None;
-    }
-    let is_dir = payload_path.is_dir();
-    let display_name = path_display_name(&original_path);
-    let (kind, kind_label) = classify_entry_kind(&display_name, is_dir);
-    let modified_unix = filetime_to_unix_secs(deleted_ft);
-    Some(FinderEntry {
-        path: payload_path.to_string_lossy().into_owned(),
-        name: display_name,
-        kind,
-        kind_label: String::from(kind_label),
-        size_bytes,
-        modified_unix,
-        created_unix: modified_unix,
-        modified_label: format_unix_timestamp(modified_unix),
-        created_label: format_unix_timestamp(modified_unix),
-        flags: 0,
-        tag_mask: 0,
-        drive_free_bytes: None,
-        drive_total_bytes: None,
-        trash_origin: Some(original_path),
-    })
-}
-
-#[must_use]
-pub(super) fn restore_trash_items(paths: &[String]) -> bool {
-    let mut restored_any = false;
-    for payload_raw in paths {
-        let payload = Path::new(payload_raw);
-        let Some(parent) = payload.parent() else {
-            continue;
-        };
-        let Some(name) = payload.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(suffix) = name.strip_prefix("$R") else {
-            continue;
-        };
-        let info_path = parent.join(format!("$I{suffix}"));
-        let Some(entry) = parse_recycle_metadata(parent, &info_path, suffix) else {
-            continue;
-        };
-        let Some(origin) = entry.trash_origin else {
-            continue;
-        };
-        let target = PathBuf::from(&origin);
-        if let Some(target_parent) = target.parent() {
-            let _ = fs::create_dir_all(target_parent);
-        }
-        let final_target = unique_target_path(&target);
-        if fs::rename(payload, &final_target).is_ok() {
-            let _ = fs::remove_file(info_path);
-            restored_any = true;
-        }
-    }
-    restored_any
-}
-
-#[must_use]
 pub(super) fn list_tagged_entries(bit: u8, tags: &HashMap<String, u8>) -> FinderListing {
     let mut entries = Vec::new();
     for (path_key, &mask) in tags {
@@ -355,6 +291,7 @@ pub(super) fn list_tagged_entries(bit: u8, tags: &HashMap<String, u8>) -> Finder
     FinderListing {
         entries,
         free_space_label: String::new(),
+        status: FinderListingStatus::Ok,
     }
 }
 
@@ -394,171 +331,6 @@ pub(super) fn save_tags_file(tags: &HashMap<String, u8>) -> bool {
     lines.sort();
     let payload = lines.join("\n");
     replace_file_atomically(&dir.join(TAGS_FILE), payload.as_bytes()).is_ok()
-}
-
-#[must_use]
-pub(super) fn create_unique_folder(parent_dir: &str) -> Option<String> {
-    let parent = Path::new(parent_dir);
-    if !parent.is_dir() {
-        return None;
-    }
-    let mut candidate = parent.join("untitled folder");
-    let mut n = 2u32;
-    while candidate.exists() {
-        candidate = parent.join(format!("untitled folder {n}"));
-        n += 1;
-    }
-    fs::create_dir(&candidate).ok()?;
-    Some(candidate.to_string_lossy().into_owned())
-}
-
-#[must_use]
-pub(super) fn rename_fs_path(path: &str, new_name: &str) -> Option<String> {
-    let src = Path::new(path);
-    let parent = src.parent()?;
-    let dst = parent.join(new_name);
-    if src == dst {
-        return Some(String::from(path));
-    }
-    if dst.exists()
-        && !src
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&dst.to_string_lossy())
-    {
-        return None;
-    }
-    fs::rename(src, &dst).ok()?;
-    Some(dst.to_string_lossy().into_owned())
-}
-
-#[must_use]
-pub(super) fn duplicate_fs_paths(paths: &[String]) -> Vec<String> {
-    let mut created = Vec::new();
-    for raw in paths {
-        let src = Path::new(raw);
-        let Some(parent) = src.parent() else {
-            continue;
-        };
-        let dst = unique_copy_target(parent, src);
-        if copy_entry_recursive(src, &dst).is_ok() {
-            created.push(dst.to_string_lossy().into_owned());
-        }
-    }
-    created
-}
-
-#[must_use]
-pub(super) fn paste_fs_paths(
-    sources: &[String],
-    dest_dir: &str,
-    move_items: bool,
-) -> Vec<(String, String)> {
-    let dest_root = Path::new(dest_dir);
-    if !dest_root.is_dir() {
-        return Vec::new();
-    }
-    let mut done = Vec::new();
-    for raw in sources {
-        let src = Path::new(raw);
-        if !src.exists() {
-            continue;
-        }
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        let initial_dst = dest_root.join(name);
-        if move_items && src == initial_dst {
-            continue;
-        }
-        let dst = if initial_dst.exists() {
-            unique_copy_target(dest_root, src)
-        } else {
-            initial_dst
-        };
-        let ok = if move_items {
-            fs::rename(src, &dst).is_ok()
-                || (copy_entry_recursive(src, &dst).is_ok() && remove_entry_recursive(src).is_ok())
-        } else {
-            copy_entry_recursive(src, &dst).is_ok()
-        };
-        if ok {
-            done.push((raw.clone(), dst.to_string_lossy().into_owned()));
-        }
-    }
-    done
-}
-
-#[must_use]
-pub(super) fn delete_fs_permanently(paths: &[String]) -> bool {
-    let mut all_ok = true;
-    for raw in paths {
-        if remove_entry_recursive(Path::new(raw)).is_err() {
-            all_ok = false;
-        }
-    }
-    all_ok
-}
-
-fn copy_entry_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if src.is_dir() {
-        fs::create_dir_all(dst)?;
-        for item in fs::read_dir(src)? {
-            let item = item?;
-            let child_src = item.path();
-            let child_dst = dst.join(item.file_name());
-            copy_entry_recursive(&child_src, &child_dst)?;
-        }
-    } else {
-        fs::copy(src, dst)?;
-    }
-    Ok(())
-}
-
-fn remove_entry_recursive(path: &Path) -> std::io::Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
-fn unique_target_path(target: &Path) -> PathBuf {
-    if !target.exists() {
-        return target.to_path_buf();
-    }
-    let parent = target.parent().unwrap_or_else(|| Path::new(r"C:\"));
-    unique_copy_target(parent, target)
-}
-
-fn unique_copy_target(dest_dir: &Path, src: &Path) -> PathBuf {
-    let name = src.file_name().map_or_else(
-        || String::from("item"),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    let is_dir = src.is_dir();
-    let (stem, ext) = if is_dir {
-        (name.as_str(), "")
-    } else if let Some((s, e)) = name.rsplit_once('.')
-        && !s.is_empty()
-    {
-        (s, e)
-    } else {
-        (name.as_str(), "")
-    };
-    let mut n = 1u32;
-    loop {
-        let candidate_name = match (n, ext.is_empty()) {
-            (1, true) => format!("{stem} copy"),
-            (1, false) => format!("{stem} copy.{ext}"),
-            (k, true) => format!("{stem} copy {k}"),
-            (k, false) => format!("{stem} copy {k}.{ext}"),
-        };
-        let candidate = dest_dir.join(candidate_name);
-        if !candidate.exists() {
-            return candidate;
-        }
-        n += 1;
-    }
 }
 
 #[must_use]

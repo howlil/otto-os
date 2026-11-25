@@ -69,7 +69,7 @@ impl SpotlightSurface {
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted = self.visible
+        let wanted = self.phase.is_visible()
             && self.hwnd != 0
             && capture_wanted(&appearance, runtime.glass_enabled.get());
         if !wanted {
@@ -110,7 +110,7 @@ impl SpotlightSurface {
         else {
             return;
         };
-        let interval = capture_interval_for(is_running_on_battery(), self.visible);
+        let interval = capture_interval_for(is_running_on_battery(), self.phase.is_visible());
         if let Some(feed) = self.backdrop.as_mut() {
             feed.request(region, interval, force);
         }
@@ -124,7 +124,7 @@ impl SpotlightSurface {
     }
 
     pub(super) fn present(&mut self, runtime: &RuntimeContext) {
-        if !self.visible || self.hwnd == 0 {
+        if !self.phase.is_visible() || self.hwnd == 0 {
             return;
         }
         if let Err(error) = self.ensure_renderer() {

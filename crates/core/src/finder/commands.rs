@@ -373,6 +373,7 @@ fn handle_plain_key<P: FinderPort>(
         }
         FinderKey::Escape => {
             state.flags.set(FinderFlags::CONFIRM_PERM_DELETE, false);
+            state.pending_perm_delete.clear();
             state.tab_mut().selected_paths.clear();
             state.status_notice = None;
         }
@@ -474,8 +475,8 @@ pub fn open_selected<P: FinderPort>(state: &mut FinderState, port: &P) {
     for entry in entries {
         if entry.is_dir() {
             state.open_tab(port, FinderLocation::Path(entry.path));
-        } else {
-            let _ = port.open_path(&entry.path);
+        } else if !port.open_path(&entry.path) {
+            state.status_notice = Some(format!("Could not open {}", entry.name));
         }
     }
 }
@@ -500,12 +501,16 @@ pub fn duplicate_selected<P: FinderPort>(state: &mut FinderState, port: &P) {
     if paths.is_empty() {
         return;
     }
-    let created = port.duplicate_paths(&paths);
-    if !created.is_empty() {
+    let outcome = port.duplicate_paths(&paths);
+    let created = outcome.completed_destinations();
+    if outcome.any_mutated() {
         state.reload_active_tab(port);
-        state.tab_mut().selected_paths = created;
+        if !created.is_empty() {
+            state.tab_mut().selected_paths = created;
+        }
         state.refresh_preview(port);
     }
+    state.status_notice = outcome.summary_notice("Duplicate");
 }
 
 pub fn copy_selected<P: FinderPort>(state: &mut FinderState, port: &P, mode: FinderClipboardMode) {
@@ -532,17 +537,21 @@ pub fn paste_clipboard<P: FinderPort>(state: &mut FinderState, port: &P, force_m
         return;
     };
     let move_items = force_move || clip.mode == FinderClipboardMode::Cut;
-    let moved = port.paste_paths(&clip.paths, &dest, move_items);
-    if !moved.is_empty() {
-        let new_selection: Vec<String> = moved.iter().map(|(_, dst)| dst.clone()).collect();
-        if move_items {
-            state.push_undo(FinderUndoAction::Move { moves: moved });
+    let outcome = port.paste_paths(&clip.paths, &dest, move_items);
+    let action = if move_items { "Move" } else { "Copy" };
+    if outcome.any_mutated() {
+        let completed = outcome.completed_pairs();
+        let new_selection = outcome.completed_destinations();
+        if move_items && !completed.is_empty() {
+            state.push_undo(FinderUndoAction::Move { moves: completed });
         }
         state.reload_active_tab(port);
-        state.tab_mut().selected_paths = new_selection;
-        state.status_notice = None;
+        if !new_selection.is_empty() {
+            state.tab_mut().selected_paths = new_selection;
+        }
         state.refresh_preview(port);
     }
+    state.status_notice = outcome.summary_notice(action);
 }
 
 pub fn move_selected_to_trash<P: FinderPort>(state: &mut FinderState, port: &P) {
@@ -550,28 +559,36 @@ pub fn move_selected_to_trash<P: FinderPort>(state: &mut FinderState, port: &P) 
     if paths.is_empty() {
         return;
     }
-    if port.recycle_paths(&paths) {
-        state.tab_mut().selected_paths.clear();
+    let outcome = port.recycle_paths(&paths);
+    let failed = outcome.failed_sources();
+    if outcome.any_mutated() {
         state.reload_active_tab(port);
     }
+    state.tab_mut().selected_paths = failed;
+    state.status_notice = outcome.summary_notice("Move to Trash");
 }
 
 pub fn request_permanent_delete(state: &mut FinderState) {
-    if !state.tab().selected_paths.is_empty() {
+    let selected = state.tab().selected_paths.clone();
+    if !selected.is_empty() {
+        state.pending_perm_delete = selected;
         state.flags.set(FinderFlags::CONFIRM_PERM_DELETE, true);
     }
 }
 
 pub fn confirm_permanent_delete<P: FinderPort>(state: &mut FinderState, port: &P) {
     state.flags.set(FinderFlags::CONFIRM_PERM_DELETE, false);
-    let paths = state.tab().selected_paths.clone();
+    let paths = std::mem::take(&mut state.pending_perm_delete);
     if paths.is_empty() {
         return;
     }
-    if port.delete_paths_permanently(&paths) {
-        state.tab_mut().selected_paths.clear();
+    let outcome = port.delete_paths_permanently(&paths);
+    let failed = outcome.failed_sources();
+    if outcome.any_mutated() {
         state.reload_active_tab(port);
     }
+    state.tab_mut().selected_paths = failed;
+    state.status_notice = outcome.summary_notice("Delete");
 }
 
 #[must_use]

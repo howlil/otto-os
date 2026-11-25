@@ -6,7 +6,8 @@ use otto_core::{
 };
 
 use super::background_cleanup::{
-    collect_process_audit, release_focus_throttles, terminate_process_group, throttle_exe_for_focus,
+    collect_process_audit, release_focus_throttles, terminate_process_group_matching,
+    throttle_exe_for_focus,
 };
 use crate::window::model::enumerate_windows;
 use crate::window::shield::post_window_message;
@@ -70,7 +71,11 @@ pub fn apply_focus_relief(category: &FocusCategory, own_pid: u32) -> FocusRelief
                     continue;
                 }
             } else if group.can_terminate
-                && terminate_process_group(&group.exe_name, own_pid) == CommandOutcome::Completed
+                && terminate_process_group_matching(
+                    &group.exe_name,
+                    group.exe_path.as_deref(),
+                    own_pid,
+                ) == CommandOutcome::Completed
             {
                 outcome.closed_apps += 1;
                 outcome.saved_memory_bytes = outcome

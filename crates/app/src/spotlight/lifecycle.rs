@@ -38,7 +38,7 @@ impl SpotlightSurface {
         self.monitor = next_monitor;
         if let Err(error) = self.ensure_renderer() {
             crate::host::log_present_error("spotlight renderer", Err(error));
-            if self.visible {
+            if self.phase.is_visible() {
                 self.hide();
             }
             return;
@@ -67,13 +67,12 @@ impl SpotlightSurface {
         self.morph_progress = self.motion.allows_motion().then_some(0.0);
         self.morph_target = 1.0;
         self.morph_tick_at = Instant::now();
-        self.closing = false;
         self.blur_dismissed_at = None;
         self.restore_focus_on_close = false;
-        if !self.visible {
+        if !self.phase.is_visible() {
             self.previous_foreground = raw_foreground_window();
         }
-        self.visible = true;
+        self.phase = super::SpotlightPhase::Open;
         self.pending_click = None;
         self.dragging = None;
         crate::menu::close(runtime);
@@ -158,19 +157,19 @@ impl SpotlightSurface {
     }
 
     pub(super) fn request_close(&mut self, restore_focus: bool) {
-        if !self.visible || self.closing {
+        if !self.phase.is_visible() || self.phase.is_closing() {
             return;
         }
         self.dragging = None;
         self.pending_click = None;
         self.restore_focus_on_close = restore_focus;
         if self.motion.allows_motion() && self.morph_progress.is_some() {
-            self.closing = true;
+            self.phase = super::SpotlightPhase::Closing;
             self.morph_target = 0.0;
             self.morph_tick_at = Instant::now();
             self.start_morph_timer();
         } else if self.motion.allows_motion() {
-            self.closing = true;
+            self.phase = super::SpotlightPhase::Closing;
             self.morph_progress = Some(1.0);
             self.morph_target = 0.0;
             self.morph_tick_at = Instant::now();
@@ -189,11 +188,10 @@ impl SpotlightSurface {
     }
 
     pub(super) fn hide(&mut self) {
-        if !self.visible {
+        if !self.phase.is_visible() {
             return;
         }
-        self.visible = false;
-        self.closing = false;
+        self.phase = super::SpotlightPhase::Closed;
         self.morph_progress = None;
         self.pending_click = None;
         self.dragging = None;
@@ -234,12 +232,12 @@ impl SpotlightSurface {
         self.morph_progress = Some(next);
         self.window = interpolate_rect(self.source_window, self.target_window, next);
         self.place();
-        if self.closing && next <= 0.005 {
+        if self.phase.is_closing() && next <= 0.005 {
             self.morph_progress = None;
             self.hide();
             return false;
         }
-        if !self.closing && next >= 0.995 {
+        if !self.phase.is_closing() && next >= 0.995 {
             self.window = self.target_window;
             self.morph_progress = None;
             self.stop_morph_timer();

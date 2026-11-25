@@ -9,7 +9,7 @@ use super::model::{
     FinderTab, FinderTag, FinderTreeRow, FinderUndoAction, FinderViewMode, format_file_size,
     parent_path_of, stem_selection_end, tag_mask_toggle,
 };
-use super::port::{FinderListing, FinderPort};
+use super::port::{FinderItemStatus, FinderListing, FinderListingStatus, FinderPort};
 
 #[derive(Clone, Debug)]
 pub struct FinderState {
@@ -24,6 +24,7 @@ pub struct FinderState {
     pub go_to: FinderGoToState,
     pub preview: FinderPreviewData,
     pub undo_stack: Vec<FinderUndoAction>,
+    pub pending_perm_delete: Vec<String>,
     pub type_ahead: String,
     pub type_ahead_tick: u64,
     pub status_notice: Option<String>,
@@ -45,6 +46,7 @@ impl FinderState {
             go_to: FinderGoToState::default(),
             preview: FinderPreviewData::default(),
             undo_stack: Vec::new(),
+            pending_perm_delete: Vec::new(),
             type_ahead: String::new(),
             type_ahead_tick: 0,
             status_notice: None,
@@ -156,6 +158,12 @@ impl FinderState {
             return notice.clone();
         }
         let tab = self.tab();
+        match tab.listing_status {
+            FinderListingStatus::NotFound => return String::from("Folder not found"),
+            FinderListingStatus::AccessDenied => return String::from("Access denied"),
+            FinderListingStatus::Unavailable => return String::from("Location unavailable"),
+            FinderListingStatus::Ok | FinderListingStatus::Partial { .. } => {}
+        }
         let total = tab.entries.len();
         let selected_count = tab.selected_paths.len();
         let items_part = if selected_count > 0 {
@@ -178,11 +186,17 @@ impl FinderState {
         } else {
             format!("{total} items")
         };
-        if tab.free_space_label.is_empty() {
+        let mut label = if tab.free_space_label.is_empty() {
             items_part
         } else {
             format!("{items_part}, {}", tab.free_space_label)
+        };
+        if let FinderListingStatus::Partial { skipped_entries } = tab.listing_status
+            && skipped_entries > 0
+        {
+            label = format!("{label}, {skipped_entries} item(s) unreadable");
         }
+        label
     }
 
     pub fn reload_active_tab<P: FinderPort>(&mut self, port: &P) {
@@ -229,6 +243,7 @@ impl FinderState {
         tab.title = tab.location.title();
         tab.entries = entries;
         tab.free_space_label = listing.free_space_label;
+        tab.listing_status = listing.status;
         tab.selected_paths.retain(|path| {
             tab.entries
                 .iter()
@@ -259,6 +274,7 @@ impl FinderState {
         }
         self.rename = None;
         self.flags.set(FinderFlags::CONFIRM_PERM_DELETE, false);
+        self.pending_perm_delete.clear();
         self.status_notice = None;
         self.reload_active_tab(port);
     }
@@ -277,6 +293,8 @@ impl FinderState {
         tab.expanded_children.clear();
         tab.miller_columns.clear();
         self.rename = None;
+        self.flags.set(FinderFlags::CONFIRM_PERM_DELETE, false);
+        self.pending_perm_delete.clear();
         self.reload_active_tab(port);
         true
     }
@@ -295,6 +313,8 @@ impl FinderState {
         tab.expanded_children.clear();
         tab.miller_columns.clear();
         self.rename = None;
+        self.flags.set(FinderFlags::CONFIRM_PERM_DELETE, false);
+        self.pending_perm_delete.clear();
         self.reload_active_tab(port);
         true
     }
@@ -643,28 +663,60 @@ impl FinderState {
         let Some(action) = self.undo_stack.pop() else {
             return false;
         };
-        let ok = match action {
+        match action {
             FinderUndoAction::Rename { from, to } => {
                 let old_name = super::model::path_display_name(&from);
-                port.rename_path(&to, &old_name).is_some()
+                if let Some(restored) = port.rename_path(&to, &old_name) {
+                    if let Some(mask) = self.tags.remove(&to.to_ascii_lowercase()) {
+                        self.tags.insert(restored.to_ascii_lowercase(), mask);
+                        let _ = port.save_tags(&self.tags);
+                    }
+                    self.status_notice = None;
+                    self.reload_active_tab(port);
+                    self.tab_mut().selected_paths = vec![restored];
+                    true
+                } else {
+                    self.undo_stack.push(FinderUndoAction::Rename { from, to });
+                    self.status_notice = Some(String::from("Could not undo rename"));
+                    false
+                }
             }
             FinderUndoAction::Move { moves } => {
-                let mut all_ok = true;
-                for (src, dst) in moves.into_iter().rev() {
-                    if let Some(parent) = parent_path_of(&src)
-                        && port.paste_paths(&[dst], &parent, true).is_empty()
-                    {
-                        all_ok = false;
+                let pairs: Vec<(String, String)> = moves
+                    .iter()
+                    .rev()
+                    .map(|(src, dst)| (dst.clone(), src.clone()))
+                    .collect();
+                let outcome = port.move_exact(&pairs);
+                let mut remaining = Vec::new();
+                for ((src, dst), item) in moves.iter().rev().zip(outcome.items.iter()) {
+                    if item.status != FinderItemStatus::Completed {
+                        remaining.push((src.clone(), dst.clone()));
                     }
                 }
-                all_ok
+                remaining.reverse();
+                if !remaining.is_empty() {
+                    self.undo_stack
+                        .push(FinderUndoAction::Move { moves: remaining });
+                }
+                if outcome.any_mutated() {
+                    self.reload_active_tab(port);
+                }
+                self.status_notice = outcome.summary_notice("Undo move");
+                outcome.all_completed()
             }
-            FinderUndoAction::NewFolder { path } => port.recycle_paths(&[path]),
-        };
-        if ok {
-            self.reload_active_tab(port);
+            FinderUndoAction::NewFolder { path } => {
+                let outcome = port.recycle_paths(std::slice::from_ref(&path));
+                if !outcome.all_completed() {
+                    self.undo_stack.push(FinderUndoAction::NewFolder { path });
+                }
+                if outcome.any_mutated() {
+                    self.reload_active_tab(port);
+                }
+                self.status_notice = outcome.summary_notice("Undo new folder");
+                outcome.all_completed()
+            }
         }
-        ok
     }
 
     pub fn refresh_preview<P: FinderPort>(&mut self, port: &P) {

@@ -23,6 +23,13 @@ use super::{
     AnimState, DOCK_HIDDEN_PROGRESS, DOCK_REVEAL_BAND, Dock, DragState, entry_notification_count,
 };
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct SecondaryPollState {
+    pub(super) dirty: bool,
+    pub(super) cover_geometry_changed: bool,
+    pub(super) geometry_changed: bool,
+}
+
 #[derive(Default)]
 pub(super) struct SecondaryDockCover {
     pub(super) fullscreen_covered: bool,
@@ -300,15 +307,13 @@ impl Dock {
         }
         let anim = AnimState::default();
         let layout = self.compute_secondary_layout_for(monitor, &all, false, None, &anim);
-        let mut renderer =
-            match DockRenderer::new(layout.window_width, layout.window_height, monitor.dpi) {
-                Ok(renderer) => renderer,
-                Err(_) => {
-                    hide_window(hwnd);
-                    runtime.queue_destroy_hwnd(hwnd);
-                    return None;
-                }
-            };
+        let Ok(mut renderer) =
+            DockRenderer::new(layout.window_width, layout.window_height, monitor.dpi)
+        else {
+            hide_window(hwnd);
+            runtime.queue_destroy_hwnd(hwnd);
+            return None;
+        };
         sync_icons(&mut renderer, &all);
         let backdrop = runtime.glass_enabled.get().then(|| {
             BackdropFeed::start(
@@ -539,25 +544,23 @@ impl Dock {
     pub(super) fn poll_secondary_docks(
         &mut self,
         runtime: &RuntimeContext,
-        dirty: bool,
-        cover_geometry_changed: bool,
-        geometry_changed: bool,
+        state: SecondaryPollState,
         has_generations: bool,
     ) -> bool {
         let mut any_busy = false;
         for index in 0..self.secondary_docks.len() {
-            if cover_geometry_changed {
+            if state.cover_geometry_changed {
                 self.refresh_secondary_cover(index);
             }
             let reservation_changed = self.sync_secondary_reservation(index);
             let should_auto_hide = self.sync_secondary_hide_from_pointer(runtime, index);
-            if cover_geometry_changed || reservation_changed {
+            if state.cover_geometry_changed || reservation_changed {
                 self.secondary_docks[index].ensure_topmost(runtime);
             }
-            if dirty && !self.secondary_docks[index].anim.timer_running {
+            if state.dirty && !self.secondary_docks[index].anim.timer_running {
                 self.present_secondary(runtime, index);
             }
-            self.sync_secondary_backdrop(runtime, index, geometry_changed);
+            self.sync_secondary_backdrop(runtime, index, state.geometry_changed);
             let sec = &self.secondary_docks[index];
             let reveal_needs_polling =
                 should_auto_hide && (!sec.anim.should_hide || !has_generations);

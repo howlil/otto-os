@@ -89,7 +89,7 @@ pub(super) fn handle_secondary_message(
     }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
-        WM_CLOSE => Some(LRESULT(0)),
+        WM_CLOSE | WM_DISPLAYCHANGE => Some(LRESULT(0)),
         WM_GETOBJECT => handle_secondary_accessible_object(runtime, hwnd, wparam, lparam),
         WM_APP_UIA_INVOKE => {
             with_dock(runtime, |dock| {
@@ -130,7 +130,6 @@ pub(super) fn handle_secondary_message(
             with_dock(runtime, |dock| dock.sync_secondary_docks(runtime));
             Some(LRESULT(0))
         }
-        WM_DISPLAYCHANGE => Some(LRESULT(0)),
         _ => None,
     }
 }

@@ -46,5 +46,8 @@ pub use self::model::{
     parent_path_of, parse_tag_mask, path_display_name, stem_selection_end, tag_mask_contains,
     tag_mask_toggle,
 };
-pub use self::port::{FinderClipboardData, FinderListing, FinderPort};
+pub use self::port::{
+    FinderBatchOutcome, FinderClipboardData, FinderItemOutcome, FinderItemStatus, FinderListing,
+    FinderListingStatus, FinderPort,
+};
 pub use self::state::{FinderState, compare_natural, sort_entries};

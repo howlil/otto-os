@@ -39,12 +39,20 @@ pub fn open_downloads_folder() {
 }
 
 pub fn open_path(path: &Path) {
+    let _ = open_path_checked(path);
+}
+
+#[must_use]
+pub(crate) fn open_path_checked(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    shell_exec(PCWSTR(wide.as_ptr()), PCWSTR::null());
+    shell_exec_ok(PCWSTR(wide.as_ptr()), PCWSTR::null())
 }
 
 pub(super) fn shell_exec(file: PCWSTR, params: PCWSTR) {

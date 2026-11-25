@@ -69,11 +69,11 @@ pub(super) fn execute_command(runtime: &RuntimeContext, command: ControlCenterCo
         ControlCenterCommand::OpenSettings(action) => {
             with_cc(runtime, |surface| surface.port.execute(action));
         }
-        _ => execute_grid_command(runtime, command),
+        _ => execute_grid_command(runtime, &command),
     }
 }
 
-fn execute_grid_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
+fn execute_grid_command(runtime: &RuntimeContext, command: &ControlCenterCommand) {
     match command {
         ControlCenterCommand::ToggleEditMode => {
             with_cc(runtime, |surface| {
@@ -95,6 +95,7 @@ fn execute_grid_command(runtime: &RuntimeContext, command: ControlCenterCommand)
             navigate_open_page(runtime, ControlCenterPage::Gallery);
         }
         ControlCenterCommand::AddControl(kind) => {
+            let kind = *kind;
             with_cc(runtime, |surface| {
                 if surface.snapshot.grid.add_control(kind).is_some() {
                     let _ = save_control_center_grid(&surface.snapshot.grid);
@@ -107,6 +108,7 @@ fn execute_grid_command(runtime: &RuntimeContext, command: ControlCenterCommand)
             });
         }
         ControlCenterCommand::RemoveTile(id) => {
+            let id = *id;
             with_cc(runtime, |surface| {
                 if surface.snapshot.grid.remove_tile(id) {
                     let _ = save_control_center_grid(&surface.snapshot.grid);
@@ -116,6 +118,7 @@ fn execute_grid_command(runtime: &RuntimeContext, command: ControlCenterCommand)
             });
         }
         ControlCenterCommand::CycleTileSize(id) => {
+            let id = *id;
             with_cc(runtime, |surface| {
                 if surface.snapshot.grid.cycle_tile_size(id) {
                     let _ = save_control_center_grid(&surface.snapshot.grid);

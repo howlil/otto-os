@@ -497,6 +497,7 @@ pub struct FinderTab {
     pub scroll_x: i32,
     pub search_query: String,
     pub free_space_label: String,
+    pub listing_status: super::port::FinderListingStatus,
 }
 
 impl FinderTab {
@@ -521,6 +522,7 @@ impl FinderTab {
             scroll_x: 0,
             search_query: String::new(),
             free_space_label: String::new(),
+            listing_status: super::port::FinderListingStatus::Ok,
         }
     }
 

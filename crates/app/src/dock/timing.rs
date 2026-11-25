@@ -148,9 +148,11 @@ impl Dock {
         self.sync_backdrop(runtime, geometry_changed);
         let secondary_busy = self.poll_secondary_docks(
             runtime,
-            dirty,
-            cover_geometry_changed,
-            geometry_changed,
+            super::monitors::SecondaryPollState {
+                dirty,
+                cover_geometry_changed,
+                geometry_changed,
+            },
             generations.is_some(),
         );
         let busy = dirty

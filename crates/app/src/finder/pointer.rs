@@ -328,18 +328,20 @@ fn try_complete_internal_drop(
         return false;
     };
     let copy_mode = is_virtual_key_down(0x11);
-    let moved = port.paste_paths(dragged, &dest_dir, !copy_mode);
-    if moved.is_empty() {
-        false
-    } else {
-        if !copy_mode {
+    let outcome = port.paste_paths(dragged, &dest_dir, !copy_mode);
+    let action = if copy_mode { "Copy" } else { "Move" };
+    let mutated = outcome.any_mutated();
+    if mutated {
+        let completed = outcome.completed_pairs();
+        if !copy_mode && !completed.is_empty() {
             window
                 .state
-                .push_undo(FinderUndoAction::Move { moves: moved });
+                .push_undo(FinderUndoAction::Move { moves: completed });
         }
         window.state.reload_active_tab(&port);
-        true
     }
+    window.state.status_notice = outcome.summary_notice(action);
+    mutated || window.state.status_notice.is_some()
 }
 
 fn apply_click_hit(window: &mut FinderWindow, port: WindowsFinderPort, hit: FinderHit) {
@@ -427,7 +429,9 @@ fn apply_overlay_click_hit(window: &mut FinderWindow, port: WindowsFinderPort, h
             if window.state.flags.has(FinderFlags::CONFIRM_PERM_DELETE) {
                 confirm_permanent_delete(&mut window.state, &port);
             } else if window.state.tab().location == FinderLocation::Trash {
-                let _ = port.empty_trash();
+                if !port.empty_trash() {
+                    window.state.status_notice = Some(String::from("Could not empty Trash"));
+                }
                 window.state.reload_active_tab(&port);
             }
         }
@@ -437,10 +441,17 @@ fn apply_overlay_click_hit(window: &mut FinderWindow, port: WindowsFinderPort, h
                     .state
                     .flags
                     .set(FinderFlags::CONFIRM_PERM_DELETE, false);
+                window.state.pending_perm_delete.clear();
             } else if window.state.tab().location == FinderLocation::Trash {
                 let paths = window.state.tab().selected_paths.clone();
-                if !paths.is_empty() && port.restore_trash_paths(&paths) {
-                    window.state.reload_active_tab(&port);
+                if !paths.is_empty() {
+                    let outcome = port.restore_trash_paths(&paths);
+                    let failed = outcome.failed_sources();
+                    if outcome.any_mutated() {
+                        window.state.reload_active_tab(&port);
+                    }
+                    window.state.tab_mut().selected_paths = failed;
+                    window.state.status_notice = outcome.summary_notice("Restore");
                 }
             }
         }

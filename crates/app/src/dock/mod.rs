@@ -124,7 +124,7 @@ pub(crate) struct Dock {
     secondary_docks: Vec<self::monitors::SecondaryDock>,
 }
 
-pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+fn initialize_dock_state(runtime: &RuntimeContext, hwnd: isize) -> Result<Dock> {
     let preferences = runtime.dock_preferences.get();
     if preferences.show_trash {
         resume_recycle_bin_task();
@@ -162,7 +162,7 @@ pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let mut renderer = DockRenderer::new(layout.window_width, layout.window_height, screen.dpi)?;
     sync_icons(&mut renderer, &entries);
 
-    let mut dock = Dock {
+    Ok(Dock {
         hwnd,
         own_pid,
         renderer,
@@ -207,7 +207,11 @@ pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         badge_poll_tick: 0,
         last_focus_badge_suppressed: false,
         secondary_docks: Vec::new(),
-    };
+    })
+}
+
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+    let mut dock = initialize_dock_state(runtime, hwnd)?;
     dock.refresh_cover();
     let _ = dock.sync_reservation();
     dock.sync_backdrop(runtime, true);

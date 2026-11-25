@@ -14,7 +14,10 @@ use super::model::{
     classify_entry_kind, format_file_size, format_tag_mask, parent_path_of, parse_tag_mask,
     stem_selection_end, tag_mask_contains,
 };
-use super::port::{FinderClipboardData, FinderListing, FinderPort};
+use super::port::{
+    FinderBatchOutcome, FinderClipboardData, FinderItemOutcome, FinderListing, FinderListingStatus,
+    FinderPort,
+};
 use super::state::{FinderState, compare_natural};
 
 struct MockFinderPort {
@@ -155,6 +158,7 @@ impl FinderPort for MockFinderPort {
         FinderListing {
             entries,
             free_space_label: String::from("128.4 GB available"),
+            status: FinderListingStatus::Ok,
         }
     }
 
@@ -173,6 +177,7 @@ impl FinderPort for MockFinderPort {
         FinderListing {
             entries,
             free_space_label: String::new(),
+            status: FinderListingStatus::Ok,
         }
     }
 
@@ -222,26 +227,46 @@ impl FinderPort for MockFinderPort {
         Some(next)
     }
 
-    fn duplicate_paths(&self, paths: &[String]) -> Vec<String> {
-        paths.iter().map(|p| format!("{p} copy")).collect()
+    fn duplicate_paths(&self, paths: &[String]) -> FinderBatchOutcome {
+        FinderBatchOutcome {
+            items: paths
+                .iter()
+                .map(|p| FinderItemOutcome::completed(p, Some(format!("{p} copy"))))
+                .collect(),
+        }
     }
 
-    fn recycle_paths(&self, paths: &[String]) -> bool {
+    fn recycle_paths(&self, paths: &[String]) -> FinderBatchOutcome {
         self.recycled.borrow_mut().extend(paths.iter().cloned());
-        true
+        FinderBatchOutcome {
+            items: paths
+                .iter()
+                .map(|p| FinderItemOutcome::completed(p, None))
+                .collect(),
+        }
     }
 
-    fn delete_paths_permanently(&self, paths: &[String]) -> bool {
+    fn delete_paths_permanently(&self, paths: &[String]) -> FinderBatchOutcome {
         self.deleted.borrow_mut().extend(paths.iter().cloned());
-        true
+        FinderBatchOutcome {
+            items: paths
+                .iter()
+                .map(|p| FinderItemOutcome::completed(p, None))
+                .collect(),
+        }
     }
 
     fn empty_trash(&self) -> bool {
         true
     }
 
-    fn restore_trash_paths(&self, _paths: &[String]) -> bool {
-        true
+    fn restore_trash_paths(&self, paths: &[String]) -> FinderBatchOutcome {
+        FinderBatchOutcome {
+            items: paths
+                .iter()
+                .map(|p| FinderItemOutcome::completed(p, None))
+                .collect(),
+        }
     }
 
     fn copy_paths_to_clipboard(&self, paths: &[String], mode: FinderClipboardMode) -> bool {
@@ -261,14 +286,27 @@ impl FinderPort for MockFinderPort {
         sources: &[String],
         dest_dir: &str,
         move_items: bool,
-    ) -> Vec<(String, String)> {
+    ) -> FinderBatchOutcome {
         self.pasted_moves
             .borrow_mut()
             .push((sources.to_vec(), String::from(dest_dir), move_items));
-        sources
-            .iter()
-            .map(|src| (src.clone(), format!(r"{dest_dir}\moved.dat")))
-            .collect()
+        FinderBatchOutcome {
+            items: sources
+                .iter()
+                .map(|src| {
+                    FinderItemOutcome::completed(src, Some(format!(r"{dest_dir}\moved.dat")))
+                })
+                .collect(),
+        }
+    }
+
+    fn move_exact(&self, moves: &[(String, String)]) -> FinderBatchOutcome {
+        FinderBatchOutcome {
+            items: moves
+                .iter()
+                .map(|(src, dst)| FinderItemOutcome::completed(src, Some(dst.clone())))
+                .collect(),
+        }
     }
 
     fn load_preview(&self, item: &FinderEntry) -> FinderPreviewData {
@@ -513,4 +551,258 @@ fn tags_breadcrumbs_menu_commands_and_size_formatting() {
         classify_entry_kind("demo.rs", false).0,
         FinderEntryKind::Code
     );
+}
+
+struct FaultyFinderPort {
+    listing_status: RefCell<FinderListingStatus>,
+    open_ok: RefCell<bool>,
+    move_exact_outcomes: RefCell<Vec<FinderItemOutcome>>,
+    recycle_outcomes: RefCell<Vec<FinderItemOutcome>>,
+    delete_outcomes: RefCell<Vec<FinderItemOutcome>>,
+    rename_ok: RefCell<bool>,
+    recorded_exact_moves: RefCell<Vec<Vec<(String, String)>>>,
+    recorded_deletes: RefCell<Vec<Vec<String>>>,
+}
+
+impl FaultyFinderPort {
+    fn new() -> Self {
+        Self {
+            listing_status: RefCell::new(FinderListingStatus::Ok),
+            open_ok: RefCell::new(true),
+            move_exact_outcomes: RefCell::new(Vec::new()),
+            recycle_outcomes: RefCell::new(Vec::new()),
+            delete_outcomes: RefCell::new(Vec::new()),
+            rename_ok: RefCell::new(true),
+            recorded_exact_moves: RefCell::new(Vec::new()),
+            recorded_deletes: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl FinderPort for FaultyFinderPort {
+    fn sidebar_items(&self) -> Vec<FinderSidebarItem> {
+        Vec::new()
+    }
+
+    fn default_location(&self) -> FinderLocation {
+        FinderLocation::Path(String::from(r"C:\Users\Demo\Documents"))
+    }
+
+    fn list_location(
+        &self,
+        _location: &FinderLocation,
+        _recursive_query: Option<&str>,
+    ) -> FinderListing {
+        FinderListing {
+            entries: vec![
+                entry(r"C:\Users\Demo\Documents\a.txt", "a.txt", false, 10, 100, 0),
+                entry(r"C:\Users\Demo\Documents\b.txt", "b.txt", false, 20, 100, 0),
+            ],
+            free_space_label: String::from("10 GB available"),
+            status: self.listing_status.borrow().clone(),
+        }
+    }
+
+    fn list_tagged(&self, _bit: u8, _tags: &HashMap<String, u8>) -> FinderListing {
+        FinderListing::default()
+    }
+
+    fn load_tags(&self) -> HashMap<String, u8> {
+        HashMap::new()
+    }
+
+    fn save_tags(&self, _tags: &HashMap<String, u8>) -> bool {
+        true
+    }
+
+    fn open_path(&self, _path: &str) -> bool {
+        *self.open_ok.borrow()
+    }
+
+    fn open_in_terminal(&self, _dir_path: &str) -> bool {
+        true
+    }
+
+    fn create_folder(&self, _parent_dir: &str) -> Option<String> {
+        None
+    }
+
+    fn rename_path(&self, path: &str, new_name: &str) -> Option<String> {
+        if *self.rename_ok.borrow() {
+            let parent = parent_path_of(path)?;
+            Some(format!(r"{parent}\{new_name}"))
+        } else {
+            None
+        }
+    }
+
+    fn duplicate_paths(&self, _paths: &[String]) -> FinderBatchOutcome {
+        FinderBatchOutcome::default()
+    }
+
+    fn recycle_paths(&self, _paths: &[String]) -> FinderBatchOutcome {
+        FinderBatchOutcome {
+            items: self.recycle_outcomes.borrow().clone(),
+        }
+    }
+
+    fn delete_paths_permanently(&self, paths: &[String]) -> FinderBatchOutcome {
+        self.recorded_deletes.borrow_mut().push(paths.to_vec());
+        FinderBatchOutcome {
+            items: self.delete_outcomes.borrow().clone(),
+        }
+    }
+
+    fn empty_trash(&self) -> bool {
+        true
+    }
+
+    fn restore_trash_paths(&self, _paths: &[String]) -> FinderBatchOutcome {
+        FinderBatchOutcome::default()
+    }
+
+    fn copy_paths_to_clipboard(&self, _paths: &[String], _mode: FinderClipboardMode) -> bool {
+        true
+    }
+
+    fn read_clipboard_paths(&self) -> Option<FinderClipboardData> {
+        None
+    }
+
+    fn paste_paths(
+        &self,
+        _sources: &[String],
+        _dest_dir: &str,
+        _move_items: bool,
+    ) -> FinderBatchOutcome {
+        FinderBatchOutcome::default()
+    }
+
+    fn move_exact(&self, moves: &[(String, String)]) -> FinderBatchOutcome {
+        self.recorded_exact_moves.borrow_mut().push(moves.to_vec());
+        FinderBatchOutcome {
+            items: self.move_exact_outcomes.borrow().clone(),
+        }
+    }
+
+    fn load_preview(&self, _entry: &FinderEntry) -> FinderPreviewData {
+        FinderPreviewData::default()
+    }
+
+    fn path_exists_dir(&self, _raw: &str) -> Option<String> {
+        None
+    }
+
+    fn copy_text_to_clipboard(&self, _text: &str) -> bool {
+        true
+    }
+}
+
+#[test]
+fn listing_status_labels_distinguish_errors_and_partial_results() {
+    let port = FaultyFinderPort::new();
+    let mut state = FinderState::new(port.default_location(), port.sidebar_items());
+
+    *port.listing_status.borrow_mut() = FinderListingStatus::NotFound;
+    state.reload_active_tab(&port);
+    assert_eq!(state.status_bar_label(), "Folder not found");
+
+    *port.listing_status.borrow_mut() = FinderListingStatus::AccessDenied;
+    state.reload_active_tab(&port);
+    assert_eq!(state.status_bar_label(), "Access denied");
+
+    *port.listing_status.borrow_mut() = FinderListingStatus::Unavailable;
+    state.reload_active_tab(&port);
+    assert_eq!(state.status_bar_label(), "Location unavailable");
+
+    *port.listing_status.borrow_mut() = FinderListingStatus::Partial { skipped_entries: 3 };
+    state.reload_active_tab(&port);
+    assert!(state.status_bar_label().contains("3 item(s) unreadable"));
+}
+
+#[test]
+fn undo_move_uses_exact_destination_and_retains_failed_items() {
+    let port = FaultyFinderPort::new();
+    let mut state = FinderState::new(port.default_location(), port.sidebar_items());
+    state.push_undo(super::model::FinderUndoAction::Move {
+        moves: vec![
+            (
+                String::from(r"C:\Src\one.txt"),
+                String::from(r"C:\Dst\one.txt"),
+            ),
+            (
+                String::from(r"C:\Src\two.txt"),
+                String::from(r"C:\Dst\two.txt"),
+            ),
+        ],
+    });
+    *port.move_exact_outcomes.borrow_mut() = vec![
+        FinderItemOutcome::with_status(
+            r"C:\Dst\two.txt",
+            Some(r"C:\Src\two.txt".to_owned()),
+            super::port::FinderItemStatus::Conflict,
+            "Destination already exists",
+        ),
+        FinderItemOutcome::completed(r"C:\Dst\one.txt", Some(r"C:\Src\one.txt".to_owned())),
+    ];
+    assert!(!state.undo(&port));
+    assert!(state.status_notice.is_some());
+    assert_eq!(state.undo_stack.len(), 1);
+    assert_eq!(
+        state.undo_stack[0],
+        super::model::FinderUndoAction::Move {
+            moves: vec![(
+                String::from(r"C:\Src\two.txt"),
+                String::from(r"C:\Dst\two.txt")
+            )],
+        }
+    );
+
+    *port.rename_ok.borrow_mut() = false;
+    state.push_undo(super::model::FinderUndoAction::Rename {
+        from: String::from(r"C:\Src\a.txt"),
+        to: String::from(r"C:\Src\b.txt"),
+    });
+    assert!(!state.undo(&port));
+    assert_eq!(state.undo_stack.len(), 2);
+}
+
+#[test]
+fn partial_delete_retains_failed_selection_and_uses_authorized_snapshot() {
+    let port = FaultyFinderPort::new();
+    let mut state = FinderState::new(port.default_location(), port.sidebar_items());
+    state.reload_active_tab(&port);
+    state.tab_mut().selected_paths = vec![
+        String::from(r"C:\Users\Demo\Documents\a.txt"),
+        String::from(r"C:\Users\Demo\Documents\b.txt"),
+    ];
+    super::commands::request_permanent_delete(&mut state);
+    state.tab_mut().selected_paths = vec![String::from(r"C:\Users\Demo\Documents\other.txt")];
+    *port.delete_outcomes.borrow_mut() = vec![
+        FinderItemOutcome::completed(r"C:\Users\Demo\Documents\a.txt", None),
+        FinderItemOutcome::with_status(
+            r"C:\Users\Demo\Documents\b.txt",
+            None,
+            super::port::FinderItemStatus::Failed,
+            "Access denied",
+        ),
+    ];
+    confirm_permanent_delete(&mut state, &port);
+    assert_eq!(
+        port.recorded_deletes.borrow()[0],
+        vec![
+            String::from(r"C:\Users\Demo\Documents\a.txt"),
+            String::from(r"C:\Users\Demo\Documents\b.txt"),
+        ]
+    );
+    assert_eq!(
+        state.tab().selected_paths,
+        vec![String::from(r"C:\Users\Demo\Documents\b.txt")]
+    );
+    assert!(state.status_notice.is_some());
+
+    *port.open_ok.borrow_mut() = false;
+    state.tab_mut().selected_paths = vec![String::from(r"C:\Users\Demo\Documents\a.txt")];
+    super::commands::open_selected(&mut state, &port);
+    assert_eq!(state.status_notice.as_deref(), Some("Could not open a.txt"));
 }

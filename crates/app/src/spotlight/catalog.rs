@@ -82,7 +82,7 @@ impl SpotlightSurface {
     }
 
     pub(super) fn rebuild(&mut self, runtime: &RuntimeContext) {
-        self.monitor = if self.visible {
+        self.monitor = if self.phase.is_visible() {
             monitor_at(
                 self.window.x + self.window.width / 2,
                 self.window.y + self.window.height / 2,
@@ -92,7 +92,7 @@ impl SpotlightSurface {
         };
         self.renderer = None;
         self.icons_attempted.clear();
-        if self.visible {
+        if self.phase.is_visible() {
             self.work_area = self.monitor.work_area;
             self.target_window = self.target_rect();
             self.source_window = self.window;

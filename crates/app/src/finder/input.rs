@@ -173,9 +173,20 @@ fn handle_drop_files(runtime: &RuntimeContext, wparam: WPARAM) {
     let move_mode = is_virtual_key_down(0x10);
     with_window(runtime, |window| {
         if let Some(dest) = window.state.active_dir_path() {
-            let done = port.paste_paths(&files, &dest, move_mode);
-            if !done.is_empty() {
+            let outcome = port.paste_paths(&files, &dest, move_mode);
+            let mutated = outcome.any_mutated();
+            if mutated {
+                let completed = outcome.completed_pairs();
+                if move_mode && !completed.is_empty() {
+                    window
+                        .state
+                        .push_undo(otto_core::FinderUndoAction::Move { moves: completed });
+                }
                 window.state.reload_active_tab(&port);
+            }
+            window.state.status_notice =
+                outcome.summary_notice(if move_mode { "Move" } else { "Copy" });
+            if mutated || window.state.status_notice.is_some() {
                 window.relayout();
                 invalidate_settings_window(window.hwnd);
             }
@@ -440,9 +451,15 @@ pub(crate) fn handle_message(
         WM_APP_FINDER_FS_CHANGE => {
             let port = WindowsFinderPort;
             with_window(runtime, |window| {
-                window.state.reload_active_tab(&port);
-                window.relayout();
-                invalidate_settings_window(window.hwnd);
+                if window
+                    .watcher
+                    .as_ref()
+                    .is_some_and(|w| w.generation() == wparam.0)
+                {
+                    window.state.reload_active_tab(&port);
+                    window.relayout();
+                    invalidate_settings_window(window.hwnd);
+                }
             });
             Some(LRESULT(0))
         }

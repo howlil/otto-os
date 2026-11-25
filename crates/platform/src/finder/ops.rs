@@ -1,23 +1,26 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use otto_core::{
-    ClipboardPayload, FinderClipboardData, FinderClipboardMode, FinderEntry, FinderEntryKind,
-    FinderListing, FinderLocation, FinderPort, FinderPreviewData, FinderSidebarItem, IconBitmap,
-    format_file_size,
+    ClipboardPayload, FinderBatchOutcome, FinderClipboardData, FinderClipboardMode, FinderEntry,
+    FinderEntryKind, FinderItemOutcome, FinderItemStatus, FinderListing, FinderListingStatus,
+    FinderLocation, FinderPort, FinderPreviewData, FinderSidebarItem, IconBitmap, format_file_size,
 };
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
 use windows::core::{HSTRING, PCWSTR};
 
 use super::fs::{
-    build_default_sidebar, build_preview_base, create_unique_folder, delete_fs_permanently,
-    duplicate_fs_paths, list_directory, list_recents, list_tagged_entries, list_trash_entries,
-    load_tags_file, paste_fs_paths, rename_fs_path, resolve_user_dir_path, restore_trash_items,
-    save_tags_file, user_home_dir,
+    build_default_sidebar, build_preview_base, list_directory, list_recents, list_tagged_entries,
+    load_tags_file, resolve_user_dir_path, save_tags_file, user_home_dir,
 };
-use crate::dock::trash::{empty_recycle_bin, recycle_path};
+use super::mutate::{
+    create_unique_folder, delete_fs_permanently, duplicate_fs_paths, move_exact_paths,
+    paste_fs_paths, rename_fs_path,
+};
+use super::recycle::{list_trash_entries, restore_trash_items};
+use crate::dock::trash::{recycle_path, try_empty_recycle_bin};
 use crate::notch::clipboard::{ClipboardRead, copy_clipboard_payload, read_clipboard_payload};
 use crate::notch::shelf::extract_shell_thumbnail;
 
@@ -25,8 +28,65 @@ const DRIVE_REMOVABLE: u32 = 2;
 const DRIVE_FIXED: u32 = 3;
 const DRIVE_REMOTE: u32 = 4;
 
-static LAST_CUT_SEQ: AtomicU32 = AtomicU32::new(0);
-static LAST_WAS_CUT: AtomicBool = AtomicBool::new(false);
+static PENDING_CUT: Mutex<Option<(u32, Vec<String>)>> = Mutex::new(None);
+
+pub(super) fn build_powershell_terminal_command(dir: &Path) -> Command {
+    let mut cmd = Command::new("powershell.exe");
+    cmd.arg("-NoExit").current_dir(dir);
+    cmd
+}
+
+pub(super) fn record_clipboard_cut(seq: u32, paths: &[String], mode: FinderClipboardMode) {
+    if let Ok(mut guard) = PENDING_CUT.lock() {
+        *guard = (mode == FinderClipboardMode::Cut).then(|| (seq, paths.to_vec()));
+    }
+}
+
+pub(super) fn resolve_clipboard_cut_mode(seq: u32, paths: Vec<String>) -> FinderClipboardData {
+    let mut remaining_cut = None;
+    if let Ok(mut guard) = PENDING_CUT.lock()
+        && let Some((cut_seq, remaining)) = guard.as_ref()
+    {
+        if *cut_seq == seq {
+            if remaining.is_empty() {
+                *guard = None;
+            } else {
+                remaining_cut = Some(remaining.clone());
+            }
+        } else {
+            *guard = None;
+        }
+    }
+    if let Some(cut_paths) = remaining_cut {
+        FinderClipboardData {
+            paths: cut_paths,
+            mode: FinderClipboardMode::Cut,
+        }
+    } else {
+        FinderClipboardData {
+            paths,
+            mode: FinderClipboardMode::Copy,
+        }
+    }
+}
+
+pub(super) fn consume_completed_cuts(completed_sources: &[String]) {
+    if completed_sources.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = PENDING_CUT.lock()
+        && let Some((_, remaining)) = guard.as_mut()
+    {
+        remaining.retain(|path| {
+            !completed_sources
+                .iter()
+                .any(|done| done.eq_ignore_ascii_case(path))
+        });
+        if remaining.is_empty() {
+            *guard = None;
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct VolumeInfo {
@@ -124,19 +184,25 @@ impl FinderPort for WindowsFinderPort {
     ) -> FinderListing {
         let volumes = query_volumes();
         match location {
-            FinderLocation::Path(dir) => FinderListing {
-                entries: list_directory(Path::new(dir), recursive_query),
-                free_space_label: free_space_for_path(dir, &volumes),
-            },
+            FinderLocation::Path(dir) => {
+                let (entries, status) = list_directory(Path::new(dir), recursive_query);
+                FinderListing {
+                    entries,
+                    free_space_label: free_space_for_path(dir, &volumes),
+                    status,
+                }
+            }
             FinderLocation::Recents => FinderListing {
                 entries: list_recents(),
                 free_space_label: String::new(),
+                status: FinderListingStatus::Ok,
             },
             FinderLocation::Trash => {
                 let roots: Vec<String> = volumes.iter().map(|v| v.root.clone()).collect();
                 FinderListing {
                     entries: list_trash_entries(&roots),
                     free_space_label: String::new(),
+                    status: FinderListingStatus::Ok,
                 }
             }
             FinderLocation::ThisPc => {
@@ -166,6 +232,7 @@ impl FinderPort for WindowsFinderPort {
                 FinderListing {
                     entries,
                     free_space_label: String::new(),
+                    status: FinderListingStatus::Ok,
                 }
             }
             FinderLocation::Tag(_) => FinderListing::default(),
@@ -185,23 +252,18 @@ impl FinderPort for WindowsFinderPort {
     }
 
     fn open_path(&self, path: &str) -> bool {
-        crate::actions::open_path(Path::new(path));
-        true
+        crate::actions::open_path_checked(Path::new(path))
     }
 
     fn open_in_terminal(&self, dir_path: &str) -> bool {
+        let dir = Path::new(dir_path);
+        if !dir.is_dir() {
+            return false;
+        }
         Command::new("wt.exe")
             .args(["-d", dir_path])
             .spawn()
-            .or_else(|_| {
-                Command::new("powershell.exe")
-                    .args([
-                        "-NoExit",
-                        "-Command",
-                        &format!("Set-Location -LiteralPath '{dir_path}'"),
-                    ])
-                    .spawn()
-            })
+            .or_else(|_| build_powershell_terminal_command(dir).spawn())
             .is_ok()
     }
 
@@ -213,37 +275,42 @@ impl FinderPort for WindowsFinderPort {
         rename_fs_path(path, new_name)
     }
 
-    fn duplicate_paths(&self, paths: &[String]) -> Vec<String> {
+    fn duplicate_paths(&self, paths: &[String]) -> FinderBatchOutcome {
         duplicate_fs_paths(paths)
     }
 
-    fn recycle_paths(&self, paths: &[String]) -> bool {
-        let mut all_ok = true;
+    fn recycle_paths(&self, paths: &[String]) -> FinderBatchOutcome {
+        let mut items = Vec::with_capacity(paths.len());
         for path in paths {
-            if !recycle_path(path) {
-                all_ok = false;
+            if recycle_path(path) {
+                items.push(FinderItemOutcome::completed(path, None));
+            } else {
+                items.push(FinderItemOutcome::with_status(
+                    path,
+                    None,
+                    FinderItemStatus::Failed,
+                    "Could not move item to Trash",
+                ));
             }
         }
-        all_ok
+        FinderBatchOutcome { items }
     }
 
-    fn delete_paths_permanently(&self, paths: &[String]) -> bool {
+    fn delete_paths_permanently(&self, paths: &[String]) -> FinderBatchOutcome {
         delete_fs_permanently(paths)
     }
 
     fn empty_trash(&self) -> bool {
-        empty_recycle_bin();
-        true
+        try_empty_recycle_bin()
     }
 
-    fn restore_trash_paths(&self, paths: &[String]) -> bool {
+    fn restore_trash_paths(&self, paths: &[String]) -> FinderBatchOutcome {
         restore_trash_items(paths)
     }
 
     fn copy_paths_to_clipboard(&self, paths: &[String], mode: FinderClipboardMode) -> bool {
         if let Some(seq) = copy_clipboard_payload(&ClipboardPayload::Files(paths.to_vec())) {
-            LAST_CUT_SEQ.store(seq, Ordering::Release);
-            LAST_WAS_CUT.store(mode == FinderClipboardMode::Cut, Ordering::Release);
+            record_clipboard_cut(seq, paths, mode);
             true
         } else {
             false
@@ -255,18 +322,7 @@ impl FinderPort for WindowsFinderPort {
             ClipboardRead::Captured {
                 seq,
                 payload: ClipboardPayload::Files(paths),
-            } => {
-                let is_cut = LAST_WAS_CUT.load(Ordering::Acquire)
-                    && LAST_CUT_SEQ.load(Ordering::Acquire) == seq;
-                Some(FinderClipboardData {
-                    paths,
-                    mode: if is_cut {
-                        FinderClipboardMode::Cut
-                    } else {
-                        FinderClipboardMode::Copy
-                    },
-                })
-            }
+            } => Some(resolve_clipboard_cut_mode(seq, paths)),
             _ => None,
         }
     }
@@ -276,12 +332,21 @@ impl FinderPort for WindowsFinderPort {
         sources: &[String],
         dest_dir: &str,
         move_items: bool,
-    ) -> Vec<(String, String)> {
-        let moved = paste_fs_paths(sources, dest_dir, move_items);
-        if move_items && !moved.is_empty() {
-            LAST_WAS_CUT.store(false, Ordering::Release);
+    ) -> FinderBatchOutcome {
+        let outcome = paste_fs_paths(sources, dest_dir, move_items);
+        if move_items {
+            let completed_sources: Vec<String> = outcome
+                .completed_pairs()
+                .into_iter()
+                .map(|(src, _)| src)
+                .collect();
+            consume_completed_cuts(&completed_sources);
         }
-        moved
+        outcome
+    }
+
+    fn move_exact(&self, moves: &[(String, String)]) -> FinderBatchOutcome {
+        move_exact_paths(moves)
     }
 
     fn load_preview(&self, entry: &FinderEntry) -> FinderPreviewData {
