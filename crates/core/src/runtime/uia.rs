@@ -4,7 +4,6 @@ use crate::control_center::{
 };
 use crate::dock::layout::DockLayout;
 use crate::layout::{HitTarget, Layout, Rect};
-use crate::notch::focus_stats_view::FocusStatsRange;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessibleRole {
