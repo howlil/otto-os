@@ -1,5 +1,5 @@
 use otto_platform::place_overlay_above;
-use otto_render::WindowControlsRenderer;
+use otto_render::{WindowControlsPresent, WindowControlsRenderer};
 
 use super::Overlay;
 
@@ -29,20 +29,22 @@ impl Overlay {
         let pressed = self.pressed_visual();
         let state = self
             .state
-            .with_alt_zoom_glyph(self.hovered && self.alt_down);
+            .with_alt_zoom_glyph(self.hover.hovered && self.hover.alt_down);
         if let Some(renderer) = self.renderer.as_mut() {
             crate::host::log_present_error(
                 "window-controls",
                 renderer.present(
                     self.hwnd,
                     render_origin,
-                    &self.layout,
-                    state,
-                    target.maximized,
-                    self.hovered,
-                    pressed,
-                    self.appearance,
-                    cover.as_ref(),
+                    &WindowControlsPresent {
+                        layout: &self.layout,
+                        state,
+                        maximized: target.maximized,
+                        hovered: self.hover.hovered,
+                        pressed,
+                        appearance: self.appearance,
+                        cover: cover.as_ref(),
+                    },
                 ),
             );
         }

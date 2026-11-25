@@ -1,15 +1,11 @@
-use std::mem::size_of;
-
 use crate::host::RuntimeContext;
 use otto_core::{
     DockDropEffect, DockDropInput, DockEntry, DockItemKind, DockPort, dock_drop_effect,
     other_applications_visible, scale,
 };
 use otto_platform::release_capture_if_owned;
-use otto_platform::{cursor_position, extract_dropped_files, is_escape_down};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+use otto_platform::{
+    capture_mouse, cursor_position, extract_dropped_files, is_escape_down, track_mouse_leave,
 };
 
 use super::Dock;
@@ -41,7 +37,9 @@ impl Dock {
         let (gx, gy) = cursor_position();
         let (_, win_top) = self.window_origin();
         let local_y = gy - win_top;
-        let still_inside = !self.anim.should_hide
+        let on_primary = gx >= 0 && gx < self.screen.width && gy >= 0 && gy < self.screen.height;
+        let still_inside = on_primary
+            && !self.anim.should_hide
             && gx >= self.layout.pill.x - 20
             && gx <= self.layout.pill.right() + 20
             && local_y >= self.layout.pill.y - 36;
@@ -57,16 +55,8 @@ impl Dock {
     }
 
     pub(super) fn on_mouse_move(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
-        if !self.tracking_mouse {
-            let mut track = TRACKMOUSEEVENT {
-                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: HWND(self.hwnd as *mut _),
-                dwHoverTime: 0,
-            };
-            if unsafe { TrackMouseEvent(&mut track) }.is_ok() {
-                self.tracking_mouse = true;
-            }
+        if !self.tracking_mouse && track_mouse_leave(self.hwnd) {
+            self.tracking_mouse = true;
         }
 
         if self.drag.start_idx.is_some() {
@@ -116,7 +106,9 @@ impl Dock {
         let (_, win_top) = self.window_origin();
         let local_x = gx;
         let local_y = gy - win_top;
-        let still_over_dock = !self.anim.should_hide
+        let on_primary = gx >= 0 && gx < self.screen.width && gy >= 0 && gy < self.screen.height;
+        let still_over_dock = on_primary
+            && !self.anim.should_hide
             && local_x >= self.layout.pill.x - 12
             && local_x <= self.layout.pill.right() + 12
             && local_y >= self.layout.pill.y - 28
@@ -174,9 +166,7 @@ impl Dock {
             is_dragging: false,
         };
         if idx.is_some() {
-            unsafe {
-                let _ = SetCapture(HWND(self.hwnd as *mut _));
-            }
+            capture_mouse(self.hwnd);
         }
     }
 

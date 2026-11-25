@@ -1,10 +1,13 @@
 mod actions;
 mod commands;
+mod grid;
+mod hit_test;
 mod layout;
 mod layout_types;
 mod model;
 mod sha256;
 mod snapshot;
+mod tile_layout;
 mod update;
 
 #[cfg(test)]
@@ -18,11 +21,16 @@ pub use self::actions::{
 pub use self::commands::{
     ControlCenterClickOutcome, ControlCenterCommand, ControlCenterFocus, ControlCenterFocusOutcome,
 };
+pub use self::grid::{
+    CONTROL_GRID_COLUMNS, CONTROL_GRID_MAX_ROWS, CONTROL_GRID_MAX_TILES, ControlCategory,
+    ControlCenterGrid, ControlKind, ControlSize, ControlTile,
+};
 pub use self::layout::{
     compute_control_center_layout_for_snapshot, next_dock_icon_size, power_mode_label,
 };
 pub use self::layout_types::{
     ControlCenterHitTarget, ControlCenterLayout, ControlCenterMetrics, ControlCenterPlacement,
+    ControlTileLayout,
 };
 pub use self::model::{
     AudioOutputDevice, BluetoothDevice, BluetoothDeviceKind, BluetoothState, ControlCenterPage,

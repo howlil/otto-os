@@ -1,0 +1,56 @@
+name: Post-Release Follow-Up (Forward Pressure)
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: release-followup-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  followup:
+    name: Create Post-Release Distribution Checklist
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open distribution and verification tracking issue
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const tag = context.payload.release.tag_name;
+            const releaseUrl = context.payload.release.html_url;
+            const title = `[Release Follow-Up]: ${tag} distribution & live verification`;
+
+            const openIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 50,
+            });
+            if (openIssues.data.some((issue) => issue.title === title)) {
+              return;
+            }
+
+            const body = [
+              `Stable release **${tag}** was published at ${releaseUrl}.`,
+              "",
+              "Complete the human-owned post-release verification and distribution steps:",
+              "",
+              "- [ ] Submit generated WinGet manifests from the release assets (`howlil.OttoOS*.yaml`) to `microsoft/winget-pkgs`.",
+              "- [ ] Verify the landing site `/api/beta-downloads` endpoint and README download badge resolve to `" + tag + "`.",
+              "- [ ] Verify Authenticode signature (when configured) and `SHA256SUMS.txt` parity on a clean Windows 11 machine.",
+              "- [ ] Run an end-to-end in-app `Check for Updates...` upgrade check from the previous stable release.",
+              "- [ ] Confirm `.\u005cscripts\u005crelease-verify.ps1 -E2EScenario full` report was archived for this release.",
+            ].join("\n");
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+            });

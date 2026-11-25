@@ -15,7 +15,7 @@ use super::worker::is_shutting_down;
 use super::worker::with_cache;
 
 #[must_use]
-pub fn read_wifi_state() -> WifiState {
+pub(crate) fn read_wifi_state() -> WifiState {
     if is_shutting_down() {
         return WifiState::default();
     }
@@ -30,7 +30,7 @@ pub fn read_wifi_state() -> WifiState {
 }
 
 #[must_use]
-pub fn set_wifi_enabled(enabled: bool) -> bool {
+pub(crate) fn set_wifi_enabled(enabled: bool) -> bool {
     let supported = with_cache(|cache| cache.wifi.supported).unwrap_or(false);
     if !supported {
         return false;
@@ -41,7 +41,7 @@ pub fn set_wifi_enabled(enabled: bool) -> bool {
 }
 
 #[must_use]
-pub fn connect_wifi(ssid: &str) -> bool {
+pub(crate) fn connect_wifi(ssid: &str) -> bool {
     if ssid.is_empty() {
         return false;
     }
@@ -63,7 +63,7 @@ pub fn connect_wifi(ssid: &str) -> bool {
 }
 
 #[must_use]
-pub fn read_bluetooth_state() -> BluetoothState {
+pub(crate) fn read_bluetooth_state() -> BluetoothState {
     if is_shutting_down() {
         return BluetoothState::default();
     }
@@ -78,7 +78,7 @@ pub fn read_bluetooth_state() -> BluetoothState {
 }
 
 #[must_use]
-pub fn set_bluetooth_enabled(enabled: bool) -> bool {
+pub(crate) fn set_bluetooth_enabled(enabled: bool) -> bool {
     let supported = with_cache(|cache| cache.bluetooth.supported).unwrap_or(false);
     if !supported {
         return false;
@@ -89,7 +89,7 @@ pub fn set_bluetooth_enabled(enabled: bool) -> bool {
 }
 
 #[must_use]
-pub fn toggle_bluetooth_device(id: &str, connect: bool) -> bool {
+pub(crate) fn toggle_bluetooth_device(id: &str, connect: bool) -> bool {
     if id.is_empty() {
         return false;
     }

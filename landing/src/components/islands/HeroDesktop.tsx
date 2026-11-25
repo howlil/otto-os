@@ -1,12 +1,12 @@
-import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { BatteryMedium, Bell, Code, Search, SlidersHorizontal, Volume2, Wifi, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { Fragment, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
-import { FocusCompact } from "./notch/Compact";
-import { FOCUS_START, ISLAND } from "./notch/spec";
 import { DockArt, type DockArtKind } from "./dock/DockArt";
 import { DOT_BOTTOM, dockCenters, hoveredSlot, magnifyScale, tooltipWidth } from "./dock/layout";
 import { DOCK } from "./dock/spec";
+import { FocusCompact } from "./notch/Compact";
+import { FOCUS_START, ISLAND } from "./notch/spec";
 
 type PopupKind = null | "notif" | "calendar";
 
@@ -35,11 +35,41 @@ const DOCK_SLOTS: DockSlot[] = [
 ];
 
 const DAYS_MINI = [
-  { d: 1, m: true }, { d: 2, m: true }, { d: 3, m: true }, { d: 4, m: true }, { d: 5, m: true }, { d: 6, m: true }, { d: 7, m: true },
-  { d: 8, m: true }, { d: 9, m: true }, { d: 10, m: true }, { d: 11, m: true }, { d: 12, m: true }, { d: 13, m: true }, { d: 14, m: true },
-  { d: 15, m: true }, { d: 16, m: true }, { d: 17, m: true }, { d: 18, m: true }, { d: 19, m: true }, { d: 20, m: true }, { d: 21, m: true },
-  { d: 22, m: true }, { d: 23, m: true, today: true }, { d: 24, m: true }, { d: 25, m: true }, { d: 26, m: true }, { d: 27, m: true }, { d: 28, m: true },
-  { d: 29, m: true }, { d: 30, m: true }, { d: 1, m: false }, { d: 2, m: false }, { d: 3, m: false }, { d: 4, m: false }, { d: 5, m: false },
+  { d: 1, m: true },
+  { d: 2, m: true },
+  { d: 3, m: true },
+  { d: 4, m: true },
+  { d: 5, m: true },
+  { d: 6, m: true },
+  { d: 7, m: true },
+  { d: 8, m: true },
+  { d: 9, m: true },
+  { d: 10, m: true },
+  { d: 11, m: true },
+  { d: 12, m: true },
+  { d: 13, m: true },
+  { d: 14, m: true },
+  { d: 15, m: true },
+  { d: 16, m: true },
+  { d: 17, m: true },
+  { d: 18, m: true },
+  { d: 19, m: true },
+  { d: 20, m: true },
+  { d: 21, m: true },
+  { d: 22, m: true },
+  { d: 23, m: true, today: true },
+  { d: 24, m: true },
+  { d: 25, m: true },
+  { d: 26, m: true },
+  { d: 27, m: true },
+  { d: 28, m: true },
+  { d: 29, m: true },
+  { d: 30, m: true },
+  { d: 1, m: false },
+  { d: 2, m: false },
+  { d: 3, m: false },
+  { d: 4, m: false },
+  { d: 5, m: false },
 ];
 
 export function HeroDesktop() {
@@ -129,7 +159,9 @@ export function HeroDesktop() {
             >
               <Bell size={15} strokeWidth={2} aria-hidden="true" />
               <span className="absolute top-1.5 right-2 size-1.5 rounded-full bg-[#ff453a]" aria-hidden="true" />
-              <span className="sr-only"><T id="Notifikasi" en="Notifications" /></span>
+              <span className="sr-only">
+                <T id="Notifikasi" en="Notifications" />
+              </span>
             </button>
             <button
               type="button"
@@ -182,14 +214,21 @@ export function HeroDesktop() {
                 </button>
               </div>
               <div className="relative pb-2">
-                <div className="absolute inset-x-3 bottom-0 h-4 rounded-b-[11px] bg-white/65 ring-1 ring-black/[0.06]" aria-hidden="true" />
+                <div
+                  className="absolute inset-x-3 bottom-0 h-4 rounded-b-[11px] bg-white/65 ring-1 ring-black/[0.06]"
+                  aria-hidden="true"
+                />
                 <div className="relative flex items-start gap-2.5 rounded-[12px] bg-white/95 p-2.5 ring-1 ring-black/[0.07]">
-                  <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#5865f2] text-[12px] font-bold text-white">D</span>
+                  <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#5865f2] text-[12px] font-bold text-white">
+                    D
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
                       <span className="flex items-center gap-1.5 text-[11px] font-medium text-ink-soft">
                         Discord
-                        <span className="rounded-[8px] bg-black/[0.06] px-1.5 py-px text-[10px] font-semibold text-ink">+2</span>
+                        <span className="rounded-[8px] bg-black/[0.06] px-1.5 py-px text-[10px] font-semibold text-ink">
+                          +2
+                        </span>
                       </span>
                       <span className="text-[10.5px] text-muted tabular-nums">2m</span>
                     </div>
@@ -199,7 +238,9 @@ export function HeroDesktop() {
                 </div>
               </div>
               <div className="mt-1.5 flex items-start gap-2.5 rounded-[12px] bg-white/95 p-2.5 ring-1 ring-black/[0.07]">
-                <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#1b1b1d] text-[12px] font-bold text-white">GH</span>
+                <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#1b1b1d] text-[12px] font-bold text-white">
+                  GH
+                </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-medium text-ink-soft">GitHub</span>
@@ -234,20 +275,18 @@ export function HeroDesktop() {
                 </button>
               </div>
               <div className="grid grid-cols-7 text-center text-[10.5px] font-semibold text-ink-soft">
-                {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-                  <span key={i} className="py-1">{d}</span>
+                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                  <span key={day} className="py-1">
+                    {day[0]}
+                  </span>
                 ))}
               </div>
               <div className="grid grid-cols-7 text-center text-[12px] tabular-nums">
-                {DAYS_MINI.map((cell, idx) => (
-                  <span key={idx} className="grid h-7 place-items-center">
+                {DAYS_MINI.map((cell) => (
+                  <span key={`${cell.m ? "m" : "o"}-${cell.d}`} className="grid h-7 place-items-center">
                     <span
                       className={`grid size-6 place-items-center rounded-full ${
-                        cell.today
-                          ? "bg-[#ff3b30] font-semibold text-white"
-                          : cell.m
-                            ? "text-ink"
-                            : "text-ink/40"
+                        cell.today ? "bg-[#ff3b30] font-semibold text-white" : cell.m ? "text-ink" : "text-ink/40"
                       }`}
                     >
                       {cell.d}
@@ -266,9 +305,11 @@ export function HeroDesktop() {
               <span className="shrink-0 font-medium">otto-os</span>
               <span className="shrink-0 text-white/35">/</span>
               <span className="truncate text-white/55 sm:hidden">compose.rs</span>
-              <span className="hidden truncate text-white/55 sm:inline">crates/core/src/appearance/glass/compose.rs</span>
+              <span className="hidden truncate text-white/55 sm:inline">
+                crates/core/src/appearance/glass/compose.rs
+              </span>
             </div>
-            <div className="flex shrink-0 items-center gap-2" aria-label="Window controls">
+            <div className="flex shrink-0 items-center gap-2" aria-hidden="true">
               <span className="size-3 rounded-full bg-window-minimize" />
               <span className="size-3 rounded-full bg-window-zoom" />
               <span className="size-3 rounded-full bg-window-close" />
@@ -285,11 +326,22 @@ export function HeroDesktop() {
               </span>
             </div>
             <div className="overflow-hidden p-4 font-mono text-[11.5px] leading-[1.7] text-white/75 sm:p-5 sm:text-[12px]">
-              <p><span className="text-[#75b0ff]">pub fn</span> <span className="text-[#ffd18c]">compose_glass_lit</span>(backdrop: &amp;Backdrop, params: GlassParams) {"{"}</p>
-              <p className="pl-4 text-white/55 hidden sm:block">let refracted = snell_bezel(backdrop.sharp, params.bezel_pt);</p>
-              <p className="pl-4 text-white/55 hidden sm:block">let frosted = box_blur_3pass(backdrop.soft, params.blur_pt);</p>
-              <p className="pl-4 text-white/55 hidden sm:block">let rim = dual_specular_rim(LIGHT_DIRECTION, params.rim);</p>
-              <p className="pl-4"><span className="text-[#7fd17a]">blend_optical</span>(refracted, frosted, rim, params.accent)</p>
+              <p>
+                <span className="text-[#75b0ff]">pub fn</span> <span className="text-[#ffd18c]">compose_glass_lit</span>
+                (backdrop: &amp;Backdrop, params: GlassParams) {"{"}
+              </p>
+              <p className="pl-4 text-white/55 hidden sm:block">
+                let refracted = snell_bezel(backdrop.sharp, params.bezel_pt);
+              </p>
+              <p className="pl-4 text-white/55 hidden sm:block">
+                let frosted = box_blur_3pass(backdrop.soft, params.blur_pt);
+              </p>
+              <p className="pl-4 text-white/55 hidden sm:block">
+                let rim = dual_specular_rim(LIGHT_DIRECTION, params.rim);
+              </p>
+              <p className="pl-4">
+                <span className="text-[#7fd17a]">blend_optical</span>(refracted, frosted, rim, params.accent)
+              </p>
               <p>{"}"}</p>
             </div>
           </div>

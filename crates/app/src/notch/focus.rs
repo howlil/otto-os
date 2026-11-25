@@ -2,14 +2,13 @@ use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    FocusBlocklist, FocusSessionStatus, FocusStatsRange, FocusSubMode, HitTarget, MotionMetrics,
-    NOTCH_STATS_DAYS, NotchExpandedTab, POMODORO_PRESETS_MINUTES, PomodoroPeek, PomodoroPeekFrame,
-    PomodoroPhase, PomodoroScene, PomodoroStatus, PomodoroSurface, PomodoroTick,
-    TIMER_PRESETS_MINUTES, warning_threshold_crossed,
+    FocusBlocklist, FocusCategoryStore, FocusSessionStatus, FocusStatsRange, HeatmapFilter,
+    HitTarget, MotionMetrics, NOTCH_STATS_DAYS, POMODORO_PRESETS_MINUTES, PomodoroPeek,
+    PomodoroPeekFrame, PomodoroPhase, PomodoroScene, PomodoroSchedule, PomodoroStatus,
+    PomodoroSurface, PomodoroTick, warning_threshold_crossed,
 };
 
 use super::GLOW_BREATH_FLOOR;
-use super::GLOW_SCENE_VISIBLE;
 use super::NotchController;
 use super::NotchEffect;
 use super::NotchUpdate;
@@ -22,12 +21,107 @@ impl NotchController {
         self.focus_blocklist = blocklist;
     }
 
+    pub(crate) fn set_focus_categories(&mut self, store: FocusCategoryStore) {
+        let schedule = PomodoroSchedule::from_category(store.active());
+        self.focus_categories = store;
+        self.pomodoro.apply_schedule(schedule);
+        if let HeatmapFilter::Category(id) = &self.heatmap_filter
+            && self.focus_categories.by_id(id).is_none()
+        {
+            self.heatmap_filter = HeatmapFilter::All;
+        }
+    }
+
+    pub(crate) fn set_focus_relief_summary(&mut self, summary: String) {
+        self.focus_relief_summary = summary;
+    }
+
+    pub(crate) fn active_category_id(&self) -> &str {
+        &self.focus_categories.active_category_id
+    }
+
     pub(crate) const fn stats_range(&self) -> FocusStatsRange {
         self.stats_range
     }
 
     pub(crate) const fn stats_selected_day(&self) -> Option<usize> {
         self.stats_selected_day
+    }
+
+    pub(crate) const fn heatmap_filter(&self) -> &HeatmapFilter {
+        &self.heatmap_filter
+    }
+
+    pub(crate) const fn heatmap_selected_cell(&self) -> Option<usize> {
+        self.heatmap_selected_cell
+    }
+
+    pub(crate) const fn is_editing_custom_time(&self) -> bool {
+        self.custom_time_input.is_some()
+    }
+
+    pub(crate) fn handle_custom_time_char(&mut self, ch: char) -> NotchUpdate {
+        let Some(buf) = self.custom_time_input.as_mut() else {
+            return NotchUpdate::default();
+        };
+        if !ch.is_ascii_digit() || buf.len() >= 3 {
+            return NotchUpdate::default();
+        }
+        buf.push(ch);
+        NotchUpdate {
+            changed: true,
+            effect: None,
+        }
+    }
+
+    pub(crate) fn handle_custom_time_backspace(&mut self) -> NotchUpdate {
+        let Some(buf) = self.custom_time_input.as_mut() else {
+            return NotchUpdate::default();
+        };
+        if buf.pop().is_some() {
+            NotchUpdate {
+                changed: true,
+                effect: None,
+            }
+        } else {
+            NotchUpdate::default()
+        }
+    }
+
+    pub(crate) fn commit_custom_time(&mut self) -> NotchUpdate {
+        let Some(raw) = self.custom_time_input.take() else {
+            return NotchUpdate::default();
+        };
+        let Ok(minutes) = raw.parse::<u32>() else {
+            return NotchUpdate {
+                changed: true,
+                effect: None,
+            };
+        };
+        let applied = self.pomodoro.set_custom_minutes(minutes);
+        let effect = (applied && self.pomodoro.phase == PomodoroPhase::Focus).then(|| {
+            let clamped = self.pomodoro.schedule.focus_minutes;
+            self.focus_categories.active_mut().focus_minutes = clamped;
+            NotchEffect::UpdateFocusDuration {
+                category_id: self.focus_categories.active_category_id.clone(),
+                minutes: clamped,
+            }
+        });
+        NotchUpdate {
+            changed: true,
+            effect,
+        }
+    }
+
+    pub(crate) fn cancel_custom_time(&mut self) -> NotchUpdate {
+        if self.custom_time_input.take().is_some() {
+            NotchUpdate {
+                changed: true,
+                effect: None,
+            }
+        } else {
+            NotchUpdate::default()
+        }
     }
 
     pub(super) fn handle_focus_stats_click(&mut self, target: HitTarget) -> NotchUpdate {
@@ -38,6 +132,7 @@ impl NotchController {
                 }
                 self.stats_range = range;
                 self.stats_selected_day = None;
+                self.heatmap_selected_cell = None;
                 NotchUpdate {
                     changed: true,
                     effect: None,
@@ -49,6 +144,38 @@ impl NotchController {
                     return NotchUpdate::default();
                 }
                 self.stats_selected_day = if self.stats_selected_day == Some(idx) {
+                    None
+                } else {
+                    Some(idx)
+                };
+                NotchUpdate {
+                    changed: true,
+                    effect: None,
+                }
+            }
+            HitTarget::FocusHeatmapFilter(index) => {
+                let next = if index == 0 {
+                    HeatmapFilter::All
+                } else if let Some(cat) =
+                    self.focus_categories.categories.get(usize::from(index - 1))
+                {
+                    HeatmapFilter::Category(cat.id.clone())
+                } else {
+                    return NotchUpdate::default();
+                };
+                if self.heatmap_filter == next {
+                    return NotchUpdate::default();
+                }
+                self.heatmap_filter = next;
+                self.heatmap_selected_cell = None;
+                NotchUpdate {
+                    changed: true,
+                    effect: None,
+                }
+            }
+            HitTarget::FocusHeatmapCell(index) => {
+                let idx = usize::from(index);
+                self.heatmap_selected_cell = if self.heatmap_selected_cell == Some(idx) {
                     None
                 } else {
                     Some(idx)
@@ -73,10 +200,8 @@ impl NotchController {
 
     pub(crate) const fn is_focus_blocking_active(&self) -> bool {
         self.focus_enabled
-            && ((matches!(self.pomodoro.status, PomodoroStatus::Running)
-                && matches!(self.pomodoro.phase, PomodoroPhase::Focus))
-                || matches!(self.quick_timer.status, PomodoroStatus::Running)
-                || self.stopwatch.running)
+            && matches!(self.pomodoro.status, PomodoroStatus::Running)
+            && matches!(self.pomodoro.phase, PomodoroPhase::Focus)
     }
 
     pub(crate) const fn focus_session_status(&self) -> FocusSessionStatus {
@@ -90,20 +215,6 @@ impl NotchController {
                 remaining_seconds: self.pomodoro.remaining_seconds,
             };
         }
-        if matches!(self.quick_timer.status, PomodoroStatus::Running) {
-            return FocusSessionStatus::RunningCountdown {
-                remaining_seconds: self.quick_timer.remaining_seconds,
-            };
-        }
-        if self.stopwatch.running {
-            let secs = self.stopwatch.elapsed_ms / 1_000;
-            let elapsed_seconds = if secs > u32::MAX as u64 {
-                u32::MAX
-            } else {
-                secs as u32
-            };
-            return FocusSessionStatus::RunningStopwatch { elapsed_seconds };
-        }
         if matches!(self.pomodoro.status, PomodoroStatus::Running) {
             return FocusSessionStatus::OnBreak {
                 remaining_seconds: self.pomodoro.remaining_seconds,
@@ -116,55 +227,19 @@ impl NotchController {
                 remaining_seconds: self.pomodoro.remaining_seconds,
             };
         }
-        if matches!(self.quick_timer.status, PomodoroStatus::Paused) {
-            return FocusSessionStatus::PausedCountdown {
-                remaining_seconds: self.quick_timer.remaining_seconds,
-            };
-        }
-        if self.stopwatch.elapsed_ms > 0 {
-            let secs = self.stopwatch.elapsed_ms / 1_000;
-            let elapsed_seconds = if secs > u32::MAX as u64 {
-                u32::MAX
-            } else {
-                secs as u32
-            };
-            return FocusSessionStatus::PausedStopwatch { elapsed_seconds };
-        }
         FocusSessionStatus::NotRunning
     }
 
-    pub(super) fn active_focus_status(&self) -> PomodoroStatus {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => self.pomodoro.status,
-            FocusSubMode::Timer => self.quick_timer.status,
-            FocusSubMode::Stopwatch => self.stopwatch.status(),
-        }
+    pub(super) const fn active_focus_status(&self) -> PomodoroStatus {
+        self.pomodoro.status
     }
 
-    pub(super) fn active_is_last_minute(&self) -> bool {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => self.pomodoro.is_last_minute(),
-            FocusSubMode::Timer => self.quick_timer.is_last_minute(),
-            FocusSubMode::Stopwatch => false,
-        }
+    pub(super) const fn active_is_last_minute(&self) -> bool {
+        self.pomodoro.is_last_minute()
     }
 
-    pub(super) fn is_stopwatch_visible(&self) -> bool {
-        self.presented
-            && ((self.panel_expansion > GLOW_SCENE_VISIBLE
-                && self.notch_tab == NotchExpandedTab::Pomodoro
-                && self.focus_mode == FocusSubMode::Stopwatch)
-                || (self.compact_expansion > GLOW_SCENE_VISIBLE
-                    && !self.media_primary
-                    && self.compact_focus_mode() == Some(FocusSubMode::Stopwatch)))
-    }
-
-    pub(super) fn active_surface(&self) -> PomodoroSurface {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => PomodoroSurface::of_state(&self.pomodoro),
-            FocusSubMode::Timer => PomodoroSurface::of_timer_state(&self.quick_timer),
-            FocusSubMode::Stopwatch => PomodoroSurface::of_stopwatch_state(&self.stopwatch),
-        }
+    pub(super) const fn active_surface(&self) -> PomodoroSurface {
+        PomodoroSurface::of_state(&self.pomodoro)
     }
 
     #[cfg(test)]
@@ -186,12 +261,16 @@ impl NotchController {
         } else {
             1.0
         };
+        let active = self.focus_categories.active();
+        let categories = self
+            .focus_categories
+            .categories
+            .iter()
+            .take(otto_core::NOTCH_CATEGORY_OPTIONS)
+            .map(|c| (c.id.clone(), c.name.clone(), c.color))
+            .collect();
         PomodoroScene {
             state: self.pomodoro,
-            timer: self.quick_timer,
-            stopwatch: self.stopwatch,
-            focus_mode: self.focus_mode,
-            compact_mode: self.compact_focus_mode().unwrap_or(self.focus_mode),
             clock: self.clock_time,
             glow: self.glow_presence * (GLOW_BREATH_FLOOR + (1.0 - GLOW_BREATH_FLOOR) * breath),
             dim: self.dim_presence,
@@ -200,6 +279,19 @@ impl NotchController {
                 text: peek.text.clone(),
                 alpha: self.peek_alpha(peek, now),
             }),
+            category_id: active.id.clone(),
+            category_name: active.name.clone(),
+            category_color: active.color,
+            category_icon: active.icon,
+            policy_summary: active.policy_summary(),
+            relief_summary: if self.is_focus_blocking_active() {
+                self.focus_relief_summary.clone()
+            } else {
+                String::new()
+            },
+            category_picker_open: self.category_picker_open,
+            categories,
+            custom_time_input: self.custom_time_input.clone(),
         }
     }
 
@@ -217,19 +309,79 @@ impl NotchController {
         }
     }
 
-    pub(super) fn handle_focus_mode_click(&mut self, mode: FocusSubMode) -> NotchUpdate {
-        if self.focus_mode == mode {
-            return NotchUpdate::default();
-        }
-        let now_ms = self.millis(Instant::now());
-        if mode == FocusSubMode::Stopwatch {
-            self.stopwatch_clock.sync(&mut self.stopwatch, now_ms, true);
-        }
-        self.focus_mode = mode;
-        self.peek = None;
-        NotchUpdate {
-            changed: true,
-            effect: None,
+    fn handle_category_or_duration_click(&mut self, target: HitTarget) -> Option<NotchUpdate> {
+        match target {
+            HitTarget::PomodoroOpenSettings => Some(NotchUpdate {
+                changed: false,
+                effect: Some(NotchEffect::OpenFocusModeSettings),
+            }),
+            HitTarget::PomodoroCategoryPill => {
+                self.custom_time_input = None;
+                self.category_picker_open = !self.category_picker_open;
+                Some(NotchUpdate {
+                    changed: true,
+                    effect: None,
+                })
+            }
+            HitTarget::PomodoroCategoryOption(index) => {
+                let Some(cat_id) = self
+                    .focus_categories
+                    .categories
+                    .get(usize::from(index))
+                    .map(|cat| cat.id.clone())
+                else {
+                    return Some(NotchUpdate::default());
+                };
+                self.category_picker_open = false;
+                self.custom_time_input = None;
+                let selected = self.focus_categories.select(&cat_id);
+                if selected {
+                    let schedule = PomodoroSchedule::from_category(self.focus_categories.active());
+                    self.pomodoro.apply_schedule(schedule);
+                }
+                Some(NotchUpdate {
+                    changed: true,
+                    effect: selected.then_some(NotchEffect::SelectFocusCategory(cat_id)),
+                })
+            }
+            HitTarget::PomodoroDurationDec | HitTarget::PomodoroDurationInc => {
+                let delta = if target == HitTarget::PomodoroDurationDec {
+                    -5
+                } else {
+                    5
+                };
+                self.custom_time_input = None;
+                if !self.pomodoro.adjust_minutes(delta) {
+                    return Some(NotchUpdate::default());
+                }
+                let effect = (self.pomodoro.phase == PomodoroPhase::Focus).then(|| {
+                    let mins = self.pomodoro.schedule.focus_minutes;
+                    self.focus_categories.active_mut().focus_minutes = mins;
+                    NotchEffect::UpdateFocusDuration {
+                        category_id: self.focus_categories.active_category_id.clone(),
+                        minutes: mins,
+                    }
+                });
+                Some(NotchUpdate {
+                    changed: true,
+                    effect,
+                })
+            }
+            HitTarget::PomodoroTimeEdit => {
+                if !matches!(
+                    self.pomodoro.status,
+                    PomodoroStatus::Idle | PomodoroStatus::Paused
+                ) {
+                    return Some(NotchUpdate::default());
+                }
+                self.category_picker_open = false;
+                self.custom_time_input = Some(String::new());
+                Some(NotchUpdate {
+                    changed: true,
+                    effect: None,
+                })
+            }
+            _ => None,
         }
     }
 
@@ -237,47 +389,57 @@ impl NotchController {
         self.clear_focus_dismissed();
         let now = Instant::now();
         let now_ms = self.millis(now);
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => self.handle_pomodoro_mode_click(target, now, now_ms),
-            FocusSubMode::Timer => self.handle_timer_mode_click(target, now_ms),
-            FocusSubMode::Stopwatch => self.handle_stopwatch_mode_click(target, now_ms),
+        if let Some(update) = self.handle_category_or_duration_click(target) {
+            if update.changed {
+                self.clock.restart(now_ms);
+            }
+            return update;
         }
-    }
-
-    pub(super) fn handle_pomodoro_mode_click(
-        &mut self,
-        target: HitTarget,
-        now: Instant,
-        now_ms: u64,
-    ) -> NotchUpdate {
         let previous = self.pomodoro.status;
+        let mut effect = None;
         match target {
             HitTarget::PomodoroPlayPause => {
+                self.category_picker_open = false;
+                self.custom_time_input = None;
                 self.pomodoro.toggle_run();
                 self.note_pomodoro_transition(previous, now);
             }
             HitTarget::PomodoroReset => {
+                self.category_picker_open = false;
+                self.custom_time_input = None;
                 self.pomodoro.reset();
                 self.peek = None;
             }
             HitTarget::PomodoroSkip => {
+                self.category_picker_open = false;
+                self.custom_time_input = None;
                 self.pomodoro.skip_phase();
                 self.peek = None;
             }
             HitTarget::PomodoroPreset(index) => {
+                self.custom_time_input = None;
                 let Some(minutes) = POMODORO_PRESETS_MINUTES.get(usize::from(index)) else {
                     return NotchUpdate::default();
                 };
                 if !self.pomodoro.set_preset(*minutes) {
                     return NotchUpdate::default();
                 }
+                self.focus_categories.active_mut().focus_minutes = *minutes;
+                effect = Some(NotchEffect::UpdateFocusDuration {
+                    category_id: self.focus_categories.active_category_id.clone(),
+                    minutes: *minutes,
+                });
             }
             HitTarget::PomodoroStartNext => {
+                self.category_picker_open = false;
+                self.custom_time_input = None;
                 self.pomodoro.start_next_from_alert();
                 self.alert_until = None;
                 self.note_pomodoro_transition(previous, now);
             }
             HitTarget::PomodoroExtendFive => {
+                self.category_picker_open = false;
+                self.custom_time_input = None;
                 self.pomodoro.extend_five_minutes();
                 self.alert_until = None;
                 self.pomodoro.mark_started(self.clock_time.minute_of_day());
@@ -288,63 +450,7 @@ impl NotchController {
         self.clock.restart(now_ms);
         NotchUpdate {
             changed: true,
-            effect: None,
-        }
-    }
-
-    pub(super) fn handle_timer_mode_click(
-        &mut self,
-        target: HitTarget,
-        now_ms: u64,
-    ) -> NotchUpdate {
-        match target {
-            HitTarget::PomodoroPlayPause => self.quick_timer.toggle_run(),
-            HitTarget::PomodoroReset => self.quick_timer.reset(),
-            HitTarget::PomodoroPreset(index) => {
-                let Some(minutes) = TIMER_PRESETS_MINUTES.get(usize::from(index)) else {
-                    return NotchUpdate::default();
-                };
-                if !self.quick_timer.set_preset(*minutes) {
-                    return NotchUpdate::default();
-                }
-            }
-            HitTarget::PomodoroStartNext => {
-                self.quick_timer.start_next_from_alert();
-                self.alert_until = None;
-            }
-            HitTarget::PomodoroExtendFive => {
-                self.quick_timer.extend_five_minutes();
-                self.alert_until = None;
-            }
-            _ => return NotchUpdate::default(),
-        }
-        self.timer_clock.restart(now_ms);
-        NotchUpdate {
-            changed: true,
-            effect: None,
-        }
-    }
-
-    pub(super) fn handle_stopwatch_mode_click(
-        &mut self,
-        target: HitTarget,
-        now_ms: u64,
-    ) -> NotchUpdate {
-        self.stopwatch_clock.sync(&mut self.stopwatch, now_ms, true);
-        match target {
-            HitTarget::PomodoroPlayPause => self.stopwatch.toggle_run(),
-            HitTarget::PomodoroReset => self.stopwatch.reset(),
-            HitTarget::PomodoroSkip => {
-                if !self.stopwatch.record_lap() {
-                    return NotchUpdate::default();
-                }
-            }
-            _ => return NotchUpdate::default(),
-        }
-        self.stopwatch_clock.restart(now_ms);
-        NotchUpdate {
-            changed: true,
-            effect: None,
+            effect,
         }
     }
 
@@ -353,25 +459,13 @@ impl NotchController {
         let before = self.pomodoro;
         let tick = self.clock.sync(&mut self.pomodoro, now_ms);
         let (mut changed, mut effect) = self.apply_tick(tick, now);
-        if tick == PomodoroTick::Completed {
-            self.focus_mode = FocusSubMode::Pomodoro;
-        }
-        let timer_tick = self.timer_clock.sync_timer(&mut self.quick_timer, now_ms);
-        let (timer_changed, timer_effect) = self.apply_tick(timer_tick, now);
-        if timer_tick == PomodoroTick::Completed {
-            self.focus_mode = FocusSubMode::Timer;
-        }
-        changed |= timer_changed;
-        if effect.is_none() {
-            effect = timer_effect;
-        }
-        let sw_visible = self.is_stopwatch_visible();
-        if self
-            .stopwatch_clock
-            .sync(&mut self.stopwatch, now_ms, sw_visible)
-            && sw_visible
-        {
-            changed = true;
+        if tick == PomodoroTick::Completed && before.phase == PomodoroPhase::Focus {
+            self.focus_relief_summary.clear();
+            if effect.is_none() {
+                effect = Some(NotchEffect::RecordCompletedSession {
+                    category_id: self.focus_categories.active_category_id.clone(),
+                });
+            }
         }
         if warning_threshold_crossed(before, self.pomodoro) {
             self.show_peek(PomodoroPeek::FiveMinutesLeft, now);

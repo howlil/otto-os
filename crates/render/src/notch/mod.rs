@@ -1,4 +1,5 @@
 pub(crate) mod clipboard;
+pub(crate) mod focus_heatmap;
 pub(crate) mod focus_stats;
 pub(crate) mod glow;
 pub(crate) mod hud;
@@ -6,6 +7,7 @@ pub(crate) mod lyrics;
 pub(crate) mod media;
 pub(crate) mod notification;
 pub(crate) mod pomodoro;
+pub(crate) mod pomodoro_redesign;
 pub(crate) mod privacy;
 pub(crate) mod shelf;
 pub(crate) mod shell;

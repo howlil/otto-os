@@ -59,7 +59,7 @@ pub(super) fn top_bar_context<'a>(
     }
 }
 
-pub fn open_top_bar_menu(runtime: &RuntimeContext, request: &TopBarMenuRequest<'_>) {
+pub(crate) fn open_top_bar_menu(runtime: &RuntimeContext, request: &TopBarMenuRequest<'_>) {
     let anchor = MenuAnchor::TopBar {
         x: request.anchor_x,
         y: request.anchor_y,
@@ -110,7 +110,7 @@ pub fn open_top_bar_menu(runtime: &RuntimeContext, request: &TopBarMenuRequest<'
     with_menu(runtime, |menu| menu.open(runtime, anchor, rows, source));
 }
 
-pub fn open_dock_menu(
+pub(crate) fn open_dock_menu(
     runtime: &RuntimeContext,
     entry: DockEntry,
     other_apps_visible: bool,
@@ -130,7 +130,7 @@ pub fn open_dock_menu(
     });
 }
 
-pub fn open_dock_settings_menu(
+pub(crate) fn open_dock_settings_menu(
     runtime: &RuntimeContext,
     center_x: i32,
     bottom_y: i32,
@@ -146,7 +146,12 @@ pub fn open_dock_settings_menu(
     });
 }
 
-pub fn open_tray_menu(runtime: &RuntimeContext, anchor_x: i32, anchor_y: i32, above_cursor: bool) {
+pub(crate) fn open_tray_menu(
+    runtime: &RuntimeContext,
+    anchor_x: i32,
+    anchor_y: i32,
+    above_cursor: bool,
+) {
     let rows = build_tray_menu_rows(
         runtime.top_bar_enabled.get(),
         runtime.notch_enabled.get(),
@@ -175,7 +180,7 @@ pub fn open_tray_menu(runtime: &RuntimeContext, anchor_x: i32, anchor_y: i32, ab
     });
 }
 
-pub fn open_dock_overflow_menu(
+pub(crate) fn open_dock_overflow_menu(
     runtime: &RuntimeContext,
     center_x: i32,
     bottom_y: i32,
@@ -201,14 +206,14 @@ pub fn open_dock_overflow_menu(
     });
 }
 
-pub fn open_downloads_stack_menu(runtime: &RuntimeContext, center_x: i32, bottom_y: i32) {
+pub(crate) fn open_downloads_stack_menu(runtime: &RuntimeContext, center_x: i32, bottom_y: i32) {
     let items = read_downloads_stack_items(DOWNLOADS_STACK_MAX_ITEMS);
     with_menu(runtime, |menu| {
         menu.open_downloads_stack(runtime, center_x, bottom_y, items);
     });
 }
 
-pub fn open_calendar(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
+pub(crate) fn open_calendar(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
     let mut month = None;
     with_menu(runtime, |menu| {
         let clock = menu.control_center.read_system_status().clock;
@@ -234,16 +239,10 @@ pub(super) fn open_calendar_month(
             x: anchor_right - 1,
             y: anchor_y,
         };
-        let width = resolve_layout(
-            &menu.metrics,
-            menu.screen.dpi,
-            probe,
-            0,
-            &rows,
-            menu.renderer.as_ref(),
-        )
-        .window
-        .width;
+        let dpi = otto_platform::monitor_at(anchor_right - 1, anchor_y).dpi;
+        let width = resolve_layout(&menu.metrics, dpi, probe, 0, &rows, menu.renderer.as_ref())
+            .window
+            .width;
         menu.open(
             runtime,
             MenuAnchor::BelowPoint {
@@ -261,14 +260,14 @@ pub(super) fn open_calendar_month(
     });
 }
 
-pub fn open_notifications(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
+pub(crate) fn open_notifications(runtime: &RuntimeContext, anchor_right: i32, anchor_y: i32) {
     with_menu(runtime, |menu| {
         menu.open_notification_center(runtime, anchor_right, anchor_y, BTreeSet::new(), 0);
     });
 }
 
 #[must_use]
-pub fn is_calendar_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_calendar_open(runtime: &RuntimeContext) -> bool {
     runtime.menu.try_borrow().ok().is_some_and(|guard| {
         guard.as_ref().is_some_and(|menu| {
             menu.visible && matches!(menu.source, Some(MenuSource::Calendar { .. }))
@@ -277,7 +276,7 @@ pub fn is_calendar_open(runtime: &RuntimeContext) -> bool {
 }
 
 #[must_use]
-pub fn is_notification_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_notification_open(runtime: &RuntimeContext) -> bool {
     runtime.menu.try_borrow().ok().is_some_and(|guard| {
         guard
             .as_ref()
@@ -285,7 +284,7 @@ pub fn is_notification_open(runtime: &RuntimeContext) -> bool {
     })
 }
 
-pub fn open_window_tiling_menu(
+pub(crate) fn open_window_tiling_menu(
     runtime: &RuntimeContext,
     window: &WindowInfo,
     anchor_x: i32,
@@ -304,6 +303,25 @@ pub fn open_window_tiling_menu(
             },
             rows,
             source,
+        );
+    });
+}
+
+pub(crate) fn open_finder_menu(
+    runtime: &RuntimeContext,
+    anchor_x: i32,
+    anchor_y: i32,
+    rows: Vec<MenuRow>,
+) {
+    with_menu(runtime, |menu| {
+        menu.open(
+            runtime,
+            MenuAnchor::BelowPoint {
+                x: anchor_x,
+                y: anchor_y,
+            },
+            rows,
+            MenuSource::Finder,
         );
     });
 }

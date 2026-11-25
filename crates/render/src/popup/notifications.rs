@@ -10,6 +10,8 @@ use windows_numerics::Vector2;
 use super::menu::PopupMenuRenderer;
 use crate::appearance::surface::{draw_on, draw_with_recovery, fnv1a_hash};
 use crate::appearance::theme::LiquidGlassPalette;
+use crate::kit::draw::draw_focus_ring_for;
+use crate::kit::icons::{ChevronDir, draw_chevron_glyph, draw_close_x_glyph};
 use crate::{
     BLACK, CLEAR, CachedCoverArt, CoverArt, build_squircle_path, decode_image_bytes,
     draw_bell_glyph, rect_to_d2d,
@@ -130,7 +132,6 @@ impl PopupMenuRenderer {
             self.target.PopAxisAlignedClip();
 
             self.draw_nc_scroll_hints(layout);
-            self.draw_nc_footer(layout, active_hit, &palette);
             if keyboard_focus && let Some(rect) = layout.target_rect(active_hit) {
                 self.draw_nc_focus_ring(rect, layout, active_hit, &palette);
             }
@@ -354,7 +355,7 @@ impl PopupMenuRenderer {
         let fill = self.brushes.alpha_brush(palette.text_primary, 0.12);
         let ink = self.brushes.alpha_brush(palette.text_primary, 0.88);
         self.fill_shape(rect, radius, None, &fill);
-        self.draw_clipped_text(&self.notif_count_format, label, &rect, &ink);
+        crate::draw_dwrite_tabular_text(&self.target, label, &self.notif_count_format, rect, &ink);
     }
 
     fn draw_nc_card_eyebrow_rows(
@@ -590,7 +591,7 @@ impl PopupMenuRenderer {
         let ink = if badge_ink_is_dark(badge.color) {
             self.brushes.alpha_brush(BLACK, 0.88)
         } else {
-            self.brushes.on_accent.clone()
+            self.brushes.white.clone()
         };
         self.draw_clipped_text(&self.notif_badge_format, initial, &d2d_rect, &ink);
     }
@@ -608,7 +609,6 @@ impl PopupMenuRenderer {
         } else {
             &self.brushes.text_muted
         };
-        let arm = r * 0.36;
         unsafe {
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
@@ -618,16 +618,15 @@ impl PopupMenuRenderer {
                 },
                 &disc,
             );
-            for (dx, dy) in [(arm, arm), (arm, -arm)] {
-                self.target.DrawLine(
-                    Vector2::new(center.X - dx, center.Y - dy),
-                    Vector2::new(center.X + dx, center.Y + dy),
-                    x_brush,
-                    1.3,
-                    &self.stroke_style,
-                );
-            }
         }
+        draw_close_x_glyph(
+            &self.target,
+            &self.stroke_style,
+            center,
+            r * 0.36,
+            (scale(1, self.dpi) as f32 * 1.3).max(1.3),
+            x_brush,
+        );
     }
 
     fn draw_nc_state_card(
@@ -709,33 +708,6 @@ impl PopupMenuRenderer {
         }
     }
 
-    fn draw_nc_footer(
-        &self,
-        layout: &NotificationCenterLayout,
-        active_hit: NotificationCenterHit,
-        palette: &LiquidGlassPalette,
-    ) {
-        let sep_y = layout.footer_button_rect.y as f32 - scale(3, self.dpi) as f32;
-        let inset = scale(8, self.dpi) as f32;
-        let sep_brush = self.brushes.alpha_brush(palette.text_primary, 0.08);
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(layout.footer_button_rect.x as f32 + inset, sep_y),
-                Vector2::new(layout.footer_button_rect.right() as f32 - inset, sep_y),
-                &sep_brush,
-                1.0,
-                None,
-            );
-        }
-        self.draw_nc_quiet_action(
-            layout.footer_button_rect,
-            layout.pill_radius,
-            "Open Windows Notifications",
-            active_hit == NotificationCenterHit::OpenWindowsNotifications,
-            palette,
-        );
-    }
-
     fn draw_nc_quiet_action(
         &self,
         rect: Rect,
@@ -787,27 +759,30 @@ impl PopupMenuRenderer {
         if !layout.is_scrollable() {
             return;
         }
-        let center = layout.viewport.x as f32 + layout.viewport.width as f32 * 0.5;
-        let half = scale(5, self.dpi) as f32;
-        let rise = scale(3, self.dpi) as f32;
-        let brush = &self.brushes.text_muted;
-        let draw_chevron = |tip_y: f32, direction: f32| unsafe {
-            let tip = Vector2::new(center, tip_y);
-            for side in [-1.0, 1.0] {
-                self.target.DrawLine(
-                    Vector2::new(center + side * half, tip_y + direction * rise),
-                    tip,
-                    brush,
-                    1.5,
-                    &self.stroke_style,
-                );
-            }
-        };
+        let center_x = layout.viewport.x as f32 + layout.viewport.width as f32 * 0.5;
+        let reach = scale(5, self.dpi) as f32;
+        let stroke = (scale(2, self.dpi) as f32 * 0.75).max(1.4);
         if layout.scroll_offset > 0 {
-            draw_chevron(layout.viewport.y as f32 - rise * 0.5, 1.0);
+            draw_chevron_glyph(
+                &self.target,
+                &self.stroke_style,
+                Vector2::new(center_x, layout.viewport.y as f32),
+                reach,
+                stroke,
+                ChevronDir::Up,
+                &self.brushes.text_muted,
+            );
         }
         if layout.scroll_offset < layout.max_scroll() {
-            draw_chevron(layout.viewport.bottom() as f32 + rise * 0.5, -1.0);
+            draw_chevron_glyph(
+                &self.target,
+                &self.stroke_style,
+                Vector2::new(center_x, layout.viewport.bottom() as f32),
+                reach,
+                stroke,
+                ChevronDir::Down,
+                &self.brushes.text_muted,
+            );
         }
     }
 
@@ -816,61 +791,50 @@ impl PopupMenuRenderer {
         rect: Rect,
         layout: &NotificationCenterLayout,
         active_hit: NotificationCenterHit,
-        palette: &LiquidGlassPalette,
+        _palette: &LiquidGlassPalette,
     ) {
-        let brush = self.brushes.alpha_brush(palette.text_primary, 0.85);
-        match active_hit {
-            NotificationCenterHit::CloseCard(_) => {
-                let cx = rect.x as f32 + rect.width as f32 * 0.5;
-                let cy = rect.y as f32 + rect.height as f32 * 0.5;
-                let r = scale(10, self.dpi) as f32;
-                unsafe {
-                    self.target.DrawEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2::new(cx, cy),
-                            radiusX: r,
-                            radiusY: r,
-                        },
-                        &brush,
-                        1.5,
-                        None,
-                    );
-                }
-            }
-            NotificationCenterHit::ClearGroup(group_index)
-                if layout.cards.iter().any(|c| {
-                    c.group_index == group_index
-                        && matches!(c.kind, NotificationCardKind::CollapsedStack { .. })
-                }) =>
-            {
-                let cx = rect.x as f32 + rect.width as f32 * 0.5;
-                let cy = rect.y as f32 + rect.height as f32 * 0.5;
-                let r = scale(10, self.dpi) as f32;
-                unsafe {
-                    self.target.DrawEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2::new(cx, cy),
-                            radiusX: r,
-                            radiusY: r,
-                        },
-                        &brush,
-                        1.5,
-                        None,
-                    );
-                }
-            }
-            _ => {
-                let d2d_rect = rect_to_d2d(rect);
-                let radius = match active_hit {
-                    NotificationCenterHit::OpenCard(_) | NotificationCenterHit::ExpandGroup(_) => {
-                        layout.card_radius
-                    }
-                    _ => layout.pill_radius,
-                };
-                let geom = build_squircle_path(&self.factory, d2d_rect, radius).ok();
-                self.draw_shape(d2d_rect, radius, geom.as_ref(), &brush, 1.5);
-            }
+        let is_circle_close = match active_hit {
+            NotificationCenterHit::CloseCard(_) => true,
+            NotificationCenterHit::ClearGroup(group_index) => layout.cards.iter().any(|c| {
+                c.group_index == group_index
+                    && matches!(c.kind, NotificationCardKind::CollapsedStack { .. })
+            }),
+            _ => false,
+        };
+        if is_circle_close {
+            let cx = rect.x as f32 + rect.width as f32 * 0.5;
+            let cy = rect.y as f32 + rect.height as f32 * 0.5;
+            let r = scale(10, self.dpi) as f32;
+            let ring_rect = D2D_RECT_F {
+                left: cx - r,
+                top: cy - r,
+                right: cx + r,
+                bottom: cy + r,
+            };
+            draw_focus_ring_for(
+                &self.factory,
+                &self.target,
+                ring_rect,
+                r,
+                self.dpi,
+                &self.brushes.text_primary,
+            );
+            return;
         }
+        let radius = match active_hit {
+            NotificationCenterHit::OpenCard(_) | NotificationCenterHit::ExpandGroup(_) => {
+                layout.card_radius
+            }
+            _ => layout.pill_radius,
+        };
+        draw_focus_ring_for(
+            &self.factory,
+            &self.target,
+            rect_to_d2d(rect),
+            radius,
+            self.dpi,
+            &self.brushes.text_primary,
+        );
     }
 }
 

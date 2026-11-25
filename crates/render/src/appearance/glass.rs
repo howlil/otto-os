@@ -197,7 +197,7 @@ impl GlassComposer {
                 tint_key,
             };
             let mut lost = false;
-            let mut gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
+            let first_try = self.gpu.get_mut().and_then(|gpu| {
                 let result = gpu.compose(
                     self.generation,
                     gpu_soft_key,
@@ -211,9 +211,9 @@ impl GlassComposer {
                 }
                 result
             });
-            if lost {
+            let gpu_bitmap = if lost {
                 self.gpu.reset();
-                gpu_bitmap = self.gpu.get_mut().and_then(|gpu| {
+                self.gpu.get_mut().and_then(|gpu| {
                     gpu.compose(
                         self.generation,
                         gpu_soft_key,
@@ -222,8 +222,10 @@ impl GlassComposer {
                         &backdrop,
                         light_dir,
                     )
-                });
-            }
+                })
+            } else {
+                first_try
+            };
             let bitmap = gpu_bitmap
                 .unwrap_or_else(|| compose_glass_lit(&params, &shape, &backdrop, light_dir));
             self.composed = Some((key, bitmap));

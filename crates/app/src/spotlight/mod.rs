@@ -6,10 +6,11 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{SPOTLIGHT_TIMER, WM_APP_SPOTLIGHT_BACKDROP, WM_UNICHAR};
 use otto_core::DockEntry;
 use otto_core::{
-    MotionPreference, Rect, SPOTLIGHT_DEFAULT_HEIGHT_POINTS, SPOTLIGHT_DEFAULT_WIDTH_POINTS,
-    SpotlightHit, SpotlightLayout, SpotlightMode, SpotlightView, scale,
+    MotionMetrics, MotionPreference, Rect, SPOTLIGHT_DEFAULT_HEIGHT_POINTS,
+    SPOTLIGHT_DEFAULT_WIDTH_POINTS, SpotlightHit, SpotlightLayout, SpotlightMode, SpotlightView,
+    scale,
 };
-use otto_platform::{PrimaryScreen, monitor_work_area_at, primary_screen};
+use otto_platform::{DisplayMonitor, monitor_at};
 use otto_render::SpotlightRenderer;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -22,13 +23,30 @@ mod input;
 mod lifecycle;
 mod presentation;
 
-const SPOTLIGHT_TICK_MS: u32 = 16;
+const SPOTLIGHT_TICK_MS: u32 = MotionMetrics::MACOS_LIKE.animation_tick_ms;
 const SPOTLIGHT_CATALOG_TTL: Duration = Duration::from_mins(5);
 const SPOTLIGHT_BLUR_TOGGLE_GRACE: Duration = Duration::from_millis(250);
 const SPOTLIGHT_MAX_QUERY_CHARS: usize = 160;
 const SPOTLIGHT_MAX_WIDTH_POINTS: i32 = 1_200;
 const SPOTLIGHT_MAX_HEIGHT_POINTS: i32 = 900;
 const UNICODE_NOCHAR: usize = 0xFFFF;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpotlightPhase {
+    Closed,
+    Open,
+    Closing,
+}
+
+impl SpotlightPhase {
+    const fn is_visible(self) -> bool {
+        !matches!(self, Self::Closed)
+    }
+
+    const fn is_closing(self) -> bool {
+        matches!(self, Self::Closing)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SpotlightVisibility {
@@ -90,11 +108,12 @@ struct PointerDrag {
 
 pub(crate) struct SpotlightSurface {
     hwnd: isize,
-    screen: PrimaryScreen,
+    monitor: DisplayMonitor,
     work_area: Rect,
     renderer: Option<SpotlightRenderer>,
     apps: Vec<DockEntry>,
     catalog_loaded_at: Option<Instant>,
+    catalog_finder_enabled: bool,
     icons_attempted: HashSet<String>,
     query: String,
     query_state: QueryEditorState,
@@ -110,12 +129,11 @@ pub(crate) struct SpotlightSurface {
     window: Rect,
     source_window: Rect,
     target_window: Rect,
-    visible: bool,
+    phase: SpotlightPhase,
     motion: MotionPreference,
     morph_progress: Option<f32>,
     morph_target: f32,
     morph_tick_at: Instant,
-    closing: bool,
     blur_dismissed_at: Option<Instant>,
     restore_focus_on_close: bool,
     previous_foreground: isize,
@@ -126,13 +144,15 @@ pub(crate) struct SpotlightSurface {
 
 impl SpotlightSurface {
     fn new(hwnd: isize) -> Self {
+        let monitor = monitor_at(0, 0);
         Self {
             hwnd,
-            screen: primary_screen(),
-            work_area: monitor_work_area_at(0, 0),
+            monitor,
+            work_area: monitor.work_area,
             renderer: None,
             apps: Vec::new(),
             catalog_loaded_at: None,
+            catalog_finder_enabled: false,
             icons_attempted: HashSet::new(),
             query: String::new(),
             query_state: QueryEditorState::default(),
@@ -163,12 +183,11 @@ impl SpotlightSurface {
                 width: scale(SPOTLIGHT_DEFAULT_WIDTH_POINTS, 96),
                 height: scale(SPOTLIGHT_DEFAULT_HEIGHT_POINTS, 96),
             },
-            visible: false,
+            phase: SpotlightPhase::Closed,
             motion: MotionPreference::Full,
             morph_progress: None,
             morph_target: 1.0,
             morph_tick_at: Instant::now(),
-            closing: false,
             blur_dismissed_at: None,
             restore_focus_on_close: false,
             previous_foreground: 0,
@@ -179,13 +198,13 @@ impl SpotlightSurface {
     }
 }
 
-pub fn start(runtime: &RuntimeContext, hwnd: isize) {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) {
     if let Ok(mut slot) = runtime.spotlight.try_borrow_mut() {
         *slot = Some(SpotlightSurface::new(hwnd));
     }
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.spotlight.try_borrow_mut()
         && let Some(mut surface) = guard.take()
     {
@@ -194,7 +213,7 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Search,
@@ -203,7 +222,7 @@ pub fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
     );
 }
 
-pub fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Apps,
@@ -212,7 +231,7 @@ pub fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
     );
 }
 
-pub fn toggle_from_hotkey(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_from_hotkey(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Search,
@@ -228,12 +247,10 @@ fn toggle_mode(
     source: SpotlightToggleSource,
 ) {
     with_spotlight(runtime, |surface| {
-        let visibility = if !surface.visible {
-            SpotlightVisibility::Closed
-        } else if surface.closing {
-            SpotlightVisibility::Closing
-        } else {
-            SpotlightVisibility::Open(surface.mode)
+        let visibility = match surface.phase {
+            SpotlightPhase::Closed => SpotlightVisibility::Closed,
+            SpotlightPhase::Closing => SpotlightVisibility::Closing,
+            SpotlightPhase::Open => SpotlightVisibility::Open(surface.mode),
         };
         let recently_dismissed_by_blur = surface
             .blur_dismissed_at
@@ -258,32 +275,32 @@ fn toggle_mode(
     });
 }
 
-pub fn close(runtime: &RuntimeContext) {
+pub(crate) fn close(runtime: &RuntimeContext) {
     with_spotlight(runtime, |surface| {
         surface.restore_focus_on_close = true;
         surface.hide();
     });
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
+pub(crate) fn repaint(runtime: &RuntimeContext) {
     with_spotlight(runtime, |surface| {
-        if surface.visible {
+        if surface.phase.is_visible() {
             surface.present(runtime);
         }
     });
 }
 
 #[must_use]
-pub fn is_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_open(runtime: &RuntimeContext) -> bool {
     runtime
         .spotlight
         .try_borrow()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|surface| surface.visible))
+        .and_then(|guard| guard.as_ref().map(|surface| surface.phase.is_visible()))
         .unwrap_or(false)
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_spotlight(runtime, |surface| {
         if !enabled {
             surface.backdrop = None;
@@ -291,14 +308,14 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
                 renderer.clear_backdrop();
             }
         }
-        if surface.visible {
+        if surface.phase.is_visible() {
             surface.sync_backdrop(runtime, true);
             surface.present(runtime);
         }
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_spotlight(runtime, |surface| {
         if let Some(feed) = surface.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -308,7 +325,7 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     });
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,
@@ -390,7 +407,7 @@ pub fn handle_message(
         }
         WM_KILLFOCUS => {
             with_spotlight(runtime, |surface| {
-                if surface.visible && !surface.closing {
+                if surface.phase.is_visible() && !surface.phase.is_closing() {
                     surface.blur_dismissed_at = Some(Instant::now());
                     surface.request_close(false);
                 }

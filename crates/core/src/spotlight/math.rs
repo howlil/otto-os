@@ -232,7 +232,7 @@ pub(super) fn format_math_result(value: f64) -> Option<String> {
 
 pub(super) fn insert_thousands_commas(digits: &str) -> String {
     if digits.len() <= 3 {
-        return digits.to_string();
+        return digits.to_owned();
     }
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (idx, ch) in digits.chars().rev().enumerate() {

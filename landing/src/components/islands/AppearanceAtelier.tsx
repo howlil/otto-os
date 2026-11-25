@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { useInView, useReducedMotion } from "motion/react";
 import { Check, Eye, EyeOff } from "lucide-react";
+import { useInView, useReducedMotion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 import { ControlCenter, type SurfaceStyleId, type ThemeAppearance } from "./ControlCenter";
 import { Switch } from "./Switch";
@@ -46,14 +46,14 @@ export function AppearanceAtelier() {
 
   useEffect(() => {
     if (!auto || !inView || reduced) return;
-    const id = window.setTimeout(() => {
+    const id = window.setInterval(() => {
       setStyle((curr) => {
         const index = STYLES.findIndex((item) => item.id === curr);
         return STYLES[(index + 1) % STYLES.length].id;
       });
     }, 2800);
-    return () => window.clearTimeout(id);
-  }, [auto, inView, reduced, style]);
+    return () => window.clearInterval(id);
+  }, [auto, inView, reduced]);
 
   const resolvedTheme: ThemeAppearance = themeChoice === "dark" ? "dark" : "light";
   const dark = resolvedTheme === "dark";
@@ -93,19 +93,29 @@ export function AppearanceAtelier() {
                     className={`relative h-10 w-14 shrink-0 overflow-hidden rounded-[10px] border border-line ${dark ? "bg-[#0c0e14]" : "bg-page"}`}
                     aria-hidden="true"
                   >
-                    <span className="absolute -top-2.5 -right-2 size-7 rounded-full" style={{ background: resolvedAccent }} />
+                    <span
+                      className="absolute -top-2.5 -right-2 size-7 rounded-full"
+                      style={{ background: resolvedAccent }}
+                    />
                     <span
                       className={`absolute inset-x-2 top-2 bottom-2 rounded-[6px] border ${item.id === "liquid" ? "border-white/70" : "border-black/[0.08]"}`}
                       style={{ background: swatchFill(item.id, dark, resolvedAccent) }}
                     />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className={`block text-[15px] font-medium ${selected ? "text-ink" : "text-ink-soft"}`}>{item.label}</span>
+                    <span className={`block text-[15px] font-medium ${selected ? "text-ink" : "text-ink-soft"}`}>
+                      {item.label}
+                    </span>
                     <span className="block text-[12.5px] text-muted">
                       <T id={item.desc[0]} en={item.desc[1]} />
                     </span>
                   </span>
-                  <Check size={16} strokeWidth={2.4} className={`shrink-0 text-accent ${selected ? "opacity-100" : "opacity-0"}`} aria-hidden="true" />
+                  <Check
+                    size={16}
+                    strokeWidth={2.4}
+                    className={`shrink-0 text-accent ${selected ? "opacity-100" : "opacity-0"}`}
+                    aria-hidden="true"
+                  />
                 </button>
               );
             })}
@@ -136,7 +146,8 @@ export function AppearanceAtelier() {
 
           <div className="flex flex-col gap-3">
             <p className="text-[13px] font-medium text-muted">
-              <T id="Warna Aksen" en="Accent Color" /> · <strong className="font-semibold text-ink">{accentObj.label}</strong>
+              <T id="Warna Aksen" en="Accent Color" /> ·{" "}
+              <strong className="font-semibold text-ink">{accentObj.label}</strong>
             </p>
             <div className="flex flex-wrap items-center gap-2.5" role="group" aria-label="Accent color">
               {ACCENTS.map((item) => {
@@ -175,7 +186,10 @@ export function AppearanceAtelier() {
                 <T id="Tampil di tangkapan layar & rekaman" en="Visible in screenshots & screen share" />
               </p>
               <p className="text-[12.5px] text-muted">
-                <T id="OBS, Discord, dan Windows Graphics Capture tanpa kedip." en="Clean glass compositing for OBS, Discord and screen capture." />
+                <T
+                  id="OBS, Discord, dan Windows Graphics Capture tanpa kedip."
+                  en="Clean glass compositing for OBS, Discord and screen capture."
+                />
               </p>
             </div>
           </div>

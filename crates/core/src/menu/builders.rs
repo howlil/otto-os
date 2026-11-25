@@ -7,7 +7,6 @@ use super::commands::CMD_APP_QUIT;
 use super::commands::CMD_APP_SETTINGS;
 use super::commands::CMD_APP_SHOW_ALL;
 use super::commands::CMD_CAL_SETTINGS;
-use super::commands::CMD_CC_CALENDAR;
 use super::commands::CMD_CONTROL_CENTER;
 use super::commands::CMD_DOCK_WINDOW_BASE;
 use super::commands::CMD_EDIT_COPY;
@@ -383,12 +382,6 @@ pub fn build_notification_rows(notifications: &NotificationCenterSnapshot) -> Ve
             ));
         }
     }
-    rows.push(MenuRow::Separator);
-    rows.push(MenuRow::item(
-        CMD_CC_CALENDAR,
-        "Open Windows Notifications",
-        "",
-    ));
     rows
 }
 

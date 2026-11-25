@@ -3,7 +3,6 @@ use crate::notch::focus_stats_view::{FocusStatsRange, NOTCH_STATS_DAYS};
 use crate::notch::hud::HudGeometry;
 use crate::notch::island::CompactSlotKind;
 use crate::notch::media::NotchExpandedTab;
-use crate::notch::pomodoro::FocusSubMode;
 use crate::notch::pomodoro_view::PomodoroSurface;
 use crate::notch::shelf::SHELF_PAGE_SIZE;
 use crate::notch::tasks::TASKS_PAGE_SIZE;
@@ -27,7 +26,6 @@ pub struct Layout {
     pub compact_swap_blend: f32,
     pub compact_primary: Option<CompactSlotKind>,
     pub compact_secondary: Option<CompactSlotKind>,
-    pub focus_mode: FocusSubMode,
     pub active_tab: NotchExpandedTab,
     pub previous_tab: NotchExpandedTab,
     pub compact_ring: Rect,
@@ -60,18 +58,26 @@ pub struct Layout {
     pub slots: BarSlotsLayout,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+pub const NOTCH_CATEGORY_OPTIONS: usize = 6;
+pub const NOTCH_HEATMAP_FILTERS: usize = 5;
+pub const NOTCH_HEATMAP_CELLS: usize = 112;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PomodoroPanelLayout {
     pub surface: PomodoroSurface,
     pub icon: Rect,
     pub time: Rect,
     pub subtitle: Rect,
     pub session_label: Rect,
+    pub category_pill: Rect,
+    pub open_settings: Rect,
+    pub category_options: [Rect; NOTCH_CATEGORY_OPTIONS],
+    pub duration_dec: Rect,
+    pub duration_inc: Rect,
     pub segments: [Rect; 4],
     pub footer_left: Rect,
     pub footer_right: Rect,
     pub presets: [Rect; 4],
-    pub focus_modes: [Rect; 3],
     pub play_button: Rect,
     pub reset_button: Rect,
     pub skip_button: Rect,
@@ -79,16 +85,20 @@ pub struct PomodoroPanelLayout {
     pub alert_extend_button: Rect,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusStatsPanelLayout {
     pub body: Rect,
     pub range_today: Rect,
     pub range_week: Rect,
+    pub range_heatmap: Rect,
     pub open_settings: Rect,
     pub days: [Rect; NOTCH_STATS_DAYS],
+    pub heatmap_filters: [Rect; NOTCH_HEATMAP_FILTERS],
+    pub heatmap_grid: Rect,
+    pub heatmap_cells: Vec<Rect>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShelfPanelLayout {
     pub add_button: Rect,
     pub clear_button: Rect,
@@ -99,7 +109,7 @@ pub struct ShelfPanelLayout {
     pub remove_buttons: [Rect; SHELF_PAGE_SIZE],
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardPanelLayout {
     pub pause_button: Rect,
     pub clear_button: Rect,
@@ -109,7 +119,7 @@ pub struct ClipboardPanelLayout {
     pub remove_buttons: [Rect; CLIPBOARD_PAGE_SIZE],
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TasksPanelLayout {
     pub add_button: Rect,
     pub clear_button: Rect,
@@ -123,7 +133,7 @@ pub struct TasksPanelLayout {
     pub remove_buttons: [Rect; TASKS_PAGE_SIZE],
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaPanelLayout {
     pub cover_art: Rect,
     pub source_label: Rect,
@@ -139,13 +149,13 @@ pub struct MediaPanelLayout {
     pub next_button: Rect,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivacyPanelLayout {
     pub dots: Rect,
     pub mic_button: Rect,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarSlotsLayout {
     pub start_slot: Rect,
     pub app_slot: Rect,
@@ -266,52 +276,87 @@ impl Layout {
                     }
                 }
             }
-            NotchExpandedTab::Pomodoro => {
-                for (mode, rect) in FocusSubMode::ALL.into_iter().zip(self.pomodoro.focus_modes) {
-                    if rect.contains(x, y) {
-                        return HitTarget::FocusMode(mode);
-                    }
-                }
-                for (rect, target) in [
-                    (self.pomodoro.play_button, HitTarget::PomodoroPlayPause),
-                    (self.pomodoro.reset_button, HitTarget::PomodoroReset),
-                    (self.pomodoro.skip_button, HitTarget::PomodoroSkip),
-                ] {
-                    if rect.contains(x, y) {
-                        return target;
-                    }
-                }
-                for (index, preset) in self.pomodoro.presets.iter().enumerate() {
-                    if preset.contains(x, y) {
-                        return HitTarget::PomodoroPreset(index as u8);
-                    }
-                }
-            }
-            NotchExpandedTab::Stats => {
-                for (rect, target) in [
-                    (
-                        self.stats.range_today,
-                        HitTarget::FocusStatsRange(FocusStatsRange::Today),
-                    ),
-                    (
-                        self.stats.range_week,
-                        HitTarget::FocusStatsRange(FocusStatsRange::Week),
-                    ),
-                    (self.stats.open_settings, HitTarget::FocusStatsOpenSettings),
-                ] {
-                    if rect.contains(x, y) {
-                        return target;
-                    }
-                }
-                for (index, day) in self.stats.days.iter().enumerate() {
-                    if day.contains(x, y) {
-                        return HitTarget::FocusStatsDay(index as u8);
-                    }
-                }
-            }
+            NotchExpandedTab::Pomodoro => return self.hit_test_pomodoro(x, y),
+            NotchExpandedTab::Stats => return self.hit_test_stats(x, y),
             NotchExpandedTab::Shelf => return self.hit_test_shelf(x, y),
             NotchExpandedTab::Clipboard => return self.hit_test_clipboard(x, y),
             NotchExpandedTab::Tasks => return self.hit_test_tasks(x, y),
+        }
+        HitTarget::Notch
+    }
+
+    fn hit_test_pomodoro(&self, x: i32, y: i32) -> HitTarget {
+        if self.pomodoro.open_settings.contains(x, y) {
+            return HitTarget::PomodoroOpenSettings;
+        }
+        if self.pomodoro.category_pill.contains(x, y) {
+            return HitTarget::PomodoroCategoryPill;
+        }
+        for (index, option) in self.pomodoro.category_options.iter().enumerate() {
+            if option.contains(x, y) {
+                return HitTarget::PomodoroCategoryOption(index as u8);
+            }
+        }
+        for (rect, target) in [
+            (self.pomodoro.duration_dec, HitTarget::PomodoroDurationDec),
+            (self.pomodoro.duration_inc, HitTarget::PomodoroDurationInc),
+            (self.pomodoro.play_button, HitTarget::PomodoroPlayPause),
+            (self.pomodoro.reset_button, HitTarget::PomodoroReset),
+            (self.pomodoro.skip_button, HitTarget::PomodoroSkip),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
+        if matches!(
+            self.pomodoro.surface,
+            PomodoroSurface::Setup | PomodoroSurface::Paused | PomodoroSurface::Ready
+        ) && self.pomodoro.time.contains(x, y)
+        {
+            return HitTarget::PomodoroTimeEdit;
+        }
+        for (index, preset) in self.pomodoro.presets.iter().enumerate() {
+            if preset.contains(x, y) {
+                return HitTarget::PomodoroPreset(index as u8);
+            }
+        }
+        HitTarget::Notch
+    }
+
+    fn hit_test_stats(&self, x: i32, y: i32) -> HitTarget {
+        for (rect, target) in [
+            (
+                self.stats.range_today,
+                HitTarget::FocusStatsRange(FocusStatsRange::Today),
+            ),
+            (
+                self.stats.range_week,
+                HitTarget::FocusStatsRange(FocusStatsRange::Week),
+            ),
+            (
+                self.stats.range_heatmap,
+                HitTarget::FocusStatsRange(FocusStatsRange::Heatmap),
+            ),
+            (self.stats.open_settings, HitTarget::FocusStatsOpenSettings),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
+        for (index, day) in self.stats.days.iter().enumerate() {
+            if day.contains(x, y) {
+                return HitTarget::FocusStatsDay(index as u8);
+            }
+        }
+        for (index, filter) in self.stats.heatmap_filters.iter().enumerate() {
+            if filter.contains(x, y) {
+                return HitTarget::FocusHeatmapFilter(index as u8);
+            }
+        }
+        for (index, cell) in self.stats.heatmap_cells.iter().enumerate() {
+            if cell.contains(x, y) {
+                return HitTarget::FocusHeatmapCell(index as u8);
+            }
         }
         HitTarget::Notch
     }
@@ -441,9 +486,16 @@ impl Layout {
             | HitTarget::PomodoroStartNext
             | HitTarget::PomodoroExtendFive
             | HitTarget::PomodoroPreset(_)
-            | HitTarget::FocusMode(_)
+            | HitTarget::PomodoroCategoryPill
+            | HitTarget::PomodoroCategoryOption(_)
+            | HitTarget::PomodoroDurationDec
+            | HitTarget::PomodoroDurationInc
+            | HitTarget::PomodoroTimeEdit
+            | HitTarget::PomodoroOpenSettings
             | HitTarget::FocusStatsRange(_)
             | HitTarget::FocusStatsDay(_)
+            | HitTarget::FocusHeatmapFilter(_)
+            | HitTarget::FocusHeatmapCell(_)
             | HitTarget::FocusStatsOpenSettings
             | HitTarget::NotchTabPomodoro
             | HitTarget::NotchTabStats
@@ -495,7 +547,6 @@ impl Layout {
 
 impl Layout {
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn notch_control_rect(&self, target: HitTarget) -> Option<Rect> {
         if self.panel_expansion <= 0.55 {
             return None;
@@ -511,118 +562,135 @@ impl Layout {
             };
             return (!rect.is_empty()).then_some(rect);
         }
-        let rect = match target {
+        let rect = self
+            .notch_shared_control_rect(target)
+            .or_else(|| self.notch_active_tab_control_rect(target))?;
+        (!rect.is_empty()).then_some(rect)
+    }
+
+    const fn notch_shared_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        Some(match target {
             HitTarget::NotchTabPomodoro => self.notch_tab_pomodoro,
             HitTarget::NotchTabStats => self.notch_tab_stats,
             HitTarget::NotchTabShelf => self.notch_tab_shelf,
             HitTarget::NotchTabClipboard => self.notch_tab_clipboard,
             HitTarget::NotchTabTasks => self.notch_tab_tasks,
             HitTarget::NotchTabMedia => self.notch_tab_media,
-            HitTarget::FocusMode(mode) if self.active_tab == NotchExpandedTab::Pomodoro => {
-                self.pomodoro.focus_modes[mode.index()]
-            }
-            HitTarget::PomodoroPreset(index) if self.active_tab == NotchExpandedTab::Pomodoro => {
-                *self.pomodoro.presets.get(usize::from(index))?
-            }
-            HitTarget::PomodoroPlayPause if self.active_tab == NotchExpandedTab::Pomodoro => {
-                self.pomodoro.play_button
-            }
-            HitTarget::PomodoroReset if self.active_tab == NotchExpandedTab::Pomodoro => {
-                self.pomodoro.reset_button
-            }
-            HitTarget::PomodoroSkip if self.active_tab == NotchExpandedTab::Pomodoro => {
-                self.pomodoro.skip_button
-            }
-            HitTarget::FocusStatsRange(FocusStatsRange::Today)
-                if self.active_tab == NotchExpandedTab::Stats =>
-            {
-                self.stats.range_today
-            }
-            HitTarget::FocusStatsRange(FocusStatsRange::Week)
-                if self.active_tab == NotchExpandedTab::Stats =>
-            {
-                self.stats.range_week
-            }
-            HitTarget::FocusStatsOpenSettings if self.active_tab == NotchExpandedTab::Stats => {
-                self.stats.open_settings
-            }
-            HitTarget::FocusStatsDay(index) if self.active_tab == NotchExpandedTab::Stats => {
-                *self.stats.days.get(usize::from(index))?
-            }
-            HitTarget::ShelfAdd if self.active_tab == NotchExpandedTab::Shelf => {
-                self.shelf.add_button
-            }
-            HitTarget::ShelfClear if self.active_tab == NotchExpandedTab::Shelf => {
-                self.shelf.clear_button
-            }
-            HitTarget::ShelfPager if self.active_tab == NotchExpandedTab::Shelf => {
-                self.shelf.pager_button
-            }
-            HitTarget::ShelfItem(index) if self.active_tab == NotchExpandedTab::Shelf => {
-                *self.shelf.cards.get(usize::from(index))?
-            }
-            HitTarget::ShelfCopyItem(index) if self.active_tab == NotchExpandedTab::Shelf => {
-                *self.shelf.copy_buttons.get(usize::from(index))?
-            }
-            HitTarget::ShelfRemoveItem(index) if self.active_tab == NotchExpandedTab::Shelf => {
-                *self.shelf.remove_buttons.get(usize::from(index))?
-            }
-            HitTarget::ClipboardPauseToggle if self.active_tab == NotchExpandedTab::Clipboard => {
-                self.clipboard.pause_button
-            }
-            HitTarget::ClipboardClear if self.active_tab == NotchExpandedTab::Clipboard => {
-                self.clipboard.clear_button
-            }
-            HitTarget::ClipboardPager if self.active_tab == NotchExpandedTab::Clipboard => {
-                self.clipboard.pager_button
-            }
-            HitTarget::ClipboardItem(index) if self.active_tab == NotchExpandedTab::Clipboard => {
-                *self.clipboard.rows.get(usize::from(index))?
-            }
-            HitTarget::ClipboardRemoveItem(index)
-                if self.active_tab == NotchExpandedTab::Clipboard =>
-            {
-                *self.clipboard.remove_buttons.get(usize::from(index))?
-            }
-            HitTarget::TasksAdd if self.active_tab == NotchExpandedTab::Tasks => {
-                self.tasks.add_button
-            }
-            HitTarget::TasksClearDone if self.active_tab == NotchExpandedTab::Tasks => {
-                self.tasks.clear_button
-            }
-            HitTarget::TasksPager if self.active_tab == NotchExpandedTab::Tasks => {
-                self.tasks.pager_button
-            }
-            HitTarget::TaskItem(index) if self.active_tab == NotchExpandedTab::Tasks => {
-                *self.tasks.rows.get(usize::from(index))?
-            }
-            HitTarget::TaskCheck(index) if self.active_tab == NotchExpandedTab::Tasks => {
-                *self.tasks.check_buttons.get(usize::from(index))?
-            }
-            HitTarget::TaskEdit(index) if self.active_tab == NotchExpandedTab::Tasks => {
-                *self.tasks.edit_buttons.get(usize::from(index))?
-            }
-            HitTarget::TaskRemove(index) if self.active_tab == NotchExpandedTab::Tasks => {
-                *self.tasks.remove_buttons.get(usize::from(index))?
-            }
             HitTarget::PrivacyMicMute => self.privacy.mic_button,
-            HitTarget::MediaPrevious if self.active_tab == NotchExpandedTab::Media => {
-                self.media.prev_button
-            }
-            HitTarget::MediaPlayPause if self.active_tab == NotchExpandedTab::Media => {
-                self.media.play_button
-            }
-            HitTarget::MediaNext if self.active_tab == NotchExpandedTab::Media => {
-                self.media.next_button
-            }
-            HitTarget::MediaLyricsToggle if self.active_tab == NotchExpandedTab::Media => {
-                self.media.lyrics_toggle
-            }
-            HitTarget::MediaSeekbar if self.active_tab == NotchExpandedTab::Media => {
-                self.media.seekbar
-            }
             _ => return None,
-        };
-        (!rect.is_empty()).then_some(rect)
+        })
+    }
+
+    fn notch_active_tab_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match self.active_tab {
+            NotchExpandedTab::Pomodoro => self.pomodoro_control_rect(target),
+            NotchExpandedTab::Stats => self.stats_control_rect(target),
+            NotchExpandedTab::Shelf => self.shelf_control_rect(target),
+            NotchExpandedTab::Clipboard => self.clipboard_control_rect(target),
+            NotchExpandedTab::Tasks => self.tasks_control_rect(target),
+            NotchExpandedTab::Media => self.media_control_rect(target),
+        }
+    }
+
+    fn pomodoro_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match target {
+            HitTarget::PomodoroOpenSettings => Some(self.pomodoro.open_settings),
+            HitTarget::PomodoroCategoryPill => Some(self.pomodoro.category_pill),
+            HitTarget::PomodoroCategoryOption(index) => self
+                .pomodoro
+                .category_options
+                .get(usize::from(index))
+                .copied(),
+            HitTarget::PomodoroDurationDec => Some(self.pomodoro.duration_dec),
+            HitTarget::PomodoroDurationInc => Some(self.pomodoro.duration_inc),
+            HitTarget::PomodoroTimeEdit => matches!(
+                self.pomodoro.surface,
+                PomodoroSurface::Setup | PomodoroSurface::Paused | PomodoroSurface::Ready
+            )
+            .then_some(self.pomodoro.time),
+            HitTarget::PomodoroPreset(index) => {
+                self.pomodoro.presets.get(usize::from(index)).copied()
+            }
+            HitTarget::PomodoroPlayPause => Some(self.pomodoro.play_button),
+            HitTarget::PomodoroReset => Some(self.pomodoro.reset_button),
+            HitTarget::PomodoroSkip => Some(self.pomodoro.skip_button),
+            _ => None,
+        }
+    }
+
+    fn stats_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match target {
+            HitTarget::FocusStatsRange(FocusStatsRange::Today) => Some(self.stats.range_today),
+            HitTarget::FocusStatsRange(FocusStatsRange::Week) => Some(self.stats.range_week),
+            HitTarget::FocusStatsRange(FocusStatsRange::Heatmap) => Some(self.stats.range_heatmap),
+            HitTarget::FocusStatsOpenSettings => Some(self.stats.open_settings),
+            HitTarget::FocusStatsDay(index) => self.stats.days.get(usize::from(index)).copied(),
+            HitTarget::FocusHeatmapFilter(index) => {
+                self.stats.heatmap_filters.get(usize::from(index)).copied()
+            }
+            HitTarget::FocusHeatmapCell(index) => {
+                self.stats.heatmap_cells.get(usize::from(index)).copied()
+            }
+            _ => None,
+        }
+    }
+
+    fn shelf_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match target {
+            HitTarget::ShelfAdd => Some(self.shelf.add_button),
+            HitTarget::ShelfClear => Some(self.shelf.clear_button),
+            HitTarget::ShelfPager => Some(self.shelf.pager_button),
+            HitTarget::ShelfItem(index) => self.shelf.cards.get(usize::from(index)).copied(),
+            HitTarget::ShelfCopyItem(index) => {
+                self.shelf.copy_buttons.get(usize::from(index)).copied()
+            }
+            HitTarget::ShelfRemoveItem(index) => {
+                self.shelf.remove_buttons.get(usize::from(index)).copied()
+            }
+            _ => None,
+        }
+    }
+
+    fn clipboard_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match target {
+            HitTarget::ClipboardPauseToggle => Some(self.clipboard.pause_button),
+            HitTarget::ClipboardClear => Some(self.clipboard.clear_button),
+            HitTarget::ClipboardPager => Some(self.clipboard.pager_button),
+            HitTarget::ClipboardItem(index) => self.clipboard.rows.get(usize::from(index)).copied(),
+            HitTarget::ClipboardRemoveItem(index) => self
+                .clipboard
+                .remove_buttons
+                .get(usize::from(index))
+                .copied(),
+            _ => None,
+        }
+    }
+
+    fn tasks_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        match target {
+            HitTarget::TasksAdd => Some(self.tasks.add_button),
+            HitTarget::TasksClearDone => Some(self.tasks.clear_button),
+            HitTarget::TasksPager => Some(self.tasks.pager_button),
+            HitTarget::TaskItem(index) => self.tasks.rows.get(usize::from(index)).copied(),
+            HitTarget::TaskCheck(index) => {
+                self.tasks.check_buttons.get(usize::from(index)).copied()
+            }
+            HitTarget::TaskEdit(index) => self.tasks.edit_buttons.get(usize::from(index)).copied(),
+            HitTarget::TaskRemove(index) => {
+                self.tasks.remove_buttons.get(usize::from(index)).copied()
+            }
+            _ => None,
+        }
+    }
+
+    const fn media_control_rect(&self, target: HitTarget) -> Option<Rect> {
+        Some(match target {
+            HitTarget::MediaPrevious => self.media.prev_button,
+            HitTarget::MediaPlayPause => self.media.play_button,
+            HitTarget::MediaNext => self.media.next_button,
+            HitTarget::MediaLyricsToggle => self.media.lyrics_toggle,
+            HitTarget::MediaSeekbar => self.media.seekbar,
+            _ => return None,
+        })
     }
 }

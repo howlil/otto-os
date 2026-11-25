@@ -15,13 +15,16 @@ use windows::core::Result;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::appearance::surface::{fnv1a_hash, upload_bgra_bitmap};
+use crate::appearance::tokens::SYSTEM_RED;
+pub(crate) use crate::kit::draw::center_of;
+use crate::kit::icons::draw_close_x_glyph;
 use crate::{
-    AMBER_WARN, CHARGING_GREEN, FOREGROUND, MUSIC_ACCENT, Renderer, rect_to_d2d, rgb,
+    AMBER_WARN, CHARGING_GREEN, MUSIC_ACCENT, Renderer, build_squircle_path, rect_to_d2d, rgb,
     translate_rect,
 };
 
 const SHELF_DROP_BLUE: D2D1_COLOR_F = rgb(90, 178, 255, 1.0);
-pub(crate) const SHELF_CLEAR_RED: D2D1_COLOR_F = rgb(255, 69, 58, 1.0);
+pub(crate) const SHELF_CLEAR_RED: D2D1_COLOR_F = SYSTEM_RED;
 pub(crate) const SHELF_FOLDER_BLUE: D2D1_COLOR_F = rgb(94, 175, 255, 1.0);
 const SHELF_AUDIO_VIOLET: D2D1_COLOR_F = rgb(175, 130, 255, 1.0);
 const SHELF_CODE_TEAL: D2D1_COLOR_F = rgb(64, 212, 200, 1.0);
@@ -47,13 +50,6 @@ fn kind_tint(kind: ShelfKindTag) -> D2D1_COLOR_F {
         ShelfKindTag::Document | ShelfKindTag::Url => SHELF_URL_INDIGO,
         ShelfKindTag::Text => SHELF_TEXT_SLATE,
     }
-}
-
-pub(crate) fn center_of(rect: Rect) -> Vector2 {
-    Vector2::new(
-        rect.x as f32 + rect.width as f32 * 0.5,
-        rect.y as f32 + rect.height as f32 * 0.5,
-    )
 }
 
 impl Renderer {
@@ -169,21 +165,22 @@ impl Renderer {
         hovered: Option<HitTarget>,
         shelf_state: &ShelfState,
     ) {
+        let ink = self.notch_ink();
         if !layout.shelf.pager_button.is_empty() {
             let pager = translate_rect(layout.shelf.pager_button, -offset_x);
             let is_hovered = hovered == Some(HitTarget::ShelfPager);
             let fill = self
                 .brushes
-                .alpha_brush(FOREGROUND, if is_hovered { 0.17 } else { 0.09 } * alpha);
-            let border = self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha);
+                .alpha_brush(ink, if is_hovered { 0.17 } else { 0.09 } * alpha);
+            let border = self.brushes.alpha_brush(ink, 0.15 * alpha);
             self.draw_shelf_pill(pager, &fill, Some(&border));
             let label = format!(
                 "{}/{}",
                 shelf_state.page + 1,
                 shelf_state.page_count().max(1)
             );
-            let fg = self.brushes.alpha_brush(FOREGROUND, 0.90 * alpha);
-            self.draw_text(&label, &self.text_tab, rect_to_d2d(pager), &fg);
+            let fg = self.brushes.alpha_brush(ink, 0.90 * alpha);
+            self.draw_tabular_text(&label, &self.text_tab, rect_to_d2d(pager), &fg);
         }
 
         if !layout.shelf.add_button.is_empty() {
@@ -191,10 +188,10 @@ impl Renderer {
             let is_hovered = hovered == Some(HitTarget::ShelfAdd);
             let fill = self
                 .brushes
-                .alpha_brush(FOREGROUND, if is_hovered { 0.18 } else { 0.10 } * alpha);
-            let border = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
+                .alpha_brush(ink, if is_hovered { 0.18 } else { 0.10 } * alpha);
+            let border = self.brushes.alpha_brush(ink, 0.18 * alpha);
             self.draw_shelf_pill(add, &fill, Some(&border));
-            let fg = self.brushes.alpha_brush(FOREGROUND, 0.95 * alpha);
+            let fg = self.brushes.alpha_brush(ink, 0.95 * alpha);
             let plus_r = scale(4, self.dpi) as f32;
             let plus_cx = add.x as f32 + scale(10, self.dpi) as f32;
             let cy = add.y as f32 + add.height as f32 * 0.5;
@@ -219,9 +216,9 @@ impl Renderer {
                 )
             } else {
                 (
-                    self.brushes.alpha_brush(FOREGROUND, 0.09 * alpha),
-                    self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha),
-                    FOREGROUND,
+                    self.brushes.alpha_brush(ink, 0.09 * alpha),
+                    self.brushes.alpha_brush(ink, 0.15 * alpha),
+                    ink,
                 )
             };
             self.draw_shelf_pill(clear, &fill, Some(&border));
@@ -241,12 +238,8 @@ impl Renderer {
         if zone.width <= 0 || zone.height <= 0 {
             return;
         }
-        let radius = scale(14, self.dpi) as f32;
-        let shape = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(zone),
-            radiusX: radius,
-            radiusY: radius,
-        };
+        let ink = self.notch_ink();
+        let radius = scale(12, self.dpi) as f32;
         let (fill, border, stroke_w) = if drag_hover {
             (
                 self.brushes.alpha_brush(SHELF_DROP_BLUE, 0.16 * alpha),
@@ -255,23 +248,27 @@ impl Renderer {
             )
         } else {
             (
-                self.brushes.alpha_brush(FOREGROUND, 0.045 * alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.24 * alpha),
+                self.brushes.alpha_brush(ink, 0.045 * alpha),
+                self.brushes.alpha_brush(
+                    ink,
+                    if self.high_contrast.get() { 0.72 } else { 0.24 } * alpha,
+                ),
                 1.2,
             )
         };
-        unsafe {
-            self.target.FillRoundedRectangle(&shape, &fill);
-            self.target
-                .DrawRoundedRectangle(&shape, &border, stroke_w, &self.dashed_stroke_style);
+        self.draw_rounded_box(zone, radius, &fill);
+        let inset = stroke_w * 0.5;
+        let stroke_rect = crate::kit::draw::inset_rect_f(rect_to_d2d(zone), inset);
+        if let Ok(geom) = build_squircle_path(&self.factory, stroke_rect, (radius - inset).max(1.0))
+        {
+            unsafe {
+                self.target
+                    .DrawGeometry(&geom, &border, stroke_w, &self.dashed_stroke_style);
+            }
         }
 
         let center = center_of(zone);
-        let icon_color = if drag_hover {
-            SHELF_DROP_BLUE
-        } else {
-            FOREGROUND
-        };
+        let icon_color = if drag_hover { SHELF_DROP_BLUE } else { ink };
         let icon_brush = self
             .brushes
             .alpha_brush(icon_color, if drag_hover { 0.96 } else { 0.78 } * alpha);
@@ -289,7 +286,7 @@ impl Renderer {
         };
         let title_brush = self
             .brushes
-            .alpha_brush(FOREGROUND, if drag_hover { 0.98 } else { 0.90 } * alpha);
+            .alpha_brush(ink, if drag_hover { 0.98 } else { 0.90 } * alpha);
         let title_rect = D2D_RECT_F {
             left: zone.x as f32 + scale(12, self.dpi) as f32,
             top: zone.y as f32 + scale(42, self.dpi) as f32,
@@ -298,7 +295,7 @@ impl Renderer {
         };
         self.draw_text(title, &self.text_tab, title_rect, &title_brush);
 
-        let hint_brush = self.brushes.alpha_brush(FOREGROUND, 0.54 * alpha);
+        let hint_brush = self.brushes.alpha_brush(ink, 0.54 * alpha);
         let hint_rect = D2D_RECT_F {
             left: zone.x as f32 + scale(16, self.dpi) as f32,
             top: zone.y as f32 + scale(62, self.dpi) as f32,
@@ -324,6 +321,7 @@ impl Renderer {
         alpha: f32,
         hovered: Option<HitTarget>,
     ) -> Result<()> {
+        let ink = self.notch_ink();
         let slot_index = u8::try_from(slot).ok();
         let card_hovered = slot_index.is_some_and(|idx| {
             matches!(
@@ -336,21 +334,14 @@ impl Renderer {
             )
         });
         let card_radius = scale(10, self.dpi) as f32;
-        let shape = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(card),
-            radiusX: card_radius,
-            radiusY: card_radius,
-        };
         let fill = self
             .brushes
-            .alpha_brush(FOREGROUND, if card_hovered { 0.13 } else { 0.075 } * alpha);
+            .alpha_brush(ink, if card_hovered { 0.13 } else { 0.075 } * alpha);
         let border = self
             .brushes
-            .alpha_brush(FOREGROUND, if card_hovered { 0.26 } else { 0.12 } * alpha);
-        unsafe {
-            self.target.FillRoundedRectangle(&shape, &fill);
-            self.target.DrawRoundedRectangle(&shape, &border, 1.0, None);
-        }
+            .alpha_brush(ink, if card_hovered { 0.26 } else { 0.12 } * alpha);
+        self.draw_rounded_box(card, card_radius, &fill);
+        self.draw_rounded_box_stroke(card, card_radius, &border, 1.0);
 
         let tile_pad = scale(7, self.dpi);
         let tile_size = (card.height - tile_pad * 2).max(scale(22, self.dpi));
@@ -380,7 +371,7 @@ impl Renderer {
             copy.x - scale(3, self.dpi)
         };
         if title_right > text_left + scale(12, self.dpi) {
-            let fg = self.brushes.alpha_brush(FOREGROUND, 0.94 * alpha);
+            let fg = self.brushes.alpha_brush(ink, 0.94 * alpha);
             let title_rect = D2D_RECT_F {
                 left: text_left as f32,
                 top: (card.y + scale(5, self.dpi)) as f32,
@@ -391,7 +382,7 @@ impl Renderer {
         }
         let sub_right = card.right() - tile_pad;
         if sub_right > text_left + scale(12, self.dpi) {
-            let sub = self.brushes.alpha_brush(FOREGROUND, 0.56 * alpha);
+            let sub = self.brushes.alpha_brush(ink, 0.56 * alpha);
             let sub_rect = D2D_RECT_F {
                 left: text_left as f32,
                 top: (card.y + scale(21, self.dpi)) as f32,
@@ -413,20 +404,16 @@ impl Renderer {
         if let Some(bitmap) = self.resolve_shelf_bitmap(item)
             && self.fill_tile_bitmap(&shape, tile, &bitmap, alpha)
         {
-            let rim = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
-            unsafe {
-                self.target.DrawRoundedRectangle(&shape, &rim, 1.0, None);
-            }
+            let rim = self.brushes.alpha_brush(self.notch_ink(), 0.16 * alpha);
+            self.draw_rounded_box_stroke(tile, radius, &rim, 1.0);
             return Ok(());
         }
         let tint = kind_tint(item.kind);
         let bg = self.brushes.alpha_brush(tint, 0.20 * alpha);
         let border = self.brushes.alpha_brush(tint, 0.36 * alpha);
         let glyph_brush = self.brushes.alpha_brush(tint, 0.96 * alpha);
-        unsafe {
-            self.target.FillRoundedRectangle(&shape, &bg);
-            self.target.DrawRoundedRectangle(&shape, &border, 1.0, None);
-        }
+        self.draw_rounded_box(tile, radius, &bg);
+        self.draw_rounded_box_stroke(tile, radius, &border, 1.0);
         let center = center_of(tile);
         self.draw_kind_glyph(
             center.X,
@@ -484,19 +471,13 @@ impl Renderer {
     }
 
     fn draw_mini_copy_button(&self, rect: Rect, hovered: bool, card_hovered: bool, alpha: f32) {
+        let ink = self.notch_ink();
         let radius = (rect.height as f32 * 0.5).max(4.0);
-        let pill = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(rect),
-            radiusX: radius,
-            radiusY: radius,
-        };
         if hovered || card_hovered {
             let bg = self
                 .brushes
-                .alpha_brush(FOREGROUND, if hovered { 0.22 } else { 0.08 } * alpha);
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, &bg);
-            }
+                .alpha_brush(ink, if hovered { 0.22 } else { 0.08 } * alpha);
+            self.draw_rounded_box(rect, radius, &bg);
         }
         let icon_alpha = if hovered {
             0.96
@@ -505,7 +486,7 @@ impl Renderer {
         } else {
             0.44
         };
-        let fg = self.brushes.alpha_brush(FOREGROUND, icon_alpha * alpha);
+        let fg = self.brushes.alpha_brush(ink, icon_alpha * alpha);
         let c = center_of(rect);
         let s = (rect.width as f32 * 0.24).max(3.0);
         let stroke = (s * 0.30).max(1.0);
@@ -544,24 +525,16 @@ impl Renderer {
         card_hovered: bool,
         alpha: f32,
     ) {
+        let ink = self.notch_ink();
         let radius = (rect.height as f32 * 0.5).max(4.0);
-        let pill = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(rect),
-            radiusX: radius,
-            radiusY: radius,
-        };
         if hovered {
             let bg = self.brushes.alpha_brush(SHELF_CLEAR_RED, 0.28 * alpha);
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, &bg);
-            }
+            self.draw_rounded_box(rect, radius, &bg);
         } else if card_hovered {
-            let bg = self.brushes.alpha_brush(FOREGROUND, 0.08 * alpha);
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, &bg);
-            }
+            let bg = self.brushes.alpha_brush(ink, 0.08 * alpha);
+            self.draw_rounded_box(rect, radius, &bg);
         }
-        let color = if hovered { SHELF_CLEAR_RED } else { FOREGROUND };
+        let color = if hovered { SHELF_CLEAR_RED } else { ink };
         let icon_alpha = if hovered {
             0.96
         } else if card_hovered {
@@ -570,25 +543,16 @@ impl Renderer {
             0.44
         };
         let fg = self.brushes.alpha_brush(color, icon_alpha * alpha);
-        let c = center_of(rect);
         let r = (rect.width as f32 * 0.21).max(2.6);
         let stroke = (r * 0.34).max(1.1);
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(c.X - r, c.Y - r),
-                Vector2::new(c.X + r, c.Y + r),
-                &fg,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(c.X + r, c.Y - r),
-                Vector2::new(c.X - r, c.Y + r),
-                &fg,
-                stroke,
-                &self.stroke_style,
-            );
-        }
+        draw_close_x_glyph(
+            &self.target,
+            &self.stroke_style,
+            center_of(rect),
+            r,
+            stroke,
+            &fg,
+        );
     }
 
     pub(crate) fn draw_shelf_pill(

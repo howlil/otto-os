@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::BOOL;
 
 use crate::dock::{friendly_app_name, is_explorer_path};
-use crate::window::caption::{effective_caption_style, has_dwm_caption_buttons};
+use crate::window::caption::effective_caption_style_for_window;
 use crate::window::hidden::{self, Concealment};
 use crate::window::ops::{
     is_own_settings_utf16, is_shell_or_desktop_utf16, utf16_eq_ascii, visible_window_rect,
@@ -127,22 +127,25 @@ pub(super) const fn window_role(owner_visible: bool, app_window: bool) -> Window
     }
 }
 
-pub(super) const fn is_full_screen(covers_monitor: bool, zoomed: bool, style: u32) -> bool {
+pub(crate) const fn is_full_screen(covers_monitor: bool, zoomed: bool, style: u32) -> bool {
     let captioned = style & WS_CAPTION.0 == WS_CAPTION.0;
-    covers_monitor && !(zoomed && captioned)
+    let resizable = style & WS_THICKFRAME.0 != 0;
+    covers_monitor && !(zoomed && (captioned || resizable))
 }
 
 pub(super) fn close_is_enabled(hwnd: HWND) -> bool {
-    let class_style = unsafe { GetClassLongPtrW(hwnd, GCL_STYLE) } as u32;
-    if class_style & CS_NOCLOSE.0 != 0 {
-        return false;
+    unsafe {
+        let class_style = GetClassLongPtrW(hwnd, GCL_STYLE) as u32;
+        if class_style & CS_NOCLOSE.0 != 0 {
+            return false;
+        }
+        let menu = GetSystemMenu(hwnd, false);
+        if menu.0.is_null() {
+            return true;
+        }
+        let state = GetMenuState(menu, SC_CLOSE, MF_BYCOMMAND);
+        state == u32::MAX || state & (MF_GRAYED.0 | MF_DISABLED.0) == 0
     }
-    let menu = unsafe { GetSystemMenu(hwnd, false) };
-    if menu.0.is_null() {
-        return true;
-    }
-    let state = unsafe { GetMenuState(menu, SC_CLOSE, MF_BYCOMMAND) };
-    state == u32::MAX || state & (MF_GRAYED.0 | MF_DISABLED.0) == 0
 }
 
 pub(super) fn uses_full_screen_shortcut(executable: &str) -> bool {
@@ -162,7 +165,7 @@ pub(super) fn read_traits(
     facts: &ProcessFacts,
     full_screen: bool,
 ) -> WindowTraits {
-    let effective = effective_caption_style(style, has_dwm_caption_buttons(hwnd), full_screen);
+    let effective = effective_caption_style_for_window(hwnd, style, full_screen);
     WindowTraits {
         closable: close_is_enabled(hwnd),
         minimizable: effective.can_minimize,
@@ -203,7 +206,10 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     let own_settings = process_id == context.own_process_id
         && context.allow_own_settings
         && is_own_settings_utf16(class);
-    if process_id == context.own_process_id && !own_settings {
+    let own_finder = process_id == context.own_process_id
+        && context.allow_own_settings
+        && utf16_eq_ascii(class, "OttoFinder");
+    if process_id == context.own_process_id && !own_settings && !own_finder {
         return None;
     }
     let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
@@ -232,9 +238,9 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     let app_facts = if utf16_eq_ascii(class, FRAME_HOST_CLASS) {
         hosted_process_id(hwnd, process_id)
             .and_then(|hosted| cached_process_facts(context.cache, hosted))
-            .unwrap_or_else(|| owner_facts.clone())
+            .unwrap_or(owner_facts)
     } else {
-        owner_facts.clone()
+        owner_facts
     };
     if is_explorer_path(&app_facts.executable)
         && !utf16_eq_ascii(class, "CabinetWClass")
@@ -242,11 +248,15 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     {
         return None;
     }
-    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
-    let owner_visible = unsafe { GetWindow(hwnd, GW_OWNER) }
-        .is_ok_and(|owner| !owner.0.is_null() && unsafe { IsWindowVisible(owner) }.as_bool());
-    let minimized = unsafe { IsIconic(hwnd) }.as_bool();
-    let zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
+    let (style, owner_visible, minimized, zoomed) = unsafe {
+        (
+            GetWindowLongW(hwnd, GWL_STYLE) as u32,
+            GetWindow(hwnd, GW_OWNER)
+                .is_ok_and(|owner| !owner.0.is_null() && IsWindowVisible(owner).as_bool()),
+            IsIconic(hwnd).as_bool(),
+            IsZoomed(hwnd).as_bool(),
+        )
+    };
     let full_screen = !minimized && visible && is_full_screen(covers_monitor(hwnd), zoomed, style);
     let presence = if !visible {
         WindowPresence::Hidden
@@ -261,6 +271,8 @@ pub(super) fn inspect(hwnd: HWND, context: &mut Inspection<'_>) -> Option<Window
     );
     let app_name = if own_settings {
         String::from("Otto Settings")
+    } else if own_finder {
+        String::from("Finder")
     } else {
         friendly_app_name(&app_facts.executable)
     };

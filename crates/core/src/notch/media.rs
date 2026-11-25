@@ -278,7 +278,7 @@ pub fn reconcile_seek(pending: PendingSeek, latest: &NowPlaying, now_unix_ms: i6
 }
 
 #[must_use]
-pub fn format_duration(ms: u64) -> String {
+pub(crate) fn format_duration(ms: u64) -> String {
     let total_seconds = ms / 1_000;
     let seconds = total_seconds % 60;
     let minutes = (total_seconds / 60) % 60;

@@ -4,16 +4,13 @@ use otto_core::{
     window_controls_visible_under_bar,
 };
 use otto_platform::{
-    ActiveWindowTarget, inspect_window, release_capture_if_owned, sample_caption_strip,
+    ActiveWindowTarget, hide_window, inspect_window, release_capture_if_owned,
+    reposition_overlay_for_target, sample_caption_strip, show_window_no_activate,
 };
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
 
-use super::CoverState;
-use super::FALLBACK_DARK_FILL;
-use super::FALLBACK_LIGHT_FILL;
-use super::Overlay;
-use super::Placement;
+use super::{
+    CoverState, FALLBACK_DARK_FILL, FALLBACK_LIGHT_FILL, MoveSizeState, Overlay, Placement,
+};
 
 impl Overlay {
     pub(super) fn bar_height_for(target: ActiveWindowTarget, bar_height_pts: i32) -> Option<i32> {
@@ -75,23 +72,9 @@ impl Overlay {
         {
             return existing.rows.clone();
         }
-        let own_settings = self
-            .window
-            .as_ref()
-            .is_some_and(|window| window.identity.process_id == self.own_pid);
-        let fallback = if own_settings {
-            let color =
-                otto_core::settings_background(self.appearance.theme == ResolvedTheme::Dark);
-            [
-                ((color >> 16) & 0xFF) as u8,
-                ((color >> 8) & 0xFF) as u8,
-                (color & 0xFF) as u8,
-            ]
-        } else {
-            match self.appearance.theme {
-                ResolvedTheme::Dark => FALLBACK_DARK_FILL,
-                ResolvedTheme::Light => FALLBACK_LIGHT_FILL,
-            }
+        let fallback = match self.appearance.theme {
+            ResolvedTheme::Dark => FALLBACK_DARK_FILL,
+            ResolvedTheme::Light => FALLBACK_LIGHT_FILL,
         };
         vec![fallback; caption.height.max(1) as usize]
     }
@@ -141,6 +124,7 @@ impl Overlay {
     }
 
     pub(super) fn hide(&mut self) {
+        self.move_size = MoveSizeState::Idle;
         self.stop_anim_timer();
         self.cancel_green_hover();
         self.press = None;
@@ -148,17 +132,52 @@ impl Overlay {
         let _ = release_capture_if_owned(self.hwnd);
         if self.visible {
             self.visible = false;
-            self.hovered = false;
-            self.alt_down = false;
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-            }
+            self.hover.hovered = false;
+            self.hover.alt_down = false;
+            hide_window(self.hwnd);
         }
         self.target = None;
         self.window = None;
         self.cover = None;
         self.last_caption_click = None;
         self.renderer = None;
+    }
+
+    pub(super) fn fast_follow_target(&mut self) -> bool {
+        let Some(mut target) = self.target else {
+            return false;
+        };
+        let Some(cover) = self.cover.as_mut() else {
+            return false;
+        };
+        let Some(live) = reposition_overlay_for_target(self.hwnd, target.hwnd, self.layout.width)
+        else {
+            return false;
+        };
+        let same_size = (live.right - live.left) == (target.right - target.left)
+            && (live.bottom - live.top) == (target.bottom - target.top)
+            && live.maximized == target.maximized;
+        if !same_size {
+            return false;
+        }
+        if !window_controls_visible_under_bar(
+            live.top,
+            cover.caption.height,
+            Self::bar_height_for(target, self.bar_height),
+        ) {
+            return false;
+        }
+        target.left = live.left;
+        target.top = live.top;
+        target.right = live.right;
+        target.bottom = live.bottom;
+        cover.caption.frame_right = live.right;
+        cover.caption.top = live.top;
+        target.caption = Some(cover.caption);
+        self.target = Some(target);
+        let rect = cover.caption.cover_rect();
+        self.render_origin = (rect.x as f32, rect.y as f32);
+        true
     }
 
     pub(super) fn render_origin(&self) -> (i32, i32) {
@@ -195,17 +214,19 @@ impl Overlay {
             return;
         }
         if window_changed {
+            self.move_size = MoveSizeState::Idle;
             if self.press.take().is_some() || self.pending_drag.take().is_some() {
                 let _ = release_capture_if_owned(self.hwnd);
             }
-            self.hovered = false;
-            self.alt_down = false;
+            self.hover.hovered = false;
+            self.hover.alt_down = false;
             self.cover = None;
         }
+        let allow_live_sample = target.sample_unobstructed && self.move_size == MoveSizeState::Idle;
         let cover = match placement {
             Placement::Cover(caption) => Some(CoverState {
                 caption,
-                rows: self.sample_cover_rows(target, caption, target.sample_unobstructed),
+                rows: self.sample_cover_rows(target, caption, allow_live_sample),
             }),
             Placement::Hidden => None,
         };
@@ -222,9 +243,7 @@ impl Overlay {
         self.render_origin = desired_origin;
         if was_invisible {
             self.visible = true;
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
-            }
+            show_window_no_activate(self.hwnd);
         }
         if target_changed {
             self.settle_ticks = 20;
@@ -234,7 +253,7 @@ impl Overlay {
         if target_changed || origin_changed || was_invisible {
             self.present();
         }
-        if self.settle_ticks > 0 || self.hovered {
+        if self.settle_ticks > 0 || self.hover.hovered || self.move_size == MoveSizeState::Active {
             self.ensure_anim_timer();
         } else {
             self.stop_anim_timer();

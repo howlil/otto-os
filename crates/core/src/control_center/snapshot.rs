@@ -1,8 +1,10 @@
+use crate::appearance::theme::ResolvedTheme;
 use crate::bar::status::SystemStatus;
 use crate::layout::Rect;
 use crate::notch::media::NowPlaying;
 use crate::settings::model::OttoSettingsSnapshot;
 
+use super::grid::{ControlCenterGrid, ControlKind};
 use super::model::AudioOutputDevice;
 use super::model::BluetoothState;
 use super::model::ControlCenterPage;
@@ -23,7 +25,7 @@ pub struct SubPanelGroupLayout {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ControlCenterSnapshot {
     pub page: ControlCenterPage,
     pub status: SystemStatus,
@@ -34,6 +36,28 @@ pub struct ControlCenterSnapshot {
     pub audio_outputs: Vec<AudioOutputDevice>,
     pub audio_switch_failed: bool,
     pub settings: OttoSettingsSnapshot,
+    pub grid: ControlCenterGrid,
+    pub editing: bool,
+    pub theme: ResolvedTheme,
+}
+
+impl Default for ControlCenterSnapshot {
+    fn default() -> Self {
+        Self {
+            page: ControlCenterPage::default(),
+            status: SystemStatus::default(),
+            focus_active: false,
+            media: None,
+            wifi: WifiState::default(),
+            bluetooth: BluetoothState::default(),
+            audio_outputs: Vec::new(),
+            audio_switch_failed: false,
+            settings: OttoSettingsSnapshot::default(),
+            grid: ControlCenterGrid::default(),
+            editing: false,
+            theme: ResolvedTheme::Dark,
+        }
+    }
 }
 
 impl ControlCenterSnapshot {
@@ -44,6 +68,7 @@ impl ControlCenterSnapshot {
             ControlCenterPage::Wifi => self.wifi.networks.len(),
             ControlCenterPage::Bluetooth => self.bluetooth.devices.len(),
             ControlCenterPage::Sound => self.audio_outputs.len(),
+            ControlCenterPage::Gallery => ControlKind::ALL.len(),
         }
     }
 
@@ -56,6 +81,24 @@ impl ControlCenterSnapshot {
                 non_empty_group("Devices", self.bluetooth.devices.len())
             }
             ControlCenterPage::Sound => non_empty_group("Output Devices", self.audio_outputs.len()),
+            ControlCenterPage::Gallery => vec![
+                SubPanelGroupSpec {
+                    title: "Connectivity",
+                    count: 3,
+                },
+                SubPanelGroupSpec {
+                    title: "Display & Sound",
+                    count: 4,
+                },
+                SubPanelGroupSpec {
+                    title: "Media & Focus",
+                    count: 2,
+                },
+                SubPanelGroupSpec {
+                    title: "System & Otto",
+                    count: 8,
+                },
+            ],
         }
     }
 }

@@ -82,7 +82,7 @@ pub struct GlassBackdrop<'a> {
     pub origin: (f32, f32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlassBitmap {
     pub x: i32,
     pub y: i32,

@@ -2,6 +2,10 @@ use crate::notch::focus_activity::{
     FOCUS_HISTORY_DAYS, FocusActivityState, clean_app_display_name, format_screen_time,
     is_browser_executable, is_non_trackable_focus_app, normalize_app_key,
 };
+use crate::notch::focus_heatmap::{
+    FocusHeatmapView, HeatmapFilter, NOTCH_HEATMAP_WEEKS, build_heatmap_view,
+};
+use crate::notch::focus_mode::CategoryColor;
 use crate::settings::focus_settings::{DayBar, build_weekly_chart};
 
 pub const NOTCH_STATS_TOP_APPS: usize = 3;
@@ -12,6 +16,7 @@ pub enum FocusStatsRange {
     #[default]
     Today,
     Week,
+    Heatmap,
 }
 
 impl FocusStatsRange {
@@ -20,6 +25,7 @@ impl FocusStatsRange {
         match self {
             Self::Today => 0,
             Self::Week => 1,
+            Self::Heatmap => 2,
         }
     }
 
@@ -27,7 +33,8 @@ impl FocusStatsRange {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Today => "Today",
-            Self::Week => "7 Days",
+            Self::Week => "7d",
+            Self::Heatmap => "Map",
         }
     }
 }
@@ -60,6 +67,8 @@ pub struct FocusStatsView {
     pub selected_day: Option<usize>,
     pub has_today_activity: bool,
     pub has_week_activity: bool,
+    pub heatmap: FocusHeatmapView,
+    pub heatmap_filters: Vec<(Option<String>, String, CategoryColor)>,
 }
 
 impl Default for FocusStatsView {
@@ -222,6 +231,27 @@ impl FocusStatsView {
         selected_day: Option<usize>,
         hovered_day: Option<usize>,
     ) -> Self {
+        Self::resolve_with_heatmap(
+            activity,
+            range,
+            selected_day,
+            hovered_day,
+            &HeatmapFilter::All,
+            None,
+            None,
+        )
+    }
+
+    #[must_use]
+    pub fn resolve_with_heatmap(
+        activity: &FocusActivityState,
+        range: FocusStatsRange,
+        selected_day: Option<usize>,
+        hovered_day: Option<usize>,
+        heatmap_filter: &HeatmapFilter,
+        selected_cell: Option<usize>,
+        hovered_cell: Option<usize>,
+    ) -> Self {
         let today_total = activity.today.total_active_ms;
         let today_focus = activity.today.focus_session_ms.min(today_total);
         let today_screen_time = format_screen_time(today_total);
@@ -229,6 +259,19 @@ impl FocusStatsView {
         let today_focus_percent = rounded_percent(today_focus, today_total);
         let top_apps = resolve_top_apps(activity);
         let weekly = resolve_weekly_stats(activity, selected_day, hovered_day);
+        let active_cell = hovered_cell.or(selected_cell);
+        let heatmap = build_heatmap_view(
+            &activity.heatmap,
+            &activity.categories.categories,
+            heatmap_filter,
+            activity.today.day,
+            NOTCH_HEATMAP_WEEKS,
+            active_cell,
+        );
+        let mut heatmap_filters = vec![(None, String::from("All"), CategoryColor::Green)];
+        for cat in activity.categories.categories.iter().take(4) {
+            heatmap_filters.push((Some(cat.id.clone()), cat.name.clone(), cat.color));
+        }
 
         Self {
             range,
@@ -246,6 +289,8 @@ impl FocusStatsView {
             selected_day: weekly.selected_day,
             has_today_activity: today_total > 0,
             has_week_activity: weekly.has_activity,
+            heatmap,
+            heatmap_filters,
         }
     }
 
@@ -253,7 +298,7 @@ impl FocusStatsView {
     pub const fn active_blocked_count(&self) -> u32 {
         match self.range {
             FocusStatsRange::Today => self.today_blocked_count,
-            FocusStatsRange::Week => self.weekly_blocked_count,
+            FocusStatsRange::Week | FocusStatsRange::Heatmap => self.weekly_blocked_count,
         }
     }
 }

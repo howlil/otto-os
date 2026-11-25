@@ -1,7 +1,6 @@
 use crate::layout::{HitTarget, Layout};
 use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::media::NotchExpandedTab;
-use crate::notch::pomodoro::FocusSubMode;
 
 const KEYBOARD_CANDIDATES: [HitTarget; 16] = [
     HitTarget::Start,
@@ -77,14 +76,22 @@ impl Layout {
                     | HitTarget::PomodoroStartNext
                     | HitTarget::PrivacyMicMute => true,
                     HitTarget::NotchTabMedia => media_present,
-                    HitTarget::FocusMode(_)
+                    HitTarget::PomodoroCategoryPill
+                    | HitTarget::PomodoroCategoryOption(_)
+                    | HitTarget::PomodoroDurationDec
+                    | HitTarget::PomodoroTimeEdit
+                    | HitTarget::PomodoroDurationInc
+                    | HitTarget::PomodoroOpenSettings
                     | HitTarget::PomodoroPreset(_)
                     | HitTarget::PomodoroReset
                     | HitTarget::PomodoroPlayPause
                     | HitTarget::PomodoroSkip => self.active_tab == NotchExpandedTab::Pomodoro,
                     HitTarget::FocusStatsRange(_)
                     | HitTarget::FocusStatsOpenSettings
-                    | HitTarget::FocusStatsDay(_) => self.active_tab == NotchExpandedTab::Stats,
+                    | HitTarget::FocusStatsDay(_)
+                    | HitTarget::FocusHeatmapFilter(_) => {
+                        self.active_tab == NotchExpandedTab::Stats
+                    }
                     HitTarget::ShelfPager
                     | HitTarget::ShelfAdd
                     | HitTarget::ShelfClear
@@ -112,15 +119,23 @@ impl Layout {
     }
 }
 
-const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 84] = [
+const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 98] = [
     HitTarget::NotchTabPomodoro,
     HitTarget::NotchTabStats,
     HitTarget::NotchTabShelf,
     HitTarget::NotchTabClipboard,
     HitTarget::NotchTabMedia,
-    HitTarget::FocusMode(FocusSubMode::Pomodoro),
-    HitTarget::FocusMode(FocusSubMode::Timer),
-    HitTarget::FocusMode(FocusSubMode::Stopwatch),
+    HitTarget::PomodoroCategoryPill,
+    HitTarget::PomodoroOpenSettings,
+    HitTarget::PomodoroCategoryOption(0),
+    HitTarget::PomodoroCategoryOption(1),
+    HitTarget::PomodoroCategoryOption(2),
+    HitTarget::PomodoroCategoryOption(3),
+    HitTarget::PomodoroCategoryOption(4),
+    HitTarget::PomodoroCategoryOption(5),
+    HitTarget::PomodoroDurationDec,
+    HitTarget::PomodoroTimeEdit,
+    HitTarget::PomodoroDurationInc,
     HitTarget::PomodoroPreset(0),
     HitTarget::PomodoroPreset(1),
     HitTarget::PomodoroPreset(2),
@@ -130,6 +145,7 @@ const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 84] = [
     HitTarget::PomodoroSkip,
     HitTarget::FocusStatsRange(FocusStatsRange::Today),
     HitTarget::FocusStatsRange(FocusStatsRange::Week),
+    HitTarget::FocusStatsRange(FocusStatsRange::Heatmap),
     HitTarget::FocusStatsOpenSettings,
     HitTarget::FocusStatsDay(0),
     HitTarget::FocusStatsDay(1),
@@ -138,6 +154,11 @@ const NOTCH_KEYBOARD_CANDIDATES: [HitTarget; 84] = [
     HitTarget::FocusStatsDay(4),
     HitTarget::FocusStatsDay(5),
     HitTarget::FocusStatsDay(6),
+    HitTarget::FocusHeatmapFilter(0),
+    HitTarget::FocusHeatmapFilter(1),
+    HitTarget::FocusHeatmapFilter(2),
+    HitTarget::FocusHeatmapFilter(3),
+    HitTarget::FocusHeatmapFilter(4),
     HitTarget::PomodoroExtendFive,
     HitTarget::PomodoroStartNext,
     HitTarget::PrivacyMicMute,
@@ -211,6 +232,8 @@ pub enum BarKey {
     Exit,
     PreviousTab,
     NextTab,
+    Digit(u8),
+    Backspace,
 }
 
 impl BarKey {
@@ -229,15 +252,24 @@ impl BarKey {
 
     #[must_use]
     pub fn code(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|key| *key == self)
-            .unwrap_or_default()
+        match self {
+            Self::Digit(d) => 100 + usize::from(d),
+            Self::Backspace => 110,
+            other => Self::ALL
+                .iter()
+                .position(|key| *key == other)
+                .unwrap_or_default(),
+        }
     }
 
     #[must_use]
     pub fn from_code(code: usize) -> Option<Self> {
-        Self::ALL.get(code).copied()
+        match code {
+            0..=9 => Self::ALL.get(code).copied(),
+            100..=109 => Some(Self::Digit((code - 100) as u8)),
+            110 => Some(Self::Backspace),
+            _ => None,
+        }
     }
 }
 
@@ -322,7 +354,12 @@ impl BarFocus {
             BarKey::Last => last,
             BarKey::Next | BarKey::NextTab => (index + 1) % targets.len(),
             BarKey::Previous | BarKey::PreviousTab => index.checked_sub(1).unwrap_or(last),
-            BarKey::Up | BarKey::Down | BarKey::Activate | BarKey::Exit => {
+            BarKey::Up
+            | BarKey::Down
+            | BarKey::Activate
+            | BarKey::Exit
+            | BarKey::Digit(_)
+            | BarKey::Backspace => {
                 return BarFocusOutcome::Unchanged;
             }
         };
@@ -343,7 +380,6 @@ mod tests {
         HitTarget, Metrics, NotchLayoutInput, compute_layout_for_app, compute_layout_with_notch,
     };
     use crate::notch::media::NotchExpandedTab;
-    use crate::notch::pomodoro::FocusSubMode;
     use crate::notch::pomodoro_view::PomodoroSurface;
 
     fn open_media_layout(media_tab: bool) -> crate::layout::Layout {
@@ -444,7 +480,7 @@ mod tests {
         assert_eq!(
             notch_tail(
                 &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Setup),
-                13
+                15
             ),
             [
                 HitTarget::NotchTabPomodoro,
@@ -452,9 +488,11 @@ mod tests {
                 HitTarget::NotchTabShelf,
                 HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
-                HitTarget::FocusMode(FocusSubMode::Pomodoro),
-                HitTarget::FocusMode(FocusSubMode::Timer),
-                HitTarget::FocusMode(FocusSubMode::Stopwatch),
+                HitTarget::PomodoroCategoryPill,
+                HitTarget::PomodoroOpenSettings,
+                HitTarget::PomodoroDurationDec,
+                HitTarget::PomodoroTimeEdit,
+                HitTarget::PomodoroDurationInc,
                 HitTarget::PomodoroPreset(0),
                 HitTarget::PomodoroPreset(1),
                 HitTarget::PomodoroPreset(2),
@@ -465,7 +503,7 @@ mod tests {
         assert_eq!(
             notch_tail(
                 &open_layout(NotchExpandedTab::Pomodoro, PomodoroSurface::Running),
-                11
+                10
             ),
             [
                 HitTarget::NotchTabPomodoro,
@@ -473,9 +511,8 @@ mod tests {
                 HitTarget::NotchTabShelf,
                 HitTarget::NotchTabClipboard,
                 HitTarget::NotchTabMedia,
-                HitTarget::FocusMode(FocusSubMode::Pomodoro),
-                HitTarget::FocusMode(FocusSubMode::Timer),
-                HitTarget::FocusMode(FocusSubMode::Stopwatch),
+                HitTarget::PomodoroCategoryPill,
+                HitTarget::PomodoroOpenSettings,
                 HitTarget::PomodoroReset,
                 HitTarget::PomodoroPlayPause,
                 HitTarget::PomodoroSkip,

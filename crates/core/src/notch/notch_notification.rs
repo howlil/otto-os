@@ -5,7 +5,7 @@ use crate::menu::{NotificationBadge, NotificationSummary, notification_badge};
 
 pub const NOTIFICATION_PEEK_MS: u64 = 1_000;
 pub const NOTIFICATION_BASE_HOLD_MS: u64 = 4_500;
-pub const NOTIFICATION_HOLD_PER_CHAR_MS: u64 = 40;
+pub(crate) const NOTIFICATION_HOLD_PER_CHAR_MS: u64 = 40;
 pub const NOTIFICATION_MAX_HOLD_MS: u64 = 9_000;
 pub const NOTIFICATION_HOVER_GRACE_MS: u64 = 1_500;
 pub const NOTIFICATION_COALESCE_MS: u64 = 3_000;
@@ -127,15 +127,11 @@ pub fn present_notification(
         NotificationKind::VideoCall if ringing => String::from("Incoming Video Call"),
         _ => notification.body.clone(),
     };
-    let accept_label = if ringing {
-        Some(if video {
-            "Open Video Call Window"
-        } else {
-            "Open Call Window"
-        })
+    let accept_label = ringing.then_some(if video {
+        "Open Video Call Window"
     } else {
-        None
-    };
+        "Open Call Window"
+    });
     NotificationPresentation {
         stage,
         app_name: notification.app_name.clone(),
@@ -258,22 +254,20 @@ impl NotificationQueue {
     }
 
     pub fn collapse_all(&mut self) -> bool {
-        let mut changed = false;
-        if self
+        let current_cleared = if self
             .current
             .as_ref()
             .is_some_and(|active| !active.notification.kind.is_call())
         {
             self.current = None;
-            changed = true;
-        }
+            true
+        } else {
+            false
+        };
         let before = self.pending.len();
         self.pending
             .retain(|notification| notification.kind.is_call());
-        if self.pending.len() != before {
-            changed = true;
-        }
-        changed
+        current_cleared || self.pending.len() != before
     }
 
     #[must_use]
@@ -328,15 +322,17 @@ impl NotificationQueue {
         let before = self.pending.len();
         self.pending
             .retain(|notification| live.contains(&notification.id));
-        let mut changed = before != self.pending.len();
-        if let Some(active) = &self.current
+        let pending_changed = before != self.pending.len();
+        let current_cleared = if let Some(active) = &self.current
             && active.notification.kind.is_call()
             && !live.contains(&active.notification.id)
         {
             self.current = None;
-            changed = true;
-        }
-        changed
+            true
+        } else {
+            false
+        };
+        pending_changed || current_cleared
     }
 
     fn arrive(&mut self, notification: NotchNotification, now_ms: u64) {

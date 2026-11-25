@@ -1,10 +1,6 @@
 use crate::host::RuntimeContext;
-use otto_core::{DockPort, dock_rest_zone};
-use otto_platform::{DockReservation, ShellNotification};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
-};
+use otto_core::{DockPort, Rect, dock_rest_zone};
+use otto_platform::{DockReservation, ShellNotification, assert_window_topmost, place};
 
 use super::Dock;
 
@@ -26,34 +22,22 @@ impl Dock {
 
     pub(super) fn place(&self) {
         let (ox, oy) = self.window_origin();
-        let _ = unsafe {
-            SetWindowPos(
-                HWND(self.hwnd as *mut _),
-                Some(HWND_TOPMOST),
-                ox,
-                oy,
-                self.layout.window_width,
-                self.layout.window_height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        };
+        place(
+            self.hwnd,
+            Rect {
+                x: ox,
+                y: oy,
+                width: self.layout.window_width,
+                height: self.layout.window_height,
+            },
+        );
     }
 
     pub(super) fn ensure_topmost(&self, runtime: &RuntimeContext) {
         if !should_assert_topmost(self.anim.should_hide, Self::higher_overlay_open(runtime)) {
             return;
         }
-        let _ = unsafe {
-            SetWindowPos(
-                HWND(self.hwnd as *mut _),
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-        };
+        assert_window_topmost(self.hwnd);
     }
 
     pub(super) fn refresh_cover(&mut self) {
@@ -71,11 +55,12 @@ impl Dock {
             self.shell_full_screen = false;
             return false;
         }
-        let mut updated = false;
-        if self.reservation.is_none() {
+        let mut updated = if self.reservation.is_none() {
             self.reservation = DockReservation::register(self.hwnd);
-            updated = self.reservation.is_some();
-        }
+            self.reservation.is_some()
+        } else {
+            false
+        };
         if let Some(reservation) = self.reservation.as_mut() {
             updated |= reservation.reserve(
                 self.screen.width,
@@ -123,5 +108,6 @@ impl Dock {
         if should_assert_topmost(self.anim.should_hide, Self::higher_overlay_open(runtime)) {
             self.place();
         }
+        self.on_secondary_taskbar_created(runtime);
     }
 }

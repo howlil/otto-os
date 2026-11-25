@@ -3,7 +3,6 @@ use crate::notch::clipboard::ClipboardLayoutInput;
 use crate::notch::focus_stats_view::FocusStatsRange;
 use crate::notch::island::CompactSlotKind;
 use crate::notch::media::NotchExpandedTab;
-use crate::notch::pomodoro::FocusSubMode;
 use crate::notch::pomodoro_view::PomodoroSurface;
 use crate::notch::tasks::TasksLayoutInput;
 
@@ -36,7 +35,9 @@ pub struct NotchLayoutInput {
     pub compact_secondary: Option<CompactSlotKind>,
     pub panel_expansion: f32,
     pub pomodoro_surface: PomodoroSurface,
-    pub focus_mode: FocusSubMode,
+    pub pomodoro_category_picker: bool,
+    pub pomodoro_category_count: u8,
+    pub heatmap_filter_count: u8,
     pub active_tab: NotchExpandedTab,
     pub previous_tab: NotchExpandedTab,
     pub top_bar_enabled: bool,
@@ -73,7 +74,9 @@ impl Default for NotchLayoutInput {
             compact_secondary: None,
             panel_expansion: 0.0,
             pomodoro_surface: PomodoroSurface::Setup,
-            focus_mode: FocusSubMode::Pomodoro,
+            pomodoro_category_picker: false,
+            pomodoro_category_count: 4,
+            heatmap_filter_count: 5,
             active_tab: NotchExpandedTab::Pomodoro,
             previous_tab: NotchExpandedTab::Pomodoro,
             top_bar_enabled: true,

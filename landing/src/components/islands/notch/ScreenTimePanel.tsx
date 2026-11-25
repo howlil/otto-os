@@ -1,10 +1,12 @@
-import { useState } from "react";
 import { ChevronRight } from "lucide-react";
+import { useState } from "react";
 import { PanelFrame } from "./Panels";
-import { PALETTE, TOP_SCREEN_APPS, WEEKLY_SCREEN_TIME, formatMinutesBrief, type NotchTabKey } from "./spec";
+import { formatMinutesBrief, type NotchTabKey, PALETTE, TOP_SCREEN_APPS, WEEKLY_SCREEN_TIME } from "./spec";
 
 const PEAK_MINUTES = Math.max(...WEEKLY_SCREEN_TIME.map((d) => d.totalMinutes));
-const AVG_MINUTES = Math.round(WEEKLY_SCREEN_TIME.reduce((sum, d) => sum + d.totalMinutes, 0) / WEEKLY_SCREEN_TIME.length);
+const AVG_MINUTES = Math.round(
+  WEEKLY_SCREEN_TIME.reduce((sum, d) => sum + d.totalMinutes, 0) / WEEKLY_SCREEN_TIME.length,
+);
 const TOTAL_WEEK_MINUTES = WEEKLY_SCREEN_TIME.reduce((sum, d) => sum + d.totalMinutes, 0);
 const TOTAL_WEEK_FOCUS = WEEKLY_SCREEN_TIME.reduce((sum, d) => sum + d.focusMinutes, 0);
 const WEEK_FOCUS_PCT = Math.round((TOTAL_WEEK_FOCUS / TOTAL_WEEK_MINUTES) * 100);
@@ -31,7 +33,11 @@ export function ScreenTimePanel({ onSelectTab }: { onSelectTab?: (tab: NotchTabK
       onSelectTab={onSelectTab}
       actions={
         <div className="flex items-center gap-1.5">
-          <div className="flex items-center rounded-full bg-white/[0.08] p-[2px]" role="group" aria-label="Screen Time range">
+          <div
+            className="flex items-center rounded-full bg-white/[0.08] p-[2px]"
+            role="group"
+            aria-label="Screen Time range"
+          >
             <button
               type="button"
               aria-pressed={range === "today"}
@@ -94,7 +100,9 @@ export function ScreenTimePanel({ onSelectTab }: { onSelectTab?: (tab: NotchTabK
                       strokeDashoffset={ringCirc * (1 - focusPctToday / 100)}
                     />
                   </svg>
-                  <span className="absolute text-[9.5px] font-semibold text-[#f5f5f7] tabular-nums">{focusPctToday}%</span>
+                  <span className="absolute text-[9.5px] font-semibold text-[#f5f5f7] tabular-nums">
+                    {focusPctToday}%
+                  </span>
                 </div>
                 <div className="min-w-0">
                   <p className="text-[10px] text-[#a8abb2]">Focus</p>

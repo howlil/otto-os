@@ -1,10 +1,10 @@
-import { useState, type FormEvent } from "react";
-import { motion } from "motion/react";
-import { Check, Copy, FileText, Link, Plus, Type, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Check, Copy, FileText, Link, Plus, Type, X } from "lucide-react";
+import { motion } from "motion/react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 import { PanelFrame, Pill } from "./notch/Panels";
-import { CLIP_ITEMS, INITIAL_TASKS, POCKET_ITEMS, type Kind, type NotchTabKey, type TaskItem } from "./notch/spec";
+import { CLIP_ITEMS, INITIAL_TASKS, type Kind, type NotchTabKey, POCKET_ITEMS, type TaskItem } from "./notch/spec";
 
 const KIND_ICON: Record<Kind, LucideIcon> = { file: FileText, link: Link, text: Type };
 
@@ -16,13 +16,7 @@ const KIND_TILE: Record<Kind, string> = {
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
-export function PocketPanel({
-  reduced,
-  onSelectTab,
-}: {
-  reduced: boolean;
-  onSelectTab?: (tab: NotchTabKey) => void;
-}) {
+export function PocketPanel({ reduced, onSelectTab }: { reduced: boolean; onSelectTab?: (tab: NotchTabKey) => void }) {
   const [items, setItems] = useState(POCKET_ITEMS);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
@@ -67,13 +61,16 @@ export function PocketPanel({
             const isCopied = copiedIdx === index;
             return (
               <motion.div
-                key={`${item.label[1]}-${index}`}
+                key={item.label[1]}
                 initial={reduced ? false : { opacity: 0, y: 5, scale: 0.97 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 transition={{ duration: 0.24, delay: reduced ? 0 : index * 0.04, ease: EASE }}
                 className="flex min-w-0 items-center gap-1.5 rounded-[10px] bg-white/[0.07] p-1.5 ring-1 ring-inset ring-white/[0.06]"
               >
-                <span className={`grid size-7 shrink-0 place-items-center rounded-[8px] ${KIND_TILE[item.kind]}`} aria-hidden="true">
+                <span
+                  className={`grid size-7 shrink-0 place-items-center rounded-[8px] ${KIND_TILE[item.kind]}`}
+                  aria-hidden="true"
+                >
                   <Icon size={13} strokeWidth={1.9} />
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
@@ -88,7 +85,9 @@ export function PocketPanel({
                   className="grid size-4 shrink-0 place-items-center rounded text-[#a8abb2] hover:text-[#f5f5f7]"
                 >
                   {isCopied ? <Check size={10} className="text-[#30d158]" /> : <Copy size={10} />}
-                  <span className="sr-only"><T id="Salin" en="Copy" /></span>
+                  <span className="sr-only">
+                    <T id="Salin" en="Copy" />
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -96,7 +95,9 @@ export function PocketPanel({
                   className="grid size-4 shrink-0 place-items-center rounded text-[#a8abb2] hover:text-[#ff8a82]"
                 >
                   <X size={10} />
-                  <span className="sr-only"><T id="Hapus" en="Remove" /></span>
+                  <span className="sr-only">
+                    <T id="Hapus" en="Remove" />
+                  </span>
                 </button>
               </motion.div>
             );
@@ -107,11 +108,7 @@ export function PocketPanel({
   );
 }
 
-export function ClipPanel({
-  onSelectTab,
-}: {
-  onSelectTab?: (tab: NotchTabKey) => void;
-}) {
+export function ClipPanel({ onSelectTab }: { onSelectTab?: (tab: NotchTabKey) => void }) {
   const [live, setLive] = useState(true);
   const [items, setItems] = useState(CLIP_ITEMS);
   const [copied, setCopied] = useState<number | null>(0);
@@ -124,7 +121,10 @@ export function ClipPanel({
         <>
           <span className="px-1 text-[11px] font-medium text-[#a8abb2] tabular-nums">{items.length}/12</span>
           <Pill tone="positive" onClick={() => setLive((v) => !v)}>
-            <span className={`block size-1.5 rounded-full ${live ? "bg-[#30d158]" : "bg-[#a8abb2]"}`} aria-hidden="true" />
+            <span
+              className={`block size-1.5 rounded-full ${live ? "bg-[#30d158]" : "bg-[#a8abb2]"}`}
+              aria-hidden="true"
+            />
             {live ? "Live" : "Paused"}
           </Pill>
           {items.length > 0 ? (
@@ -149,7 +149,10 @@ export function ClipPanel({
             const Icon = KIND_ICON[item.kind];
             const isCopied = index === copied;
             return (
-              <li key={item.label[1]} className="flex h-[21px] items-center gap-2 rounded-md px-1 text-[12px] transition-colors hover:bg-white/[0.06]">
+              <li
+                key={item.label[1]}
+                className="flex h-[21px] items-center gap-2 rounded-md px-1 text-[12px] transition-colors hover:bg-white/[0.06]"
+              >
                 <button
                   type="button"
                   onClick={() => setCopied(index)}
@@ -174,7 +177,9 @@ export function ClipPanel({
                   className="grid size-4 shrink-0 place-items-center text-[#a8abb2] hover:text-[#ff8a82]"
                 >
                   <X size={11} />
-                  <span className="sr-only"><T id="Hapus" en="Remove" /></span>
+                  <span className="sr-only">
+                    <T id="Hapus" en="Remove" />
+                  </span>
                 </button>
               </li>
             );
@@ -200,19 +205,24 @@ export function TasksPanel({
 }) {
   const [tasks, setTasks] = useState<TaskItem[]>(INITIAL_TASKS);
   const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (composing) inputRef.current?.focus();
+  }, [composing]);
   const hasDone = tasks.some((task) => task.done);
 
   function toggleDone(id: number) {
     setTasks((curr) =>
-      curr.map((task) => (task.id === id ? { ...task, done: !task.done, active: !task.done ? false : task.active } : task)),
+      curr.map((task) =>
+        task.id === id ? { ...task, done: !task.done, active: !task.done ? false : task.active } : task,
+      ),
     );
   }
 
   function selectActive(id: number) {
     setTasks((curr) => {
-      const next = curr.map((task) =>
-        task.done ? task : { ...task, active: task.id === id ? !task.active : false },
-      );
+      const next = curr.map((task) => (task.done ? task : { ...task, active: task.id === id ? !task.active : false }));
       const found = next.find((t) => t.active);
       onActiveTaskChange?.(found ? found.text : null);
       return next;
@@ -248,16 +258,22 @@ export function TasksPanel({
     >
       <div className="flex h-full flex-col gap-1.5">
         {composing ? (
-          <form onSubmit={handleSubmit} className="flex items-center gap-1.5 rounded-[10px] bg-white/[0.1] px-2.5 py-1 ring-1 ring-inset ring-[#0a84ff]/70">
+          <form
+            onSubmit={handleSubmit}
+            className="flex items-center gap-1.5 rounded-[10px] bg-white/[0.1] px-2.5 py-1 ring-1 ring-inset ring-[#0a84ff]/70"
+          >
             <input
+              ref={inputRef}
               type="text"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="Quick capture · Enter to save"
-              autoFocus
               className="min-w-0 flex-1 bg-transparent text-[12px] text-[#f5f5f7] placeholder:text-[#a8abb2] outline-none"
             />
-            <button type="submit" className="rounded-full bg-[#0a84ff] px-2 py-0.5 text-[10px] font-semibold text-white">
+            <button
+              type="submit"
+              className="rounded-full bg-[#0a84ff] px-2 py-0.5 text-[10px] font-semibold text-white"
+            >
               Save
             </button>
           </form>
@@ -280,13 +296,19 @@ export function TasksPanel({
                 }`}
               >
                 {task.done ? <Check size={9} strokeWidth={3} aria-hidden="true" /> : null}
-                <span className="sr-only"><T id="Tandai selesai" en="Mark done" /></span>
+                <span className="sr-only">
+                  <T id="Tandai selesai" en="Mark done" />
+                </span>
               </button>
               <button
                 type="button"
                 onClick={() => selectActive(task.id)}
                 className={`min-w-0 flex-1 truncate text-left ${
-                  task.done ? "text-[#a8abb2] line-through" : task.active ? "font-semibold text-[#ff9230]" : "text-[#f5f5f7]"
+                  task.done
+                    ? "text-[#a8abb2] line-through"
+                    : task.active
+                      ? "font-semibold text-[#ff9230]"
+                      : "text-[#f5f5f7]"
                 }`}
               >
                 <T id={task.text[0]} en={task.text[1]} />

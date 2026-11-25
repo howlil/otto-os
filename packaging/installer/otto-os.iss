@@ -31,8 +31,15 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.22621
-Compression=lzma2/ultra64
-SolidCompression=yes
+Compression=zip
+SolidCompression=no
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCompany=Otto OS Contributors
+VersionInfoDescription=Otto OS Installer
+VersionInfoProductName=Otto OS
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoOriginalFileName=otto-os-setup-{#MyAppVersion}-x64.exe
+VersionInfoCopyright=Copyright (c) 2026 Otto OS Contributors (MIT)
 WizardStyle=modern
 CloseApplications=yes
 
@@ -56,6 +63,11 @@ Filename: "{app}\otto-os.exe"; Description: "Launch Otto OS"; Flags: nowait post
 Filename: "{app}\otto-os.exe"; Flags: nowait skipifnotsilent; Check: HasRelaunchSwitch
 
 [Code]
+const
+  WM_CLOSE = $0010;
+  INSTANCE_MUTEX = 'Local\OttoNotchBar';
+  BAR_WINDOW_CLASS = 'OttoNotchBar';
+
 function HasRelaunchSwitch: Boolean;
 var
   I: Integer;
@@ -71,18 +83,30 @@ begin
   end;
 end;
 
-procedure QuitRunningInstance(const ExePath: string);
+procedure QuitRunningInstance;
 var
-  ResultCode: Integer;
+  Wnd: HWND;
+  PostedWnd: HWND;
+  Attempt: Integer;
 begin
-  if FileExists(ExePath) then
-    Exec(ExePath, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  PostedWnd := 0;
+  for Attempt := 0 to 199 do
+  begin
+    Wnd := FindWindowByClassName(BAR_WINDOW_CLASS);
+    if (Wnd = 0) and (not CheckForMutexes(INSTANCE_MUTEX)) then
+      Exit;
+    if (Wnd <> 0) and (Wnd <> PostedWnd) then
+    begin
+      PostMessage(Wnd, WM_CLOSE, 0, 0);
+      PostedWnd := Wnd;
+    end;
+    Sleep(25);
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  ExtractTemporaryFile('otto-os.exe');
-  QuitRunningInstance(ExpandConstant('{tmp}\otto-os.exe'));
+  QuitRunningInstance;
   Result := '';
 end;
 
@@ -90,7 +114,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
-    QuitRunningInstance(ExpandConstant('{app}\otto-os.exe'));
+    QuitRunningInstance;
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OttoOS');
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Otto OS');
   end;

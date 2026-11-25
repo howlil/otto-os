@@ -17,11 +17,11 @@ pub struct CaptureRegion {
 
 impl CaptureRegion {
     #[must_use]
-    pub fn clipped_to_screen(rect: Rect, screen_width: i32, screen_height: i32) -> Option<Self> {
-        let left = rect.x.max(0);
-        let top = rect.y.max(0);
-        let right = rect.right().min(screen_width);
-        let bottom = rect.bottom().min(screen_height);
+    pub fn clipped_to_bounds(rect: Rect, bounds: Rect) -> Option<Self> {
+        let left = rect.x.max(bounds.x);
+        let top = rect.y.max(bounds.y);
+        let right = rect.right().min(bounds.right());
+        let bottom = rect.bottom().min(bounds.bottom());
         (right > left && bottom > top).then(|| Self {
             x: left,
             y: top,
@@ -31,12 +31,7 @@ impl CaptureRegion {
     }
 
     #[must_use]
-    pub fn padded_to_screen(
-        rect: Rect,
-        padding: i32,
-        screen_width: i32,
-        screen_height: i32,
-    ) -> Option<Self> {
+    pub fn padded_to_bounds(rect: Rect, padding: i32, bounds: Rect) -> Option<Self> {
         let pad = padding.max(0);
         let padded = Rect {
             x: rect.x.saturating_sub(pad),
@@ -44,7 +39,39 @@ impl CaptureRegion {
             width: rect.width.saturating_add(pad.saturating_mul(2)),
             height: rect.height.saturating_add(pad.saturating_mul(2)),
         };
-        Self::clipped_to_screen(padded, screen_width, screen_height)
+        Self::clipped_to_bounds(padded, bounds)
+    }
+
+    #[must_use]
+    pub fn clipped_to_screen(rect: Rect, screen_width: i32, screen_height: i32) -> Option<Self> {
+        Self::clipped_to_bounds(
+            rect,
+            Rect {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            },
+        )
+    }
+
+    #[must_use]
+    pub fn padded_to_screen(
+        rect: Rect,
+        padding: i32,
+        screen_width: i32,
+        screen_height: i32,
+    ) -> Option<Self> {
+        Self::padded_to_bounds(
+            rect,
+            padding,
+            Rect {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            },
+        )
     }
 
     #[must_use]
@@ -226,6 +253,27 @@ mod tests {
             Some(CaptureRegion {
                 x: 0,
                 y: 0,
+                width: 1920,
+                height: 56,
+            })
+        );
+        let left_monitor = Rect {
+            x: -1920,
+            y: -120,
+            width: 1920,
+            height: 1080,
+        };
+        let secondary_bar = Rect {
+            x: -1920,
+            y: -120,
+            width: 1920,
+            height: 32,
+        };
+        assert_eq!(
+            CaptureRegion::padded_to_bounds(secondary_bar, 24, left_monitor),
+            Some(CaptureRegion {
+                x: -1920,
+                y: -120,
                 width: 1920,
                 height: 56,
             })

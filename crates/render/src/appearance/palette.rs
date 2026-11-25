@@ -2,7 +2,8 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT};
 use windows_numerics::Vector2;
 
-use crate::notch::glow::linear_gradient;
+pub(crate) use crate::appearance::tokens::with_alpha;
+use crate::kit::draw::linear_gradient;
 use crate::{FOREGROUND, Renderer};
 
 const DIM_MIX: f32 = 0.65;
@@ -54,13 +55,6 @@ pub(crate) fn muted(color: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F {
         },
         amount,
     )
-}
-
-pub(crate) const fn with_alpha(color: D2D1_COLOR_F, alpha: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        a: color.a * alpha,
-        ..color
-    }
 }
 
 impl Renderer {

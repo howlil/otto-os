@@ -16,14 +16,14 @@ use windows::core::{IUnknown, Interface};
 use crate::com::ComGuard;
 use crate::winrt_io::{await_until, read_stream_bounded};
 
-pub const MEDIA_CACHE_TTL: Duration = Duration::from_millis(250);
-pub const MEDIA_PLAYING_EVENT_TTL: Duration = Duration::from_secs(2);
-pub const MEDIA_IDLE_EVENT_TTL: Duration = Duration::from_secs(10);
-pub const MEDIA_STALE_AFTER: Duration = Duration::from_secs(3);
-pub const MEDIA_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
-pub const MEDIA_QUEUE_DEPTH: usize = 8;
-pub const MEDIA_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
-pub const MAX_THUMBNAIL_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MEDIA_CACHE_TTL: Duration = Duration::from_millis(250);
+pub(crate) const MEDIA_PLAYING_EVENT_TTL: Duration = Duration::from_secs(2);
+pub(crate) const MEDIA_IDLE_EVENT_TTL: Duration = Duration::from_secs(10);
+pub(crate) const MEDIA_STALE_AFTER: Duration = Duration::from_secs(3);
+pub(crate) const MEDIA_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
+pub(crate) const MEDIA_QUEUE_DEPTH: usize = 8;
+pub(crate) const MEDIA_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
+pub(crate) const MAX_THUMBNAIL_BYTES: usize = 10 * 1024 * 1024;
 const ARTWORK_RETRY_BASE: Duration = Duration::from_secs(1);
 const ARTWORK_MAX_ATTEMPTS: u32 = 4;
 const WINDOWS_TO_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
@@ -186,8 +186,11 @@ fn runtime() -> Option<(mpsc::SyncSender<MediaTask>, Arc<Mutex<MediaCache>>)> {
             handle,
         });
     }
-    let active = guard.as_ref()?;
-    Some((active.sender.clone(), Arc::clone(&active.cache)))
+    let result = guard
+        .as_ref()
+        .map(|active| (active.sender.clone(), Arc::clone(&active.cache)));
+    drop(guard);
+    result
 }
 
 #[must_use]

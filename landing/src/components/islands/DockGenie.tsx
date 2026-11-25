@@ -1,7 +1,21 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AnimatePresence, motion, useAnimationControls, useInView, useReducedMotion } from "motion/react";
 import type { LucideIcon } from "lucide-react";
-import { Code, Disc3, Download, FileArchive, FileImage, FileText, Folder, Globe, NotebookPen, Terminal, Trash, Trash2, X } from "lucide-react";
+import {
+  Code,
+  Disc3,
+  Download,
+  FileArchive,
+  FileImage,
+  FileText,
+  Folder,
+  Globe,
+  NotebookPen,
+  Terminal,
+  Trash,
+  Trash2,
+  X,
+} from "lucide-react";
+import { AnimatePresence, motion, useAnimationControls, useInView, useReducedMotion } from "motion/react";
+import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 
 type DockMode = "always" | "autohide" | "reserve";
@@ -95,16 +109,15 @@ export function DockGenie() {
   const stageRef = useRef<HTMLDivElement>(null);
   const inView = useInView(stageRef, { amount: 0.4 });
   const [auto, setAuto] = useState(true);
+  const autoStepRef = useRef<() => void>(() => {});
+  autoStepRef.current = () => {
+    if (minimized) void restore();
+    else void minimize();
+  };
 
   useEffect(() => {
     if (!auto || !inView || reduced || busy) return;
-    const id = window.setTimeout(
-      () => {
-        if (minimized) void restore();
-        else void minimize();
-      },
-      minimized ? 1800 : 2600,
-    );
+    const id = window.setTimeout(() => autoStepRef.current(), minimized ? 1800 : 2600);
     return () => window.clearTimeout(id);
   }, [auto, inView, reduced, busy, minimized]);
 
@@ -112,7 +125,8 @@ export function DockGenie() {
     if (dockMode === "reserve" && sheetMode === "normal") setSheetMode("maximized");
   }, [dockMode, sheetMode]);
 
-  const dockHidden = dockMode === "autohide" && sheetMode === "maximized" && !minimized && !edgeReveal && !downloadsOpen;
+  const dockHidden =
+    dockMode === "autohide" && sheetMode === "maximized" && !minimized && !edgeReveal && !downloadsOpen;
 
   function selectDockMode(next: DockMode) {
     setDockMode(next);
@@ -190,7 +204,14 @@ export function DockGenie() {
     else void minimize();
   }
 
-  function renderUtilityTile(index: number, label: [string, string], Icon: LucideIcon, tint: string, onClick: () => void, active = false) {
+  function renderUtilityTile(
+    index: number,
+    label: [string, string],
+    Icon: LucideIcon,
+    tint: string,
+    onClick: () => void,
+    active = false,
+  ) {
     const isHovered = hovered === index;
     return (
       <div key={label[1]} className="relative hidden flex-col items-center sm:flex">
@@ -213,10 +234,16 @@ export function DockGenie() {
           animate={{ scale: scales[index] }}
           transition={SPRING}
           className="grid size-[50px] origin-bottom place-items-center squircle text-white focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-accent"
-          style={{ background: tint, outline: active ? "2px solid var(--color-ink)" : undefined, outlineOffset: active ? 3 : undefined }}
+          style={{
+            background: tint,
+            outline: active ? "2px solid var(--color-ink)" : undefined,
+            outlineOffset: active ? 3 : undefined,
+          }}
         >
           <Icon className="pointer-events-none size-[24px]" strokeWidth={1.85} aria-hidden="true" />
-          <span className="sr-only"><T id={label[0]} en={label[1]} /></span>
+          <span className="sr-only">
+            <T id={label[0]} en={label[1]} />
+          </span>
         </motion.button>
         <span className="mt-1 size-1 rounded-full opacity-0" aria-hidden="true" />
       </div>
@@ -258,6 +285,7 @@ export function DockGenie() {
         </div>
       </div>
 
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-leave cancels edge reveal preview */}
       <div
         ref={stageRef}
         onMouseLeave={() => setEdgeReveal(false)}
@@ -273,11 +301,17 @@ export function DockGenie() {
         >
           <div className="flex items-center gap-2.5 text-[13px] font-medium text-ink">
             <FileText size={16} strokeWidth={1.9} className="shrink-0 text-accent-text" aria-hidden="true" />
-            <span><T id="Catatan rilis v1.3" en="Release notes v1.3" /></span>
+            <span>
+              <T id="Catatan rilis v1.3" en="Release notes v1.3" />
+            </span>
           </div>
           <div className="mt-5 flex min-h-0 flex-1 flex-col gap-2.5" aria-hidden="true">
-            {SHEET_LINES.map((width, index) => (
-              <span key={index} className="h-2 shrink-0 rounded-full bg-black/[0.07]" style={{ width: `${width * 100}%` }} />
+            {SHEET_LINES.map((width) => (
+              <span
+                key={width}
+                className="h-2 shrink-0 rounded-full bg-black/[0.07]"
+                style={{ width: `${width * 100}%` }}
+              />
             ))}
           </div>
         </motion.div>
@@ -306,8 +340,15 @@ export function DockGenie() {
                 {DOWNLOAD_FILES.map((file) => {
                   const Icon = file.icon;
                   return (
-                    <div key={file.name} className="flex flex-col items-center gap-1.5 rounded-[10px] p-2 text-center transition-colors hover:bg-black/[0.05]">
-                      <span className="grid size-11 place-items-center rounded-[10px] text-white" style={{ background: file.tint }} aria-hidden="true">
+                    <div
+                      key={file.name}
+                      className="flex flex-col items-center gap-1.5 rounded-[10px] p-2 text-center transition-colors hover:bg-black/[0.05]"
+                    >
+                      <span
+                        className="grid size-11 place-items-center rounded-[10px] text-white"
+                        style={{ background: file.tint }}
+                        aria-hidden="true"
+                      >
                         <Icon size={18} strokeWidth={1.9} />
                       </span>
                       <span className="w-full truncate text-[10.5px] font-medium text-ink">{file.name}</span>
@@ -323,7 +364,11 @@ export function DockGenie() {
         </AnimatePresence>
 
         {dockMode === "autohide" ? (
-          <div onMouseEnter={() => setEdgeReveal(true)} className="absolute inset-x-0 bottom-0 z-20 h-6" aria-hidden="true" />
+          <div
+            onMouseEnter={() => setEdgeReveal(true)}
+            className="absolute inset-x-0 bottom-0 z-20 h-6"
+            aria-hidden="true"
+          />
         ) : null}
 
         <motion.div
@@ -357,12 +402,20 @@ export function DockGenie() {
                   onBlur={() => setHovered((v) => (v === index ? null : v))}
                   onClick={isNotes ? toggleNotes : undefined}
                   animate={{ scale: scales[index], y: showsRestore ? [0, -5, 0] : 0 }}
-                  transition={showsRestore ? { y: { duration: 1.3, repeat: Infinity, ease: "easeInOut" }, scale: SPRING } : SPRING}
+                  transition={
+                    showsRestore ? { y: { duration: 1.3, repeat: Infinity, ease: "easeInOut" }, scale: SPRING } : SPRING
+                  }
                   className="grid size-11 origin-bottom place-items-center squircle text-white focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-accent sm:size-[50px]"
                   style={{ background: app.tint }}
                 >
-                  <Icon className="pointer-events-none size-[22px] sm:size-[24px]" strokeWidth={1.85} aria-hidden="true" />
-                  <span className="sr-only"><T id={app.name[0]} en={app.name[1]} /></span>
+                  <Icon
+                    className="pointer-events-none size-[22px] sm:size-[24px]"
+                    strokeWidth={1.85}
+                    aria-hidden="true"
+                  />
+                  <span className="sr-only">
+                    <T id={app.name[0]} en={app.name[1]} />
+                  </span>
                 </motion.button>
                 <span
                   className={`mt-1 size-1 rounded-full bg-ink transition-opacity duration-200 ${
@@ -386,7 +439,9 @@ export function DockGenie() {
           )}
           {renderUtilityTile(
             TRASH_INDEX,
-            trashFull ? ["Tempat Sampah (Terisi)", "Recycle Bin (Full)"] : ["Tempat Sampah (Kosong)", "Recycle Bin (Empty)"],
+            trashFull
+              ? ["Tempat Sampah (Terisi)", "Recycle Bin (Full)"]
+              : ["Tempat Sampah (Kosong)", "Recycle Bin (Empty)"],
             trashFull ? Trash2 : Trash,
             trashFull ? "#636366" : "#98a6b5",
             () => setTrashFull((v) => !v),

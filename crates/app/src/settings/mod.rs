@@ -1,17 +1,16 @@
 use std::collections::HashSet;
 
 use otto_core::{
-    ContentLayout, FocusAppFilter, FocusPageState, FocusTextField, GeneralPageState, ModuleRow,
-    OttoSettingsSnapshot, SettingsContent, SettingsHit, SettingsLayout, SettingsPage, UpdateState,
-    build_content, compute_content_layout, compute_settings_layout, resolve_modules,
+    BarWindowControlsView, ContentLayout, FocusAppFilter, FocusPageState, FocusTextField,
+    GeneralPageState, ModuleRow, OttoSettingsSnapshot, SettingsContent, SettingsHit,
+    SettingsLayout, SettingsPage, UpdateState, WindowControlsState, build_content,
+    compute_content_layout, compute_settings_layout, resolve_modules,
 };
 use otto_platform::{
     collect_focus_catalog_apps, collect_process_audit, current_process_id, extract_app_icon_bitmap,
-    settings_client_size, settings_window_dpi,
+    is_settings_window_maximized, settings_client_size, settings_window_dpi, validate_window_rect,
 };
 use otto_render::{SettingsPaintState, SettingsRenderer};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::ValidateRect;
 
 use crate::host::{RuntimeContext, module_status};
 
@@ -22,8 +21,8 @@ mod state;
 
 pub(crate) use self::input::handle_message;
 pub(crate) use self::lifecycle::{
-    open, open_focus_activity, refresh_appearance, refresh_process_audit_if_general, repaint,
-    repaint_if_focus_page, take_hwnd, toggle,
+    open, open_focus_activity, open_focus_modes, refresh_appearance,
+    refresh_process_audit_if_general, repaint, repaint_if_focus_page, take_hwnd, toggle,
 };
 pub(crate) use self::state::settings_snapshot;
 #[cfg(test)]
@@ -35,6 +34,7 @@ pub(super) enum CatalogLoadState {
     Loaded,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SettingsWindow {
     pub(super) hwnd: isize,
     pub(super) page: SettingsPage,
@@ -47,6 +47,10 @@ pub(crate) struct SettingsWindow {
     pub(super) dpi: u32,
     pub(super) launch_at_login: bool,
     pub(super) glass: bool,
+    pub(super) active: bool,
+    pub(super) maximized: bool,
+    pub(super) alt_down: bool,
+    pub(super) green_hover_armed: bool,
     pub(super) update_state: UpdateState,
     pub(super) focus_state: FocusPageState,
     pub(super) focus_catalog: CatalogLoadState,
@@ -74,6 +78,10 @@ impl SettingsWindow {
             dpi,
             launch_at_login: false,
             glass: false,
+            active: true,
+            maximized: is_settings_window_maximized(hwnd),
+            alt_down: false,
+            green_hover_armed: false,
             update_state: UpdateState::Idle,
             focus_state: FocusPageState::default(),
             focus_catalog: CatalogLoadState::Unloaded,
@@ -255,6 +263,27 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
         window.sync_visible_app_icons();
         let app = crate::theme_state::appearance(runtime);
         let accent = app.resolved_accent();
+        let hovered_control = matches!(window.hovered, Some(SettingsHit::WindowControl(_)));
+        let pressed_control = match (window.pressed, window.hovered) {
+            (Some(SettingsHit::WindowControl(p)), Some(SettingsHit::WindowControl(h)))
+                if p == h =>
+            {
+                Some(p)
+            }
+            _ => None,
+        };
+        let window_controls = BarWindowControlsView {
+            state: WindowControlsState {
+                active: window.active,
+                close: true,
+                minimize: true,
+                zoom: true,
+                alt_zoom_glyph: hovered_control && window.alt_down,
+            },
+            maximized: window.maximized,
+            hovered: hovered_control,
+            pressed: pressed_control,
+        };
         let drawn = window.renderer.as_mut().map(|renderer| {
             renderer.draw(&SettingsPaintState {
                 layout: &window.layout,
@@ -263,9 +292,11 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
                 page: window.page,
                 scroll: window.scroll,
                 hovered: window.hovered,
+                window_controls,
                 dark: app.content_theme().is_dark(),
                 glass: window.glass,
                 high_contrast: app.contrast.is_some(),
+                contrast: app.contrast,
                 accent: accent.fill,
                 on_accent: accent.on_accent,
             })
@@ -275,7 +306,5 @@ pub(super) fn paint(runtime: &RuntimeContext, hwnd: isize) {
             window.icons_attempted.clear();
         }
     });
-    unsafe {
-        let _ = ValidateRect(Some(HWND(hwnd as *mut _)), None);
-    }
+    validate_window_rect(hwnd);
 }

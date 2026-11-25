@@ -53,6 +53,24 @@ pub fn toggle_tray_overflow(
     bar_height: i32,
     screen_width: i32,
 ) -> TrayOverflowOutcome {
+    toggle_tray_overflow_in_bounds(
+        anchor_center_x,
+        bar_height,
+        otto_core::Rect {
+            x: 0,
+            y: 0,
+            width: screen_width,
+            height: 0,
+        },
+    )
+}
+
+#[must_use]
+pub fn toggle_tray_overflow_in_bounds(
+    anchor_center_x: i32,
+    bar_bottom_y: i32,
+    bounds: otto_core::Rect,
+) -> TrayOverflowOutcome {
     unsafe {
         let Some(overflow) = find_tray_overflow_window() else {
             return TrayOverflowOutcome::Unavailable;
@@ -70,12 +88,14 @@ pub fn toggle_tray_overflow(
             let _ = ShowWindow(overflow, SW_HIDE);
             return TrayOverflowOutcome::Unavailable;
         };
-        let x = (anchor_center_x - width / 2).clamp(8, (screen_width - width - 8).max(8));
+        let min_x = bounds.x + 8;
+        let max_x = (bounds.right() - width - 8).max(min_x);
+        let x = (anchor_center_x - width / 2).clamp(min_x, max_x);
         if SetWindowPos(
             overflow,
             Some(HWND_TOPMOST),
             x,
-            bar_height + 6,
+            bar_bottom_y + 6,
             0,
             0,
             SWP_NOSIZE | SWP_SHOWWINDOW,

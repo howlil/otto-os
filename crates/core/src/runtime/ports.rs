@@ -50,6 +50,9 @@ pub enum ControlCenterAction {
     OpenNightLight,
     OpenSound,
     OpenPowerSettings,
+    LockScreen,
+    Screenshot,
+    TaskView,
 }
 
 pub trait ControlCenterPort {
@@ -102,23 +105,11 @@ pub trait ControlCenterPort {
     fn read_launch_at_login(&self) -> bool {
         false
     }
+}
 
-    fn set_launch_at_login(&self, _enabled: bool) -> bool {
-        false
-    }
-
-    fn open_logs_folder(&self) {}
-
-    fn check_for_updates(&self) -> Option<String> {
-        None
-    }
-
+pub trait UpdatesPort {
     fn start_update_check(&self) -> bool {
         false
-    }
-
-    fn poll_update_status(&self) -> Option<String> {
-        None
     }
 
     fn poll_update_state(&self) -> crate::UpdateState {
@@ -140,7 +131,9 @@ pub trait ControlCenterPort {
     fn mark_update_install_failed(&self, _message: &str) {}
 
     fn open_releases_page(&self) {}
+}
 
+pub trait NotificationCenterPort {
     fn read_notifications(&self) -> crate::NotificationCenterSnapshot {
         crate::NotificationCenterSnapshot::default()
     }
@@ -185,6 +178,14 @@ pub trait DockPort {
     fn window_overlaps_zone(&self, zone: Rect, own_pid: u32) -> bool;
 
     fn fullscreen_on_primary(&self, width: i32, height: i32, own_pid: u32) -> bool;
+
+    fn fullscreen_on_monitor(&self, bounds: Rect, own_pid: u32) -> bool {
+        if bounds.x == 0 && bounds.y == 0 {
+            self.fullscreen_on_primary(bounds.width, bounds.height, own_pid)
+        } else {
+            false
+        }
+    }
 
     fn toggle_pin(&self, entry: &DockEntry);
 

@@ -8,12 +8,12 @@ use crate::win_msg::{
 use otto_core::{
     BarKey, ControlCenterAction, ControlCenterCommand, ControlCenterFocus, ControlCenterHitTarget,
     ControlCenterLayout, ControlCenterMetrics, ControlCenterPage, ControlCenterPort,
-    ControlCenterSnapshot, MotionPreference, build_control_center_accessible_tree,
+    ControlCenterSnapshot, MotionMetrics, MotionPreference, build_control_center_accessible_tree,
     control_center_action, decode_control_center_target, scale,
 };
 use otto_platform::{
-    MenuNavEvent, PrimaryScreen, WM_APP_CONTROL_CENTER_REFRESH, WM_APP_UIA_INVOKE,
-    WindowsControlCenter, handle_wm_getobject, primary_screen,
+    DisplayMonitor, MenuNavEvent, WM_APP_CONTROL_CENTER_REFRESH, WM_APP_UIA_INVOKE,
+    WindowsControlCenter, cursor_position, handle_wm_getobject, monitor_at,
 };
 use otto_render::ControlCenterRenderer;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -30,7 +30,7 @@ mod presentation;
 use self::commands::execute_command;
 use self::commands::refresh_and_present;
 
-const CC_POLL_MS: u32 = 16;
+const CC_POLL_MS: u32 = MotionMetrics::MACOS_LIKE.animation_tick_ms;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
 const WHEEL_SCROLL_STEP: i32 = 36;
 
@@ -38,7 +38,7 @@ pub(crate) struct ControlCenterSurface {
     hwnd: isize,
     port: Box<dyn ControlCenterPort>,
     renderer: Option<ControlCenterRenderer>,
-    screen: PrimaryScreen,
+    monitor: DisplayMonitor,
     metrics: ControlCenterMetrics,
     snapshot: ControlCenterSnapshot,
     layout: ControlCenterLayout,
@@ -48,7 +48,7 @@ pub(crate) struct ControlCenterSurface {
     hovered: Option<ControlCenterHitTarget>,
     pressed: Option<ControlCenterHitTarget>,
     focus: ControlCenterFocus,
-    dragging: Option<ControlCenterHitTarget>,
+    drag: Option<DragMode>,
     visible: bool,
     opened_at: Instant,
     dismissed_outside_at: Option<Instant>,
@@ -60,6 +60,27 @@ pub(crate) struct ControlCenterSurface {
     morph_tick_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+enum DragMode {
+    Slider {
+        target: ControlCenterHitTarget,
+    },
+    ResizeTile {
+        tile_id: u32,
+        start_pos: (i32, i32),
+        moved: bool,
+        preview_cols: u8,
+        preview_rows: u8,
+    },
+    MoveTile {
+        tile_id: u32,
+        start_pos: (i32, i32),
+        moved: bool,
+        preview_col: u8,
+        preview_row: u8,
+    },
+}
+
 enum PostClickAction {
     None,
     Close,
@@ -68,13 +89,17 @@ enum PostClickAction {
 
 impl ControlCenterSurface {
     fn new(hwnd: isize) -> Self {
+        let snapshot = ControlCenterSnapshot {
+            grid: otto_platform::load_control_center_grid(),
+            ..ControlCenterSnapshot::default()
+        };
         Self {
             hwnd,
             port: Box::new(WindowsControlCenter),
             renderer: None,
-            screen: primary_screen(),
+            monitor: monitor_at(0, 0),
             metrics: ControlCenterMetrics::DEFAULT,
-            snapshot: ControlCenterSnapshot::default(),
+            snapshot,
             layout: ControlCenterLayout::default(),
             anchor_right: 0,
             anchor_y: 0,
@@ -82,7 +107,7 @@ impl ControlCenterSurface {
             hovered: None,
             pressed: None,
             focus: ControlCenterFocus::default(),
-            dragging: None,
+            drag: None,
             visible: false,
             opened_at: Instant::now(),
             dismissed_outside_at: None,
@@ -96,13 +121,13 @@ impl ControlCenterSurface {
     }
 }
 
-pub fn start(runtime: &RuntimeContext, hwnd: isize) {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) {
     if let Ok(mut slot) = runtime.control_center.try_borrow_mut() {
         *slot = Some(ControlCenterSurface::new(hwnd));
     }
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.control_center.try_borrow_mut()
         && let Some(mut surface) = guard.take()
     {
@@ -110,12 +135,12 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn close(runtime: &RuntimeContext) {
+pub(crate) fn close(runtime: &RuntimeContext) {
     with_cc(runtime, ControlCenterSurface::hide);
 }
 
 #[must_use]
-pub fn is_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_open(runtime: &RuntimeContext) -> bool {
     runtime
         .control_center
         .try_borrow()
@@ -125,7 +150,7 @@ pub fn is_open(runtime: &RuntimeContext) -> bool {
 }
 
 #[must_use]
-pub fn active_page(runtime: &RuntimeContext) -> Option<ControlCenterPage> {
+pub(crate) fn active_page(runtime: &RuntimeContext) -> Option<ControlCenterPage> {
     runtime.control_center.try_borrow().ok().and_then(|guard| {
         guard
             .as_ref()
@@ -134,7 +159,7 @@ pub fn active_page(runtime: &RuntimeContext) -> Option<ControlCenterPage> {
     })
 }
 
-pub fn open_at_page(
+pub(crate) fn open_at_page(
     runtime: &RuntimeContext,
     page: ControlCenterPage,
     anchor_right: i32,
@@ -148,7 +173,7 @@ pub fn open_at_page(
     });
 }
 
-pub fn open_at_page_focused(
+pub(crate) fn open_at_page_focused(
     runtime: &RuntimeContext,
     page: ControlCenterPage,
     anchor_right: i32,
@@ -173,18 +198,19 @@ fn resolve_anchor(
     {
         return anchor;
     }
-    let screen = primary_screen();
+    let (cx, cy) = cursor_position();
+    let monitor = monitor_at(cx, cy);
     let motion = otto_platform::motion_preference();
-    let anchor_right = screen.width - scale(8, screen.dpi);
+    let anchor_right = monitor.bounds.right() - scale(8, monitor.dpi);
     let anchor_y = if from_tray {
-        screen.height - 1
+        monitor.bounds.bottom() - 1
     } else {
-        scale(12, screen.dpi)
+        monitor.bounds.y + scale(12, monitor.dpi)
     };
     (anchor_right, anchor_y, motion)
 }
 
-pub fn toggle_from_host(
+pub(crate) fn toggle_from_host(
     runtime: &RuntimeContext,
     page: ControlCenterPage,
     focused: bool,
@@ -219,11 +245,11 @@ pub fn toggle_from_host(
     }
 }
 
-pub fn open_settings_action(action: ControlCenterAction) {
+pub(crate) fn open_settings_action(action: ControlCenterAction) {
     WindowsControlCenter.execute(action);
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
+pub(crate) fn repaint(runtime: &RuntimeContext) {
     with_cc(runtime, |surface| {
         if surface.visible {
             surface.sync_snapshot(runtime);
@@ -235,7 +261,7 @@ pub fn repaint(runtime: &RuntimeContext) {
     });
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_cc(runtime, |surface| {
         if !enabled {
             surface.backdrop = None;
@@ -248,7 +274,7 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_cc(runtime, |surface| {
         if let Some(feed) = surface.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -258,7 +284,7 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     });
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,
@@ -330,7 +356,7 @@ pub fn handle_message(
         }
         WM_CAPTURECHANGED => {
             with_cc(runtime, |surface| {
-                surface.dragging = None;
+                surface.drag = None;
                 if surface.pressed.take().is_some() {
                     surface.present(runtime);
                 }
@@ -342,7 +368,10 @@ pub fn handle_message(
             with_cc(runtime, |surface| surface.begin_press(runtime, x, y));
             Some(LRESULT(0))
         }
-        WM_RBUTTONUP => Some(LRESULT(0)),
+        WM_RBUTTONUP => {
+            with_cc(runtime, |surface| surface.toggle_edit_mode(runtime));
+            Some(LRESULT(0))
+        }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
             with_cc(runtime, |surface| surface.rebuild(runtime));
             Some(LRESULT(0))
@@ -351,10 +380,7 @@ pub fn handle_message(
             repaint(runtime);
             Some(LRESULT(0))
         }
-        WM_APP_CONTROL_CENTER_BACKDROP => {
-            with_cc(runtime, |surface| surface.on_backdrop(runtime));
-            Some(LRESULT(0))
-        }
+        WM_APP_CONTROL_CENTER_BACKDROP => Some(LRESULT(0)),
         WM_CLOSE => {
             with_cc(runtime, ControlCenterSurface::hide);
             Some(LRESULT(0))
@@ -372,11 +398,14 @@ fn apply_post_action(runtime: &RuntimeContext, action: PostClickAction) {
                 command,
                 ControlCenterCommand::OpenPage(_) | ControlCenterCommand::Back
             );
-            execute_command(runtime, command);
             if dismiss {
                 close(runtime);
-            } else if !skip_refresh {
-                refresh_and_present(runtime);
+                execute_command(runtime, command);
+            } else {
+                execute_command(runtime, command);
+                if !skip_refresh {
+                    refresh_and_present(runtime);
+                }
             }
         }
     }

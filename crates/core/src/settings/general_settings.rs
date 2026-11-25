@@ -327,13 +327,18 @@ pub(crate) fn build_general_page(
         OttoSettingItem::Toggle(OttoSettingKind::LaunchAtLogin),
         SettingsPage::General,
     );
+    let finder_row = setting_row(
+        snapshot,
+        OttoSettingItem::Toggle(OttoSettingKind::Finder),
+        SettingsPage::General,
+    );
     SettingsContent {
         hero: None,
         sections: vec![
             SettingsSection {
-                title: "Startup",
+                title: "Startup & Shell",
                 footer: None,
-                rows: vec![startup_row],
+                rows: vec![startup_row, finder_row],
             },
             build_cleanup_section(snapshot, modules, &snapshot.process_audit.audit),
             build_audit_section(&snapshot.process_audit),

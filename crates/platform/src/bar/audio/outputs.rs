@@ -101,7 +101,7 @@ mod policy_com {
     use windows::Win32::Media::Audio::ERole;
     use windows::core::{GUID, HRESULT, IUnknown, IUnknown_Vtbl, PCWSTR, interface};
 
-    pub const CLSID_POLICY_CONFIG_CLIENT: GUID =
+    pub(super) const CLSID_POLICY_CONFIG_CLIENT: GUID =
         GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
 
     #[interface("f8679f50-850a-41cf-9c72-430f290290c8")]

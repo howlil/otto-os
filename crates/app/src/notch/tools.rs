@@ -87,11 +87,14 @@ impl NotchController {
     pub(crate) fn handle_shelf_drag_enter(&mut self) -> NotchUpdate {
         self.shelf_drag_leave_until = None;
         self.hover_blocked = false;
-        let mut changed = self.shelf.set_drag_hover(true);
-        if !self.panel_trigger.is_open() && !self.opened_by_shelf_drag {
+        let shelf_changed = self.shelf.set_drag_hover(true);
+        let opened = if !self.panel_trigger.is_open() && !self.opened_by_shelf_drag {
             self.opened_by_shelf_drag = true;
-            changed = true;
-        }
+            true
+        } else {
+            false
+        };
+        let mut changed = shelf_changed || opened;
         changed |= self.switch_tab(NotchExpandedTab::Shelf);
         NotchUpdate {
             changed,
@@ -101,11 +104,8 @@ impl NotchController {
 
     pub(crate) fn handle_shelf_drag_leave(&mut self, now: Instant) -> NotchUpdate {
         let changed = self.shelf.set_drag_hover(false);
-        self.shelf_drag_leave_until = if self.opened_by_shelf_drag || self.panel_trigger.is_open() {
-            Some(now + Duration::from_millis(SHELF_HOVER_LEAVE_MS))
-        } else {
-            None
-        };
+        self.shelf_drag_leave_until = (self.opened_by_shelf_drag || self.panel_trigger.is_open())
+            .then(|| now + Duration::from_millis(SHELF_HOVER_LEAVE_MS));
         NotchUpdate {
             changed,
             effect: None,

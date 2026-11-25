@@ -73,6 +73,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Dependency policy and advisories (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2
+        with:
+          arguments: --all-features
+
       - name: Test core, render, and app crates
         run: cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
 

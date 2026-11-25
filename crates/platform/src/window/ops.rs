@@ -214,9 +214,10 @@ pub(crate) fn should_record_sample_occluder(hwnd: HWND, own_pid: u32) -> Option<
         if is_shell_or_desktop_utf16(class) {
             return None;
         }
-        let own_settings = pid == own_pid && is_own_settings_utf16(class);
+        let own_app =
+            pid == own_pid && (is_own_settings_utf16(class) || utf16_eq_ascii(class, "OttoFinder"));
         if pid == own_pid
-            && !own_settings
+            && !own_app
             && !utf16_eq_ascii(class, "OttoPopupMenu")
             && !utf16_eq_ascii(class, "OttoNotchPanel")
             && !utf16_eq_ascii(class, "OttoControlCenter")
@@ -244,7 +245,7 @@ pub(crate) fn should_record_sample_occluder(hwnd: HWND, own_pid: u32) -> Option<
         if bounds.width <= 0 || bounds.height <= 0 {
             return None;
         }
-        let is_normal = (pid != own_pid || own_settings)
+        let is_normal = (pid != own_pid || own_app)
             && !(ex_style & WS_EX_TOOLWINDOW.0 != 0 && ex_style & WS_EX_APPWINDOW.0 == 0)
             && ex_style & WS_EX_NOACTIVATE.0 == 0
             && GetWindowTextLengthW(hwnd) > 0;
@@ -280,7 +281,8 @@ unsafe extern "system" fn collect_window_target(hwnd: HWND, lparam: LPARAM) -> B
         return BOOL(1);
     };
     if is_normal {
-        if bounds.width >= MIN_TARGET_WIDTH
+        if pid != sweep.own_pid
+            && bounds.width >= MIN_TARGET_WIDTH
             && bounds.height >= MIN_TARGET_HEIGHT
             && !sweep.is_uipi_blocked(hwnd, pid)
         {
@@ -292,14 +294,11 @@ unsafe extern "system" fn collect_window_target(hwnd: HWND, lparam: LPARAM) -> B
             };
             let active = hwnd == sweep.foreground || hwnd == sweep.active_root;
             let target = window_target(hwnd, rect, sweep.primary, active, &sweep.sample_occluders);
-            let keep = target.caption.is_some_and(|caption| {
-                let cover = caption.cover_rect();
-                !sweep
-                    .above_normal
-                    .iter()
-                    .any(|above| above.contains_rect(&cover))
-            });
-            if keep {
+            let above = &sweep.above_normal;
+            if target
+                .caption
+                .is_some_and(|c| !above.iter().any(|a| a.contains_rect(&c.cover_rect())))
+            {
                 sweep.targets.push(target);
             }
         }

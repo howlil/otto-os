@@ -11,8 +11,10 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::core::Result;
 use windows_numerics::Vector2;
 
-use crate::GLYPH_STROKE_SCALE;
 use crate::Renderer;
+use crate::kit::icons::{
+    GlyphCtx, draw_music_note_glyph_on, draw_pause_glyph_on, draw_play_glyph_on, draw_skip_glyph_on,
+};
 
 impl Renderer {
     pub(crate) fn draw_play_glyph(
@@ -22,41 +24,20 @@ impl Renderer {
         r: f32,
         brush: &ID2D1SolidColorBrush,
     ) -> Result<()> {
-        unsafe {
-            let geom = self.factory.CreatePathGeometry()?;
-            let sink = geom.Open()?;
-            sink.BeginFigure(
-                Vector2::new(cx - r * 0.55, cy - r * 0.85),
-                D2D1_FIGURE_BEGIN_FILLED,
-            );
-            sink.AddLine(Vector2::new(cx + r * 0.90, cy));
-            sink.AddLine(Vector2::new(cx - r * 0.55, cy + r * 0.85));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            self.target.FillGeometry(&geom, brush, None);
-        }
-        Ok(())
+        draw_play_glyph_on(
+            GlyphCtx {
+                factory: &self.factory,
+                target: &self.target,
+                stroke_style: &self.stroke_style,
+            },
+            Vector2::new(cx, cy),
+            r,
+            brush,
+        )
     }
 
     pub(crate) fn draw_pause_glyph(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
-        let bar_w = (r * 0.42).max(2.2);
-        let bar_h = r * 1.55;
-        let gap = r * 0.36;
-        for dx in [-gap - bar_w * 0.5, gap + bar_w * 0.5] {
-            let pill = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: cx + dx - bar_w * 0.5,
-                    top: cy - bar_h * 0.5,
-                    right: cx + dx + bar_w * 0.5,
-                    bottom: cy + bar_h * 0.5,
-                },
-                radiusX: bar_w * 0.45,
-                radiusY: bar_w * 0.45,
-            };
-            unsafe {
-                self.target.FillRoundedRectangle(&pill, brush);
-            }
-        }
+        draw_pause_glyph_on(&self.target, Vector2::new(cx, cy), r, brush);
     }
 
     pub(crate) fn draw_reset_glyph(
@@ -113,29 +94,17 @@ impl Renderer {
         r: f32,
         brush: &ID2D1SolidColorBrush,
     ) -> Result<()> {
-        let stroke = (r * 0.30).max(1.6);
-        unsafe {
-            let geom = self.factory.CreatePathGeometry()?;
-            let sink = geom.Open()?;
-            sink.BeginFigure(
-                Vector2::new(cx - r * 0.75, cy - r * 0.72),
-                D2D1_FIGURE_BEGIN_FILLED,
-            );
-            sink.AddLine(Vector2::new(cx + r * 0.35, cy));
-            sink.AddLine(Vector2::new(cx - r * 0.75, cy + r * 0.72));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            self.target.FillGeometry(&geom, brush, None);
-
-            self.target.DrawLine(
-                Vector2::new(cx + r * 0.62, cy - r * 0.68),
-                Vector2::new(cx + r * 0.62, cy + r * 0.68),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
-        Ok(())
+        draw_skip_glyph_on(
+            GlyphCtx {
+                factory: &self.factory,
+                target: &self.target,
+                stroke_style: &self.stroke_style,
+            },
+            Vector2::new(cx, cy),
+            r,
+            true,
+            brush,
+        )
     }
 
     pub(crate) fn draw_previous_glyph(
@@ -145,29 +114,17 @@ impl Renderer {
         r: f32,
         brush: &ID2D1SolidColorBrush,
     ) -> Result<()> {
-        let stroke = (r * 0.30).max(1.6);
-        unsafe {
-            let geom = self.factory.CreatePathGeometry()?;
-            let sink = geom.Open()?;
-            sink.BeginFigure(
-                Vector2::new(cx + r * 0.75, cy - r * 0.72),
-                D2D1_FIGURE_BEGIN_FILLED,
-            );
-            sink.AddLine(Vector2::new(cx - r * 0.35, cy));
-            sink.AddLine(Vector2::new(cx + r * 0.75, cy + r * 0.72));
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink.Close()?;
-            self.target.FillGeometry(&geom, brush, None);
-
-            self.target.DrawLine(
-                Vector2::new(cx - r * 0.62, cy - r * 0.68),
-                Vector2::new(cx - r * 0.62, cy + r * 0.68),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
-        Ok(())
+        draw_skip_glyph_on(
+            GlyphCtx {
+                factory: &self.factory,
+                target: &self.target,
+                stroke_style: &self.stroke_style,
+            },
+            Vector2::new(cx, cy),
+            r,
+            false,
+            brush,
+        )
     }
 
     pub(crate) fn draw_music_note_glyph(
@@ -177,54 +134,13 @@ impl Renderer {
         r: f32,
         brush: &ID2D1SolidColorBrush,
     ) {
-        let stroke = (r * GLYPH_STROKE_SCALE).max(1.5);
-        let head_radius_x = r * 0.38;
-        let head_radius_y = r * 0.28;
-        let gap = r * 0.75;
-        let x1 = cx - gap * 0.5;
-        let x2 = cx + gap * 0.5;
-        let y_head1 = cy + r * 0.45;
-        let y_head2 = cy + r * 0.25;
-        let y_top = cy - r * 0.70;
-        unsafe {
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(x1, y_head1),
-                    radiusX: head_radius_x,
-                    radiusY: head_radius_y,
-                },
-                brush,
-            );
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(x2, y_head2),
-                    radiusX: head_radius_x,
-                    radiusY: head_radius_y,
-                },
-                brush,
-            );
-            self.target.DrawLine(
-                Vector2::new(x1 + head_radius_x * 0.6, y_head1),
-                Vector2::new(x1 + head_radius_x * 0.6, y_top),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(x2 + head_radius_x * 0.6, y_head2),
-                Vector2::new(x2 + head_radius_x * 0.6, y_top - r * 0.2),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(x1 + head_radius_x * 0.6, y_top),
-                Vector2::new(x2 + head_radius_x * 0.6, y_top - r * 0.2),
-                brush,
-                stroke * 1.6,
-                &self.stroke_style,
-            );
-        }
+        draw_music_note_glyph_on(
+            &self.target,
+            &self.stroke_style,
+            Vector2::new(cx, cy),
+            r,
+            brush,
+        );
     }
 
     pub(crate) fn draw_equalizer_bars(

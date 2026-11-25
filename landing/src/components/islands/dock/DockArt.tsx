@@ -21,8 +21,24 @@ function Finder() {
     <>
       <Plate fill="rgb(138,214,255)" />
       <path d="M67 18H132.4V238H67A49 49 0 0 1 18 189V67A49 49 0 0 1 67 18Z" fill="rgb(28,120,242)" />
-      <rect x={at(0.29) - S(0.035)} y={at(0.29)} width={S(0.07)} height={S(0.11)} rx={S(0.035)} fill="rgb(20,44,84)" fillOpacity={0.96} />
-      <rect x={at(0.71) - S(0.035)} y={at(0.29)} width={S(0.07)} height={S(0.11)} rx={S(0.035)} fill="rgb(20,44,84)" fillOpacity={0.96} />
+      <rect
+        x={at(0.29) - S(0.035)}
+        y={at(0.29)}
+        width={S(0.07)}
+        height={S(0.11)}
+        rx={S(0.035)}
+        fill="rgb(20,44,84)"
+        fillOpacity={0.96}
+      />
+      <rect
+        x={at(0.71) - S(0.035)}
+        y={at(0.29)}
+        width={S(0.07)}
+        height={S(0.11)}
+        rx={S(0.035)}
+        fill="rgb(20,44,84)"
+        fillOpacity={0.96}
+      />
       <path
         {...feature}
         d={`M${at(0.5) + S(0.03)} ${at(0.06)} C${at(0.5) - S(0.04)} ${at(0.3)} ${at(0.5) - S(0.06)} ${at(0.44)} ${at(0.5) + S(0.06)} ${at(0.54)} L${at(0.5) - S(0.01)} ${at(0.94)}`}
@@ -41,13 +57,13 @@ function Browser() {
   const reach = dial * 0.78;
   const hw = dial * 0.14;
   const k = Math.SQRT1_2;
-  const ticks = Array.from({ length: 12 }, (_, i) => {
-    const angle = (i * Math.PI) / 6;
+  const ticks = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330].map((deg) => {
+    const angle = (deg * Math.PI) / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     return (
       <line
-        key={i}
+        key={deg}
         x1={c + cos * dial * 0.78}
         y1={c + sin * dial * 0.78}
         x2={c + cos * dial * 0.91}
@@ -123,7 +139,15 @@ function Music() {
       <Plate fill="rgb(250,45,72)" />
       <line x1={lx} y1={tl} x2={lx} y2={bl} stroke="rgb(255,255,255)" strokeWidth={stem} strokeLinecap="round" />
       <line x1={rx} y1={tr} x2={rx} y2={br} stroke="rgb(255,255,255)" strokeWidth={stem} strokeLinecap="round" />
-      <line x1={lx} y1={tl} x2={rx} y2={tr} stroke="rgb(255,255,255)" strokeWidth={Math.max(stem * 1.45, 2.2)} strokeLinecap="round" />
+      <line
+        x1={lx}
+        y1={tl}
+        x2={rx}
+        y2={tr}
+        stroke="rgb(255,255,255)"
+        strokeWidth={Math.max(stem * 1.45, 2.2)}
+        strokeLinecap="round"
+      />
       <ellipse cx={lx - nw * 0.55} cy={bl} rx={nw} ry={nh} fill="rgb(255,255,255)" />
       <ellipse cx={rx - nw * 0.55} cy={br} rx={nw} ry={nh} fill="rgb(255,255,255)" />
     </>

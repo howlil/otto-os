@@ -1,6 +1,6 @@
-import type { CSSProperties, ReactNode } from "react";
-import { Minus, Square, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Minus, Square, X } from "lucide-react";
+import type { CSSProperties, ReactNode } from "react";
 
 export type Theme = "light" | "dark";
 
@@ -35,10 +35,10 @@ export const COLORS = {
   },
 } as const;
 
-const CAPTION_BUTTONS: { icon: LucideIcon; close: boolean }[] = [
-  { icon: Minus, close: false },
-  { icon: Square, close: false },
-  { icon: X, close: true },
+const CAPTION_BUTTONS: { id: string; icon: LucideIcon; close: boolean }[] = [
+  { id: "minimize", icon: Minus, close: false },
+  { id: "maximize", icon: Square, close: false },
+  { id: "close", icon: X, close: true },
 ];
 
 export function WindowFrame({
@@ -60,15 +60,18 @@ export function WindowFrame({
       className="flex w-full min-w-0 flex-col overflow-hidden rounded-[12px] border border-line"
       style={{ background: c.body, color: c.text }}
     >
-      <div className="flex h-9 shrink-0 items-center justify-between border-b pl-3.5" style={{ borderColor: c.hairline }}>
+      <div
+        className="flex h-9 shrink-0 items-center justify-between border-b pl-3.5"
+        style={{ borderColor: c.hairline }}
+      >
         <div className="flex min-w-0 items-center gap-2 text-[12px] font-medium">
           <img src="/favicon.svg" alt="" width={14} height={14} />
           <span className="truncate">{title}</span>
         </div>
         <div className="flex h-full" aria-hidden="true">
-          {CAPTION_BUTTONS.map(({ icon: Icon, close }, index) => (
+          {CAPTION_BUTTONS.map(({ id, icon: Icon, close }) => (
             <span
-              key={index}
+              key={id}
               className={`grid h-full w-[44px] place-items-center ${close ? "hover:bg-[#c42b1c] hover:text-white" : c.captionHover}`}
             >
               <Icon size={10} strokeWidth={1.3} />
@@ -99,7 +102,10 @@ export function SidebarGroup({ theme, title, children }: { theme: Theme; title?:
   return (
     <div className="flex flex-col gap-0.5">
       {title ? (
-        <p className="hidden px-2 pt-2.5 pb-1 text-[11px] font-semibold sm:block" style={{ color: COLORS[theme].secondary }}>
+        <p
+          className="hidden px-2 pt-2.5 pb-1 text-[11px] font-semibold sm:block"
+          style={{ color: COLORS[theme].secondary }}
+        >
           {title}
         </p>
       ) : null}
@@ -128,7 +134,11 @@ export function SidebarItem({
   const c = COLORS[theme];
   const inner = (
     <>
-      <span className="grid size-6 shrink-0 place-items-center rounded-[7px] text-white" style={{ background: tint }} aria-hidden="true">
+      <span
+        className="grid size-6 shrink-0 place-items-center rounded-[7px] text-white"
+        style={{ background: tint }}
+        aria-hidden="true"
+      >
         <Icon size={13} strokeWidth={2} />
       </span>
       <span className="hidden truncate text-[13px] font-medium sm:block">{label}</span>
@@ -216,7 +226,11 @@ export function Row({
   return (
     <div className={`flex min-h-[48px] items-center gap-3 px-4 py-2.5 ${muted ? "opacity-60" : ""}`}>
       {Icon ? (
-        <span className="grid size-7 shrink-0 place-items-center rounded-[8px] text-white" style={{ background: tint }} aria-hidden="true">
+        <span
+          className="grid size-7 shrink-0 place-items-center rounded-[8px] text-white"
+          style={{ background: tint }}
+          aria-hidden="true"
+        >
           <Icon size={15} strokeWidth={2} />
         </span>
       ) : null}
@@ -235,7 +249,15 @@ export function Row({
   );
 }
 
-export function Badge({ theme, tone, children }: { theme: Theme; tone: "good" | "warning" | "neutral"; children: ReactNode }) {
+export function Badge({
+  theme,
+  tone,
+  children,
+}: {
+  theme: Theme;
+  tone: "good" | "warning" | "neutral";
+  children: ReactNode;
+}) {
   const color = COLORS[theme][tone];
   return (
     <span

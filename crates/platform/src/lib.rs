@@ -3,6 +3,7 @@ mod appearance;
 mod bar;
 mod control_center;
 mod dock;
+mod finder;
 mod input;
 mod notch;
 mod settings;
@@ -15,8 +16,8 @@ pub(crate) use bar::appbar;
 pub(crate) use input::{capture, idle_wake, keyboard_hook, motion, os_events, uia};
 pub(crate) use settings as settings_window;
 pub(crate) use system::{
-    background_cleanup, com, diagnostics, file, instance, os_version, startup, timer_resolution,
-    winrt_io, worker,
+    background_cleanup, com, diagnostics, file, flags, focus_relief, instance, os_version, startup,
+    timer_resolution, winrt_io, worker,
 };
 
 pub use actions::{
@@ -28,16 +29,18 @@ pub use actions::{
     open_start_menu, open_task_view, play_pomodoro_chime, poll_menu_events,
     register_capture_hotkey, register_notch_hotkeys, register_settings_hotkey,
     register_shell_hotkeys, remove_apple_fonts, signal_command_failure, toggle_tray_overflow,
-    trim_working_set, unregister_capture_hotkey, unregister_notch_hotkeys,
-    unregister_settings_hotkey, unregister_shell_hotkeys,
+    toggle_tray_overflow_in_bounds, trim_working_set, unregister_capture_hotkey,
+    unregister_notch_hotkeys, unregister_settings_hotkey, unregister_shell_hotkeys,
 };
 pub use appbar::{
     APPBAR_CALLBACK_MESSAGE, AppBar, DOCK_APPBAR_CALLBACK_MESSAGE, DockReservation,
-    ShellNotification, classify_shell_notification, restore_shell_from_recovery,
+    ShellNotification, TopEdgeReservation, classify_shell_notification,
+    restore_shell_from_recovery,
 };
 pub use backdrop::{
-    BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now, capture_wallpaper_now,
-    exclude_from_capture, include_in_capture, is_surface_visible, release_backdrop_capture_cache,
+    BackdropFrame, BackdropRequest, BackdropWorker, capture_backdrop_now,
+    capture_screen_scaled_now, capture_wallpaper_now, exclude_from_capture, include_in_capture,
+    is_surface_visible, release_backdrop_capture_cache,
 };
 pub use background_cleanup::{
     collect_process_audit, set_background_cleanup, shutdown_background_cleanup,
@@ -58,7 +61,10 @@ pub use bar::status::{
 pub use bar::tray_icon::{TrayIcon, TrayIconEvent, WM_APP_TRAY_ICON, classify_tray_icon_message};
 pub use capture::release_capture_if_owned;
 pub use com::{ComGuard, OleGuard};
-pub use control_center::{WindowsControlCenter, cleanup_stale_updates, shutdown_update_check_task};
+pub use control_center::{
+    WindowsControlCenter, WindowsNotificationPort, WindowsUpdatesPort, cleanup_stale_updates,
+    load_control_center_grid, save_control_center_grid, shutdown_update_check_task,
+};
 pub use diagnostics::{log_error, log_info, logs_dir, open_logs_folder};
 pub use dock::trash::{
     empty_recycle_bin, is_recycle_bin_full, resume_recycle_bin_task, shutdown_recycle_bin_task,
@@ -67,19 +73,25 @@ pub use dock::{
     PinnedApp, WindowsDockPort, build_dock_context_menu_rows, collect_dock_entries,
     collect_dock_entries_with_options, enable_drag_accept_files, extract_app_icon_bitmap,
     extract_dock_icon, extract_dropped_files, extract_window_icon, focus_window_hwnd,
-    launch_new_instance, open_file_with_dock_entry, overflow_dock_entry,
+    fullscreen_on_monitor, launch_new_instance, open_file_with_dock_entry, overflow_dock_entry,
     read_downloads_active_progress, read_downloads_stack_items, read_downloads_stack_thumbnails,
     remove_pinned_app, reorder_pinned_apps, toggle_pin_entry,
 };
 pub use file::{DATA_DIR_OVERRIDE, data_dir, replace_file_atomically};
+pub use finder::{
+    FinderDirWatcher, WM_APP_FINDER_FS_CHANGE, WindowsFinderPort, extract_finder_thumbnail,
+};
+pub use flags::read_experimental_flags;
+pub use focus_relief::{FocusReliefOutcome, apply_focus_relief, release_focus_relief};
 pub use idle_wake::{
     acknowledge_idle_wake, register_idle_wake, unregister_idle_wake, watch_bottom_edge,
-    watch_top_edge,
+    watch_bottom_edges, watch_top_edge, watch_top_edges,
 };
 pub use instance::{InstanceGuard, quit_running_instance};
 pub use keyboard_hook::{
-    install_keyboard_hook, is_routing_bar_keys, is_volume_hud_hook_enabled, route_bar_keys,
-    routes_keys_to, set_volume_hud_hook_enabled, stop_routing_bar_keys, stop_routing_if_targets,
+    install_keyboard_hook, is_finder_shortcut_hook_enabled, is_routing_bar_keys,
+    is_volume_hud_hook_enabled, route_bar_keys, routes_keys_to, set_finder_shortcut_hook,
+    set_volume_hud_hook_enabled, stop_routing_bar_keys, stop_routing_if_targets,
     take_keystroke_count, uninstall_keyboard_hook,
 };
 pub use motion::motion_preference;
@@ -113,25 +125,31 @@ pub use notch::shelf::{
 };
 pub use notch::tasks::{load_tasks, save_tasks};
 pub use os_events::{
-    WindowChangeGenerations, acknowledge_window_sync, foreground_title_generation,
+    WindowChangeGenerations, WindowSyncEvent, acknowledge_window_sync, foreground_title_generation,
     install_window_event_hooks, install_window_tracking_hook, is_name_change_sync,
-    poll_foreground_change, suppress_native_osd, uninstall_window_event_hooks,
-    uninstall_window_tracking_hook, window_change_generations,
+    poll_foreground_change, suppress_native_osd, take_window_sync_event,
+    uninstall_window_event_hooks, uninstall_window_tracking_hook, window_change_generations,
 };
 pub use os_version::{
     MIN_WINDOWS_11_BUILD, current_windows_build_label, is_supported_windows_build,
     is_supported_windows_version, read_windows_build, show_error_dialog,
 };
 pub use screen::{
-    PrimaryScreen, enable_per_monitor_dpi, monitor_work_area_at, primary_screen, virtual_screen,
+    DisplayMonitor, PrimaryScreen, display_monitors, enable_per_monitor_dpi, monitor_at,
+    monitor_for_window, monitor_work_area_at, primary_screen, secondary_monitors, virtual_screen,
 };
 pub use settings_window::{
-    apply_settings_chrome, apply_settings_min_track, create_settings_window,
-    destroy_settings_window, hide_settings_window, invalidate_settings_window,
-    is_settings_window_foreground, is_settings_window_visible, present_settings_window,
+    apply_finder_min_track, apply_settings_chrome, apply_settings_min_track, create_finder_window,
+    create_settings_window, destroy_settings_window, handle_settings_ncactivate,
+    handle_settings_nccalcsize, handle_settings_nchittest, hide_settings_window,
+    invalidate_settings_window, is_settings_window_foreground, is_settings_window_maximized,
+    is_settings_window_visible, minimize_settings_window, present_settings_window,
     settings_client_size, settings_glass_available, settings_window_dpi, suggested_dpi_rect,
+    toggle_settings_window_maximize,
 };
-pub use spotlight::{collect_focus_catalog_apps, collect_spotlight_apps};
+pub use spotlight::{
+    collect_focus_catalog_apps, collect_spotlight_apps, collect_spotlight_apps_with_options,
+};
 pub use startup::{read_launch_at_login, set_launch_at_login};
 pub use theme::{
     PowerNotificationGuard, is_battery_saver_active, is_high_contrast_active,
@@ -142,7 +160,7 @@ pub use uia::{WM_APP_UIA_INVOKE, handle_wm_getobject};
 pub use window::caption::{
     activate_window_no_restore, double_click_ms, drag_threshold, drag_threshold_exceeded,
     forward_caption_context_menu, forward_caption_drag, forward_resize_drag, native_caption,
-    place_overlay_above, place_overlay_below, sample_caption_strip, window_corner_radius_px,
+    sample_caption_strip, window_corner_radius_px,
 };
 pub use window::corners::{restore_rounded_corners, round_window_corners};
 pub use window::model::{
@@ -152,8 +170,8 @@ pub use window::model::{
     window_command_capability, window_identity,
 };
 pub use window::native_minimize::{
-    acknowledge_native_minimize, install_native_minimize_hook, take_mouse_click_count,
-    uninstall_native_minimize_hook,
+    acknowledge_native_minimize, install_native_minimize_hook,
+    set_native_minimize_intercept_enabled, take_mouse_click_count, uninstall_native_minimize_hook,
 };
 pub use window::ops::{
     ActiveWindowTarget, WindowSnapshot, capture_window, current_process_id, cursor_position,
@@ -162,9 +180,17 @@ pub use window::ops::{
     restore_window_native, restore_window_native_quiet, restored_window_bounds,
     set_window_transitions_enabled, visible_window_targets, window_bounds,
 };
+pub use window::overlay_zorder::{
+    FastTrackFrame, place_overlay_above, place_overlay_below, place_overlays_batch,
+    reposition_overlay_for_target,
+};
 pub use window::shield::{
-    activate_window, back_in_browser, destroy_window, foreground_window, hide_window, place,
-    show_over, window_below, window_dpi, window_frame,
+    activate_window, assert_window_topmost, back_in_browser, capture_mouse, client_to_screen,
+    destroy_window, drag_thresholds, foreground_window, hide_window, is_virtual_key_down,
+    kill_window_timer, place, place_no_zorder, post_window_message, raw_foreground_window,
+    release_mouse_capture, set_foreground_window, set_resize_cursor, set_window_timer,
+    show_and_focus_window, show_over, show_window_no_activate, track_mouse_leave,
+    validate_window_rect, window_below, window_dpi, window_frame,
 };
 pub use worker::join_within;
 
@@ -178,11 +204,13 @@ pub fn resume_background_tasks() {
     notch::privacy::resume_privacy_task();
     bar::status::resume_status_task();
     dock::trash::resume_recycle_bin_task();
+    window::caption_probe::resume_caption_probe_task();
 }
 
 pub fn shutdown_background_tasks() {
     background_cleanup::shutdown_background_cleanup();
     backdrop::release_backdrop_capture_cache();
+    window::caption_probe::shutdown_caption_probe_task();
     notch::focus_activity::shutdown_focus_uia_task();
     notch::media::shutdown_media_task();
     bar::audio::shutdown_audio_task();

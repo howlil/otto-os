@@ -1,13 +1,13 @@
 use crate::host::RuntimeContext;
 use otto_core::Appearance;
 
-pub fn appearance(runtime: &RuntimeContext) -> Appearance {
+pub(crate) fn appearance(runtime: &RuntimeContext) -> Appearance {
     let system = runtime.system_appearance.get();
     let preferences = runtime.appearance_preferences.get();
     system.resolve_preferences(preferences)
 }
 
-pub fn refresh_system_appearance(runtime: &RuntimeContext) {
+pub(crate) fn refresh_system_appearance(runtime: &RuntimeContext) {
     let latest = otto_platform::read_system_appearance();
     if latest != runtime.system_appearance.get() {
         runtime.system_appearance.set(latest);
@@ -15,7 +15,7 @@ pub fn refresh_system_appearance(runtime: &RuntimeContext) {
     }
 }
 
-pub fn sync_effective_glass(runtime: &RuntimeContext) {
+pub(crate) fn sync_effective_glass(runtime: &RuntimeContext) {
     let effective = runtime.blur_supported.get() && appearance(runtime).uses_backdrop();
     if effective != runtime.glass_enabled.get() {
         runtime.glass_enabled.set(effective);
@@ -28,7 +28,7 @@ pub fn sync_effective_glass(runtime: &RuntimeContext) {
     refresh_theme(runtime);
 }
 
-pub fn refresh_theme(runtime: &RuntimeContext) {
+pub(crate) fn refresh_theme(runtime: &RuntimeContext) {
     let appearance = appearance(runtime);
     crate::bar::apply_appearance(runtime, appearance);
     crate::dock::repaint(runtime);
@@ -36,7 +36,7 @@ pub fn refresh_theme(runtime: &RuntimeContext) {
     crate::control_center::repaint(runtime);
     crate::spotlight::repaint(runtime);
     crate::settings_window::refresh_appearance(runtime);
-    crate::window_controls::apply_appearance(runtime, appearance);
+    crate::finder::refresh_appearance(runtime);
 }
 
 #[cfg(test)]

@@ -24,6 +24,33 @@ impl ControlCenterRenderer {
         state: ControlCenterPaintState,
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
+        if !layout.canvas_panel.is_empty() {
+            let panel = crate::rect_to_d2d(layout.canvas_panel);
+            let r = layout.shell_radius as f32;
+            let fill = self.brushes.color_brush(palette.menu_fill);
+            let border = self.brushes.color_brush(palette.menu_outer_border);
+            crate::kit::draw::fill_squircle_or_rounded_f(
+                &self.factory,
+                &self.target,
+                panel,
+                r,
+                self.dpi,
+                (&fill).into(),
+            );
+            crate::kit::draw::stroke_squircle_or_rounded_f(
+                &self.factory,
+                &self.target,
+                panel,
+                r,
+                self.dpi,
+                (&border).into(),
+                1.0,
+            );
+        }
+        if layout.page == ControlCenterPage::Gallery {
+            self.draw_gallery_page(layout, snapshot, state, palette);
+            return Ok(());
+        }
         self.draw_subpanel_header(layout, snapshot, state, palette);
         match layout.page {
             ControlCenterPage::Sound => {
@@ -54,7 +81,7 @@ impl ControlCenterRenderer {
                     palette,
                 );
             }
-            ControlCenterPage::Main => {}
+            ControlCenterPage::Main | ControlCenterPage::Gallery => {}
         }
         Ok(())
     }
@@ -188,6 +215,7 @@ impl ControlCenterRenderer {
             ControlCenterPage::Bluetooth => "Bluetooth",
             ControlCenterPage::Sound => "Sound",
             ControlCenterPage::Display => "Display",
+            ControlCenterPage::Gallery => "Add a Control",
             ControlCenterPage::Main => "",
         };
         let title_r = D2D_RECT_F {
@@ -374,8 +402,7 @@ impl ControlCenterRenderer {
         let clip_layer = clip_geo
             .as_ref()
             .and_then(|_| unsafe { self.target.CreateLayer(None) }.ok());
-        let mut active_mask = None;
-        if let (Some(geo), Some(layer)) = (clip_geo, clip_layer.as_ref()) {
+        let active_mask = if let (Some(geo), Some(layer)) = (clip_geo, clip_layer.as_ref()) {
             let params = D2D1_LAYER_PARAMETERS {
                 contentBounds: group_d2d,
                 geometricMask: std::mem::ManuallyDrop::new(Some(geo)),
@@ -388,8 +415,10 @@ impl ControlCenterRenderer {
             unsafe {
                 self.target.PushLayer(&params, layer);
             }
-            active_mask = Some(params.geometricMask);
-        }
+            Some(params.geometricMask)
+        } else {
+            None
+        };
 
         for offset in 0..group.count {
             let index = group.start_index + offset;
@@ -450,7 +479,7 @@ impl ControlCenterRenderer {
                     self.draw_audio_output_row(rect, &dev.name, dev.is_default, palette);
                 }
             }
-            ControlCenterPage::Main | ControlCenterPage::Display => {}
+            ControlCenterPage::Main | ControlCenterPage::Display | ControlCenterPage::Gallery => {}
         }
     }
 

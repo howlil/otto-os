@@ -258,3 +258,42 @@ fn hide_clears_cached_snapshot_and_notch_off_suppresses_media() {
     surface.sync_snapshot(&runtime);
     assert!(surface.snapshot.media.is_none());
 }
+
+#[test]
+fn edit_mode_resize_move_and_background_unwind_work_as_expected() {
+    let runtime = RuntimeContext::new(false);
+    let mut surface = ControlCenterSurface::new(0);
+    surface.port = Box::new(MockControlCenterPort(Arc::new(Mutex::new(
+        MockControlCenterState::default(),
+    ))));
+    surface.snapshot.page = ControlCenterPage::Main;
+    surface.visible = true;
+    surface.sync_snapshot(&runtime);
+    surface.relayout();
+
+    let bg_action = surface.on_click(&runtime, 8, 8);
+    assert!(matches!(
+        bg_action,
+        PostClickAction::Command(ControlCenterCommand::Dismiss, true)
+    ));
+
+    surface.snapshot.editing = true;
+    surface.relayout();
+    let edit_bg = surface.on_click(&runtime, 8, 8);
+    assert!(matches!(
+        edit_bg,
+        PostClickAction::Command(ControlCenterCommand::ExitEditMode, false)
+    ));
+
+    let first_tile = surface.layout.tiles[0];
+    let rx = first_tile.resize_handle.right() - 4;
+    let ry = first_tile.resize_handle.bottom() - 4;
+    surface.begin_press(&runtime, rx, ry);
+    assert!(matches!(
+        surface.drag,
+        Some(super::DragMode::ResizeTile { .. })
+    ));
+    surface.on_mouse_move(&runtime, rx - 80, ry - 80);
+    let _ = surface.release_press(&runtime, rx - 80, ry - 80);
+    assert!(surface.drag.is_none());
+}

@@ -207,14 +207,6 @@ impl NotchController {
                 PomodoroStatus::Alert => self.pomodoro.dismiss_alert(),
                 PomodoroStatus::Idle | PomodoroStatus::Paused => {}
             }
-            match self.quick_timer.status {
-                PomodoroStatus::Running => self.quick_timer.toggle_run(),
-                PomodoroStatus::Alert => self.quick_timer.dismiss_alert(),
-                PomodoroStatus::Idle | PomodoroStatus::Paused => {}
-            }
-            if self.stopwatch.running {
-                self.stopwatch.toggle_run();
-            }
             self.alert_until = None;
             self.peek = None;
             self.glow_presence = 0.0;
@@ -297,14 +289,6 @@ impl NotchController {
             PomodoroStatus::Running => self.pomodoro.toggle_run(),
             PomodoroStatus::Alert => self.pomodoro.dismiss_alert(),
             PomodoroStatus::Idle | PomodoroStatus::Paused => {}
-        }
-        match self.quick_timer.status {
-            PomodoroStatus::Running => self.quick_timer.toggle_run(),
-            PomodoroStatus::Alert => self.quick_timer.dismiss_alert(),
-            PomodoroStatus::Idle | PomodoroStatus::Paused => {}
-        }
-        if self.stopwatch.running {
-            self.stopwatch.toggle_run();
         }
         self.alert_until = None;
         self.peek = None;

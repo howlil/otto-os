@@ -1,14 +1,13 @@
 use otto_core::{
-    CommandOutcome, ControlCenterPort, FocusActivityState, FocusTextField, OttoSettingKind,
-    SettingsAction, SettingsHit, SettingsPage, normalize_domain,
+    CommandOutcome, FocusActivityState, FocusDisclosure, FocusRulePolicy, FocusTextField,
+    OttoSettingKind, SettingsAction, SettingsHit, SettingsPage, UpdatesPort, normalize_domain,
 };
 use otto_platform::{
-    WindowsControlCenter, current_process_id, pick_blocked_app_executable, read_launch_at_login,
-    save_focus_activity, signal_command_failure, terminate_process_group,
-    toggle_process_group_throttle,
+    WindowsUpdatesPort, current_process_id, kill_window_timer, pick_blocked_app_executable,
+    post_window_message, read_launch_at_login, save_focus_activity, set_window_timer,
+    signal_command_failure, terminate_process_group, toggle_process_group_throttle,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer, WM_CLOSE};
+use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
 
 use crate::host::RuntimeContext;
 use crate::win_msg::{AUDIT_TIMER_ID, UPDATE_TIMER_ID};
@@ -20,20 +19,11 @@ const UPDATE_POLL_MS: u32 = 250;
 const AUDIT_POLL_MS: u32 = 2_000;
 
 pub(super) fn arm_audit_timer(hwnd: isize) {
-    unsafe {
-        SetTimer(
-            Some(HWND(hwnd as *mut _)),
-            AUDIT_TIMER_ID,
-            AUDIT_POLL_MS,
-            None,
-        );
-    }
+    let _ = set_window_timer(hwnd, AUDIT_TIMER_ID, AUDIT_POLL_MS);
 }
 
 pub(super) fn disarm_audit_timer(hwnd: isize) {
-    unsafe {
-        let _ = KillTimer(Some(HWND(hwnd as *mut _)), AUDIT_TIMER_ID);
-    }
+    kill_window_timer(hwnd, AUDIT_TIMER_ID);
 }
 
 pub(super) fn sync_audit_timer(hwnd: isize, page: SettingsPage) {
@@ -45,24 +35,15 @@ pub(super) fn sync_audit_timer(hwnd: isize, page: SettingsPage) {
 }
 
 pub(super) fn arm_update_timer(hwnd: isize) {
-    unsafe {
-        SetTimer(
-            Some(HWND(hwnd as *mut _)),
-            UPDATE_TIMER_ID,
-            UPDATE_POLL_MS,
-            None,
-        );
-    }
+    let _ = set_window_timer(hwnd, UPDATE_TIMER_ID, UPDATE_POLL_MS);
 }
 
 fn disarm_update_timer(hwnd: isize) {
-    unsafe {
-        let _ = KillTimer(Some(HWND(hwnd as *mut _)), UPDATE_TIMER_ID);
-    }
+    kill_window_timer(hwnd, UPDATE_TIMER_ID);
 }
 
 fn start_update_check(runtime: &RuntimeContext) {
-    let port = WindowsControlCenter;
+    let port = WindowsUpdatesPort;
     let started = port.start_update_check();
     let state = port.poll_update_state();
     let poll = started || state.is_busy();
@@ -76,7 +57,7 @@ fn start_update_check(runtime: &RuntimeContext) {
 }
 
 fn start_update_install(runtime: &RuntimeContext) {
-    let port = WindowsControlCenter;
+    let port = WindowsUpdatesPort;
     let started = port.start_update_install();
     let state = port.poll_update_state();
     if !started && !state.is_busy() {
@@ -93,21 +74,11 @@ fn start_update_install(runtime: &RuntimeContext) {
 }
 
 fn request_quit_for_update(runtime: &RuntimeContext) {
-    let bar_hwnd = runtime.bar_hwnd.get();
-    if bar_hwnd != 0 {
-        let _ = unsafe {
-            PostMessageW(
-                Some(HWND(bar_hwnd as *mut _)),
-                WM_CLOSE,
-                WPARAM(0),
-                LPARAM(0),
-            )
-        };
-    }
+    let _ = post_window_message(runtime.bar_hwnd.get(), WM_CLOSE, 0, 0);
 }
 
 pub(super) fn poll_update_check(runtime: &RuntimeContext, hwnd: isize) {
-    let port = WindowsControlCenter;
+    let port = WindowsUpdatesPort;
     let next = port.poll_update_state();
     let changed = with_window(runtime, |window| {
         if window.update_state == next {
@@ -161,6 +132,83 @@ fn update_focus_activity(
     updated
 }
 
+pub(super) fn submit_focus_category(runtime: &RuntimeContext) {
+    let raw = with_window(runtime, |window| {
+        window.focus_state.category_name_input.clone()
+    })
+    .unwrap_or_default();
+    let trimmed = otto_core::sanitize_category_name(&raw);
+    if trimmed.is_empty() {
+        with_window(runtime, |window| {
+            window.focus_state.category_error = Some(String::from("Enter a category name"));
+        });
+        return;
+    }
+    let catalog =
+        with_window(runtime, |window| window.focus_state.catalog.clone()).unwrap_or_default();
+    let audit = otto_platform::collect_process_audit(current_process_id());
+    let created = update_focus_activity(runtime, |fa| {
+        let suggestion =
+            otto_core::suggest_for_category(&trimmed, &catalog, &fa.today.apps, &audit.groups);
+        if fa
+            .categories
+            .create_category(&trimmed, Some(&suggestion))
+            .is_some()
+        {
+            fa.mark_dirty();
+            true
+        } else {
+            false
+        }
+    });
+    if created {
+        with_window(runtime, |window| {
+            window.focus_state.category_name_input.clear();
+            window.focus_state.category_error = None;
+            window.focus_state.focused_field = FocusTextField::None;
+            window
+                .focus_state
+                .set_disclosure(FocusDisclosure::CreateMode, false);
+        });
+    } else {
+        with_window(runtime, |window| {
+            window.focus_state.category_error = Some(String::from("Max 12 focus modes reached"));
+        });
+        signal_command_failure();
+    }
+}
+
+pub(super) fn submit_rename_focus_category(runtime: &RuntimeContext) {
+    let raw = with_window(runtime, |window| {
+        window.focus_state.category_rename_input.clone()
+    })
+    .unwrap_or_default();
+    let renamed = update_focus_activity(runtime, |fa| {
+        let active_id = fa.categories.active_category_id.clone();
+        if fa.categories.rename_category(&active_id, &raw) {
+            fa.mark_dirty();
+            true
+        } else {
+            false
+        }
+    });
+    if renamed {
+        with_window(runtime, |window| {
+            window.focus_state.category_rename_input.clear();
+            window.focus_state.category_error = None;
+            window.focus_state.focused_field = FocusTextField::None;
+            window
+                .focus_state
+                .set_disclosure(FocusDisclosure::RenameMode, false);
+        });
+    } else {
+        with_window(runtime, |window| {
+            window.focus_state.category_error = Some(String::from("Enter a unique mode name"));
+        });
+        signal_command_failure();
+    }
+}
+
 pub(super) fn submit_blocked_website(runtime: &RuntimeContext) {
     let raw =
         with_window(runtime, |window| window.focus_state.website_input.clone()).unwrap_or_default();
@@ -192,7 +240,8 @@ pub(super) fn submit_blocked_website(runtime: &RuntimeContext) {
         return;
     }
     let added = update_focus_activity(runtime, |fa| {
-        let ok = fa.blocklist.add_website(&domain);
+        let ok = fa.categories.active_mut().add_blocked_website(&domain)
+            || fa.blocklist.add_website(&domain);
         if ok {
             fa.mark_dirty();
         }
@@ -231,6 +280,7 @@ fn apply_action(runtime: &RuntimeContext, action: SettingsAction) {
         }
         SettingsAction::CycleDockIconSize => super::state::cycle_dock_icon_size(runtime),
         SettingsAction::CycleMenuBarHide => super::state::cycle_menu_bar_hide(runtime),
+        SettingsAction::CycleBrandIcon => super::state::cycle_brand_icon(runtime),
         SettingsAction::Open(page) => {
             let hwnd = with_window(runtime, |window| {
                 window.select_page(page);
@@ -246,7 +296,7 @@ fn apply_action(runtime: &RuntimeContext, action: SettingsAction) {
         }
         SettingsAction::CheckForUpdates => start_update_check(runtime),
         SettingsAction::InstallUpdate => start_update_install(runtime),
-        SettingsAction::OpenReleases => WindowsControlCenter.open_releases_page(),
+        SettingsAction::OpenReleases => WindowsUpdatesPort.open_releases_page(),
         SettingsAction::ToggleFocusBlockNotifications => {
             let _ = update_focus_activity(runtime, |fa| {
                 fa.blocklist.block_notifications = !fa.blocklist.block_notifications;
@@ -279,11 +329,15 @@ fn apply_action(runtime: &RuntimeContext, action: SettingsAction) {
             let owner = with_window(runtime, |window| window.hwnd).unwrap_or(0);
             if let Some(app_key) = pick_blocked_app_executable(owner) {
                 let _ = update_focus_activity(runtime, |fa| {
-                    let added = fa.blocklist.add_app(&app_key);
-                    if added {
+                    let active = fa.categories.active_mut();
+                    let changed = match active.policy {
+                        FocusRulePolicy::Allowlist => active.toggle_allowed_app(&app_key),
+                        FocusRulePolicy::Blocklist => active.toggle_blocked_app(&app_key),
+                    };
+                    if changed {
                         fa.mark_dirty();
                     }
-                    added
+                    changed
                 });
             }
         }
@@ -328,6 +382,224 @@ fn apply_action(runtime: &RuntimeContext, action: SettingsAction) {
         SettingsAction::ToggleFocusActivityDetails => {
             with_window(runtime, |window| {
                 window.focus_state.details_expanded = !window.focus_state.details_expanded;
+            });
+        }
+        SettingsAction::SelectFocusCategory(id) => {
+            let changed = update_focus_activity(runtime, |fa| {
+                if fa.categories.select(&id) {
+                    fa.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                with_window(runtime, |window| {
+                    window.focus_state.category_error = None;
+                    window
+                        .focus_state
+                        .set_disclosure(FocusDisclosure::RenameMode, false);
+                });
+            }
+        }
+        SettingsAction::SubmitFocusCategory => submit_focus_category(runtime),
+        SettingsAction::SubmitRenameFocusCategory => submit_rename_focus_category(runtime),
+        SettingsAction::DeleteFocusCategory(id) => {
+            let changed = update_focus_activity(runtime, |fa| {
+                if fa.categories.delete_category(&id) {
+                    fa.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                with_window(runtime, |window| {
+                    window.focus_state.category_error = None;
+                    window
+                        .focus_state
+                        .set_disclosure(FocusDisclosure::RenameMode, false);
+                });
+            }
+        }
+        SettingsAction::CycleFocusCategoryColor => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                active.color = active.color.next();
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::SetFocusCategoryColor(color) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                if active.color == color {
+                    return false;
+                }
+                active.color = color;
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::AdjustFocusCategoryDuration(delta) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                let next = active.focus_minutes as i32 + delta;
+                active.focus_minutes = if next > otto_core::POMODORO_MAX_MINUTES as i32 {
+                    15
+                } else {
+                    next.clamp(5, otto_core::POMODORO_MAX_MINUTES as i32) as u32
+                };
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::CycleFocusCategoryBreaks => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                let (s, l, c) = match (
+                    active.short_break_minutes,
+                    active.long_break_minutes,
+                    active.cycles_before_long_break,
+                ) {
+                    (5, 15, 4) => (10, 20, 4),
+                    (10, 20, 4) => (5, 20, 3),
+                    (5, 20, 3) => (10, 30, 4),
+                    _ => (5, 15, 4),
+                };
+                active.short_break_minutes = s;
+                active.long_break_minutes = l;
+                active.cycles_before_long_break = c;
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::ToggleFocusCategoryPolicy => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                active.policy = active.policy.toggled();
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::SetFocusCategoryPolicy(policy) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                if active.policy == policy {
+                    return false;
+                }
+                active.policy = policy;
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::CycleFocusCategoryBackgroundPolicy => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                active.background_policy = active.background_policy.next();
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::ApplyFocusCategorySuggestions => {
+            let catalog = with_window(runtime, |window| window.focus_state.catalog.clone())
+                .unwrap_or_default();
+            let audit = otto_platform::collect_process_audit(current_process_id());
+            let _ = update_focus_activity(runtime, |fa| {
+                let name = fa.categories.active().name.clone();
+                let suggestion =
+                    otto_core::suggest_for_category(&name, &catalog, &fa.today.apps, &audit.groups);
+                otto_core::apply_suggestion_to_category(fa.categories.active_mut(), &suggestion);
+                fa.mark_dirty();
+                true
+            });
+        }
+        SettingsAction::ToggleCategoryAllowedApp(app_key) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let changed = fa.categories.active_mut().toggle_allowed_app(&app_key);
+                if changed {
+                    fa.mark_dirty();
+                }
+                changed
+            });
+        }
+        SettingsAction::ToggleCategoryBlockedApp(app_key) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let changed = fa.categories.active_mut().toggle_blocked_app(&app_key);
+                if changed {
+                    fa.mark_dirty();
+                }
+                changed
+            });
+        }
+        SettingsAction::ToggleCategoryApp(app_key) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let active = fa.categories.active_mut();
+                let changed = match active.policy {
+                    FocusRulePolicy::Allowlist => active.toggle_allowed_app(&app_key),
+                    FocusRulePolicy::Blocklist => active.toggle_blocked_app(&app_key),
+                };
+                if changed {
+                    fa.mark_dirty();
+                }
+                changed
+            });
+        }
+        SettingsAction::ToggleCategoryWebsite(domain) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let changed = fa.categories.active_mut().toggle_blocked_website(&domain);
+                if changed {
+                    fa.mark_dirty();
+                }
+                changed
+            });
+        }
+        SettingsAction::ToggleCategoryCloseApp(app_key) => {
+            let _ = update_focus_activity(runtime, |fa| {
+                let changed = fa.categories.active_mut().toggle_close_app(&app_key);
+                if changed {
+                    fa.mark_dirty();
+                }
+                changed
+            });
+        }
+        SettingsAction::ToggleFocusDisclosure(disc) => {
+            let current_name = runtime
+                .focus_activity
+                .try_borrow()
+                .ok()
+                .map(|fa| fa.categories.active().name.clone())
+                .unwrap_or_default();
+            with_window(runtime, |window| {
+                window.focus_state.toggle_disclosure(disc);
+                let open = window.focus_state.is_open(disc);
+                if disc == FocusDisclosure::RawActivity {
+                    window.focus_state.details_expanded = open;
+                } else if disc == FocusDisclosure::CreateMode && open {
+                    window.focus_state.category_name_input.clear();
+                    window.focus_state.category_error = None;
+                    window.focus_state.focused_field = FocusTextField::CategoryName;
+                } else if disc == FocusDisclosure::RenameMode && open {
+                    window.focus_state.category_rename_input = current_name;
+                    window.focus_state.category_error = None;
+                    window.focus_state.focused_field = FocusTextField::CategoryRename;
+                }
+            });
+        }
+        SettingsAction::SetFocusHeatmapFilter(category_id) => {
+            with_window(runtime, |window| {
+                window.focus_state.heatmap_category_id = category_id;
+                window.focus_state.selected_heatmap_cell = None;
+            });
+        }
+        SettingsAction::SelectFocusHeatmapCell(cell) => {
+            with_window(runtime, |window| {
+                window.focus_state.selected_heatmap_cell =
+                    if window.focus_state.selected_heatmap_cell == Some(cell) {
+                        None
+                    } else {
+                        Some(cell)
+                    };
             });
         }
         SettingsAction::SetAppearanceStyle(style) => {
@@ -442,6 +714,7 @@ pub(super) fn activate(runtime: &RuntimeContext, hit: SettingsHit) {
                 window.focus_state.focused_field = FocusTextField::None;
             });
         }
+        SettingsHit::WindowControl(_) => {}
     }
     repaint(runtime);
 }

@@ -3,6 +3,7 @@ use crate::notch::media::MediaCommand;
 use crate::ports::ControlCenterAction;
 use crate::settings_window::SettingsPage;
 
+use super::grid::ControlKind;
 use super::layout_types::ControlCenterHitTarget;
 use super::model::ControlCenterPage;
 use super::model::SLIDER_KEY_STEP_PERCENT;
@@ -24,6 +25,17 @@ pub enum ControlCenterCommand {
     Media(MediaCommand),
     OpenNotchMedia,
     OpenSettings(ControlCenterAction),
+    ToggleEditMode,
+    ExitEditMode,
+    OpenGallery,
+    AddControl(ControlKind),
+    RemoveTile(u32),
+    CycleTileSize(u32),
+    ResetGrid,
+    ToggleDarkMode,
+    OpenFinder,
+    OpenSpotlight,
+    Dismiss,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +142,9 @@ impl ControlCenterFocus {
             BarKey::Previous | BarKey::PreviousTab | BarKey::Up => {
                 index.checked_sub(1).unwrap_or(last)
             }
-            BarKey::Activate | BarKey::Exit => return ControlCenterFocusOutcome::Unchanged,
+            BarKey::Activate | BarKey::Exit | BarKey::Digit(_) | BarKey::Backspace => {
+                return ControlCenterFocusOutcome::Unchanged;
+            }
         };
         let target = targets[next];
         self.current = Some(target);

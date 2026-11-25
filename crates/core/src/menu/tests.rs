@@ -542,6 +542,10 @@ fn notification_rows_group_apps_and_cover_access_modes() {
     let unpackaged_rows = build_notification_rows(&unpackaged);
     assert!(unpackaged_rows.iter().any(|row| matches!(
         row,
+        MenuRow::Item { label, enabled: false, .. } if label == "Requires Package Identity"
+    )));
+    assert!(!unpackaged_rows.iter().any(|row| matches!(
+        row,
         MenuRow::Item { id, .. } if *id == CMD_CC_CALENDAR
     )));
 }

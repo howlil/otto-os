@@ -24,7 +24,6 @@ const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/howlil/otto-os/r
 const RELEASES_PAGE_URL: &str = "https://github.com/howlil/otto-os/releases";
 const UPDATES_DIR_NAME: &str = "updates";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(6);
-const UPDATE_JOIN_TIMEOUT: Duration = Duration::from_secs(7);
 const UPDATE_CHECKSUM_TIMEOUT: Duration = Duration::from_secs(15);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(3);
 const MAX_RELEASE_JSON_BYTES: usize = 256 * 1024;
@@ -131,6 +130,7 @@ impl UpdateCache {
         self.state.clone()
     }
 
+    #[cfg(test)]
     fn current_label(&self) -> Option<String> {
         self.state.status_label()
     }
@@ -219,30 +219,6 @@ pub fn shutdown_update_check_task() {
 
 pub(crate) fn resume_update_check_task() {
     UPDATE_SHUTTING_DOWN.store(false, Ordering::Release);
-}
-
-pub(super) fn check_for_updates_sync() -> String {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let Ok(handle) = thread::Builder::new()
-        .name(String::from("otto-update-check"))
-        .spawn(move || {
-            let _ = sender.send(check_for_updates_blocking());
-        })
-    else {
-        return String::from("Check failed");
-    };
-    let state = receiver
-        .recv_timeout(UPDATE_JOIN_TIMEOUT)
-        .unwrap_or_else(|_| UpdateState::Failed {
-            message: String::from("Check failed"),
-            retry_available: None,
-        });
-    let _ = join_within(handle, Duration::from_millis(100));
-    let label = state
-        .status_label()
-        .unwrap_or_else(|| String::from("Check failed"));
-    crate::diagnostics::log_info("updates", &label);
-    label
 }
 
 pub(super) fn start_async_update_check() -> bool {
@@ -337,7 +313,7 @@ fn last_saved_info_or_empty() -> ReleaseUpdateInfo {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
-        .unwrap_or(ReleaseUpdateInfo {
+        .unwrap_or_else(|| ReleaseUpdateInfo {
             version: String::new(),
             tag: String::new(),
             installer_name: String::new(),
@@ -357,13 +333,6 @@ fn reap_finished_task(slot: &mut Option<JoinHandle<()>>) -> bool {
         }
     }
     true
-}
-
-pub(super) fn poll_async_update_status() -> Option<String> {
-    update_cache()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.current_label())
 }
 
 pub(super) fn poll_async_update_state() -> UpdateState {
@@ -754,9 +723,9 @@ mod tests {
         TempPartGuard, UPDATE_TASK, UpdateCache, cleanup_updates_in, commit_verified_installer,
         is_staged_installer_path, resume_update_check_task, shutdown_update_check_task,
     };
-    use crate::control_center::WindowsControlCenter;
+    use crate::control_center::WindowsUpdatesPort;
     use otto_core::{
-        ControlCenterPort, ReleaseUpdateInfo, UPDATE_CHECKING_LABEL, UpdateState, sha256_digest,
+        ReleaseUpdateInfo, UPDATE_CHECKING_LABEL, UpdateState, UpdatesPort, sha256_digest,
     };
 
     fn sample_release() -> ReleaseUpdateInfo {
@@ -811,7 +780,7 @@ mod tests {
             }
         );
 
-        cache.finish_install_failed("Checksum mismatch", release.clone());
+        cache.finish_install_failed("Checksum mismatch", release);
         assert!(cache.take_ready_installer().is_none());
         assert!(cache.begin_install().is_some());
 
@@ -885,8 +854,8 @@ mod tests {
 
         let _resume = ResumeGuard;
         shutdown_update_check_task();
-        assert!(!WindowsControlCenter.start_update_check());
-        assert!(!WindowsControlCenter.start_update_install());
+        assert!(!WindowsUpdatesPort.start_update_check());
+        assert!(!WindowsUpdatesPort.start_update_install());
         assert!(UPDATE_TASK.lock().unwrap().is_none());
     }
 }

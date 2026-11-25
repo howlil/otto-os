@@ -7,15 +7,18 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWi
 use windows::Win32::UI::WindowsAndMessaging::{
     CHILDID_SELF, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW,
-    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, FindWindowW, GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow,
+    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+    EVENT_SYSTEM_MOVESIZESTART, FindWindowW, GA_ROOT, GetAncestor, GetForegroundWindow, IsWindow,
     OBJID_CURSOR, OBJID_WINDOW, PostMessageW, SW_HIDE, ShowWindow, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS,
 };
 use windows::core::{PCWSTR, w};
 
-const HOOKED_EVENT_RANGES: [(u32, u32); 7] = [
+const HOOKED_EVENT_RANGES: [(u32, u32); 9] = [
     (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+    (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
+    (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
     (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
     (EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER),
     (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
@@ -23,6 +26,14 @@ const HOOKED_EVENT_RANGES: [(u32, u32); 7] = [
     (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
     (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
 ];
+
+const SYNC_FLAG_TOPOLOGY: u32 = 1 << 0;
+const SYNC_FLAG_GEOMETRY: u32 = 1 << 1;
+const SYNC_FLAG_MULTI_MOVE: u32 = 1 << 2;
+const SYNC_FLAG_SETTLE: u32 = 1 << 3;
+const SYNC_FLAG_CAPTURE: u32 = 1 << 4;
+const SYNC_FLAG_MOVESIZE_START: u32 = 1 << 5;
+const SYNC_FLAG_MOVESIZE_END: u32 = 1 << 6;
 
 static HOOKS: [AtomicPtr<c_void>; HOOKED_EVENT_RANGES.len()] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; HOOKED_EVENT_RANGES.len()];
@@ -33,7 +44,11 @@ static TITLE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WIN_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
 static WIN_EVENT_MSG: AtomicU32 = AtomicU32::new(0);
 static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
-static SETTLE_PENDING: AtomicBool = AtomicBool::new(false);
+static PENDING_SYNC_FLAGS: AtomicU32 = AtomicU32::new(0);
+static LAST_MOVED_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAST_CAPTURE_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAST_MOVESIZE_START_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAST_MOVESIZE_END_HWND: AtomicIsize = AtomicIsize::new(0);
 static LAST_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 static LAST_POLLED_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 
@@ -41,6 +56,16 @@ static LAST_POLLED_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
 pub struct WindowChangeGenerations {
     pub topology: u64,
     pub geometry: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowSyncEvent {
+    pub topology: bool,
+    pub settle: bool,
+    pub moved_hwnd: isize,
+    pub capture_hwnd: isize,
+    pub move_size_start: isize,
+    pub move_size_end: isize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,13 +83,14 @@ fn classify_window_event(event: u32, top_level: bool, is_foreground: bool) -> Op
         EVENT_SYSTEM_FOREGROUND
         | EVENT_SYSTEM_MINIMIZESTART
         | EVENT_SYSTEM_MINIMIZEEND
+        | EVENT_SYSTEM_MOVESIZEEND
         | EVENT_OBJECT_DESTROY
         | EVENT_OBJECT_SHOW
         | EVENT_OBJECT_HIDE
         | EVENT_OBJECT_CLOAKED
         | EVENT_OBJECT_UNCLOAKED => Some(WindowChange::Topology),
         EVENT_OBJECT_LOCATIONCHANGE => Some(WindowChange::Geometry),
-        EVENT_OBJECT_REORDER => Some(WindowChange::OverlaySync),
+        EVENT_OBJECT_REORDER | EVENT_SYSTEM_MOVESIZESTART => Some(WindowChange::OverlaySync),
         EVENT_OBJECT_NAMECHANGE if is_foreground => Some(WindowChange::OverlaySync),
         _ => None,
     }
@@ -117,10 +143,12 @@ pub fn poll_foreground_change() -> bool {
 
 pub(crate) fn current_foreground() -> HWND {
     let announced = HWND(LAST_FOREGROUND.load(Ordering::Acquire) as *mut _);
-    if !announced.0.is_null() && unsafe { IsWindow(Some(announced)) }.as_bool() {
-        return announced;
+    unsafe {
+        if !announced.0.is_null() && IsWindow(Some(announced)).as_bool() {
+            return announced;
+        }
+        GetForegroundWindow()
     }
-    unsafe { GetForegroundWindow() }
 }
 
 fn install_hook(slot: &AtomicPtr<c_void>, (first, last): (u32, u32)) -> bool {
@@ -191,11 +219,19 @@ pub fn uninstall_window_event_hooks() {
     LAST_POLLED_FOREGROUND.store(0, Ordering::SeqCst);
 }
 
+fn clear_pending_sync_state() {
+    SYNC_PENDING.store(false, Ordering::SeqCst);
+    PENDING_SYNC_FLAGS.store(0, Ordering::SeqCst);
+    LAST_MOVED_HWND.store(0, Ordering::SeqCst);
+    LAST_CAPTURE_HWND.store(0, Ordering::SeqCst);
+    LAST_MOVESIZE_START_HWND.store(0, Ordering::SeqCst);
+    LAST_MOVESIZE_END_HWND.store(0, Ordering::SeqCst);
+}
+
 pub fn install_window_tracking_hook(target_hwnd: isize, message: u32) -> bool {
     WIN_EVENT_TARGET.store(target_hwnd, Ordering::SeqCst);
     WIN_EVENT_MSG.store(message, Ordering::SeqCst);
-    SYNC_PENDING.store(false, Ordering::SeqCst);
-    SETTLE_PENDING.store(false, Ordering::SeqCst);
+    clear_pending_sync_state();
     let installed = install_window_event_hooks();
     if !installed {
         uninstall_window_tracking_hook();
@@ -206,14 +242,48 @@ pub fn install_window_tracking_hook(target_hwnd: isize, message: u32) -> bool {
 pub fn uninstall_window_tracking_hook() {
     WIN_EVENT_TARGET.store(0, Ordering::SeqCst);
     WIN_EVENT_MSG.store(0, Ordering::SeqCst);
-    SYNC_PENDING.store(false, Ordering::SeqCst);
-    SETTLE_PENDING.store(false, Ordering::SeqCst);
+    clear_pending_sync_state();
     LAST_POLLED_FOREGROUND.store(0, Ordering::SeqCst);
 }
 
-pub fn acknowledge_window_sync() -> bool {
+#[must_use]
+pub fn take_window_sync_event() -> WindowSyncEvent {
+    let flags = PENDING_SYNC_FLAGS.swap(0, Ordering::AcqRel);
+    let moved_raw = LAST_MOVED_HWND.swap(0, Ordering::AcqRel);
+    let capture_raw = LAST_CAPTURE_HWND.swap(0, Ordering::AcqRel);
+    let start_raw = LAST_MOVESIZE_START_HWND.swap(0, Ordering::AcqRel);
+    let end_raw = LAST_MOVESIZE_END_HWND.swap(0, Ordering::AcqRel);
     SYNC_PENDING.store(false, Ordering::Release);
-    SETTLE_PENDING.swap(false, Ordering::AcqRel)
+    let topology = flags & (SYNC_FLAG_TOPOLOGY | SYNC_FLAG_MULTI_MOVE) != 0;
+    WindowSyncEvent {
+        topology,
+        settle: flags & SYNC_FLAG_SETTLE != 0,
+        moved_hwnd: if flags & SYNC_FLAG_GEOMETRY != 0 {
+            moved_raw
+        } else {
+            0
+        },
+        capture_hwnd: if flags & SYNC_FLAG_CAPTURE != 0 {
+            capture_raw
+        } else {
+            0
+        },
+        move_size_start: if flags & SYNC_FLAG_MOVESIZE_START != 0 {
+            start_raw
+        } else {
+            0
+        },
+        move_size_end: if flags & SYNC_FLAG_MOVESIZE_END != 0 {
+            end_raw
+        } else {
+            0
+        },
+    }
+}
+
+#[must_use]
+pub fn acknowledge_window_sync() -> bool {
+    take_window_sync_event().settle
 }
 
 fn post_window_sync(source: HWND, event: u32) {
@@ -235,9 +305,53 @@ fn post_window_sync(source: HWND, event: u32) {
     }
 }
 
-fn is_top_level_or_gone(hwnd: HWND) -> bool {
+pub(crate) fn notify_caption_probe_ready() {
+    PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_TOPOLOGY | SYNC_FLAG_SETTLE, Ordering::AcqRel);
+    post_window_sync(HWND::default(), EVENT_OBJECT_REORDER);
+    crate::idle_wake::request_idle_wake();
+}
+
+fn root_of(hwnd: HWND) -> HWND {
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
-    root.0.is_null() || root == hwnd
+    if root.0.is_null() { hwnd } else { root }
+}
+
+fn is_top_level_or_gone(hwnd: HWND) -> bool {
+    root_of(hwnd) == hwnd
+}
+
+fn record_sync_signal(event: u32, hwnd: HWND, is_foreground: bool) {
+    let raw = hwnd.0 as isize;
+    match event {
+        EVENT_OBJECT_LOCATIONCHANGE => {
+            let previous = LAST_MOVED_HWND.swap(raw, Ordering::AcqRel);
+            let mut bits = SYNC_FLAG_GEOMETRY;
+            if previous != 0 && previous != raw {
+                bits |= SYNC_FLAG_MULTI_MOVE;
+            }
+            PENDING_SYNC_FLAGS.fetch_or(bits, Ordering::AcqRel);
+        }
+        EVENT_SYSTEM_MOVESIZESTART => {
+            LAST_MOVESIZE_START_HWND.store(raw, Ordering::Release);
+            PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_MOVESIZE_START, Ordering::AcqRel);
+        }
+        EVENT_SYSTEM_MOVESIZEEND => {
+            LAST_MOVESIZE_END_HWND.store(raw, Ordering::Release);
+            PENDING_SYNC_FLAGS.fetch_or(
+                SYNC_FLAG_MOVESIZE_END | SYNC_FLAG_TOPOLOGY | SYNC_FLAG_SETTLE,
+                Ordering::AcqRel,
+            );
+        }
+        EVENT_SYSTEM_FOREGROUND => {
+            PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_TOPOLOGY | SYNC_FLAG_SETTLE, Ordering::AcqRel);
+        }
+        EVENT_OBJECT_NAMECHANGE if is_foreground => {
+            PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_TOPOLOGY | SYNC_FLAG_SETTLE, Ordering::AcqRel);
+        }
+        _ => {
+            PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_TOPOLOGY, Ordering::AcqRel);
+        }
+    }
 }
 
 unsafe extern "system" fn win_event_proc(
@@ -252,6 +366,15 @@ unsafe extern "system" fn win_event_proc(
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if event == EVENT_OBJECT_LOCATIONCHANGE && id_object == OBJID_CURSOR.0 {
             crate::idle_wake::pointer_moved();
+            return;
+        }
+        if event == EVENT_SYSTEM_CAPTURESTART && !hwnd.0.is_null() {
+            let root = root_of(hwnd);
+            if !root.0.is_null() {
+                LAST_CAPTURE_HWND.store(root.0 as isize, Ordering::Release);
+                PENDING_SYNC_FLAGS.fetch_or(SYNC_FLAG_CAPTURE, Ordering::AcqRel);
+                post_window_sync(root, event);
+            }
             return;
         }
         if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 || hwnd.0.is_null() {
@@ -272,13 +395,12 @@ unsafe extern "system" fn win_event_proc(
         if event == EVENT_SYSTEM_FOREGROUND {
             LAST_FOREGROUND.store(hwnd.0 as isize, Ordering::Release);
             TITLE_GENERATION.fetch_add(1, Ordering::AcqRel);
-            SETTLE_PENDING.store(true, Ordering::Release);
         } else if event == EVENT_OBJECT_NAMECHANGE && is_foreground {
             TITLE_GENERATION.fetch_add(1, Ordering::AcqRel);
-            SETTLE_PENDING.store(true, Ordering::Release);
         }
         let relevant = event == EVENT_SYSTEM_FOREGROUND || change.is_some();
         if relevant {
+            record_sync_signal(event, hwnd, is_foreground);
             post_window_sync(hwnd, event);
             crate::idle_wake::request_idle_wake();
         }
@@ -297,13 +419,18 @@ pub fn suppress_native_osd() {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
         EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
         EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+        EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
     };
 
-    use super::{WindowChange, classify_window_event};
+    use super::{
+        WindowChange, classify_window_event, clear_pending_sync_state, record_sync_signal,
+        take_window_sync_event,
+    };
 
     #[test]
     fn top_level_lifecycle_events_change_the_window_topology() {
@@ -311,6 +438,7 @@ mod tests {
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_MINIMIZESTART,
             EVENT_SYSTEM_MINIMIZEEND,
+            EVENT_SYSTEM_MOVESIZEEND,
             EVENT_OBJECT_DESTROY,
             EVENT_OBJECT_SHOW,
             EVENT_OBJECT_HIDE,
@@ -333,9 +461,13 @@ mod tests {
     }
 
     #[test]
-    fn zorder_and_foreground_name_changes_sync_overlays_without_bumping_topology() {
+    fn zorder_movesize_start_and_foreground_name_changes_sync_overlays_without_bumping_topology() {
         assert_eq!(
             classify_window_event(EVENT_OBJECT_REORDER, true, false),
+            Some(WindowChange::OverlaySync)
+        );
+        assert_eq!(
+            classify_window_event(EVENT_SYSTEM_MOVESIZESTART, true, false),
             Some(WindowChange::OverlaySync)
         );
         assert_eq!(
@@ -363,5 +495,19 @@ mod tests {
             classify_window_event(EVENT_OBJECT_NAMECHANGE, false, true),
             None
         );
+    }
+
+    #[test]
+    fn single_window_location_change_stays_fast_path_while_multi_move_promotes_to_topology() {
+        clear_pending_sync_state();
+        record_sync_signal(EVENT_OBJECT_LOCATIONCHANGE, HWND(42 as *mut _), false);
+        let single = take_window_sync_event();
+        assert!(!single.topology);
+        assert_eq!(single.moved_hwnd, 42);
+
+        record_sync_signal(EVENT_OBJECT_LOCATIONCHANGE, HWND(42 as *mut _), false);
+        record_sync_signal(EVENT_OBJECT_LOCATIONCHANGE, HWND(99 as *mut _), false);
+        let multi = take_window_sync_event();
+        assert!(multi.topology);
     }
 }

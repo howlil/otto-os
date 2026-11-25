@@ -2,31 +2,29 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use crate::win_msg::{
-    GREEN_HOVER_TIMER, WINDOW_CONTROLS_ANIM_TIMER, WM_APP_NATIVE_MINIMIZE, WM_APP_WINDOW_SYNC,
-    WM_MOUSELEAVE,
+    GREEN_HOVER_TIMER, WINDOW_CONTROLS_ANIM_TIMER, WM_APP_WINDOW_SYNC, WM_MOUSELEAVE,
 };
 use otto_core::{
-    Appearance, Capability, Metrics, NativeCaption, NotchStyle, WindowCommand, WindowControlAction,
-    WindowControlsLayout, WindowControlsMetrics, WindowControlsState, WindowInfo,
+    Appearance, BarHideMode, Capability, Metrics, NativeCaption, NotchStyle, WindowCommand,
+    WindowControlAction, WindowControlsLayout, WindowControlsMetrics, WindowControlsState,
+    WindowInfo,
 };
 use otto_platform::{
-    ActiveWindowTarget, acknowledge_native_minimize, acknowledge_window_sync, current_process_id,
-    drag_threshold_exceeded, inspect_window, install_native_minimize_hook,
-    install_window_tracking_hook, is_name_change_sync, minimize_window_native, place_overlay_above,
-    poll_foreground_change, restore_rounded_corners, round_window_corners,
-    uninstall_native_minimize_hook, uninstall_window_tracking_hook, visible_window_targets,
+    ActiveWindowTarget, WindowSyncEvent, acknowledge_native_minimize, current_process_id,
+    drag_threshold_exceeded, hide_window, inspect_window, install_window_tracking_hook,
+    is_virtual_key_down, minimize_window_native, place_overlay_above, place_overlays_batch,
+    poll_foreground_change, restore_rounded_corners, round_window_corners, take_window_sync_event,
+    uninstall_window_tracking_hook, visible_window_targets,
 };
 use otto_render::WindowControlsRenderer;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GWL_EXSTYLE, GetWindowLongW, HTCLIENT, MA_NOACTIVATE, SW_HIDE, ShowWindow,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WS_EX_TOPMOST, WS_POPUP,
+    HTCLIENT, MA_NOACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_TIMER,
 };
-use windows::core::{PCWSTR, Result, w};
+use windows::core::Result;
 
 mod actions;
 mod animation;
@@ -34,10 +32,11 @@ mod geometry;
 mod pointer;
 mod presentation;
 
+pub(crate) use self::actions::open_tiling_menu;
+
 const WINDOW_CONTROLS_ANIM_MS: u32 = 16;
-const GREEN_HOVER_MS: u32 = 600;
+pub(crate) const GREEN_HOVER_MS: u32 = 600;
 const MAX_OVERLAYS: usize = 24;
-pub(crate) const OVERLAY_CLASS: PCWSTR = w!("OttoWindowControls");
 const DOUBLE_CLICK_SLOP_DIP: i32 = 4;
 const FALLBACK_DARK_FILL: [u8; 3] = [0x20, 0x20, 0x20];
 const FALLBACK_LIGHT_FILL: [u8; 3] = [0xF3, 0xF3, 0xF3];
@@ -65,6 +64,20 @@ struct PendingCaptionDrag {
     target_hwnd: isize,
     start_client: (i32, i32),
     start_screen: (i32, i32),
+}
+
+#[derive(Default)]
+struct HoverState {
+    hovered: bool,
+    alt_down: bool,
+    green_hover_armed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MoveSizeState {
+    #[default]
+    Idle,
+    Active,
 }
 
 fn step_press_move(
@@ -109,11 +122,11 @@ fn should_start_caption_drag(
     Some(drag)
 }
 
-fn is_alt_pressed() -> bool {
-    (unsafe { GetAsyncKeyState(i32::from(VK_MENU.0)) } as u16 & 0x8000) != 0
+#[must_use]
+pub(crate) fn is_alt_pressed() -> bool {
+    is_virtual_key_down(i32::from(VK_MENU.0))
 }
 
-#[allow(clippy::struct_excessive_bools)]
 struct Overlay {
     hwnd: isize,
     own_pid: u32,
@@ -128,14 +141,13 @@ struct Overlay {
     cover: Option<CoverState>,
     render_origin: (f32, f32),
     settle_ticks: u8,
-    green_hover_armed: bool,
-    hovered: bool,
-    alt_down: bool,
+    hover: HoverState,
     press: Option<PressState>,
     pending_drag: Option<PendingCaptionDrag>,
     visible: bool,
     tracking_mouse: bool,
     animating: bool,
+    move_size: MoveSizeState,
     last_caption_click: Option<(Instant, (i32, i32))>,
 }
 
@@ -165,17 +177,17 @@ fn plan_overlay_slots(held: &[Option<isize>], wanted: &[isize]) -> Vec<Option<is
 }
 
 fn effective_bar_height(runtime: &RuntimeContext, style: NotchStyle) -> i32 {
-    if runtime.top_bar_enabled.get() {
-        Metrics::for_style(style).bar_height
-    } else {
-        0
+    if !runtime.top_bar_enabled.get() {
+        return 0;
+    }
+    match runtime.menu_bar.get().hide_mode {
+        BarHideMode::Always | BarHideMode::DesktopOnly => 0,
+        BarHideMode::FullScreenOnly | BarHideMode::Never => Metrics::for_style(style).bar_height,
     }
 }
 
-#[allow(clippy::unnecessary_wraps)]
-pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize, appearance: Appearance) -> Result<()> {
     let own_pid = current_process_id();
-    let appearance = crate::theme_state::appearance(runtime);
     let bar_height = effective_bar_height(runtime, runtime.notch_style());
     let overlay = Overlay::new(hwnd, own_pid, appearance, bar_height);
     let mut controls = WindowControls {
@@ -185,9 +197,10 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         bar_height,
         overlays: vec![overlay],
     };
-    install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
-    let _ = install_native_minimize_hook(hwnd, WM_APP_NATIVE_MINIMIZE);
-    controls.sync();
+    if hwnd != 0 {
+        install_window_tracking_hook(hwnd, WM_APP_WINDOW_SYNC);
+        controls.sync();
+    }
     let mut slot = runtime
         .window_controls
         .try_borrow_mut()
@@ -196,8 +209,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     Ok(())
 }
 
-pub fn stop(runtime: &RuntimeContext) {
-    uninstall_native_minimize_hook();
+pub(crate) fn stop(runtime: &RuntimeContext) {
     uninstall_window_tracking_hook();
     let _ = restore_rounded_corners();
     if let Ok(mut guard) = runtime.window_controls.try_borrow_mut()
@@ -205,9 +217,7 @@ pub fn stop(runtime: &RuntimeContext) {
     {
         for overlay in &controls.overlays {
             overlay.kill_timers();
-            unsafe {
-                let _ = ShowWindow(HWND(overlay.hwnd as *mut _), SW_HIDE);
-            }
+            hide_window(overlay.hwnd);
             if overlay.hwnd != controls.primary {
                 runtime.queue_destroy_hwnd(overlay.hwnd);
             }
@@ -215,7 +225,7 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,
@@ -233,12 +243,8 @@ pub fn handle_message(
             }
         }
         WM_APP_WINDOW_SYNC => {
-            let settle_active = acknowledge_window_sync() || is_name_change_sync(lparam.0 as u32);
-            with_window_controls(runtime, |controls| controls.sync_internal(settle_active));
-            Some(LRESULT(0))
-        }
-        WM_APP_NATIVE_MINIMIZE => {
-            minimize_from_native_button(runtime, wparam.0 as isize);
+            let event = take_window_sync_event();
+            with_window_controls(runtime, |controls| controls.handle_sync_event(event));
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == WINDOW_CONTROLS_ANIM_TIMER => {
@@ -301,7 +307,7 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
+pub(crate) fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
     with_window_controls(runtime, |controls| {
         controls.appearance = appearance;
         for overlay in &mut controls.overlays {
@@ -315,7 +321,7 @@ pub fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
     });
 }
 
-pub fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
+pub(crate) fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
     let bar_height = effective_bar_height(runtime, style);
     with_window_controls(runtime, |controls| {
         if controls.bar_height == bar_height {
@@ -329,11 +335,11 @@ pub fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
     });
 }
 
-pub fn sync_bar_height(runtime: &RuntimeContext) {
+pub(crate) fn sync_bar_height(runtime: &RuntimeContext) {
     set_notch_style(runtime, runtime.notch_style());
 }
 
-fn minimize_from_native_button(runtime: &RuntimeContext, window: isize) {
+pub(crate) fn minimize_from_native_button(runtime: &RuntimeContext, window: isize) {
     acknowledge_native_minimize(window);
     let can_minimize = inspect_window(window, current_process_id())
         .is_some_and(|live| live.capability(WindowCommand::Minimize) == Capability::Available);
@@ -344,15 +350,10 @@ fn minimize_from_native_button(runtime: &RuntimeContext, window: isize) {
     }
 }
 
-pub fn poll_foreground(runtime: &RuntimeContext) {
+pub(crate) fn poll_foreground(runtime: &RuntimeContext) {
     if poll_foreground_change() {
         with_window_controls(runtime, WindowControls::sync);
     }
-}
-
-pub fn notify_own_window_change(runtime: &RuntimeContext) {
-    let _ = poll_foreground_change();
-    with_window_controls(runtime, |controls| controls.sync_internal(true));
 }
 
 fn with_window_controls(runtime: &RuntimeContext, action: impl FnOnce(&mut WindowControls)) {
@@ -391,38 +392,12 @@ fn with_overlay_result(
     action(overlay)
 }
 
-fn spawn_overlay_window(template: isize) -> Option<isize> {
-    let ex_style = WINDOW_EX_STYLE(
-        (unsafe { GetWindowLongW(HWND(template as *mut _), GWL_EXSTYLE) } as u32)
-            & !WS_EX_TOPMOST.0,
-    );
-    let instance = unsafe { GetModuleHandleW(None) }.ok()?;
-    let hwnd = unsafe {
-        CreateWindowExW(
-            ex_style,
-            OVERLAY_CLASS,
-            PCWSTR::null(),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )
-    }
-    .ok()?;
-    Some(hwnd.0 as isize)
-}
-
 impl WindowControls {
     fn spawn_overlay(&mut self) -> bool {
         if self.overlays.len() >= MAX_OVERLAYS {
             return false;
         }
-        let Some(hwnd) = spawn_overlay_window(self.primary) else {
+        let Some(hwnd) = crate::host::create_window_controls_overlay() else {
             return false;
         };
         self.overlays.push(Overlay::new(
@@ -436,6 +411,57 @@ impl WindowControls {
 
     fn sync(&mut self) {
         self.sync_internal(false);
+    }
+
+    fn handle_sync_event(&mut self, event: WindowSyncEvent) {
+        if event.move_size_start != 0
+            && let Some(overlay) = self.overlays.iter_mut().find(|overlay| {
+                overlay.visible
+                    && overlay
+                        .target
+                        .is_some_and(|item| item.hwnd == event.move_size_start)
+            })
+        {
+            overlay.move_size = MoveSizeState::Active;
+            overlay.ensure_anim_timer();
+        }
+        if event.move_size_end != 0
+            && let Some(overlay) = self.overlays.iter_mut().find(|overlay| {
+                overlay
+                    .target
+                    .is_some_and(|item| item.hwnd == event.move_size_end)
+            })
+        {
+            overlay.move_size = MoveSizeState::Idle;
+        }
+        if event.topology {
+            self.sync_internal(event.settle);
+            return;
+        }
+        if event.moved_hwnd != 0 && !self.try_fast_reposition(event.moved_hwnd) {
+            self.sync_internal(event.settle);
+            return;
+        }
+        if event.capture_hwnd != 0
+            && let Some(overlay) = self.overlays.iter_mut().find(|overlay| {
+                overlay.visible
+                    && overlay
+                        .target
+                        .is_some_and(|item| item.hwnd == event.capture_hwnd)
+            })
+            && !place_overlay_above(overlay.hwnd, event.capture_hwnd)
+        {
+            overlay.hide();
+        }
+    }
+
+    fn try_fast_reposition(&mut self, target_hwnd: isize) -> bool {
+        let Some(overlay) = self.overlays.iter_mut().find(|overlay| {
+            overlay.visible && overlay.target.is_some_and(|item| item.hwnd == target_hwnd)
+        }) else {
+            return false;
+        };
+        overlay.fast_follow_target()
     }
 
     fn sync_internal(&mut self, settle_active: bool) {
@@ -471,10 +497,20 @@ impl WindowControls {
                 settle_active && target.is_some_and(|item| item.active),
             );
         }
+        let mut pairs = Vec::with_capacity(targets.len());
         for target in &targets {
-            if let Some(overlay) = self.overlays.iter_mut().find(|overlay| {
+            if let Some(overlay) = self.overlays.iter().find(|overlay| {
                 overlay.visible && overlay.target.is_some_and(|item| item.hwnd == target.hwnd)
-            }) && !place_overlay_above(overlay.hwnd, target.hwnd)
+            }) {
+                pairs.push((overlay.hwnd, target.hwnd));
+            }
+        }
+        let failed = place_overlays_batch(&pairs);
+        for failed_hwnd in failed {
+            if let Some(overlay) = self
+                .overlays
+                .iter_mut()
+                .find(|overlay| overlay.hwnd == failed_hwnd)
             {
                 overlay.hide();
             }
@@ -505,14 +541,13 @@ impl Overlay {
             cover: None,
             render_origin: (0.0, 0.0),
             settle_ticks: 0,
-            green_hover_armed: false,
-            hovered: false,
-            alt_down: false,
+            hover: HoverState::default(),
             press: None,
             pending_drag: None,
             visible: false,
             tracking_mouse: false,
             animating: false,
+            move_size: MoveSizeState::Idle,
             last_caption_click: None,
         }
     }

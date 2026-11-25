@@ -3,15 +3,15 @@ use otto_core::{
     WeeklyChart,
 };
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
-use windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR;
-use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS;
+use windows_numerics::Vector2;
 
 use super::palette::{
-    CARD_RADIUS_POINTS, Palette, ROW_PAD_POINTS, ROW_TILE_POINTS, SWITCH_WIDTH_POINTS, WHITE, d2d,
-    rect_f, rgba, with_alpha,
+    CARD_RADIUS_POINTS, Palette, ROW_PAD_POINTS, ROW_TILE_POINTS, SWITCH_WIDTH_POINTS, rect_f,
+    rgba, with_alpha,
 };
 use super::{SettingsPaintState, SettingsRenderer};
-use crate::shared_dwrite_factory;
+use crate::kit::draw::measure_text_width;
+use crate::kit::icons::ChevronDir;
 
 fn scale_bar_height(percent: u8, max_height: i32) -> i32 {
     i32::from(percent) * max_height / 100
@@ -26,15 +26,7 @@ impl SettingsRenderer {
         palette: &Palette,
     ) {
         if let Some(bitmap) = self.app_icons.get(icon_key) {
-            unsafe {
-                self.target.DrawBitmap(
-                    bitmap,
-                    Some(&d2d(rect)),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
-            }
+            self.canvas.draw_bitmap(bitmap, rect);
             return;
         }
         let radius = rect.width as f32 * 0.24;
@@ -151,7 +143,7 @@ impl SettingsRenderer {
             let radius = chip_rect.height as f32 / 2.0;
             if is_selected {
                 self.fill_round(*chip_rect, radius, palette.accent);
-                if state.high_contrast {
+                if palette.high_contrast {
                     self.stroke_round_f(
                         rect_f(
                             chip_rect.x as f32 + 0.5,
@@ -161,7 +153,7 @@ impl SettingsRenderer {
                         ),
                         radius,
                         1.5,
-                        WHITE,
+                        palette.text,
                     );
                 }
             } else {
@@ -187,7 +179,11 @@ impl SettingsRenderer {
                 &chip.label,
                 &self.formats.chip,
                 *chip_rect,
-                if is_selected { WHITE } else { palette.text },
+                if is_selected {
+                    palette.on_accent
+                } else {
+                    palette.text
+                },
             );
         }
     }
@@ -244,22 +240,16 @@ impl SettingsRenderer {
             border_color,
         );
 
-        let mut text_left = input_part.x + self.px(10);
-        if field == FocusTextField::AppSearch {
+        let text_left = if field == FocusTextField::AppSearch {
             let icon_r = self.px(4) as f32;
             let cx = input_part.x as f32 + self.px(15) as f32;
-            let cy = input_part.y as f32 + input_part.height as f32 / 2.0 - 1.0;
-            self.stroke_circle(cx, cy, icon_r, 1.4, palette.secondary);
-            self.line(
-                cx + icon_r * 0.72,
-                cy + icon_r * 0.72,
-                cx + icon_r * 1.55,
-                cy + icon_r * 1.55,
-                1.5,
-                palette.secondary,
-            );
-            text_left = input_part.x + self.px(28);
-        }
+            let cy = input_part.y as f32 + input_part.height as f32 / 2.0;
+            self.canvas
+                .search_magnifier(Vector2::new(cx, cy), icon_r, 1.4, palette.secondary);
+            input_part.x + self.px(28)
+        } else {
+            input_part.x + self.px(10)
+        };
         let text_rect = Rect {
             x: text_left,
             y: input_part.y,
@@ -277,8 +267,10 @@ impl SettingsRenderer {
             self.text(text, &self.formats.sidebar, text_rect, palette.text);
         }
         if focused {
-            let advance = measure_text_width(text, &self.formats.sidebar, text_rect.width)
-                .min((text_rect.width - 2).max(0) as f32);
+            let advance =
+                measure_text_width(text, &self.formats.sidebar, text_rect.width.max(1) as f32)
+                    .unwrap_or(0.0)
+                    .min((text_rect.width - 2).max(0) as f32);
             let caret_x = text_rect.x as f32 + advance + 1.0;
             let caret_top = input_part.y as f32 + self.px(8) as f32;
             let caret_bot = input_part.bottom() as f32 - self.px(8) as f32;
@@ -348,7 +340,11 @@ impl SettingsRenderer {
                 label,
                 &self.formats.chip,
                 button_rect,
-                if enabled { WHITE } else { palette.secondary },
+                if enabled {
+                    palette.on_accent
+                } else {
+                    palette.secondary
+                },
             );
         } else {
             if hovered {
@@ -356,20 +352,9 @@ impl SettingsRenderer {
             }
             let cx = button_rect.x as f32 + button_rect.width as f32 / 2.0;
             let cy = button_rect.y as f32 + button_rect.height as f32 / 2.0;
-            let arm = self.px(4) as f32;
-            self.line(
-                cx - arm,
-                cy - arm,
-                cx + arm,
-                cy + arm,
-                1.5,
-                palette.secondary,
-            );
-            self.line(
-                cx + arm,
-                cy - arm,
-                cx - arm,
-                cy + arm,
+            self.canvas.close_x(
+                Vector2::new(cx, cy),
+                self.px(4) as f32,
                 1.5,
                 palette.secondary,
             );
@@ -404,7 +389,7 @@ impl SettingsRenderer {
                 },
                 palette.secondary,
             );
-            self.text(
+            self.tabular_text(
                 &item.value,
                 &self.formats.kpi_value,
                 Rect {
@@ -513,7 +498,7 @@ impl SettingsRenderer {
         } else {
             palette.secondary
         };
-        self.text(
+        self.tabular_text(
             &readout,
             &self.formats.subtitle,
             Rect {
@@ -566,7 +551,7 @@ impl SettingsRenderer {
             height: swatch,
         };
         self.fill_round(focus_box, 2.0, palette.accent);
-        self.draw_focus_hatch(focus_box, high_contrast);
+        self.draw_focus_hatch(focus_box, high_contrast, palette.on_accent);
         self.text(
             "Focus",
             &self.formats.caption_leading,
@@ -651,7 +636,7 @@ impl SettingsRenderer {
                 height: focus_h,
             };
             self.fill_round(focus_rect, bar_radius, palette.accent);
-            self.draw_focus_hatch(focus_rect, high_contrast);
+            self.draw_focus_hatch(focus_rect, high_contrast, palette.on_accent);
             if high_contrast {
                 self.stroke_round_f(
                     rect_f(
@@ -662,7 +647,7 @@ impl SettingsRenderer {
                     ),
                     bar_radius,
                     1.2,
-                    WHITE,
+                    palette.text,
                 );
             }
         }
@@ -694,9 +679,9 @@ impl SettingsRenderer {
         }
     }
 
-    fn draw_focus_hatch(&self, rect: Rect, high_contrast: bool) {
+    fn draw_focus_hatch(&self, rect: Rect, high_contrast: bool, ink: D2D1_COLOR_F) {
         let step = self.px(6).max(4);
-        let stripe = with_alpha(WHITE, if high_contrast { 0.60 } else { 0.26 });
+        let stripe = with_alpha(ink, if high_contrast { 0.60 } else { 0.26 });
         let mut offset = step;
         while offset < rect.height + rect.width {
             let x0 = (rect.x + offset).min(rect.right() - 2);
@@ -743,7 +728,7 @@ impl SettingsRenderer {
 
         let duration_w = self.px(66);
         let duration_x = right - switch_w - self.px(10) - duration_w;
-        self.text(
+        self.tabular_text(
             duration,
             &self.formats.value,
             Rect {
@@ -803,14 +788,13 @@ impl SettingsRenderer {
     ) {
         let cy = row.y as f32 + row.height as f32 / 2.0;
         let reach = self.px(4) as f32;
-        let x = cx as f32;
-        if expanded {
-            self.line(x - reach, cy - reach / 2.0, x, cy + reach / 2.0, 1.5, color);
-            self.line(x, cy + reach / 2.0, x + reach, cy - reach / 2.0, 1.5, color);
+        let dir = if expanded {
+            ChevronDir::Down
         } else {
-            self.line(x - reach / 2.0, cy - reach, x + reach / 2.0, cy, 1.5, color);
-            self.line(x + reach / 2.0, cy, x - reach / 2.0, cy + reach, 1.5, color);
-        }
+            ChevronDir::Right
+        };
+        self.canvas
+            .chevron(Vector2::new(cx as f32, cy), reach, 1.5, dir, color);
     }
 
     pub(super) fn draw_hover_detail_bar(&self, state: &SettingsPaintState<'_>, palette: &Palette) {
@@ -842,15 +826,18 @@ impl SettingsRenderer {
             return;
         }
         let radius = self.px(CARD_RADIUS_POINTS) as f32;
-        self.fill_round(
-            area,
-            radius,
+        let bar_fill = if palette.high_contrast {
+            palette.surface
+        } else if palette.glass {
             if state.dark {
                 rgba(0x1C_1C1F, 0.94)
             } else {
                 rgba(0xFF_FFFF, 0.96)
-            },
-        );
+            }
+        } else {
+            palette.card
+        };
+        self.fill_round(area, radius, bar_fill);
         self.stroke_round_f(
             rect_f(
                 area.x as f32 + 0.5,
@@ -874,29 +861,5 @@ impl SettingsRenderer {
             },
             palette.secondary,
         );
-    }
-}
-
-fn measure_text_width(
-    text: &str,
-    format: &windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
-    max_width: i32,
-) -> f32 {
-    if text.is_empty() || max_width <= 0 {
-        return 0.0;
-    }
-    let Ok(dwrite) = shared_dwrite_factory() else {
-        return 0.0;
-    };
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    let Ok(layout) = (unsafe { dwrite.CreateTextLayout(&wide, format, max_width as f32, 64.0) })
-    else {
-        return 0.0;
-    };
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
-        metrics.widthIncludingTrailingWhitespace
-    } else {
-        0.0
     }
 }

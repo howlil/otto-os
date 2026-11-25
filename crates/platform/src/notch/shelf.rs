@@ -157,7 +157,7 @@ pub fn register_shelf_drop_target(
 }
 
 #[must_use]
-pub fn pick_shelf_files() -> Vec<String> {
+pub(crate) fn pick_shelf_files() -> Vec<String> {
     let _com = ComGuard::single_threaded();
     let Ok(dialog) = (unsafe {
         CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
@@ -205,7 +205,7 @@ pub fn pick_shelf_files() -> Vec<String> {
 }
 
 #[must_use]
-pub fn inspect_shelf_file(path: &str, max_px: u32) -> (bool, Option<ShelfThumbnail>) {
+pub(crate) fn inspect_shelf_file(path: &str, max_px: u32) -> (bool, Option<ShelfThumbnail>) {
     extract_shell_thumbnail(path, max_px, true)
 }
 
@@ -273,7 +273,7 @@ pub(crate) fn extract_shell_thumbnail(
     (is_dir, thumb)
 }
 
-pub fn open_shelf_payload(payload: &ShelfPayload) -> bool {
+pub(crate) fn open_shelf_payload(payload: &ShelfPayload) -> bool {
     match payload {
         ShelfPayload::File(path) => {
             if !is_valid_shelf_file_path(path) {
@@ -293,7 +293,7 @@ pub fn open_shelf_payload(payload: &ShelfPayload) -> bool {
     }
 }
 
-pub fn reveal_shelf_payload(payload: &ShelfPayload) -> bool {
+pub(crate) fn reveal_shelf_payload(payload: &ShelfPayload) -> bool {
     let ShelfPayload::File(path) = payload else {
         return false;
     };
@@ -315,7 +315,7 @@ pub fn reveal_shelf_payload(payload: &ShelfPayload) -> bool {
     unsafe { SHOpenFolderAndSelectItems(pidl.0.cast_const(), None, 0) }.is_ok()
 }
 
-pub fn copy_shelf_payload(payload: &ShelfPayload) -> bool {
+pub(crate) fn copy_shelf_payload(payload: &ShelfPayload) -> bool {
     let (format, hglobal) = match payload {
         ShelfPayload::File(path) => {
             if !is_valid_shelf_file_path(path) {
@@ -339,7 +339,7 @@ pub fn copy_shelf_payload(payload: &ShelfPayload) -> bool {
     write_clipboard_hglobal(format, hglobal).is_some()
 }
 
-pub fn start_shelf_drag(_hwnd: isize, payload: &ShelfPayload) -> bool {
+pub(crate) fn start_shelf_drag(_hwnd: isize, payload: &ShelfPayload) -> bool {
     let Some(data_object) = com_impl::ShelfDataObject::from_payload(payload) else {
         return false;
     };
@@ -718,7 +718,7 @@ mod com_impl {
     impl IDropTarget_Impl for ShelfDropTarget_Impl {
         fn DragEnter(
             &self,
-            pdataobj: Ref<IDataObject>,
+            pdataobj: Ref<'_, IDataObject>,
             _grfkeystate: MODIFIERKEYS_FLAGS,
             pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
@@ -775,7 +775,7 @@ mod com_impl {
 
         fn Drop(
             &self,
-            pdataobj: Ref<IDataObject>,
+            pdataobj: Ref<'_, IDataObject>,
             _grfkeystate: MODIFIERKEYS_FLAGS,
             pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
@@ -969,7 +969,7 @@ mod com_impl {
             &self,
             _pformatetc: *const FORMATETC,
             _advf: u32,
-            _padvsink: Ref<IAdviseSink>,
+            _padvsink: Ref<'_, IAdviseSink>,
         ) -> Result<u32> {
             Err(E_NOTIMPL.into())
         }

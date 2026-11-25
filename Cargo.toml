@@ -18,10 +18,38 @@ otto-render = { path = "crates/render" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+elided_lifetimes_in_paths = "warn"
+unused_macro_rules = "warn"
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+exit = "deny"
+mem_forget = "deny"
+self_named_module_files = "deny"
+tests_outside_test_module = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+lossy_float_literal = "deny"
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
+equatable_if_let = "warn"
+branches_sharing_code = "warn"
+cognitive_complexity = "warn"
+or_fun_call = "warn"
+str_to_string = "warn"
+if_then_some_else_none = "warn"
+significant_drop_tightening = "warn"
+useless_let_if_seq = "warn"
+derive_partial_eq_without_eq = "warn"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 borrow_as_ptr = "allow"

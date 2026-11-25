@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    ClockTime, CompactContent, CompactSlotKind, FocusSubMode, IslandInputs, MotionMetrics,
-    NotchExpandedTab, NotchLayoutInput, NotificationLayoutInput, NotificationStage, NowPlaying,
-    PomodoroStatus, PrivacyLayoutState, ShelfLayoutInput, TrackKey,
+    ClockTime, CompactContent, CompactSlotKind, IslandInputs, MotionMetrics, NotchExpandedTab,
+    NotchLayoutInput, NotificationLayoutInput, NotificationStage, NowPlaying, PomodoroStatus,
+    PrivacyLayoutState, ShelfLayoutInput, TrackKey,
 };
 
 use super::NotchController;
@@ -97,40 +97,22 @@ impl NotchController {
         self.shelf_drag_leave_until = None;
         self.shelf.drag_hover = false;
         self.seek_drag = None;
+        self.category_picker_open = false;
+        self.custom_time_input = None;
         self.hover_blocked = false;
         self.presented = false;
     }
 
-    pub(super) fn is_mode_compact_active(&self, mode: FocusSubMode) -> bool {
-        match mode {
-            FocusSubMode::Pomodoro => self.pomodoro.is_compact_active(),
-            FocusSubMode::Timer => self.quick_timer.is_compact_active(),
-            FocusSubMode::Stopwatch => self.stopwatch.is_compact_active(),
-        }
-    }
-
-    pub(super) fn compact_focus_mode(&self) -> Option<FocusSubMode> {
-        if self.is_mode_compact_active(self.focus_mode) {
-            return Some(self.focus_mode);
-        }
-        FocusSubMode::ALL
-            .into_iter()
-            .find(|mode| self.is_mode_compact_active(*mode))
-    }
-
     pub(super) fn has_compact_focus(&self) -> bool {
-        self.focus_enabled && self.compact_focus_mode().is_some()
+        self.focus_enabled && self.pomodoro.is_compact_active()
     }
 
     pub(super) fn has_alert(&self) -> bool {
-        self.focus_enabled
-            && (self.pomodoro.status == PomodoroStatus::Alert
-                || self.quick_timer.status == PomodoroStatus::Alert)
+        self.focus_enabled && self.pomodoro.status == PomodoroStatus::Alert
     }
 
     pub(super) fn dismiss_active_alert(&mut self) {
         self.pomodoro.dismiss_alert();
-        self.quick_timer.dismiss_alert();
         self.alert_until = None;
     }
 
@@ -287,8 +269,15 @@ impl NotchController {
             press_progress: self.press_progress.clamp(0.0, 1.0),
             compact_primary,
             compact_secondary,
-            focus_mode: self.focus_mode,
             pomodoro_surface: self.active_surface(),
+            pomodoro_category_picker: self.category_picker_open,
+            pomodoro_category_count: self
+                .focus_categories
+                .categories
+                .len()
+                .min(otto_core::NOTCH_CATEGORY_OPTIONS) as u8,
+            heatmap_filter_count: (self.focus_categories.categories.len() + 1)
+                .min(otto_core::NOTCH_HEATMAP_FILTERS) as u8,
             active_tab: self.notch_tab,
             previous_tab: self.previous_tab,
             top_bar_enabled: true,

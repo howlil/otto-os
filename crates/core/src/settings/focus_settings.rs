@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::bar::calendar::{days_in_month, weekday_of};
 use crate::notch::focus_activity::{
-    DayKey, FOCUS_HISTORY_DAYS, FocusActivityState, PRESET_BLOCKED_APPS, PRESET_BLOCKED_WEBSITES,
-    clean_app_display_name, compact_app_id, estimated_words, format_compact_count,
-    format_screen_time, is_non_trackable_focus_app, normalize_app_key, normalize_domain,
+    DayKey, FOCUS_HISTORY_DAYS, FocusActivityState, PRESET_BLOCKED_APPS, clean_app_display_name,
+    compact_app_id, estimated_words, format_compact_count, format_screen_time,
+    is_non_trackable_focus_app, normalize_app_key,
 };
 use crate::settings::model::{OttoSettingItem, OttoSettingKind, OttoSettingsSnapshot};
 use crate::settings_content::{
-    BadgeTone, SettingsAction, SettingsContent, SettingsRow, SettingsRowValue, SettingsSection,
-    module_badge, percent_of, setting_row,
+    BadgeTone, SettingsAction, SettingsRow, SettingsRowValue, SettingsSection, module_badge,
+    percent_of, setting_row,
 };
 use crate::settings_window::{ModuleId, ModuleRow, SettingsPage};
 
@@ -18,14 +18,39 @@ pub const FOCUS_ALL_APPS_PAGE_STEP: usize = 12;
 pub const FOCUS_SEARCH_MAX_RESULTS: usize = 24;
 pub const FOCUS_SEARCH_MAX_CHARS: usize = 80;
 pub const FOCUS_WEBSITE_INPUT_MAX_CHARS: usize = 120;
-const SUGGESTED_WEBSITES_DEFAULT_COUNT: usize = 6;
 const WEEKDAY_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FocusSettingsTab {
     #[default]
-    BlockApps,
-    Activity,
+    Modes,
+    Insights,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FocusDisclosure {
+    CreateMode,
+    RenameMode,
+    SmartPreview,
+    BackgroundPower,
+    BlockedWebsites,
+    Notifications,
+    RawActivity,
+}
+
+impl FocusDisclosure {
+    #[must_use]
+    pub const fn bit(self) -> u8 {
+        match self {
+            Self::CreateMode => 1 << 0,
+            Self::RenameMode => 1 << 1,
+            Self::SmartPreview => 1 << 2,
+            Self::BackgroundPower => 1 << 3,
+            Self::BlockedWebsites => 1 << 4,
+            Self::Notifications => 1 << 5,
+            Self::RawActivity => 1 << 6,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,6 +67,8 @@ pub enum FocusTextField {
     None,
     AppSearch,
     WebsiteDomain,
+    CategoryName,
+    CategoryRename,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -51,14 +78,8 @@ pub enum FocusSessionStatus {
     RunningCountdown {
         remaining_seconds: u32,
     },
-    RunningStopwatch {
-        elapsed_seconds: u32,
-    },
     PausedCountdown {
         remaining_seconds: u32,
-    },
-    PausedStopwatch {
-        elapsed_seconds: u32,
     },
     OnBreak {
         remaining_seconds: u32,
@@ -68,10 +89,7 @@ pub enum FocusSessionStatus {
 impl FocusSessionStatus {
     #[must_use]
     pub const fn is_blocking_now(self) -> bool {
-        matches!(
-            self,
-            Self::RunningCountdown { .. } | Self::RunningStopwatch { .. }
-        )
+        matches!(self, Self::RunningCountdown { .. })
     }
 
     #[must_use]
@@ -81,17 +99,11 @@ impl FocusSessionStatus {
             Self::RunningCountdown { remaining_seconds } => {
                 format!("{} remaining", format_remaining_brief(remaining_seconds))
             }
-            Self::RunningStopwatch { elapsed_seconds } => {
-                format!("Running ({})", format_remaining_brief(elapsed_seconds))
-            }
             Self::PausedCountdown { remaining_seconds } => {
                 format!(
                     "Paused ({} left)",
                     format_remaining_brief(remaining_seconds)
                 )
-            }
-            Self::PausedStopwatch { elapsed_seconds } => {
-                format!("Paused ({})", format_remaining_brief(elapsed_seconds))
             }
             Self::OnBreak { remaining_seconds } => {
                 format!("Break ({} left)", format_remaining_brief(remaining_seconds))
@@ -170,8 +182,14 @@ pub struct FocusPageState {
     pub all_apps_limit: usize,
     pub website_input: String,
     pub website_error: Option<String>,
+    pub category_name_input: String,
+    pub category_rename_input: String,
+    pub category_error: Option<String>,
+    pub heatmap_category_id: Option<String>,
+    pub selected_heatmap_cell: Option<usize>,
     pub focused_field: FocusTextField,
     pub details_expanded: bool,
+    pub disclosures: u8,
     pub selected_bar_day: Option<usize>,
     pub catalog: Vec<FocusCatalogApp>,
     pub session: FocusSessionStatus,
@@ -180,14 +198,20 @@ pub struct FocusPageState {
 impl Default for FocusPageState {
     fn default() -> Self {
         Self {
-            tab: FocusSettingsTab::BlockApps,
+            tab: FocusSettingsTab::Modes,
             app_filter: FocusAppFilter::Recent,
             app_search: String::new(),
             all_apps_limit: FOCUS_ALL_APPS_INITIAL_LIMIT,
             website_input: String::new(),
             website_error: None,
+            category_name_input: String::new(),
+            category_rename_input: String::new(),
+            category_error: None,
+            heatmap_category_id: None,
+            selected_heatmap_cell: None,
             focused_field: FocusTextField::None,
             details_expanded: false,
+            disclosures: 0,
             selected_bar_day: None,
             catalog: Vec::new(),
             session: FocusSessionStatus::NotRunning,
@@ -196,11 +220,29 @@ impl Default for FocusPageState {
 }
 
 impl FocusPageState {
+    #[must_use]
+    pub const fn is_open(&self, disc: FocusDisclosure) -> bool {
+        (self.disclosures & disc.bit()) != 0
+    }
+
+    pub fn toggle_disclosure(&mut self, disc: FocusDisclosure) {
+        self.disclosures ^= disc.bit();
+    }
+
+    pub fn set_disclosure(&mut self, disc: FocusDisclosure, open: bool) {
+        if open {
+            self.disclosures |= disc.bit();
+        } else {
+            self.disclosures &= !disc.bit();
+        }
+    }
+
     pub fn select_tab(&mut self, tab: FocusSettingsTab) {
         if self.tab != tab {
             self.tab = tab;
             self.focused_field = FocusTextField::None;
             self.website_error = None;
+            self.category_error = None;
         }
     }
 
@@ -219,6 +261,11 @@ impl FocusPageState {
         self.focused_field = field;
         if field == FocusTextField::WebsiteDomain {
             self.website_error = None;
+        } else if matches!(
+            field,
+            FocusTextField::CategoryName | FocusTextField::CategoryRename
+        ) {
+            self.category_error = None;
         }
     }
 
@@ -226,9 +273,7 @@ impl FocusPageState {
         match field {
             FocusTextField::None => false,
             FocusTextField::AppSearch => {
-                if self.app_search.is_empty() {
-                    false
-                } else {
+                !self.app_search.is_empty() && {
                     self.app_search.clear();
                     true
                 }
@@ -237,6 +282,20 @@ impl FocusPageState {
                 let had_text = !self.website_input.is_empty() || self.website_error.is_some();
                 self.website_input.clear();
                 self.website_error = None;
+                had_text
+            }
+            FocusTextField::CategoryName => {
+                let had_text =
+                    !self.category_name_input.is_empty() || self.category_error.is_some();
+                self.category_name_input.clear();
+                self.category_error = None;
+                had_text
+            }
+            FocusTextField::CategoryRename => {
+                let had_text =
+                    !self.category_rename_input.is_empty() || self.category_error.is_some();
+                self.category_rename_input.clear();
+                self.category_error = None;
                 had_text
             }
         }
@@ -263,6 +322,22 @@ impl FocusPageState {
                 self.website_error = None;
                 true
             }
+            FocusTextField::CategoryName => {
+                if self.category_name_input.chars().count() >= 24 {
+                    return false;
+                }
+                self.category_name_input.push(ch);
+                self.category_error = None;
+                true
+            }
+            FocusTextField::CategoryRename => {
+                if self.category_rename_input.chars().count() >= 24 {
+                    return false;
+                }
+                self.category_rename_input.push(ch);
+                self.category_error = None;
+                true
+            }
         }
     }
 
@@ -287,11 +362,19 @@ impl FocusPageState {
                 self.website_error = None;
                 self.website_input.pop().is_some()
             }
+            FocusTextField::CategoryName => {
+                self.category_error = None;
+                self.category_name_input.pop().is_some()
+            }
+            FocusTextField::CategoryRename => {
+                self.category_error = None;
+                self.category_rename_input.pop().is_some()
+            }
         }
     }
 
     pub fn step_chart_day(&mut self, delta: i32) -> bool {
-        if self.tab != FocusSettingsTab::Activity {
+        if self.tab != FocusSettingsTab::Insights {
             return false;
         }
         let max_index = FOCUS_HISTORY_DAYS.saturating_sub(1) as i32;
@@ -475,17 +558,17 @@ pub fn build_weekly_chart(
 }
 
 #[derive(Clone, Debug)]
-struct ResolvedApp {
-    block_key: String,
-    display_name: String,
-    detail: Option<String>,
-    icon_source: Option<String>,
-    today_active_ms: u64,
-    week_active_ms: u64,
-    open_count: u32,
-    blocked: bool,
-    in_recent: bool,
-    in_catalog: bool,
+pub(super) struct ResolvedApp {
+    pub(super) block_key: String,
+    pub(super) display_name: String,
+    pub(super) detail: Option<String>,
+    pub(super) icon_source: Option<String>,
+    pub(super) today_active_ms: u64,
+    pub(super) week_active_ms: u64,
+    pub(super) open_count: u32,
+    pub(super) blocked: bool,
+    pub(super) in_recent: bool,
+    pub(super) in_catalog: bool,
 }
 
 fn prettify_app_key(key: &str) -> String {
@@ -636,7 +719,7 @@ fn insert_usage_apps(
     }
 }
 
-fn merge_focus_apps(
+pub(super) fn merge_focus_apps(
     activity: &FocusActivityState,
     catalog: &[FocusCatalogApp],
 ) -> Vec<ResolvedApp> {
@@ -698,13 +781,13 @@ fn merge_focus_apps(
     map.into_values().collect()
 }
 
-fn matches_app_query(app: &ResolvedApp, query_lower: &str) -> bool {
+pub(super) fn matches_app_query(app: &ResolvedApp, query_lower: &str) -> bool {
     query_lower.is_empty()
         || app.display_name.to_lowercase().contains(query_lower)
         || app.block_key.contains(query_lower)
 }
 
-fn app_usage_subtitle(app: &ResolvedApp) -> String {
+pub(super) fn app_usage_subtitle(app: &ResolvedApp) -> String {
     if app.today_active_ms > 0 {
         format!("Used {} today", format_screen_time(app.today_active_ms))
     } else if app.week_active_ms > 0 {
@@ -716,23 +799,7 @@ fn app_usage_subtitle(app: &ResolvedApp) -> String {
     }
 }
 
-fn app_toggle_row(app: &ResolvedApp) -> SettingsRow {
-    let mut row = SettingsRow::new(
-        app.display_name.clone(),
-        app_usage_subtitle(app),
-        SettingsRowValue::Toggle(app.blocked),
-    )
-    .with_action(SettingsAction::ToggleBlockedApp(app.block_key.clone()));
-    row.app_icon = Some(
-        app.icon_source
-            .clone()
-            .unwrap_or_else(|| app.block_key.clone()),
-    );
-    row.detail_hint.clone_from(&app.detail);
-    row
-}
-
-fn sort_by_usage_then_name(items: &mut [&ResolvedApp]) {
+pub(super) fn sort_by_usage_then_name(items: &mut [&ResolvedApp]) {
     items.sort_by(|a, b| {
         b.today_active_ms
             .cmp(&a.today_active_ms)
@@ -746,7 +813,7 @@ fn sort_by_usage_then_name(items: &mut [&ResolvedApp]) {
     });
 }
 
-fn sort_alphabetically(items: &mut [&ResolvedApp]) {
+pub(super) fn sort_alphabetically(items: &mut [&ResolvedApp]) {
     items.sort_by(|a, b| {
         a.display_name
             .to_lowercase()
@@ -754,7 +821,7 @@ fn sort_alphabetically(items: &mut [&ResolvedApp]) {
     });
 }
 
-fn focus_header_section(
+pub(super) fn focus_header_section(
     snapshot: &OttoSettingsSnapshot,
     modules: &[ModuleRow],
     state: &FocusPageState,
@@ -770,23 +837,25 @@ fn focus_header_section(
         .copied();
     let feature_paused = module_row.is_some_and(|row| row.paused_by.is_some());
     let feature_on = snapshot.is_enabled(OttoSettingKind::FocusModule) && !feature_paused;
-    let feature_state = if feature_paused {
-        "Paused (Needs Notch)"
-    } else if feature_on {
-        "On"
-    } else {
-        "Off"
-    };
-    feature_row.label = format!("Focus feature: {feature_state}");
-    feature_row.subtitle = if !feature_on {
-        String::from("Session: Not running · Turn on Focus to use sessions and blocking")
+    let active_name = snapshot.focus_activity.categories.active().name.as_str();
+    feature_row.label = if feature_paused {
+        String::from("Focus Shield: Paused (Needs Notch)")
+    } else if !feature_on {
+        String::from("Focus Shield: Off")
     } else if state.session.is_blocking_now() {
-        format!("Session: {} · Blocking active now", state.session.label())
+        format!("Focus Shield: Active ({active_name})")
     } else {
+        String::from("Focus Shield: Ready (Idle)")
+    };
+    feature_row.subtitle = if !feature_on {
+        String::from("Turn on Focus to run sessions and protect distractions")
+    } else if state.session.is_blocking_now() {
         format!(
-            "Session: {} · Blocking runs only during a Focus session",
+            "{} · Blocking & background relief active",
             state.session.label()
         )
+    } else {
+        format!("Active mode: {active_name} · Runs only during a Focus session")
     };
     feature_row.badge = Some(if !feature_on {
         module_row.map_or(("Off", BadgeTone::Neutral), module_badge)
@@ -797,26 +866,7 @@ fn focus_header_section(
     });
     feature_row.muted = feature_paused;
 
-    let tabs_row = SettingsRow::new(
-        "",
-        "",
-        SettingsRowValue::Segmented {
-            options: vec![
-                SegmentedOption {
-                    label: "Block apps",
-                    action: SettingsAction::SetFocusTab(FocusSettingsTab::BlockApps),
-                },
-                SegmentedOption {
-                    label: "Activity",
-                    action: SettingsAction::SetFocusTab(FocusSettingsTab::Activity),
-                },
-            ],
-            selected: match state.tab {
-                FocusSettingsTab::BlockApps => 0,
-                FocusSettingsTab::Activity => 1,
-            },
-        },
-    );
+    let tabs_row = super::focus_modes_settings::focus_tabs_row(state);
 
     SettingsSection {
         title: "",
@@ -825,54 +875,7 @@ fn focus_header_section(
     }
 }
 
-fn empty_apps_row(
-    filter: FocusAppFilter,
-    query_lower: &str,
-    all_query_matches: usize,
-) -> SettingsRow {
-    if !query_lower.is_empty() && filter != FocusAppFilter::AllApps && all_query_matches > 0 {
-        let filter_name = match filter {
-            FocusAppFilter::Blocked => "Blocked",
-            FocusAppFilter::Recent => "Recent",
-            FocusAppFilter::AllApps => "All apps",
-        };
-        return SettingsRow::new(
-            format!("No matches in {filter_name}"),
-            format!("Show {all_query_matches} matching installed apps in All apps"),
-            SettingsRowValue::Detail("All apps"),
-        )
-        .with_action(SettingsAction::SetFocusAppFilter(FocusAppFilter::AllApps));
-    }
-    match filter {
-        FocusAppFilter::Blocked => SettingsRow::new(
-            if query_lower.is_empty() {
-                "No apps blocked yet"
-            } else {
-                "No blocked apps match your search"
-            },
-            "Browse Recent or All apps to toggle apps to block during Focus",
-            SettingsRowValue::Detail("All apps"),
-        )
-        .with_action(SettingsAction::SetFocusAppFilter(FocusAppFilter::AllApps)),
-        FocusAppFilter::Recent => SettingsRow::new(
-            if query_lower.is_empty() {
-                "No recent apps detected yet"
-            } else {
-                "No recent apps match your search"
-            },
-            "Browse All apps to pick from installed Windows apps",
-            SettingsRowValue::Detail("All apps"),
-        )
-        .with_action(SettingsAction::SetFocusAppFilter(FocusAppFilter::AllApps)),
-        FocusAppFilter::AllApps => SettingsRow::new(
-            "No installed apps match your search",
-            "Try another name or choose an executable manually below",
-            SettingsRowValue::Text(String::from("0")),
-        ),
-    }
-}
-
-fn build_during_focus_section(activity: &FocusActivityState) -> SettingsSection {
+pub(super) fn build_during_focus_section(activity: &FocusActivityState) -> SettingsSection {
     let blocklist = &activity.blocklist;
     SettingsSection {
         title: "During Focus",
@@ -892,216 +895,6 @@ fn build_during_focus_section(activity: &FocusActivityState) -> SettingsSection 
             .with_action(SettingsAction::ToggleFocusAllowCalls),
         ],
     }
-}
-
-fn build_block_apps_controls(
-    state: &FocusPageState,
-    blocked_count: usize,
-    recent_count: usize,
-    all_count: usize,
-) -> Vec<SettingsRow> {
-    vec![
-        SettingsRow::new(
-            "",
-            "",
-            SettingsRowValue::TextInput {
-                field: FocusTextField::AppSearch,
-                text: state.app_search.clone(),
-                placeholder: "Search installed apps...",
-                button_label: None,
-                focused: state.focused_field == FocusTextField::AppSearch,
-                error: None,
-            },
-        ),
-        SettingsRow::new(
-            "",
-            "",
-            SettingsRowValue::FilterChips {
-                chips: vec![
-                    FilterChip {
-                        label: format!("Blocked ({blocked_count})"),
-                        action: SettingsAction::SetFocusAppFilter(FocusAppFilter::Blocked),
-                    },
-                    FilterChip {
-                        label: format!("Recent ({recent_count})"),
-                        action: SettingsAction::SetFocusAppFilter(FocusAppFilter::Recent),
-                    },
-                    FilterChip {
-                        label: format!("All apps ({all_count})"),
-                        action: SettingsAction::SetFocusAppFilter(FocusAppFilter::AllApps),
-                    },
-                ],
-                selected: match state.app_filter {
-                    FocusAppFilter::Blocked => 0,
-                    FocusAppFilter::Recent => 1,
-                    FocusAppFilter::AllApps => 2,
-                },
-            },
-        ),
-    ]
-}
-
-fn build_block_apps_sections(
-    activity: &FocusActivityState,
-    state: &FocusPageState,
-) -> Vec<SettingsSection> {
-    let all = merge_focus_apps(activity, &state.catalog);
-    let query_lower = state.app_search.trim().to_lowercase();
-    let blocked_count = all.iter().filter(|app| app.blocked).count();
-    let recent_count = all.iter().filter(|app| app.in_recent).count();
-    let mut rows = build_block_apps_controls(state, blocked_count, recent_count, all.len());
-
-    let mut filtered: Vec<&ResolvedApp> = all
-        .iter()
-        .filter(|app| match state.app_filter {
-            FocusAppFilter::Blocked => app.blocked,
-            FocusAppFilter::Recent => app.in_recent,
-            FocusAppFilter::AllApps => app.in_catalog || app.in_recent || app.blocked,
-        })
-        .filter(|app| matches_app_query(app, &query_lower))
-        .collect();
-
-    if state.app_filter == FocusAppFilter::AllApps && query_lower.is_empty() {
-        sort_alphabetically(&mut filtered);
-    } else {
-        sort_by_usage_then_name(&mut filtered);
-    }
-
-    let total_matching = filtered.len();
-    let visible_limit = match state.app_filter {
-        FocusAppFilter::AllApps if query_lower.is_empty() => state.all_apps_limit,
-        FocusAppFilter::AllApps => FOCUS_SEARCH_MAX_RESULTS,
-        FocusAppFilter::Blocked | FocusAppFilter::Recent => total_matching,
-    };
-
-    if filtered.is_empty() {
-        let all_query_matches = if query_lower.is_empty() {
-            0
-        } else {
-            all.iter()
-                .filter(|app| matches_app_query(app, &query_lower))
-                .count()
-        };
-        rows.push(empty_apps_row(
-            state.app_filter,
-            &query_lower,
-            all_query_matches,
-        ));
-    } else {
-        for app in filtered.iter().take(visible_limit) {
-            rows.push(app_toggle_row(app));
-        }
-        if total_matching > visible_limit {
-            let shown = visible_limit.min(total_matching);
-            let mut more = SettingsRow::new(
-                format!("Show more apps ({shown} of {total_matching})"),
-                "Or type in the search box above to filter immediately",
-                SettingsRowValue::Detail("More"),
-            );
-            more.action = (state.app_filter == FocusAppFilter::AllApps && query_lower.is_empty())
-                .then_some(SettingsAction::ExpandFocusAllApps);
-            rows.push(more);
-        }
-    }
-
-    rows.push(
-        SettingsRow::new(
-            "+ Choose an app manually",
-            "Pick an .exe for portable apps not listed above",
-            SettingsRowValue::Detail(""),
-        )
-        .with_action(SettingsAction::PickBlockedAppFile),
-    );
-
-    vec![
-        SettingsSection {
-            title: "Block apps",
-            footer: Some(
-                "Toggles apply immediately during Focus. Covered apps get a Back overlay and are never closed.",
-            ),
-            rows,
-        },
-        build_during_focus_section(activity),
-        SettingsSection {
-            title: "Blocked websites",
-            footer: Some(
-                "Blocked browser tabs get a Back overlay during Focus. Type a domain and press Enter or click Add.",
-            ),
-            rows: build_blocked_websites_rows(activity, state),
-        },
-    ]
-}
-
-fn build_blocked_websites_rows(
-    activity: &FocusActivityState,
-    state: &FocusPageState,
-) -> Vec<SettingsRow> {
-    let blocklist = &activity.blocklist;
-    let mut rows = vec![SettingsRow::new(
-        "",
-        "",
-        SettingsRowValue::TextInput {
-            field: FocusTextField::WebsiteDomain,
-            text: state.website_input.clone(),
-            placeholder: "Enter domain (e.g. youtube.com)...",
-            button_label: Some("Add"),
-            focused: state.focused_field == FocusTextField::WebsiteDomain,
-            error: state.website_error.clone(),
-        },
-    )];
-
-    let filter = state.website_input.trim().to_lowercase();
-    let normalized_filter = normalize_domain(&filter);
-    for domain in &blocklist.blocked_websites {
-        let matches = filter.is_empty()
-            || domain.contains(&filter)
-            || normalized_filter
-                .as_deref()
-                .is_some_and(|norm| domain.contains(norm));
-        if !matches {
-            continue;
-        }
-        let subtitle = PRESET_BLOCKED_WEBSITES
-            .iter()
-            .find(|(preset, _)| *preset == domain)
-            .map_or_else(
-                || String::from("Blocked during Focus"),
-                |(_, label)| format!("{label} · Blocked during Focus"),
-            );
-        rows.push(
-            SettingsRow::new(domain.clone(), subtitle, SettingsRowValue::Toggle(true))
-                .with_action(SettingsAction::ToggleBlockedWebsite(domain.clone())),
-        );
-    }
-
-    let mut suggested_shown = 0usize;
-    for (preset_domain, preset_label) in PRESET_BLOCKED_WEBSITES {
-        if blocklist.is_website_blocked(preset_domain) {
-            continue;
-        }
-        let matches = filter.is_empty()
-            || preset_domain.contains(&filter)
-            || preset_label.to_lowercase().contains(&filter);
-        if !matches {
-            continue;
-        }
-        if filter.is_empty() && suggested_shown >= SUGGESTED_WEBSITES_DEFAULT_COUNT {
-            break;
-        }
-        suggested_shown += 1;
-        rows.push(
-            SettingsRow::new(
-                preset_domain,
-                format!("{preset_label} · Suggested"),
-                SettingsRowValue::Toggle(false),
-            )
-            .with_action(SettingsAction::ToggleBlockedWebsite(String::from(
-                preset_domain,
-            ))),
-        );
-    }
-
-    rows
 }
 
 fn build_kpi_section(activity: &FocusActivityState) -> SettingsSection {
@@ -1287,7 +1080,7 @@ fn build_activity_details_section(
     }
 }
 
-fn build_activity_sections(
+pub(super) fn build_activity_sections(
     activity: &FocusActivityState,
     state: &FocusPageState,
 ) -> Vec<SettingsSection> {
@@ -1341,34 +1134,14 @@ fn build_activity_sections(
 
     sections.push(build_activity_details_section(
         activity,
-        state.details_expanded,
+        state.is_open(FocusDisclosure::RawActivity) || state.details_expanded,
     ));
     sections
 }
 
-#[must_use]
-pub fn build_focus_page(
-    snapshot: &OttoSettingsSnapshot,
-    modules: &[ModuleRow],
-    state: &FocusPageState,
-) -> SettingsContent {
-    let mut sections = vec![focus_header_section(snapshot, modules, state)];
-    match state.tab {
-        FocusSettingsTab::BlockApps => {
-            sections.extend(build_block_apps_sections(&snapshot.focus_activity, state));
-        }
-        FocusSettingsTab::Activity => {
-            sections.extend(build_activity_sections(&snapshot.focus_activity, state));
-        }
-    }
-    SettingsContent {
-        hero: None,
-        sections,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::focus_insights_settings::build_focus_page;
     use super::*;
     use crate::notch::focus_activity::inspect_browser_context;
     use crate::settings::model::{PluginSettingsState, SystemSettingsState};
@@ -1455,8 +1228,8 @@ mod tests {
         };
         let idle_page = build_focus_page(&snap, &modules, &idle_state);
         let status_row = &idle_page.sections[0].rows[0];
-        assert_eq!(status_row.label, "Focus feature: On");
-        assert!(status_row.subtitle.contains("Session: Not running"));
+        assert_eq!(status_row.label, "Focus Shield: Ready (Idle)");
+        assert!(status_row.subtitle.contains("Active mode: Coding"));
         assert_eq!(status_row.badge, Some(("Idle", BadgeTone::Neutral)));
 
         let running_state = FocusPageState {
@@ -1467,45 +1240,45 @@ mod tests {
         };
         let running_page = build_focus_page(&snap, &modules, &running_state);
         let running_row = &running_page.sections[0].rows[0];
-        assert_eq!(running_row.label, "Focus feature: On");
+        assert_eq!(running_row.label, "Focus Shield: Active (Coding)");
         assert!(running_row.subtitle.contains("24 min remaining"));
         assert_eq!(running_row.badge, Some(("Active", BadgeTone::Good)));
     }
 
     #[test]
-    fn block_apps_tab_merges_usage_catalog_and_toggles_and_demotes_manual_picker() {
+    fn modes_tab_merges_usage_catalog_and_toggles_and_demotes_manual_picker() {
         let snap = snapshot_with_activity();
         let modules = resolve_modules(&snap, |_| None);
         let state = FocusPageState {
-            tab: FocusSettingsTab::BlockApps,
+            tab: FocusSettingsTab::Modes,
             app_filter: FocusAppFilter::Recent,
             catalog: sample_catalog(),
             ..FocusPageState::default()
         };
         let page = build_focus_page(&snap, &modules, &state);
-        let block_section = page
+        let apps_section = page
             .sections
             .iter()
-            .find(|section| section.title == "Block apps")
-            .expect("block apps section");
-        let chrome = block_section
+            .find(|section| section.title == "Apps for this mode")
+            .expect("apps for this mode section");
+        let chrome = apps_section
             .rows
             .iter()
             .find(|row| row.label == "Google Chrome")
             .expect("recent chrome row");
-        assert_eq!(chrome.value, SettingsRowValue::Toggle(false));
+        assert_eq!(chrome.value, SettingsRowValue::Toggle(true));
         assert_eq!(
             chrome.action,
-            Some(SettingsAction::ToggleBlockedApp(String::from("chrome")))
+            Some(SettingsAction::ToggleCategoryApp(String::from("chrome")))
         );
-        assert!(chrome.subtitle.contains("today"));
+        assert!(chrome.subtitle.contains("Allowed during Focus"));
         assert!(
             chrome
                 .detail_hint
                 .as_deref()
                 .is_some_and(|p| p.contains("chrome.exe"))
         );
-        let last = block_section.rows.last().expect("manual fallback row");
+        let last = apps_section.rows.last().expect("manual fallback row");
         assert_eq!(last.label, "+ Choose an app manually");
         assert_eq!(last.action, Some(SettingsAction::PickBlockedAppFile));
     }
@@ -1523,13 +1296,17 @@ mod tests {
             })
             .collect();
         let mut state = FocusPageState {
-            tab: FocusSettingsTab::BlockApps,
+            tab: FocusSettingsTab::Modes,
             app_filter: FocusAppFilter::AllApps,
             catalog,
             ..FocusPageState::default()
         };
         let page = build_focus_page(&snap, &modules, &state);
-        let section = &page.sections[1];
+        let section = page
+            .sections
+            .iter()
+            .find(|s| s.title == "Apps for this mode")
+            .expect("apps section");
         assert!(
             section
                 .rows
@@ -1545,7 +1322,12 @@ mod tests {
 
         state.app_search = String::from("Tool 17");
         let filtered_page = build_focus_page(&snap, &modules, &state);
-        let filtered_labels: Vec<&str> = filtered_page.sections[1]
+        let filtered_section = filtered_page
+            .sections
+            .iter()
+            .find(|s| s.title == "Apps for this mode")
+            .expect("apps section");
+        let filtered_labels: Vec<&str> = filtered_section
             .rows
             .iter()
             .filter(|row| matches!(row.value, SettingsRowValue::Toggle(_)))
@@ -1555,11 +1337,11 @@ mod tests {
     }
 
     #[test]
-    fn activity_tab_hides_clicks_and_searches_until_details_expanded() {
+    fn insights_tab_hides_clicks_and_searches_until_details_expanded() {
         let snap = snapshot_with_activity();
         let modules = resolve_modules(&snap, |_| None);
         let mut state = FocusPageState {
-            tab: FocusSettingsTab::Activity,
+            tab: FocusSettingsTab::Insights,
             catalog: sample_catalog(),
             ..FocusPageState::default()
         };
@@ -1573,6 +1355,7 @@ mod tests {
         assert!(!labels.contains(&"otto focus"));
         assert!(!labels.contains(&"Reset Activity & Screen Time Stats"));
         assert!(labels.contains(&"Google Chrome"));
+        assert!(labels.contains(&"Contribution heatmap"));
         let chart_row = collapsed
             .sections
             .iter()
@@ -1584,18 +1367,18 @@ mod tests {
         };
         assert_eq!(chart.days.len(), 7);
         assert_eq!(chart.days[6].day_label, "Sun");
-        assert!(chart.days[6].is_today);
 
-        state.details_expanded = true;
+        state.toggle_disclosure(FocusDisclosure::RawActivity);
+        assert!(state.is_open(FocusDisclosure::RawActivity));
         let expanded = build_focus_page(&snap, &modules, &state);
-        let expanded_labels: Vec<&str> = expanded
+        let exp_labels: Vec<&str> = expanded
             .sections
             .iter()
             .flat_map(|section| section.rows.iter().map(|row| row.label.as_str()))
             .collect();
-        assert!(expanded_labels.contains(&"Clicks & keys today"));
-        assert!(expanded_labels.contains(&"otto focus"));
-        assert!(expanded_labels.contains(&"Reset Activity & Screen Time Stats"));
+        assert!(exp_labels.contains(&"Clicks & keys today"));
+        assert!(exp_labels.contains(&"otto focus"));
+        assert!(exp_labels.contains(&"Reset Activity & Screen Time Stats"));
     }
 
     #[test]

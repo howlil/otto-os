@@ -672,7 +672,6 @@ fn pomodoro_hit_rects(layout: &Layout) -> Vec<Rect> {
         rects.push(layout.pomodoro.alert_extend_button);
         rects.push(layout.pomodoro.alert_start_button);
     } else {
-        rects.extend(layout.pomodoro.focus_modes);
         rects.push(layout.pomodoro.play_button);
         rects.push(layout.pomodoro.reset_button);
         rects.push(layout.pomodoro.skip_button);
@@ -1164,7 +1163,6 @@ fn four_adaptive_tabs_fit_without_overlapping_header_labels_across_dpis() {
             ] {
                 assert_eq!(pair.1.x - pair.0.right(), gap);
             }
-            assert!(layout.notch_tab_strip.right() + gap < layout.pomodoro.focus_modes[0].x);
             assert!(layout.notch_tab_strip.right() + gap < layout.pomodoro.session_label.x);
             assert!(layout.notch_tab_strip.right() + gap <= layout.stats.range_today.x);
             assert!(layout.notch_tab_strip.right() + gap < layout.media.source_label.x);

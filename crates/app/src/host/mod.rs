@@ -28,7 +28,7 @@ use self::plugins::CONFIG_FILE;
 use self::plugins::PLUGIN_DESCRIPTORS;
 use self::plugins::PluginConfig;
 use self::plugins::PluginDescriptor;
-pub use self::plugins::PluginId;
+pub(crate) use self::plugins::PluginId;
 use self::plugins::PluginState;
 use self::plugins::SurfaceSlot;
 pub(crate) use self::runtime::RuntimeContext;
@@ -110,7 +110,7 @@ fn destroy_hwnds(hwnds: &[HWND]) {
     }
 }
 
-pub fn start(blur: bool) -> Result<()> {
+pub(crate) fn start(blur: bool) -> Result<()> {
     resume_background_tasks();
     let instance: HINSTANCE =
         unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? }.into();
@@ -168,7 +168,7 @@ pub fn start(blur: bool) -> Result<()> {
     })
 }
 
-pub fn run_message_loop() {
+pub(crate) fn run_message_loop() {
     unsafe {
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
@@ -178,7 +178,7 @@ pub fn run_message_loop() {
     }
 }
 
-pub fn apply_cli_overrides() -> Result<()> {
+pub(crate) fn apply_cli_overrides() -> Result<()> {
     let overrides = std::env::args().filter_map(|arg| {
         if let Some(name) = arg.strip_prefix("--enable-plugin=") {
             return PluginId::parse(name).map(|plugin| (plugin, true));
@@ -193,24 +193,54 @@ pub fn apply_cli_overrides() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn create_focus_shield_window() -> Option<isize> {
+fn create_dynamic_overlay_window(
+    class_name: PCWSTR,
+    wnd_proc: WNDPROC,
+    ex_style: WINDOW_EX_STYLE,
+) -> Option<isize> {
     let instance: HINSTANCE =
         unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
             .ok()?
             .into();
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }.ok()?;
-    create_overlay_window(
-        instance,
-        cursor,
+    create_overlay_window(instance, cursor, class_name, wnd_proc, ex_style)
+        .ok()
+        .map(|hwnd| hwnd.0 as isize)
+}
+
+pub(crate) fn create_focus_shield_window() -> Option<isize> {
+    create_dynamic_overlay_window(
         windows::core::w!("OttoFocusShield"),
         Some(messages::focus_shield_window_proc),
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
     )
-    .ok()
-    .map(|hwnd| hwnd.0 as isize)
 }
 
-pub fn stop() {
+pub(crate) fn create_secondary_bar_window() -> Option<isize> {
+    create_dynamic_overlay_window(
+        windows::core::w!("OttoNotchBar"),
+        Some(messages::bar_window_proc),
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+    )
+}
+
+pub(crate) fn create_secondary_dock_window() -> Option<isize> {
+    create_dynamic_overlay_window(
+        windows::core::w!("OttoDockBar"),
+        Some(messages::dock_window_proc),
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+    )
+}
+
+pub(crate) fn create_window_controls_overlay() -> Option<isize> {
+    create_dynamic_overlay_window(
+        windows::core::w!("OttoWindowControls"),
+        Some(messages::window_controls_window_proc),
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+    )
+}
+
+pub(crate) fn stop() {
     let hwnds = HOST.with(|cell| {
         let Ok(mut guard) = cell.try_borrow_mut() else {
             return Vec::new();
@@ -232,7 +262,7 @@ pub fn stop() {
     otto_render::release_shared_factories();
 }
 
-pub fn shutdown_session() {
+pub(crate) fn shutdown_session() {
     otto_platform::uninstall_keyboard_hook();
     stop();
     let _ = otto_platform::restore_shell_from_recovery();
@@ -248,7 +278,7 @@ pub(crate) fn log_present_error<E: std::fmt::Display>(
     }
 }
 
-pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
+pub(crate) fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
     let mut pending_hwnds = Vec::new();
     let result = with_host_mut(|host| {
         let outcome = host.set_plugin_enabled(plugin, enabled, PluginConfig::save);
@@ -272,11 +302,6 @@ pub fn set_plugin_enabled(plugin: PluginId, enabled: bool) -> Result<()> {
                         &host.runtime,
                         enabled && host.config.dock.hide_taskbar,
                     );
-                });
-            }
-            PluginId::TopBar => {
-                with_host_read(|host| {
-                    window_controls::sync_bar_height(&host.runtime);
                 });
             }
             _ => {}
@@ -329,7 +354,7 @@ fn reclaim_disabled_memory(host: &Host) {
     otto_platform::trim_working_set();
 }
 
-pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
+pub(crate) fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
     with_host_mut(|host| {
         let previous = host.config.online_lyrics;
         host.config.online_lyrics = enabled;
@@ -342,7 +367,7 @@ pub fn set_online_lyrics_enabled(enabled: bool) -> Result<()> {
     })
 }
 
-pub fn set_dock_preferences(preferences: DockPreferences) -> Result<()> {
+pub(crate) fn set_dock_preferences(preferences: DockPreferences) -> Result<()> {
     let result = with_host_mut(|host| {
         let previous = host.config.dock;
         host.config.dock = preferences;
@@ -452,11 +477,14 @@ fn start_window_controls(host: &Host) -> Result<()> {
     window_controls::start(
         &host.runtime,
         surface(host, SurfaceSlot::WindowControls)?.0 as isize,
+        crate::theme_state::appearance(&host.runtime),
     )
 }
 
 fn start_genie(host: &Host) -> Result<()> {
-    genie::start(&host.runtime, surface(host, SurfaceSlot::Genie)?.0 as isize)
+    genie::start(&host.runtime, surface(host, SurfaceSlot::Genie)?.0 as isize)?;
+    otto_platform::set_native_minimize_intercept_enabled(true);
+    Ok(())
 }
 
 fn start_control_center(host: &Host) -> Result<()> {
@@ -493,6 +521,7 @@ fn stop_window_controls(runtime: &RuntimeContext) {
 }
 
 fn stop_genie(runtime: &RuntimeContext) {
+    otto_platform::set_native_minimize_intercept_enabled(false);
     genie::stop(runtime);
 }
 
@@ -505,6 +534,10 @@ fn stop_spotlight(runtime: &RuntimeContext) {
 }
 
 fn report_plugin_failure(plugin: PluginId, error: &Error) {
+    otto_platform::log_error(
+        "host",
+        &format!("plugin {} failed to start: {error}", plugin.name()),
+    );
     let message = format!("Otto plugin {} failed to start: {error}\0", plugin.name());
     let wide: Vec<u16> = message.encode_utf16().collect();
     unsafe {

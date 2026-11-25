@@ -73,7 +73,7 @@ pub fn glass_color(
 }
 
 #[must_use]
-pub fn glass_color_lit(
+pub(super) fn glass_color_lit(
     params: &GlassParams,
     shape: &GlassShape,
     backdrop: &GlassBackdrop<'_>,

@@ -6,10 +6,10 @@ use otto_core::{
 };
 
 use super::{
-    collect_dock_entries_with_options, force_quit_entry, fullscreen_on_primary,
-    launch_new_instance, open_file_with_dock_entry, overflow_dock_entry, pin_entry_at_target,
-    remove_pinned_app, reorder_pinned_apps, reveal_entry_in_explorer, toggle_pin_entry,
-    window_overlaps_zone,
+    collect_dock_entries_with_options, force_quit_entry, fullscreen_on_monitor,
+    fullscreen_on_primary, launch_new_instance, open_file_with_dock_entry, overflow_dock_entry,
+    pin_entry_at_target, remove_pinned_app, reorder_pinned_apps, reveal_entry_in_explorer,
+    toggle_pin_entry, window_overlaps_zone,
 };
 use super::{extract_dock_icon, extract_window_icon, read_downloads_active_progress};
 
@@ -56,6 +56,10 @@ impl DockPort for WindowsDockPort {
 
     fn fullscreen_on_primary(&self, width: i32, height: i32, own_pid: u32) -> bool {
         fullscreen_on_primary(width, height, own_pid)
+    }
+
+    fn fullscreen_on_monitor(&self, bounds: Rect, own_pid: u32) -> bool {
+        fullscreen_on_monitor(bounds, own_pid)
     }
 
     fn toggle_pin(&self, entry: &DockEntry) {

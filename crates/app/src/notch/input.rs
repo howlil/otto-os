@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use otto_core::{FocusSubMode, HitTarget, NotchExpandedTab};
+use otto_core::{HitTarget, NotchExpandedTab};
 
 use super::NotchController;
 use super::NotchHotkey;
@@ -36,36 +36,14 @@ impl NotchController {
                     return NotchUpdate::default();
                 }
                 self.clear_focus_dismissed();
-                match self.focus_mode {
-                    FocusSubMode::Pomodoro => {
-                        let previous = self.pomodoro.status;
-                        self.pomodoro.toggle_run();
-                        self.note_pomodoro_transition(previous, now);
-                        self.clock.restart(now_ms);
-                        self.alert_until = None;
-                        NotchUpdate {
-                            changed: true,
-                            effect: None,
-                        }
-                    }
-                    FocusSubMode::Timer => {
-                        self.quick_timer.toggle_run();
-                        self.timer_clock.restart(now_ms);
-                        self.alert_until = None;
-                        NotchUpdate {
-                            changed: true,
-                            effect: None,
-                        }
-                    }
-                    FocusSubMode::Stopwatch => {
-                        self.stopwatch_clock.sync(&mut self.stopwatch, now_ms, true);
-                        self.stopwatch.toggle_run();
-                        self.stopwatch_clock.restart(now_ms);
-                        NotchUpdate {
-                            changed: true,
-                            effect: None,
-                        }
-                    }
+                let previous = self.pomodoro.status;
+                self.pomodoro.toggle_run();
+                self.note_pomodoro_transition(previous, now);
+                self.clock.restart(now_ms);
+                self.alert_until = None;
+                NotchUpdate {
+                    changed: true,
+                    effect: None,
                 }
             }
         }
@@ -109,14 +87,20 @@ impl NotchController {
     pub(crate) fn handle_click(&mut self, target: HitTarget) -> NotchUpdate {
         self.press_active = false;
         match target {
-            HitTarget::FocusMode(mode) => self.handle_focus_mode_click(mode),
             HitTarget::FocusStatsRange(_)
             | HitTarget::FocusStatsDay(_)
+            | HitTarget::FocusHeatmapFilter(_)
+            | HitTarget::FocusHeatmapCell(_)
             | HitTarget::FocusStatsOpenSettings => self.handle_focus_stats_click(target),
             HitTarget::PomodoroPlayPause
             | HitTarget::PomodoroReset
             | HitTarget::PomodoroSkip
             | HitTarget::PomodoroPreset(_)
+            | HitTarget::PomodoroCategoryPill
+            | HitTarget::PomodoroCategoryOption(_)
+            | HitTarget::PomodoroDurationDec
+            | HitTarget::PomodoroDurationInc
+            | HitTarget::PomodoroTimeEdit
             | HitTarget::PomodoroStartNext
             | HitTarget::PomodoroExtendFive => self.handle_pomodoro_click(target),
             HitTarget::NotchTabPomodoro
@@ -180,7 +164,10 @@ impl NotchController {
             || !matches!(
                 target,
                 HitTarget::Notch
-                    | HitTarget::FocusMode(_)
+                    | HitTarget::PomodoroCategoryPill
+                    | HitTarget::PomodoroDurationDec
+                    | HitTarget::PomodoroDurationInc
+                    | HitTarget::PomodoroTimeEdit
                     | HitTarget::PomodoroPreset(_)
                     | HitTarget::PomodoroPlayPause
                     | HitTarget::PomodoroReset
@@ -218,11 +205,7 @@ impl NotchController {
             steps
         };
         let changed = match self.notch_tab {
-            NotchExpandedTab::Pomodoro => match self.focus_mode {
-                FocusSubMode::Pomodoro => self.pomodoro.adjust_minutes(step),
-                FocusSubMode::Timer => self.quick_timer.adjust_minutes(step),
-                FocusSubMode::Stopwatch => false,
-            },
+            NotchExpandedTab::Pomodoro => self.pomodoro.adjust_minutes(step),
             NotchExpandedTab::Shelf => self.shelf.step_page(-step),
             NotchExpandedTab::Clipboard => self.clipboard.step_page((-step) as isize),
             NotchExpandedTab::Tasks => self.tasks.step_page((-step) as isize),

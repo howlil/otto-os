@@ -79,7 +79,7 @@ pub(crate) fn settings_snapshot(
             launch_at_login,
             hotkeys_enabled: runtime.hotkeys_enabled.get(),
             capture_visible: runtime.capture_visible.get(),
-            classic_logo: runtime.classic_logo_enabled.get(),
+            brand_icon: runtime.brand_icon.get(),
             dynamic_island: runtime.dynamic_island_enabled.get(),
             privacy_indicators: runtime.privacy_indicators_enabled.get(),
             clipboard_history: runtime.clipboard_history_enabled.get(),
@@ -88,6 +88,7 @@ pub(crate) fn settings_snapshot(
             media_module: runtime.media_module_enabled.get(),
             focus_module: runtime.focus_module_enabled.get(),
             background_cleanup: runtime.background_cleanup_enabled.get(),
+            finder_enabled: runtime.finder_enabled.get(),
             quick_capture: runtime.quick_capture_enabled.get(),
         },
     }
@@ -103,6 +104,11 @@ pub(super) fn cycle_menu_bar_hide(runtime: &RuntimeContext) {
     let mut prefs = runtime.menu_bar.get();
     prefs.hide_mode = prefs.hide_mode.next();
     runtime.pending_menu_bar.set(Some(prefs));
+}
+
+pub(super) fn cycle_brand_icon(runtime: &RuntimeContext) {
+    let next = runtime.brand_icon.get().next();
+    runtime.pending_brand_icon.set(Some(next));
 }
 
 pub(super) fn set_appearance_style(runtime: &RuntimeContext, style: AppearanceStyle) {
@@ -183,6 +189,9 @@ pub(crate) fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
                 &runtime.pending_background_cleanup,
             );
         }
+        OttoSettingKind::Finder => {
+            toggle_flag(&runtime.finder_enabled, &runtime.pending_finder_enabled);
+        }
         OttoSettingKind::MediaModule => {
             toggle_flag(&runtime.media_module_enabled, &runtime.pending_media_module);
         }
@@ -217,9 +226,6 @@ pub(crate) fn toggle_setting(runtime: &RuntimeContext, kind: OttoSettingKind) {
         }
         OttoSettingKind::Hotkeys => {
             toggle_flag(&runtime.hotkeys_enabled, &runtime.pending_hotkeys_enabled);
-        }
-        OttoSettingKind::ClassicLogo => {
-            toggle_flag(&runtime.classic_logo_enabled, &runtime.pending_classic_logo);
         }
         OttoSettingKind::MenuBarBackground
         | OttoSettingKind::MenuBarKeepNotch

@@ -6,8 +6,8 @@ use windows::Win32::UI::Shell::{
     ABN_FULLSCREENAPP, ABN_POSCHANGED, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SHOW_WINDOW_CMD, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-    SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW,
+    FindWindowExW, FindWindowW, SHOW_WINDOW_CMD, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE,
+    SW_HIDE, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -166,12 +166,16 @@ pub struct AppBar {
     top: TopReservation,
 }
 
+fn sh_appbar(message: u32, data: &mut APPBARDATA) -> usize {
+    unsafe { SHAppBarMessage(message, data) }
+}
+
 impl AppBar {
     #[must_use]
     pub fn register(hwnd: isize) -> Self {
         let hwnd = HWND(hwnd as *mut _);
         let mut data = Self::data(hwnd);
-        let live_state = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) };
+        let live_state = sh_appbar(ABM_GETSTATE, &mut data);
         let live_work_area = rect_to_area(Self::get_work_area());
         let primary = primary_screen();
         let screen = (primary.width, primary.height);
@@ -198,7 +202,7 @@ impl AppBar {
         if matches!(self.top, TopReservation::None) {
             let mut registration = Self::data(self.hwnd);
             registration.uCallbackMessage = APPBAR_CALLBACK_MESSAGE;
-            self.top = if unsafe { SHAppBarMessage(ABM_NEW, &mut registration) } != 0 {
+            self.top = if sh_appbar(ABM_NEW, &mut registration) != 0 {
                 TopReservation::Shell
             } else {
                 TopReservation::WorkArea { written: false }
@@ -218,9 +222,7 @@ impl AppBar {
             TopReservation::None | TopReservation::WorkArea { written: false } => {}
             TopReservation::Shell => {
                 let mut data = Self::data(self.hwnd);
-                unsafe {
-                    SHAppBarMessage(ABM_REMOVE, &mut data);
-                }
+                sh_appbar(ABM_REMOVE, &mut data);
             }
             TopReservation::WorkArea { written: true } => {
                 Self::set_work_area(self.original_work_area);
@@ -238,11 +240,9 @@ impl AppBar {
             right: screen_width,
             bottom: bar_height,
         };
-        unsafe {
-            SHAppBarMessage(ABM_QUERYPOS, &mut data);
-            data.rc.bottom = data.rc.top + bar_height;
-            SHAppBarMessage(ABM_SETPOS, &mut data);
-        }
+        sh_appbar(ABM_QUERYPOS, &mut data);
+        data.rc.bottom = data.rc.top + bar_height;
+        sh_appbar(ABM_SETPOS, &mut data);
     }
 
     fn write_work_area(&mut self, screen_width: i32, screen_height: i32, bar_height: i32) {
@@ -336,9 +336,7 @@ impl AppBar {
     fn set_taskbar_state(&self, state: usize) {
         let mut data = Self::data(self.hwnd);
         data.lParam = LPARAM(state as isize);
-        unsafe {
-            SHAppBarMessage(ABM_SETSTATE, &mut data);
-        }
+        sh_appbar(ABM_SETSTATE, &mut data);
     }
 
     fn set_tray_visibility(cmd: SHOW_WINDOW_CMD) {
@@ -347,6 +345,22 @@ impl AppBar {
                 && !tray.0.is_null()
             {
                 let _ = ShowWindow(tray, cmd);
+            }
+            let mut prev = HWND::default();
+            for _ in 0..64 {
+                let Ok(next) = FindWindowExW(
+                    None,
+                    (!prev.0.is_null()).then_some(prev),
+                    w!("Shell_SecondaryTrayWnd"),
+                    PCWSTR::null(),
+                ) else {
+                    break;
+                };
+                if next.0.is_null() || next == prev {
+                    break;
+                }
+                let _ = ShowWindow(next, cmd);
+                prev = next;
             }
         }
     }
@@ -361,12 +375,81 @@ impl AppBar {
 }
 
 #[derive(Debug)]
-pub struct DockReservation {
+pub struct TopEdgeReservation {
     hwnd: HWND,
-    applied: Option<(i32, i32, i32)>,
+    applied: Option<(otto_core::Rect, i32)>,
     applied_rect: Option<WorkArea>,
 }
 
+impl TopEdgeReservation {
+    #[must_use]
+    pub fn register(hwnd: isize) -> Option<Self> {
+        let hwnd = HWND(hwnd as *mut _);
+        let mut data = AppBar::data(hwnd);
+        data.uCallbackMessage = APPBAR_CALLBACK_MESSAGE;
+        (sh_appbar(ABM_NEW, &mut data) != 0).then_some(Self {
+            hwnd,
+            applied: None,
+            applied_rect: None,
+        })
+    }
+
+    pub fn reserve(&mut self, bounds: otto_core::Rect, height: i32) -> bool {
+        let request = (bounds, height);
+        if self.applied == Some(request) || height <= 0 || height >= bounds.height {
+            return false;
+        }
+        self.apply(request, true)
+    }
+
+    pub fn reapply(&mut self, bounds: otto_core::Rect, height: i32) -> bool {
+        if height <= 0 || height >= bounds.height {
+            return false;
+        }
+        self.apply((bounds, height), false)
+    }
+
+    fn apply(&mut self, request: (otto_core::Rect, i32), force: bool) -> bool {
+        let (bounds, height) = request;
+        let mut data = AppBar::data(self.hwnd);
+        data.uEdge = ABE_TOP;
+        data.rc = RECT {
+            left: bounds.x,
+            top: bounds.y,
+            right: bounds.right(),
+            bottom: bounds.y + height,
+        };
+        sh_appbar(ABM_QUERYPOS, &mut data);
+        data.rc.left = bounds.x;
+        data.rc.right = bounds.right();
+        data.rc.top = data.rc.top.clamp(bounds.y, bounds.bottom() - height);
+        data.rc.bottom = data.rc.top + height;
+        let queried = rect_to_area(data.rc);
+        if !force && self.applied == Some(request) && self.applied_rect == Some(queried) {
+            return false;
+        }
+        sh_appbar(ABM_SETPOS, &mut data);
+        self.applied = Some(request);
+        self.applied_rect = Some(rect_to_area(data.rc));
+        true
+    }
+}
+
+impl Drop for TopEdgeReservation {
+    fn drop(&mut self) {
+        let mut data = AppBar::data(self.hwnd);
+        sh_appbar(ABM_REMOVE, &mut data);
+    }
+}
+
+#[derive(Debug)]
+pub struct DockReservation {
+    hwnd: HWND,
+    applied: Option<(otto_core::Rect, i32)>,
+    applied_rect: Option<WorkArea>,
+}
+
+#[cfg(test)]
 const fn dock_reservation_needs_apply(
     applied: Option<(i32, i32, i32)>,
     applied_rect: Option<WorkArea>,
@@ -386,7 +469,7 @@ impl DockReservation {
         let hwnd = HWND(hwnd as *mut _);
         let mut data = AppBar::data(hwnd);
         data.uCallbackMessage = DOCK_APPBAR_CALLBACK_MESSAGE;
-        (unsafe { SHAppBarMessage(ABM_NEW, &mut data) } != 0).then_some(Self {
+        (sh_appbar(ABM_NEW, &mut data) != 0).then_some(Self {
             hwnd,
             applied: None,
             applied_rect: None,
@@ -394,43 +477,64 @@ impl DockReservation {
     }
 
     pub fn reserve(&mut self, screen_width: i32, screen_height: i32, height: i32) -> bool {
-        let request = (screen_width, screen_height, height);
-        if self.applied == Some(request) || height <= 0 || height >= screen_height {
+        self.reserve_in_bounds(
+            otto_core::Rect {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            },
+            height,
+        )
+    }
+
+    pub fn reapply(&mut self, screen_width: i32, screen_height: i32, height: i32) -> bool {
+        self.reapply_in_bounds(
+            otto_core::Rect {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            },
+            height,
+        )
+    }
+
+    pub fn reserve_in_bounds(&mut self, bounds: otto_core::Rect, height: i32) -> bool {
+        let request = (bounds, height);
+        if self.applied == Some(request) || height <= 0 || height >= bounds.height {
             return false;
         }
         self.apply(request, true)
     }
 
-    pub fn reapply(&mut self, screen_width: i32, screen_height: i32, height: i32) -> bool {
-        if height <= 0 || height >= screen_height {
+    pub fn reapply_in_bounds(&mut self, bounds: otto_core::Rect, height: i32) -> bool {
+        if height <= 0 || height >= bounds.height {
             return false;
         }
-        self.apply((screen_width, screen_height, height), false)
+        self.apply((bounds, height), false)
     }
 
-    fn apply(&mut self, request: (i32, i32, i32), force: bool) -> bool {
-        let (screen_width, screen_height, height) = request;
+    fn apply(&mut self, request: (otto_core::Rect, i32), force: bool) -> bool {
+        let (bounds, height) = request;
         let mut data = AppBar::data(self.hwnd);
         data.uEdge = ABE_BOTTOM;
         data.rc = RECT {
-            left: 0,
-            top: screen_height - height,
-            right: screen_width,
-            bottom: screen_height,
+            left: bounds.x,
+            top: bounds.bottom() - height,
+            right: bounds.right(),
+            bottom: bounds.bottom(),
         };
-        unsafe {
-            SHAppBarMessage(ABM_QUERYPOS, &mut data);
-            data.rc.top = data.rc.bottom - height;
-        }
+        sh_appbar(ABM_QUERYPOS, &mut data);
+        data.rc.left = bounds.x;
+        data.rc.right = bounds.right();
+        data.rc.bottom = data.rc.bottom.clamp(bounds.y + height, bounds.bottom());
+        data.rc.top = data.rc.bottom - height;
         let queried = rect_to_area(data.rc);
-        if !force
-            && !dock_reservation_needs_apply(self.applied, self.applied_rect, request, queried)
-        {
+        if !force && self.applied == Some(request) && self.applied_rect == Some(queried) {
             return false;
         }
-        unsafe {
-            SHAppBarMessage(ABM_SETPOS, &mut data);
-        }
+        sh_appbar(ABM_SETPOS, &mut data);
         self.applied = Some(request);
         self.applied_rect = Some(rect_to_area(data.rc));
         true
@@ -440,9 +544,7 @@ impl DockReservation {
 impl Drop for DockReservation {
     fn drop(&mut self) {
         let mut data = AppBar::data(self.hwnd);
-        unsafe {
-            SHAppBarMessage(ABM_REMOVE, &mut data);
-        }
+        sh_appbar(ABM_REMOVE, &mut data);
     }
 }
 
@@ -502,9 +604,7 @@ fn apply_restore_plan(plan: &RestorePlan) {
             lParam: LPARAM(state as isize),
             ..APPBARDATA::default()
         };
-        unsafe {
-            SHAppBarMessage(ABM_SETSTATE, &mut data);
-        }
+        sh_appbar(ABM_SETSTATE, &mut data);
     }
 }
 

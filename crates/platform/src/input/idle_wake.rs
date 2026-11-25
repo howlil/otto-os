@@ -1,16 +1,39 @@
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
-use otto_core::PointerEdgeWatch;
+use otto_core::{MonitorEdgeWatch, Rect};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW};
+
+struct EdgeWatches {
+    top: Vec<MonitorEdgeWatch>,
+    bottom: Vec<MonitorEdgeWatch>,
+}
+
+impl EdgeWatches {
+    const fn new() -> Self {
+        Self {
+            top: Vec::new(),
+            bottom: Vec::new(),
+        }
+    }
+
+    fn is_watching(&self) -> bool {
+        self.top.iter().any(MonitorEdgeWatch::is_watching)
+            || self.bottom.iter().any(MonitorEdgeWatch::is_watching)
+    }
+
+    fn touches(&self, x: i32, y: i32) -> bool {
+        self.top.iter().any(|watch| watch.touches(x, y))
+            || self.bottom.iter().any(|watch| watch.touches(x, y))
+    }
+}
 
 static WAKE_TARGET: AtomicIsize = AtomicIsize::new(0);
 static WAKE_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
-static EDGE_SCREEN_WIDTH: AtomicI32 = AtomicI32::new(0);
-static EDGE_SCREEN_HEIGHT: AtomicI32 = AtomicI32::new(0);
-static EDGE_TOP: AtomicBool = AtomicBool::new(false);
-static EDGE_BOTTOM_BAND: AtomicI32 = AtomicI32::new(0);
+static ANY_EDGE_WATCHED: AtomicBool = AtomicBool::new(false);
+static EDGE_WATCHES: Mutex<EdgeWatches> = Mutex::new(EdgeWatches::new());
 
 pub fn register_idle_wake(target_hwnd: isize, message: u32) {
     WAKE_PENDING.store(false, Ordering::SeqCst);
@@ -22,8 +45,11 @@ pub fn unregister_idle_wake() {
     WAKE_TARGET.store(0, Ordering::SeqCst);
     WAKE_MESSAGE.store(0, Ordering::SeqCst);
     WAKE_PENDING.store(false, Ordering::SeqCst);
-    EDGE_TOP.store(false, Ordering::SeqCst);
-    EDGE_BOTTOM_BAND.store(0, Ordering::SeqCst);
+    ANY_EDGE_WATCHED.store(false, Ordering::SeqCst);
+    if let Ok(mut watches) = EDGE_WATCHES.lock() {
+        watches.top.clear();
+        watches.bottom.clear();
+    }
 }
 
 pub fn acknowledge_idle_wake() {
@@ -31,54 +57,77 @@ pub fn acknowledge_idle_wake() {
 }
 
 pub fn watch_top_edge(enabled: bool, screen_width: i32, screen_height: i32) {
-    store_edge_screen(screen_width, screen_height);
-    EDGE_TOP.store(enabled, Ordering::Release);
+    if enabled {
+        watch_top_edges(&[Rect {
+            x: 0,
+            y: 0,
+            width: screen_width,
+            height: screen_height,
+        }]);
+    } else {
+        watch_top_edges(&[]);
+    }
+}
+
+pub fn watch_top_edges(monitors: &[Rect]) {
+    if let Ok(mut watches) = EDGE_WATCHES.lock() {
+        watches.top.clear();
+        for &bounds in monitors {
+            if bounds.width > 0 && bounds.height > 0 {
+                watches.top.push(MonitorEdgeWatch {
+                    bounds,
+                    top: true,
+                    bottom_band: None,
+                });
+            }
+        }
+        ANY_EDGE_WATCHED.store(watches.is_watching(), Ordering::Release);
+    }
 }
 
 pub fn watch_bottom_edge(band: Option<i32>, screen_width: i32, screen_height: i32) {
-    store_edge_screen(screen_width, screen_height);
-    EDGE_BOTTOM_BAND.store(band.unwrap_or(0).max(0), Ordering::Release);
+    match band.filter(|&value| value > 0) {
+        Some(value) => watch_bottom_edges(&[(
+            Rect {
+                x: 0,
+                y: 0,
+                width: screen_width,
+                height: screen_height,
+            },
+            value,
+        )]),
+        None => watch_bottom_edges(&[]),
+    }
 }
 
-fn store_edge_screen(screen_width: i32, screen_height: i32) {
-    EDGE_SCREEN_WIDTH.store(screen_width, Ordering::Release);
-    EDGE_SCREEN_HEIGHT.store(screen_height, Ordering::Release);
-}
-
-fn edge_watch() -> PointerEdgeWatch {
-    edge_watch_from(
-        EDGE_SCREEN_WIDTH.load(Ordering::Acquire),
-        EDGE_SCREEN_HEIGHT.load(Ordering::Acquire),
-        EDGE_TOP.load(Ordering::Acquire),
-        EDGE_BOTTOM_BAND.load(Ordering::Acquire),
-    )
-}
-
-const fn edge_watch_from(
-    screen_width: i32,
-    screen_height: i32,
-    top: bool,
-    bottom_band: i32,
-) -> PointerEdgeWatch {
-    PointerEdgeWatch {
-        screen_width,
-        screen_height,
-        top,
-        bottom_band: if bottom_band > 0 {
-            Some(bottom_band)
-        } else {
-            None
-        },
+pub fn watch_bottom_edges(monitors: &[(Rect, i32)]) {
+    if let Ok(mut watches) = EDGE_WATCHES.lock() {
+        watches.bottom.clear();
+        for &(bounds, band) in monitors {
+            if band > 0 && bounds.width > 0 && bounds.height > 0 {
+                watches.bottom.push(MonitorEdgeWatch {
+                    bounds,
+                    top: false,
+                    bottom_band: Some(band),
+                });
+            }
+        }
+        ANY_EDGE_WATCHED.store(watches.is_watching(), Ordering::Release);
     }
 }
 
 pub(crate) fn pointer_moved() {
-    let edges = edge_watch();
-    if !edges.is_watching() {
+    if !ANY_EDGE_WATCHED.load(Ordering::Acquire) {
         return;
     }
     let mut point = POINT::default();
-    if unsafe { GetCursorPos(&mut point) }.is_ok() && edges.touches(point.x, point.y) {
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    let touched = EDGE_WATCHES
+        .try_lock()
+        .is_ok_and(|watches| watches.touches(point.x, point.y));
+    if touched {
         request_idle_wake();
     }
 }
@@ -98,7 +147,25 @@ pub(crate) fn request_idle_wake() {
 
 #[cfg(test)]
 mod tests {
-    use super::edge_watch_from;
+    use otto_core::{MonitorEdgeWatch, PointerEdgeWatch, Rect};
+
+    const fn edge_watch_from(
+        screen_width: i32,
+        screen_height: i32,
+        top: bool,
+        bottom_band: i32,
+    ) -> PointerEdgeWatch {
+        PointerEdgeWatch {
+            screen_width,
+            screen_height,
+            top,
+            bottom_band: if bottom_band > 0 {
+                Some(bottom_band)
+            } else {
+                None
+            },
+        }
+    }
 
     #[test]
     fn a_zero_band_means_no_bottom_watch() {
@@ -120,5 +187,22 @@ mod tests {
         let edges = edge_watch_from(1920, 1080, true, 0);
         assert!(edges.touches(960, 0));
         assert!(edges.is_watching());
+    }
+
+    #[test]
+    fn secondary_monitor_watches_edges_in_virtual_coordinates() {
+        let right = MonitorEdgeWatch {
+            bounds: Rect {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            top: true,
+            bottom_band: Some(6),
+        };
+        assert!(right.touches(2500, 0));
+        assert!(right.touches(2500, 1439));
+        assert!(!right.touches(960, 0));
     }
 }

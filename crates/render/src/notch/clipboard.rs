@@ -1,13 +1,12 @@
 use otto_core::{ClipboardItem, ClipboardKind, ClipboardState, HitTarget, Layout, Rect, scale};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::notch::shelf::{
     SHELF_CLEAR_RED, SHELF_FOLDER_BLUE, SHELF_TEXT_SLATE, SHELF_URL_INDIGO, center_of,
 };
-use crate::{AMBER_WARN, CHARGING_GREEN, FOREGROUND, Renderer, rect_to_d2d, translate_rect};
+use crate::{AMBER_WARN, CHARGING_GREEN, Renderer, rect_to_d2d, translate_rect};
 
 fn clipboard_kind_tint(kind: ClipboardKind) -> D2D1_COLOR_F {
     match kind {
@@ -63,21 +62,22 @@ impl Renderer {
         hovered: Option<HitTarget>,
         clipboard_state: &ClipboardState,
     ) {
+        let ink = self.notch_ink();
         if !layout.clipboard.pager_button.is_empty() {
             let pager = translate_rect(layout.clipboard.pager_button, -offset_x);
             let is_hovered = hovered == Some(HitTarget::ClipboardPager);
             let fill = self
                 .brushes
-                .alpha_brush(FOREGROUND, if is_hovered { 0.17 } else { 0.09 } * alpha);
-            let border = self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha);
+                .alpha_brush(ink, if is_hovered { 0.17 } else { 0.09 } * alpha);
+            let border = self.brushes.alpha_brush(ink, 0.15 * alpha);
             self.draw_shelf_pill(pager, &fill, Some(&border));
             let label = format!(
                 "{}/{}",
                 clipboard_state.clamped_page() + 1,
                 clipboard_state.page_count().max(1)
             );
-            let fg = self.brushes.alpha_brush(FOREGROUND, 0.90 * alpha);
-            self.draw_text(&label, &self.text_tab, rect_to_d2d(pager), &fg);
+            let fg = self.brushes.alpha_brush(ink, 0.90 * alpha);
+            self.draw_tabular_text(&label, &self.text_tab, rect_to_d2d(pager), &fg);
         }
 
         if !layout.clipboard.pause_button.is_empty() {
@@ -110,9 +110,9 @@ impl Renderer {
                 )
             } else {
                 (
-                    self.brushes.alpha_brush(FOREGROUND, 0.09 * alpha),
-                    self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha),
-                    FOREGROUND,
+                    self.brushes.alpha_brush(ink, 0.09 * alpha),
+                    self.brushes.alpha_brush(ink, 0.15 * alpha),
+                    ink,
                 )
             };
             self.draw_shelf_pill(clear, &fill, Some(&border));
@@ -126,27 +126,27 @@ impl Renderer {
         if body.width <= 0 || body.height <= 0 {
             return;
         }
+        let ink = self.notch_ink();
         let radius = scale(12, self.dpi) as f32;
-        let card = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(body),
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let fill = self.brushes.alpha_brush(FOREGROUND, 0.045 * alpha);
+        let fill = self.brushes.alpha_brush(ink, 0.045 * alpha);
         let border = self.brushes.alpha_brush(
-            if paused { AMBER_WARN } else { FOREGROUND },
-            if paused { 0.34 } else { 0.16 } * alpha,
+            if paused { AMBER_WARN } else { ink },
+            if paused {
+                0.34
+            } else if self.high_contrast.get() {
+                0.72
+            } else {
+                0.16
+            } * alpha,
         );
-        unsafe {
-            self.target.FillRoundedRectangle(&card, &fill);
-            self.target.DrawRoundedRectangle(&card, &border, 1.0, None);
-        }
+        self.draw_rounded_box(body, radius, &fill);
+        self.draw_rounded_box_stroke(body, radius, &border, 1.0);
 
         let center = center_of(body);
         let icon_r = scale(8, self.dpi) as f32;
         let stroke = (icon_r * 0.22).max(1.3);
         let icon_brush = self.brushes.alpha_brush(
-            if paused { AMBER_WARN } else { FOREGROUND },
+            if paused { AMBER_WARN } else { ink },
             if paused { 0.86 } else { 0.72 } * alpha,
         );
         self.draw_clipboard_glyph(
@@ -166,7 +166,7 @@ impl Renderer {
         } else {
             "Copy text, links, or files to keep them here"
         };
-        let title_brush = self.brushes.alpha_brush(FOREGROUND, 0.90 * alpha);
+        let title_brush = self.brushes.alpha_brush(ink, 0.90 * alpha);
         let title_rect = D2D_RECT_F {
             left: body.x as f32 + scale(12, self.dpi) as f32,
             top: body.y as f32 + scale(41, self.dpi) as f32,
@@ -175,7 +175,7 @@ impl Renderer {
         };
         self.draw_text(title, &self.text_tab, title_rect, &title_brush);
 
-        let hint_brush = self.brushes.alpha_brush(FOREGROUND, 0.56 * alpha);
+        let hint_brush = self.brushes.alpha_brush(ink, 0.56 * alpha);
         let hint_rect = D2D_RECT_F {
             left: body.x as f32 + scale(16, self.dpi) as f32,
             top: body.y as f32 + scale(61, self.dpi) as f32,
@@ -196,6 +196,7 @@ impl Renderer {
         alpha: f32,
         hovered: Option<HitTarget>,
     ) -> Result<()> {
+        let ink = self.notch_ink();
         let slot_index = u8::try_from(slot).ok();
         let row_hovered = slot_index.is_some_and(|idx| {
             matches!(
@@ -206,12 +207,7 @@ impl Renderer {
         let remove_hovered =
             slot_index.is_some_and(|idx| hovered == Some(HitTarget::ClipboardRemoveItem(idx)));
 
-        let radius = scale(7, self.dpi) as f32;
-        let shape = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(row),
-            radiusX: radius,
-            radiusY: radius,
-        };
+        let radius = scale(8, self.dpi) as f32;
         let (fill, border) = if copied {
             (
                 self.brushes.alpha_brush(CHARGING_GREEN, 0.22 * alpha),
@@ -219,19 +215,17 @@ impl Renderer {
             )
         } else if row_hovered {
             (
-                self.brushes.alpha_brush(FOREGROUND, 0.13 * alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.24 * alpha),
+                self.brushes.alpha_brush(ink, 0.13 * alpha),
+                self.brushes.alpha_brush(ink, 0.24 * alpha),
             )
         } else {
             (
-                self.brushes.alpha_brush(FOREGROUND, 0.065 * alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.11 * alpha),
+                self.brushes.alpha_brush(ink, 0.065 * alpha),
+                self.brushes.alpha_brush(ink, 0.11 * alpha),
             )
         };
-        unsafe {
-            self.target.FillRoundedRectangle(&shape, &fill);
-            self.target.DrawRoundedRectangle(&shape, &border, 1.0, None);
-        }
+        self.draw_rounded_box(row, radius, &fill);
+        self.draw_rounded_box_stroke(row, radius, &border, 1.0);
 
         self.draw_clipboard_row_kind_glyph(row, item.kind, copied, alpha)?;
 
@@ -257,7 +251,7 @@ impl Renderer {
         } else {
             (
                 item.meta.as_str(),
-                self.brushes.alpha_brush(FOREGROUND, 0.56 * alpha),
+                self.brushes.alpha_brush(ink, 0.56 * alpha),
             )
         };
         self.draw_text(
@@ -276,10 +270,9 @@ impl Renderer {
                 right: text_right as f32,
                 bottom: row.bottom() as f32,
             };
-            let preview_brush = self.brushes.alpha_brush(
-                FOREGROUND,
-                if row_hovered || copied { 0.96 } else { 0.88 } * alpha,
-            );
+            let preview_brush = self
+                .brushes
+                .alpha_brush(ink, if row_hovered || copied { 0.96 } else { 0.88 } * alpha);
             self.draw_text(
                 &item.preview,
                 &self.text_pomodoro_sub,

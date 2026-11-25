@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings', 'native-minimize', 'window-cover')]
+    [ValidateSet('all', 'full', 'success', 'false', 'worst', 'edge', 'recovery', 'fullscreen', 'genie', 'dock', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference', 'dock-settings', 'native-minimize', 'window-cover')]
     [string]$Scenario = 'all',
     [string]$ExecutablePath = 'target\release\otto-os.exe',
     [string]$ArtifactDirectory = 'artifacts\e2e',
@@ -864,15 +864,8 @@ function Assert-InitialTopology($process) {
     if ($panel -or $menu -or $controlCenter) {
         throw 'Initial popup, Control Center, or expanded panel is visible.'
     }
-    if ($controls -and $controls.Left -lt $bar.Right -and $controls.Right -gt $bar.Left -and $controls.Top -lt $bar.Bottom -and $controls.Bottom -gt $bar.Top) {
-        [void]$script:observations.Add([pscustomobject][ordered]@{
-            scenario = $script:activeScenario
-            checkpoint = '01-baseline-window-controls-overlap'
-            expectation = 'Window controls stay in the external application titlebar and do not cover Otto top-bar targets.'
-            status = 'WARNING'
-            message = "OttoWindowControls overlaps OttoNotchBar: controls=($($controls.Left),$($controls.Top),$($controls.Width),$($controls.Height)) bar=($($bar.Left),$($bar.Top),$($bar.Width),$($bar.Height))"
-        })
-        Write-Output 'OBSERVATION_WARNING window-controls-overlap-top-bar'
+    if ($controls) {
+        throw "Retired OttoWindowControls overlay window must not exist: controls=($($controls.Left),$($controls.Top),$($controls.Width),$($controls.Height))"
     }
 }
 
@@ -1465,19 +1458,18 @@ function Get-CaptionFrameRight($window) {
     return $frame
 }
 
-function Get-CoverCircleCenterX($cover, [int]$slot) {
-    $rightMargin = Convert-ToScaled 14
-    $spacing = Convert-ToScaled 20
-    $closeX = $cover.Right - $rightMargin
-    return [int]($closeX - (2 - $slot) * $spacing)
+function Get-BarWindowControlCenterX($bar, [int]$slot) {
+    $leftEdge = $bar.Left + (Convert-ToScaled 8) + (Convert-ToScaled 34) + (Convert-ToScaled 2)
+    $slotWidth = [int]((Convert-ToScaled 60) / 3)
+    return [int]($leftEdge + $slot * $slotWidth + [int]($slotWidth / 2))
 }
 
-function Assert-CoverCircle([string]$path, $cover, [int]$slot, [string]$name, [scriptblock]$isColor) {
-    $x = Get-CoverCircleCenterX $cover $slot
-    $y = [int](($cover.Top + $cover.Bottom) / 2)
+function Assert-BarTrafficCircle([string]$path, $bar, [int]$slot, [string]$name, [scriptblock]$isColor) {
+    $x = Get-BarWindowControlCenterX $bar $slot
+    $y = [int](($bar.Top + $bar.Bottom) / 2)
     $color = Get-RegionColor $path ([pscustomobject]@{ X = $x - 2; Y = $y - 2; Width = 4; Height = 4 })
     if (-not (& $isColor $color)) {
-        throw "The $name circle is not drawn at the expected traffic light position (rgb=$($color.R),$($color.G),$($color.B) at $x,$y)."
+        throw "The $name circle is not drawn at the expected Top Bar traffic light position (rgb=$($color.R),$($color.G),$($color.B) at $x,$y)."
     }
 }
 
@@ -1485,38 +1477,27 @@ function Run-WindowCoverFlow {
     $process = Start-Otto 'window-cover'
     $probe = Start-ProbeWindow "OttoE2ECover$runId"
     try {
-        $form = Wait-ProbeForm $probe 'cover probe window to open'
+        $form = Wait-ProbeForm $probe 'window controls probe window to open'
         [OttoE2ENative]::Click([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
         Wait-Until { [OttoE2EWindowState]::Foreground() -eq $form.Handle } 'probe window to take focus' 3000
-        Wait-Until { $null -ne (Get-OttoWindow $process.Id 'OttoWindowControls' $true) } 'cover overlay to appear' 5000
         Start-Sleep -Milliseconds 400
-        $cover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-        $frame = Get-CaptionFrameRight $form
-        $expectedWidth = Convert-ToScaled 138
-        if ([Math]::Abs($cover.Right - $frame.Right) -gt 2) {
-            throw "The cover right edge $($cover.Right) does not match the window frame right edge $($frame.Right)."
+        $legacyCover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
+        if ($legacyCover) {
+            throw 'Retired OttoWindowControls overlay window must not appear over external windows.'
         }
-        if ([Math]::Abs($cover.Width - $expectedWidth) -gt 3) {
-            throw "The cover is $($cover.Width) px wide; the native button strip is $expectedWidth px."
-        }
-        if ($cover.Top -lt $frame.Top -or $cover.Top -gt $frame.Top + (Convert-ToScaled 4)) {
-            throw "The cover top $($cover.Top) is not aligned with the window top $($frame.Top)."
+        $bar = Get-OttoWindow $process.Id 'OttoNotchBar' $true
+        if (-not $bar) {
+            throw 'OttoNotchBar is not visible for Top Bar window controls.'
         }
         [OttoE2ENative]::MoveCursor($form.Left + 40, $form.Top + 200)
         Start-Sleep -Milliseconds 300
-        $shot = Save-Screenshot 'window-cover' '01-cover'
-        Assert-CoverCircle $shot $cover 0 'yellow minimize' { param($c) $c.R -gt 200 -and $c.G -gt 150 -and $c.B -lt 110 }
-        Assert-CoverCircle $shot $cover 1 'green zoom' { param($c) $c.G -gt 150 -and $c.R -lt 120 }
-        Assert-CoverCircle $shot $cover 2 'red close' { param($c) $c.R -gt 180 -and $c.G -lt 120 }
-        $midY = [int](($cover.Top + $cover.Bottom) / 2)
-        $titleBar = Get-RegionColor $shot ([pscustomobject]@{ X = $cover.Left - 12; Y = $midY - 2; Width = 4; Height = 4 })
-        $coverFill = Get-RegionColor $shot ([pscustomobject]@{ X = $cover.Left + 2; Y = $midY - 2; Width = 4; Height = 4 })
-        if (-not (Test-ColorNear $coverFill @($titleBar.R, $titleBar.G, $titleBar.B) 14)) {
-            throw "The cover fill rgb=$($coverFill.R),$($coverFill.G),$($coverFill.B) does not match the title bar rgb=$($titleBar.R),$($titleBar.G),$($titleBar.B)."
-        }
-        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=01-covers-native-buttons'
-        $y = [int](($cover.Top + $cover.Bottom) / 2)
-        $zoomX = Get-CoverCircleCenterX $cover 1
+        $shot = Save-Screenshot 'window-cover' '01-top-bar-controls'
+        Assert-BarTrafficCircle $shot $bar 0 'red close' { param($c) $c.R -gt 180 -and $c.G -lt 120 }
+        Assert-BarTrafficCircle $shot $bar 1 'yellow minimize' { param($c) $c.R -gt 200 -and $c.G -gt 150 -and $c.B -lt 110 }
+        Assert-BarTrafficCircle $shot $bar 2 'green zoom' { param($c) $c.G -gt 150 -and $c.R -lt 120 }
+        Write-Output 'CHECKPOINT_PASS scenario=window-cover name=01-top-bar-zero-overlay-controls'
+        $y = [int](($bar.Top + $bar.Bottom) / 2)
+        $zoomX = Get-BarWindowControlCenterX $bar 2
         [OttoE2ENative]::Click($zoomX, $y)
         Wait-Until { [OttoE2EWindowState]::IsZoomed($form.Handle) } 'green button to maximize the probe window' 3000
         Start-Sleep -Milliseconds 500
@@ -1524,11 +1505,8 @@ function Run-WindowCoverFlow {
         Write-Output 'CHECKPOINT_PASS scenario=window-cover name=02-zoom-maximizes'
         [void][OttoE2EWindowState]::ShowWindow($form.Handle, 9)
         Wait-Until { -not [OttoE2EWindowState]::IsZoomed($form.Handle) } 'probe window to restore' 3000
-        Wait-Until { $null -ne (Get-OttoWindow $process.Id 'OttoWindowControls' $true) } 'cover overlay to return after restore' 5000
-        Start-Sleep -Milliseconds 500
-        $cover = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-        $y = [int](($cover.Top + $cover.Bottom) / 2)
-        $closeX = Get-CoverCircleCenterX $cover 2
+        Start-Sleep -Milliseconds 400
+        $closeX = Get-BarWindowControlCenterX $bar 0
         [OttoE2ENative]::Click($closeX, $y)
         Wait-Until { -not [OttoE2EWindowState]::IsWindowVisible($form.Handle) } 'red button to close the probe window' 3000
         Write-Output 'CHECKPOINT_PASS scenario=window-cover name=03-close-closes'
@@ -1651,35 +1629,34 @@ function Get-EmptyBarRegion($bar) {
 
 function Invoke-GenieMinimize($process, $form, [string]$scenario) {
     $center = @([int](($form.Left + $form.Right) / 2), [int](($form.Top + $form.Bottom) / 2))
-    $tolerance = Convert-ToScaled 48
-    $controls = $null
-    for ($attempt = 0; $attempt -lt 3 -and -not $controls; $attempt++) {
+    $focused = $false
+    for ($attempt = 0; $attempt -lt 3 -and -not $focused; $attempt++) {
         [OttoE2ENative]::Click($center[0], $center[1])
         $deadline = (Get-Date).AddMilliseconds(1500)
         while ((Get-Date) -lt $deadline) {
-            $candidate = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-            $focused = [OttoE2EWindowState]::Foreground() -eq $form.Handle
-            if ($focused -and $candidate -and
-                (([Math]::Abs($candidate.Left - $form.Left) -le $tolerance) -or ([Math]::Abs($candidate.Right - $form.Right) -le $tolerance)) -and
-                [Math]::Abs($candidate.Top - $form.Top) -le $tolerance) {
-                $controls = $candidate
+            if ([OttoE2EWindowState]::Foreground() -eq $form.Handle) {
+                $focused = $true
                 break
             }
             Start-Sleep -Milliseconds 30
         }
     }
-    if (-not $controls) {
-        throw 'Window controls never attached to the focused probe window; refusing to press minimize.'
+    if (-not $focused) {
+        throw 'Probe window never took focus; refusing to press minimize.'
     }
-    $coverMode = [Math]::Abs($controls.Right - $form.Right) -le $tolerance
-    $pressX = if ($coverMode) { Get-CoverCircleCenterX $controls 0 } else { $controls.Left + (Convert-ToScaled 32) }
-    $pressY = if ($coverMode) { [int](($controls.Top + $controls.Bottom) / 2) } else { $controls.Top + (Convert-ToScaled 14) }
+    $bar = Get-OttoWindow $process.Id 'OttoNotchBar' $true
+    if (-not $bar) {
+        throw 'OttoNotchBar is not visible; refusing to press minimize.'
+    }
+    if (Get-OttoWindow $process.Id 'OttoWindowControls' $true) {
+        throw 'Retired OttoWindowControls overlay window must not exist.'
+    }
+    $pressX = Get-BarWindowControlCenterX $bar 1
+    $pressY = [int](($bar.Top + $bar.Bottom) / 2)
     [OttoE2ENative]::MoveCursor($pressX, $pressY)
     Start-Sleep -Milliseconds 300
-    $settled = Get-OttoWindow $process.Id 'OttoWindowControls' $true
-    if (-not $settled -or [OttoE2EWindowState]::Foreground() -ne $form.Handle -or
-        ([Math]::Abs($settled.Left - $form.Left) -gt $tolerance -and [Math]::Abs($settled.Right - $form.Right) -gt $tolerance) -or [Math]::Abs($settled.Top - $form.Top) -gt $tolerance) {
-        throw 'Focus or window controls moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
+    if ([OttoE2EWindowState]::Foreground() -ne $form.Handle) {
+        throw 'Focus moved away from the probe before minimize; leave the desktop untouched while this scenario runs.'
     }
     Save-Screenshot $scenario '00-before-minimize' | Out-Null
     [OttoE2ENative]::Click($pressX, $pressY)
@@ -1694,7 +1671,7 @@ function Invoke-GenieMinimize($process, $form, [string]$scenario) {
     }
     if (-not $overlaySeen) {
         Start-Sleep -Milliseconds 800
-        throw "The Genie overlay never appeared after the minimize button was pressed. (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) controls=$($controls.Left),$($controls.Top) probe=$($form.Left),$($form.Top))"
+        throw "The Genie overlay never appeared after the Top Bar minimize button was pressed. (iconic=$([OttoE2EWindowState]::IsIconic($form.Handle)) bar=$($bar.Left),$($bar.Top) probe=$($form.Left),$($form.Top))"
     }
     $dockIcon = $null
     $frames = 0
@@ -2414,7 +2391,13 @@ function Run-AudioFlow {
     Stop-Otto $process
 }
 
-$scenarios = if ($Scenario -eq 'all') { @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'native-minimize', 'window-cover', 'dock', 'keyboard', 'keyboard-dock', 'stall') } else { @($Scenario) }
+$allScenarioList = @('success', 'false', 'edge', 'worst', 'fullscreen', 'genie', 'native-minimize', 'window-cover', 'dock', 'keyboard', 'keyboard-dock', 'stall')
+$fullScenarioList = @('success', 'false', 'edge', 'worst', 'recovery', 'fullscreen', 'genie', 'native-minimize', 'window-cover', 'dock', 'dock-settings', 'keyboard', 'keyboard-dock', 'stall', 'appearance', 'audio', 'visual-reference')
+$scenarios = if ($Scenario -eq 'all') { $allScenarioList } elseif ($Scenario -eq 'full') { $fullScenarioList } else { @($Scenario) }
+if ($Scenario -eq 'all') {
+    $excludedFromAll = @($fullScenarioList | Where-Object { $allScenarioList -notcontains $_ })
+    Write-Output "E2E_INFO mode=all excluded=$($excludedFromAll -join ',') hint='use -Scenario full for complete pre-release coverage'"
+}
 $fatal = $null
 $scenarioFailures = [System.Collections.Generic.List[string]]::new()
 try {

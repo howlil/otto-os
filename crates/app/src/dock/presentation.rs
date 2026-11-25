@@ -52,6 +52,7 @@ impl Dock {
         self.sync_backdrop(runtime, true);
         self.place();
         self.present(runtime);
+        self.sync_secondary_docks(runtime);
     }
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {

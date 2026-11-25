@@ -6,26 +6,25 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{MENU_POLL_TIMER, WM_APP_MENU_BACKDROP};
 use otto_core::{
     BACKDROP_PADDING_PT, CMD_DOWNLOADS_ITEM_BASE, CMD_DOWNLOADS_OPEN_FOLDER, CalendarControl,
-    CaptureRegion, ControlCenterAction, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit,
-    DownloadsStackLayout, EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure,
-    NotificationAccess, NotificationCenterHit, NotificationCenterLayout, NotificationGroup,
-    PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, WindowInfo, capture_interval_for,
-    capture_wanted, compute_downloads_stack_layout, compute_notification_center_layout,
-    compute_popup_menu_layout, downloads_stack_hit_test, group_notifications,
-    next_downloads_stack_focus, scale,
+    CaptureRegion, ControlCenterPort, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout,
+    EstimatedMenuText, HitTarget, MenuAnchor, MenuRow, MenuTextMeasure, MotionMetrics,
+    NotificationAccess, NotificationCenterHit, NotificationCenterLayout, NotificationCenterPort,
+    NotificationGroup, PopupMenuLayout, PopupMenuMetrics, PopupMenuPlacement, Rect, WindowInfo,
+    capture_interval_for, capture_wanted, compute_downloads_stack_layout,
+    compute_notification_center_layout, compute_popup_menu_layout, downloads_stack_hit_test,
+    group_notifications, next_downloads_stack_focus, scale,
 };
 use otto_core::{DockEntry, StackItem};
 use otto_platform::{
-    MenuNavEvent, PrimaryScreen, WindowsControlCenter, cursor_position, focus_window_hwnd,
-    is_running_on_battery, monitor_work_area_at, poll_menu_events, primary_screen,
-    read_downloads_stack_thumbnails,
+    DisplayMonitor, MenuNavEvent, WindowsControlCenter, WindowsNotificationPort, cursor_position,
+    focus_window_hwnd, hide_window, is_running_on_battery, kill_window_timer, monitor_at, place,
+    poll_menu_events, read_downloads_stack_thumbnails, set_window_timer,
 };
 use otto_render::{DownloadsStackRenderer, MenuHover, PopupMenuRenderer};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, KillTimer, MA_NOACTIVATE, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowPos, ShowWindow, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
+    MA_NOACTIVATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -33,19 +32,13 @@ mod dispatch;
 mod open;
 
 use self::dispatch::dispatch_selection;
-pub use self::open::is_calendar_open;
-pub use self::open::is_notification_open;
-pub use self::open::open_calendar;
-pub use self::open::open_dock_menu;
-pub use self::open::open_dock_overflow_menu;
-pub use self::open::open_dock_settings_menu;
-pub use self::open::open_downloads_stack_menu;
-pub use self::open::open_notifications;
-pub use self::open::open_top_bar_menu;
-pub use self::open::open_tray_menu;
-pub use self::open::open_window_tiling_menu;
+pub(crate) use self::open::{
+    is_calendar_open, is_notification_open, open_calendar, open_dock_menu, open_dock_overflow_menu,
+    open_dock_settings_menu, open_downloads_stack_menu, open_finder_menu, open_notifications,
+    open_top_bar_menu, open_tray_menu, open_window_tiling_menu,
+};
 
-const MENU_POLL_MS: u32 = 16;
+const MENU_POLL_MS: u32 = MotionMetrics::MACOS_LIKE.animation_tick_ms;
 const OPEN_CLICK_GRACE: Duration = Duration::from_millis(60);
 const WHEEL_ROWS_PER_NOTCH: i32 = 2;
 
@@ -90,6 +83,7 @@ enum MenuSource {
     Tray {
         from_tray: bool,
     },
+    Finder,
 }
 
 struct DownloadsStackView {
@@ -123,7 +117,8 @@ pub(crate) struct PopupMenu {
     stack_view: Option<DownloadsStackView>,
     notif_view: Option<NotificationCenterView>,
     control_center: Box<dyn ControlCenterPort>,
-    screen: PrimaryScreen,
+    notifications: Box<dyn NotificationCenterPort>,
+    monitor: DisplayMonitor,
     metrics: PopupMenuMetrics,
     rows: Vec<MenuRow>,
     layout: PopupMenuLayout,
@@ -157,7 +152,7 @@ fn resolve_layout(
 ) -> PopupMenuLayout {
     let (x, y) = anchor_point(anchor);
     let placement = PopupMenuPlacement {
-        bounds: monitor_work_area_at(x, y),
+        bounds: monitor_at(x, y).work_area,
         dpi,
         anchor,
         scroll_offset,
@@ -171,8 +166,8 @@ fn resolve_layout(
 }
 
 #[allow(clippy::unnecessary_wraps)]
-pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
-    let screen = primary_screen();
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+    let monitor = monitor_at(0, 0);
     let metrics = PopupMenuMetrics::default();
     let anchor = MenuAnchor::TopBar { x: 0, y: 0 };
     let menu = PopupMenu {
@@ -182,8 +177,9 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
         stack_view: None,
         notif_view: None,
         control_center: Box::new(WindowsControlCenter),
-        screen,
-        layout: resolve_layout(&metrics, screen.dpi, anchor, 0, &[], None),
+        notifications: Box::new(WindowsNotificationPort),
+        monitor,
+        layout: resolve_layout(&metrics, monitor.dpi, anchor, 0, &[], None),
         metrics,
         rows: Vec::new(),
         anchor,
@@ -206,7 +202,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     Ok(())
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.menu.try_borrow_mut()
         && let Some(mut menu) = guard.take()
     {
@@ -215,7 +211,7 @@ pub fn stop(runtime: &RuntimeContext) {
 }
 
 #[must_use]
-pub fn is_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_open(runtime: &RuntimeContext) -> bool {
     runtime
         .menu
         .try_borrow()
@@ -225,7 +221,7 @@ pub fn is_open(runtime: &RuntimeContext) -> bool {
 }
 
 #[must_use]
-pub fn active_top_bar_target(runtime: &RuntimeContext) -> Option<HitTarget> {
+pub(crate) fn active_top_bar_target(runtime: &RuntimeContext) -> Option<HitTarget> {
     let guard = runtime.menu.try_borrow().ok()?;
     let menu = guard.as_ref()?;
     if !menu.visible {
@@ -238,11 +234,11 @@ pub fn active_top_bar_target(runtime: &RuntimeContext) -> Option<HitTarget> {
     }
 }
 
-pub fn close(runtime: &RuntimeContext) {
+pub(crate) fn close(runtime: &RuntimeContext) {
     with_menu(runtime, PopupMenu::hide);
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_menu(runtime, |menu| {
         if !enabled {
             menu.backdrop = None;
@@ -258,7 +254,7 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_menu(runtime, |menu| {
         if let Some(feed) = menu.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -268,7 +264,7 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     });
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     _hwnd: isize,
     message: u32,
@@ -336,11 +332,20 @@ fn with_menu(runtime: &RuntimeContext, action: impl FnOnce(&mut PopupMenu)) {
     }
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
+pub(crate) fn repaint(runtime: &RuntimeContext) {
     with_menu(runtime, |menu| menu.present(runtime));
 }
 
 impl PopupMenu {
+    fn sync_monitor(&mut self, point: (i32, i32)) {
+        let next = monitor_at(point.0, point.1);
+        if next.dpi != self.monitor.dpi {
+            self.renderer = None;
+            self.stack_renderer = None;
+        }
+        self.monitor = next;
+    }
+
     fn open(
         &mut self,
         runtime: &RuntimeContext,
@@ -354,7 +359,7 @@ impl PopupMenu {
         }
         crate::spotlight::close(runtime);
         crate::control_center::close(runtime);
-        self.screen = primary_screen();
+        self.sync_monitor(anchor_point(anchor));
         self.stack_view = None;
         self.stack_renderer = None;
         self.notif_view = None;
@@ -376,14 +381,7 @@ impl PopupMenu {
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                MENU_POLL_TIMER,
-                MENU_POLL_MS,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, MENU_POLL_TIMER, MENU_POLL_MS);
     }
 
     fn open_downloads_stack(
@@ -395,7 +393,7 @@ impl PopupMenu {
     ) {
         crate::spotlight::close(runtime);
         crate::control_center::close(runtime);
-        self.screen = primary_screen();
+        self.sync_monitor((center_x, bottom_y));
         self.rows.clear();
         self.hovered_row = None;
         self.source = None;
@@ -409,13 +407,13 @@ impl PopupMenu {
                 is_dir: item.is_dir,
             })
             .collect();
-        let bounds = monitor_work_area_at(center_x, bottom_y);
+        let bounds = self.monitor.work_area;
         let layout =
-            compute_downloads_stack_layout(center_x, bottom_y, bounds, self.screen.dpi, &entries);
-        let thumb_px = scale(46, self.screen.dpi) as u32;
+            compute_downloads_stack_layout(center_x, bottom_y, bounds, self.monitor.dpi, &entries);
+        let thumb_px = scale(46, self.monitor.dpi) as u32;
         let thumbs = read_downloads_stack_thumbnails(&items, thumb_px);
         if self.stack_renderer.is_none()
-            && let Ok(renderer) = DownloadsStackRenderer::new(self.screen.dpi)
+            && let Ok(renderer) = DownloadsStackRenderer::new(self.monitor.dpi)
         {
             self.stack_renderer = Some(renderer);
         }
@@ -439,20 +437,13 @@ impl PopupMenu {
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                MENU_POLL_TIMER,
-                MENU_POLL_MS,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, MENU_POLL_TIMER, MENU_POLL_MS);
     }
 
     fn relayout(&mut self) {
         self.layout = resolve_layout(
             &self.metrics,
-            self.screen.dpi,
+            self.monitor.dpi,
             self.anchor,
             self.scroll_offset,
             &self.rows,
@@ -462,17 +453,7 @@ impl PopupMenu {
     }
 
     fn place(&self) {
-        let _ = unsafe {
-            SetWindowPos(
-                HWND(self.hwnd as *mut _),
-                Some(HWND_TOPMOST),
-                self.layout.window.x,
-                self.layout.window.y,
-                self.layout.window.width,
-                self.layout.window.height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        };
+        place(self.hwnd, self.layout.window);
     }
 
     fn scroll_to(&mut self, runtime: &RuntimeContext, offset: i32) {
@@ -505,16 +486,15 @@ impl PopupMenu {
             if !notif.layout.is_scrollable() {
                 return;
             }
-            let scroll_step = scale(36, self.screen.dpi);
+            let scroll_step = scale(36, self.monitor.dpi);
             let offset = notif.layout.scrolled_by(step * scroll_step);
             if offset != notif.scroll_offset {
                 notif.scroll_offset = offset;
-                let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
                 notif.layout = compute_notification_center_layout(
                     notif.access,
                     &notif.groups,
-                    bounds,
-                    self.screen.dpi,
+                    self.monitor.work_area,
+                    self.monitor.dpi,
                     notif.anchor_right,
                     notif.anchor_y,
                     notif.scroll_offset,
@@ -527,7 +507,7 @@ impl PopupMenu {
         if !self.layout.is_scrollable() {
             return;
         }
-        let row_height = scale(self.metrics.row_height, self.screen.dpi);
+        let row_height = scale(self.metrics.row_height, self.monitor.dpi);
         let offset = self
             .layout
             .scrolled_by(step * row_height * WHEEL_ROWS_PER_NOTCH);
@@ -536,7 +516,7 @@ impl PopupMenu {
 
     fn ensure_renderer(&mut self) -> bool {
         if self.renderer.is_none()
-            && let Ok(renderer) = PopupMenuRenderer::new(self.screen.dpi)
+            && let Ok(renderer) = PopupMenuRenderer::new(self.monitor.dpi)
         {
             self.renderer = Some(renderer);
         }
@@ -569,10 +549,8 @@ impl PopupMenu {
         self.notif_view = None;
         self.backdrop = None;
         self.renderer = None;
-        unsafe {
-            let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), MENU_POLL_TIMER);
-            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-        }
+        kill_window_timer(self.hwnd, MENU_POLL_TIMER);
+        hide_window(self.hwnd);
         if let Some(hwnd) = restore_hwnd {
             focus_window_hwnd(hwnd);
         }
@@ -581,7 +559,7 @@ impl PopupMenu {
 
     fn rebuild(&mut self) {
         self.hide();
-        self.screen = primary_screen();
+        self.monitor = monitor_at(0, 0);
         self.renderer = None;
         self.stack_renderer = None;
     }
@@ -710,7 +688,7 @@ impl PopupMenu {
             self.outside_since = None;
             false
         } else {
-            self.outside_since.get_or_insert(Instant::now());
+            self.outside_since.get_or_insert_with(Instant::now);
             self.outside_since
                 .is_some_and(|t| t.elapsed() >= Duration::from_millis(180))
         }
@@ -747,7 +725,7 @@ impl PopupMenu {
     ) {
         crate::spotlight::close(runtime);
         crate::control_center::close(runtime);
-        self.screen = primary_screen();
+        self.sync_monitor((anchor_right - 1, anchor_y));
         self.rows.clear();
         self.hovered_row = None;
         self.hovered_calendar = None;
@@ -756,14 +734,13 @@ impl PopupMenu {
         self.stack_renderer = None;
         let _ = self.ensure_renderer();
 
-        let snapshot = self.control_center.read_notifications();
+        let snapshot = self.notifications.read_notifications();
         let groups = group_notifications(&snapshot.items, &expanded_apps);
-        let bounds = monitor_work_area_at(anchor_right - 1, anchor_y);
         let layout = compute_notification_center_layout(
             snapshot.access,
             &groups,
-            bounds,
-            self.screen.dpi,
+            self.monitor.work_area,
+            self.monitor.dpi,
             anchor_right,
             anchor_y,
             scroll_offset,
@@ -790,14 +767,7 @@ impl PopupMenu {
         self.place();
         self.sync_backdrop(runtime, true);
         self.present(runtime);
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                MENU_POLL_TIMER,
-                MENU_POLL_MS,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, MENU_POLL_TIMER, MENU_POLL_MS);
     }
 
     fn relayout_notification_center(&mut self, runtime: &RuntimeContext) {
@@ -807,12 +777,11 @@ impl PopupMenu {
         for group in &mut notif.groups {
             group.expanded = notif.expanded_apps.contains(&group.app_key);
         }
-        let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
         notif.layout = compute_notification_center_layout(
             notif.access,
             &notif.groups,
-            bounds,
-            self.screen.dpi,
+            self.monitor.work_area,
+            self.monitor.dpi,
             notif.anchor_right,
             notif.anchor_y,
             notif.scroll_offset,
@@ -841,12 +810,11 @@ impl PopupMenu {
         let scroll = notif.layout.scroll_revealing(next);
         if scroll != notif.scroll_offset {
             notif.scroll_offset = scroll;
-            let bounds = monitor_work_area_at(notif.anchor_right - 1, notif.anchor_y);
             notif.layout = compute_notification_center_layout(
                 notif.access,
                 &notif.groups,
-                bounds,
-                self.screen.dpi,
+                self.monitor.work_area,
+                self.monitor.dpi,
                 notif.anchor_right,
                 notif.anchor_y,
                 notif.scroll_offset,
@@ -1100,13 +1068,10 @@ impl PopupMenu {
         if !needs_backdrop {
             return;
         }
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
-        let Some(region) = CaptureRegion::padded_to_screen(
-            self.layout.window,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
+        let pad = scale(BACKDROP_PADDING_PT, self.monitor.dpi);
+        let Some(region) =
+            CaptureRegion::padded_to_bounds(self.layout.window, pad, self.monitor.bounds)
+        else {
             return;
         };
         let Some(pixels) =
@@ -1157,13 +1122,10 @@ impl PopupMenu {
         let Some(feed) = self.backdrop.as_mut() else {
             return;
         };
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
-        let Some(region) = CaptureRegion::padded_to_screen(
-            self.layout.window,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
+        let pad = scale(BACKDROP_PADDING_PT, self.monitor.dpi);
+        let Some(region) =
+            CaptureRegion::padded_to_bounds(self.layout.window, pad, self.monitor.bounds)
+        else {
             return;
         };
         let interval = capture_interval_for(is_running_on_battery(), self.visible);
@@ -1206,6 +1168,7 @@ impl PopupMenu {
                     &stack.entries,
                     stack.active_hit,
                     appearance,
+                    runtime.finder_enabled.get(),
                 ),
             );
             return;
@@ -1287,12 +1250,12 @@ fn dispatch_notification_hit(runtime: &RuntimeContext, hit: NotificationCenterHi
         NotificationCenterHit::OpenCard(id) => {
             with_menu(runtime, |menu| {
                 menu.hide();
-                let _ = menu.control_center.dismiss_notification(id);
+                let _ = menu.notifications.dismiss_notification(id);
             });
         }
         NotificationCenterHit::CloseCard(id) => {
             with_menu(runtime, |menu| {
-                let _ = menu.control_center.remove_notification(id);
+                let _ = menu.notifications.remove_notification(id);
             });
             refresh_notification_center(runtime, false);
         }
@@ -1307,29 +1270,22 @@ fn dispatch_notification_hit(runtime: &RuntimeContext, hit: NotificationCenterHi
                 notif.expanded_apps.remove(&group.app_key);
                 let ids: Vec<u32> = group.items.iter().map(|item| item.id).collect();
                 for id in ids {
-                    let _ = menu.control_center.remove_notification(id);
+                    let _ = menu.notifications.remove_notification(id);
                 }
             });
             refresh_notification_center(runtime, false);
         }
         NotificationCenterHit::ClearAll => {
             with_menu(runtime, |menu| {
-                let _ = menu.control_center.clear_notifications();
+                let _ = menu.notifications.clear_notifications();
             });
             refresh_notification_center(runtime, true);
         }
         NotificationCenterHit::AccessAction => {
             with_menu(runtime, |menu| {
-                let _ = menu.control_center.request_notification_access();
+                let _ = menu.notifications.request_notification_access();
             });
             refresh_notification_center(runtime, false);
-        }
-        NotificationCenterHit::OpenWindowsNotifications => {
-            with_menu(runtime, |menu| {
-                menu.hide();
-                menu.control_center
-                    .execute(ControlCenterAction::OpenCalendar);
-            });
         }
     }
 }

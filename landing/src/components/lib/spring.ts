@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
 import { animate } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 
 export function useEased(target: number, initial: number, reduced: boolean, duration = 0.95) {
   const [value, setValue] = useState(initial);

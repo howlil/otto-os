@@ -9,7 +9,6 @@ use windows_numerics::Vector2;
 use crate::CachedCoverArt;
 use crate::CachedNotchGeometry;
 use crate::CoverArt;
-use crate::FOREGROUND;
 use crate::Renderer;
 use crate::decode_image_bytes;
 use crate::write_attached_notch_figure;
@@ -25,10 +24,7 @@ impl Renderer {
         anim_phase: f32,
     ) -> Result<()> {
         let primary = layout.compact_primary.unwrap_or_else(|| {
-            if pomodoro.state.is_compact_active()
-                || pomodoro.timer.is_compact_active()
-                || pomodoro.stopwatch.is_compact_active()
-            {
+            if pomodoro.state.is_compact_active() {
                 CompactSlotKind::Focus
             } else {
                 CompactSlotKind::Media
@@ -86,24 +82,25 @@ impl Renderer {
             radiusX: r,
             radiusY: r,
         };
+        let ink = self.notch_ink();
         unsafe {
             self.target
                 .FillEllipse(&ellipse, &self.brushes.notch_obsidian);
-            if layout.notch.y > 0 && !is_high_contrast {
-                let floating_rim = self.brushes.alpha_brush(FOREGROUND, 0.14);
-                self.target
-                    .DrawEllipse(&ellipse, &floating_rim, 1.0, &self.stroke_style);
-            } else {
+            if is_high_contrast {
                 self.target.DrawEllipse(
                     &ellipse,
                     &self.brushes.specular_rim,
                     1.0,
                     &self.stroke_style,
                 );
+            } else {
+                let rim = self.brushes.alpha_brush(ink, 0.14);
+                self.target
+                    .DrawEllipse(&ellipse, &rim, 1.0, &self.stroke_style);
             }
             if hovered == Some(HitTarget::NotchSecondary) {
-                let hover_fill = self.brushes.alpha_brush(FOREGROUND, 0.10);
-                let hover_rim = self.brushes.alpha_brush(FOREGROUND, 0.28);
+                let hover_fill = self.brushes.alpha_brush(ink, 0.10);
+                let hover_rim = self.brushes.alpha_brush(ink, 0.28);
                 self.target.FillEllipse(&ellipse, &hover_fill);
                 self.target
                     .DrawEllipse(&ellipse, &hover_rim, 1.2, &self.stroke_style);

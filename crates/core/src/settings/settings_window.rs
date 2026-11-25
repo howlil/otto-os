@@ -1,6 +1,7 @@
 use super::model::{OttoSettingItem, OttoSettingKind, OttoSettingsSnapshot};
 use crate::layout::{Rect, scale};
 use crate::settings_content::ContentLayout;
+use crate::window::controls::WindowControlAction;
 
 pub const SETTINGS_PAGE_COUNT: usize = 13;
 
@@ -14,7 +15,7 @@ pub const fn settings_text(dark: bool) -> u32 {
     if dark { 0xF5_F5F7 } else { 0x1D_1D1F }
 }
 
-pub const MODULE_COUNT: usize = 13;
+pub const MODULE_COUNT: usize = 14;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsGroup {
@@ -125,7 +126,6 @@ impl SettingsPage {
     pub const fn for_kind(kind: OttoSettingKind) -> Self {
         match kind {
             OttoSettingKind::TopBar
-            | OttoSettingKind::ClassicLogo
             | OttoSettingKind::MenuBarBackground
             | OttoSettingKind::MenuBarKeepNotch
             | OttoSettingKind::MenuBarTray
@@ -153,7 +153,9 @@ impl SettingsPage {
             OttoSettingKind::WindowControls | OttoSettingKind::Genie => Self::WindowControls,
             OttoSettingKind::CaptureVisible => Self::Appearance,
             OttoSettingKind::Hotkeys => Self::Shortcuts,
-            OttoSettingKind::LaunchAtLogin | OttoSettingKind::BackgroundCleanup => Self::General,
+            OttoSettingKind::LaunchAtLogin
+            | OttoSettingKind::BackgroundCleanup
+            | OttoSettingKind::Finder => Self::General,
         }
     }
 
@@ -162,7 +164,7 @@ impl SettingsPage {
         match item {
             OttoSettingItem::Toggle(kind) => Self::for_kind(kind),
             OttoSettingItem::DockIconSize => Self::Dock,
-            OttoSettingItem::MenuBarHide => Self::TopBar,
+            OttoSettingItem::MenuBarHide | OttoSettingItem::BrandLogo => Self::TopBar,
         }
     }
 
@@ -216,6 +218,7 @@ pub enum ModuleId {
     TopBar,
     Notch,
     Dock,
+    Finder,
     WindowControls,
     Genie,
     Spotlight,
@@ -233,6 +236,7 @@ impl ModuleId {
         Self::TopBar,
         Self::Notch,
         Self::Dock,
+        Self::Finder,
         Self::WindowControls,
         Self::Genie,
         Self::Spotlight,
@@ -251,6 +255,7 @@ impl ModuleId {
             Self::TopBar => "Top Bar",
             Self::Notch => "Notch",
             Self::Dock => "Dock",
+            Self::Finder => "Finder",
             Self::WindowControls => "Window Controls",
             Self::Genie => "Genie",
             Self::Spotlight => "Spotlight",
@@ -270,12 +275,13 @@ impl ModuleId {
             Self::TopBar => "Menus, tray, status, clock",
             Self::Notch => "Focus, music, HUD, notifications",
             Self::Dock => "Apps, Downloads, Trash",
+            Self::Finder => "macOS-style File Explorer",
             Self::WindowControls => "Close, minimize, zoom circles",
             Self::Genie => "Minimize into the Dock",
             Self::Spotlight => "Local app search",
             Self::ControlCenter => "Sound, display, now playing",
             Self::Media => "Playback in the Notch",
-            Self::Focus => "Pomodoro, timer, stopwatch",
+            Self::Focus => "Pomodoro focus sessions",
             Self::Clipboard => "Recent copies in the Notch",
             Self::Pocket => "File drop shelf in the Notch",
             Self::QuickCapture => "Tasks and Ctrl+Alt+Q capture",
@@ -289,6 +295,7 @@ impl ModuleId {
             Self::TopBar
             | Self::Notch
             | Self::Dock
+            | Self::Finder
             | Self::WindowControls
             | Self::Genie
             | Self::Spotlight
@@ -316,6 +323,7 @@ impl ModuleId {
             Self::TopBar => Some(OttoSettingKind::TopBar),
             Self::Notch => Some(OttoSettingKind::Notch),
             Self::Dock => Some(OttoSettingKind::Dock),
+            Self::Finder => Some(OttoSettingKind::Finder),
             Self::WindowControls => Some(OttoSettingKind::WindowControls),
             Self::Genie => Some(OttoSettingKind::Genie),
             Self::Media => Some(OttoSettingKind::MediaModule),
@@ -340,7 +348,7 @@ impl ModuleId {
             Self::WindowControls | Self::Genie => SettingsPage::WindowControls,
             Self::Spotlight => SettingsPage::Spotlight,
             Self::ControlCenter => SettingsPage::ControlCenter,
-            Self::BackgroundCleanup => SettingsPage::General,
+            Self::BackgroundCleanup | Self::Finder => SettingsPage::General,
         }
     }
 }
@@ -428,6 +436,7 @@ pub struct SettingsMetrics {
     pub sidebar_width: i32,
     pub rail_width: i32,
     pub rail_below_width: i32,
+    pub titlebar_height: i32,
     pub sidebar_padding: i32,
     pub sidebar_item_height: i32,
     pub sidebar_group_height: i32,
@@ -445,9 +454,10 @@ impl SettingsMetrics {
         sidebar_width: 240,
         rail_width: 60,
         rail_below_width: 760,
+        titlebar_height: 36,
         sidebar_padding: 10,
-        sidebar_item_height: 34,
-        sidebar_group_height: 30,
+        sidebar_item_height: 32,
+        sidebar_group_height: 28,
         content_padding: 24,
         content_max_width: 680,
         header_height: 52,
@@ -456,6 +466,12 @@ impl SettingsMetrics {
         min_width: 720,
         min_height: 480,
     };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SettingsWindowControlSlot {
+    pub action: WindowControlAction,
+    pub rect: Rect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -473,6 +489,9 @@ pub struct SettingsGroupHeading {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettingsLayout {
     pub sidebar: Rect,
+    pub sidebar_titlebar: Rect,
+    pub window_controls_group: Rect,
+    pub window_controls: [SettingsWindowControlSlot; 3],
     pub content: Rect,
     pub column: Rect,
     pub rail: bool,
@@ -484,6 +503,7 @@ pub struct SettingsLayout {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsHit {
+    WindowControl(WindowControlAction),
     Page(SettingsPage),
     Row {
         section: usize,
@@ -551,6 +571,15 @@ pub fn compute_settings_layout_with(
     };
 
     let side_pad = scale(metrics.sidebar_padding, dpi);
+    let titlebar_height = scale(metrics.titlebar_height, dpi).min(height);
+    let sidebar_titlebar = Rect {
+        x: 0,
+        y: 0,
+        width: sidebar_width,
+        height: titlebar_height,
+    };
+    let (window_controls_group, window_controls) =
+        compute_settings_window_controls(sidebar_titlebar, rail, dpi);
     let item_height = scale(metrics.sidebar_item_height, dpi);
     let group_height = if rail {
         side_pad
@@ -559,7 +588,7 @@ pub fn compute_settings_layout_with(
     };
     let mut pages = Vec::with_capacity(SETTINGS_PAGE_COUNT);
     let mut group_headings = Vec::new();
-    let mut y = side_pad;
+    let mut y = titlebar_height + scale(2, dpi);
     let mut last_group = SettingsGroup::Home;
     for page in SettingsPage::ALL {
         if page.group() != last_group {
@@ -591,6 +620,9 @@ pub fn compute_settings_layout_with(
 
     SettingsLayout {
         sidebar,
+        sidebar_titlebar,
+        window_controls_group,
+        window_controls,
         content,
         column,
         rail,
@@ -601,9 +633,66 @@ pub fn compute_settings_layout_with(
     }
 }
 
+fn compute_settings_window_controls(
+    titlebar: Rect,
+    rail: bool,
+    dpi: u32,
+) -> (Rect, [SettingsWindowControlSlot; 3]) {
+    const ACTIONS: [WindowControlAction; 3] = [
+        WindowControlAction::Close,
+        WindowControlAction::Minimize,
+        WindowControlAction::ToggleMaximize,
+    ];
+    if titlebar.is_empty() {
+        return (
+            Rect::default(),
+            ACTIONS.map(|action| SettingsWindowControlSlot {
+                action,
+                rect: Rect::default(),
+            }),
+        );
+    }
+    let cell_w = scale(if rail { 16 } else { 20 }, dpi).max(1);
+    let group_w = (cell_w * 3).min(titlebar.width);
+    let start_x = if rail {
+        (titlebar.width - group_w) / 2
+    } else {
+        scale(10, dpi).min((titlebar.width - group_w).max(0))
+    };
+    let group = Rect {
+        x: start_x,
+        y: titlebar.y,
+        width: group_w,
+        height: titlebar.height,
+    };
+    let mut index = 0;
+    let slots = ACTIONS.map(|action| {
+        let x = start_x + index * cell_w;
+        index += 1;
+        let width = cell_w.min((titlebar.right() - x).max(0));
+        SettingsWindowControlSlot {
+            action,
+            rect: Rect {
+                x,
+                y: titlebar.y,
+                width,
+                height: titlebar.height,
+            },
+        }
+    });
+    (group, slots)
+}
+
 impl SettingsLayout {
     #[must_use]
     pub fn hit_test(&self, x: i32, y: i32, content: &ContentLayout) -> Option<SettingsHit> {
+        if let Some(slot) = self
+            .window_controls
+            .iter()
+            .find(|slot| slot.rect.contains(x, y))
+        {
+            return Some(SettingsHit::WindowControl(slot.action));
+        }
         if let Some(slot) = self.pages.iter().find(|slot| slot.rect.contains(x, y)) {
             return Some(SettingsHit::Page(slot.page));
         }
@@ -616,6 +705,14 @@ impl SettingsLayout {
             }
         }
         self.content.contains(x, y).then_some(SettingsHit::Content)
+    }
+
+    #[must_use]
+    pub const fn is_titlebar_drag(&self, x: i32, y: i32) -> bool {
+        if self.window_controls_group.contains(x, y) {
+            return false;
+        }
+        self.sidebar_titlebar.contains(x, y) || self.header.contains(x, y)
     }
 
     #[must_use]
@@ -659,6 +756,7 @@ mod tests {
                 focus_module: true,
                 clipboard_history: true,
                 drop_shelf: true,
+                finder_enabled: true,
                 ..SystemSettingsState::default()
             },
             ..OttoSettingsSnapshot::default()
@@ -886,5 +984,32 @@ mod tests {
         assert_eq!(wide.group_headings[0].rect.bottom(), top_bar.y);
         let rail = compute_settings_layout(720, 700, 96);
         assert!(rail.group_headings.is_empty());
+    }
+
+    #[test]
+    fn settings_window_controls_hit_test_and_exclude_titlebar_drag_in_wide_and_rail_modes() {
+        let empty = ContentLayout::default();
+        for (width, height) in [(1000, 700), (720, 480)] {
+            let layout = compute_settings_layout(width, height, 96);
+            assert!(!layout.sidebar_titlebar.is_empty());
+            assert_eq!(layout.window_controls.len(), 3);
+            assert!(
+                layout.pages.last().unwrap().rect.bottom() <= layout.sidebar.bottom(),
+                "sidebar pages must fit inside {width}x{height}"
+            );
+            for slot in layout.window_controls {
+                let cx = slot.rect.x + slot.rect.width / 2;
+                let cy = slot.rect.y + slot.rect.height / 2;
+                assert_eq!(
+                    layout.hit_test(cx, cy, &empty),
+                    Some(SettingsHit::WindowControl(slot.action))
+                );
+                assert!(!layout.is_titlebar_drag(cx, cy));
+            }
+            assert!(layout.is_titlebar_drag(
+                layout.header.x + layout.header.width / 2,
+                layout.header.y + 8
+            ));
+        }
     }
 }

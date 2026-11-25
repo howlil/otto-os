@@ -1,4 +1,6 @@
 pub(crate) mod appearance_settings;
+pub(crate) mod focus_insights_settings;
+pub(crate) mod focus_modes_settings;
 pub(crate) mod focus_settings;
 pub(crate) mod general_settings;
 pub(crate) mod model;

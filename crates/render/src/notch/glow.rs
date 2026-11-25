@@ -1,13 +1,13 @@
+#[cfg(test)]
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP};
 #[cfg(test)]
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ELLIPSE, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, ID2D1RadialGradientBrush, ID2D1StrokeStyle,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+    ID2D1DCRenderTarget, ID2D1RadialGradientBrush, ID2D1StrokeStyle,
 };
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    ID2D1DCRenderTarget, ID2D1LinearGradientBrush,
-};
+#[cfg(test)]
 use windows::core::Result;
+#[cfg(test)]
 use windows_numerics::Vector2;
 
 #[cfg(test)]
@@ -36,36 +36,8 @@ struct GlowLayer {
     alpha: f32,
 }
 
-pub(crate) fn linear_gradient(
-    target: &ID2D1DCRenderTarget,
-    start: Vector2,
-    end: Vector2,
-    from: D2D1_COLOR_F,
-    to: D2D1_COLOR_F,
-) -> Result<ID2D1LinearGradientBrush> {
-    let stops = [
-        D2D1_GRADIENT_STOP {
-            position: 0.0,
-            color: from,
-        },
-        D2D1_GRADIENT_STOP {
-            position: 1.0,
-            color: to,
-        },
-    ];
-    unsafe {
-        let collection =
-            target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
-        target.CreateLinearGradientBrush(
-            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                startPoint: start,
-                endPoint: end,
-            },
-            None,
-            &collection,
-        )
-    }
-}
+#[cfg(test)]
+use crate::kit::draw::linear_gradient;
 
 #[cfg(test)]
 pub(crate) fn radial_fade(

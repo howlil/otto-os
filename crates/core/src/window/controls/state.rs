@@ -53,6 +53,30 @@ impl WindowControlsState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BarWindowControlsView {
+    pub state: WindowControlsState,
+    pub maximized: bool,
+    pub hovered: bool,
+    pub pressed: Option<WindowControlAction>,
+}
+
+#[must_use]
+pub const fn active_bar_window_controls(window: Option<&WindowInfo>) -> WindowControlsState {
+    match window {
+        Some(win) if !win.traits.elevated && matches!(win.presence, WindowPresence::Visible) => {
+            WindowControlsState::of(win)
+        }
+        _ => WindowControlsState {
+            active: false,
+            close: false,
+            minimize: false,
+            zoom: false,
+            alt_zoom_glyph: false,
+        },
+    }
+}
+
 #[must_use]
 pub const fn accepts_window_controls(window: &WindowInfo) -> bool {
     window.traits.title_bar

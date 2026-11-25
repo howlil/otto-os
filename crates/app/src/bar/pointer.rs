@@ -1,14 +1,12 @@
-use std::mem::size_of;
 use std::time::Instant;
 
 use crate::bar_controls::{BarControlAction, BarControlsController};
 use crate::host::RuntimeContext;
 use crate::notch_io::PendingShelfDrag;
 use otto_core::{HitTarget, NotchExpandedTab, NotchHudKind, is_top_bar_menu_target, scale};
-use otto_platform::{adjust_volume, cursor_position, read_system_status, step_display_brightness};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+use otto_platform::{
+    adjust_volume, capture_mouse, cursor_position, read_system_status, step_display_brightness,
+    track_mouse_leave,
 };
 
 use super::Bar;
@@ -39,13 +37,7 @@ impl Bar {
         if already_tracking {
             return;
         }
-        let mut track = TRACKMOUSEEVENT {
-            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-            dwFlags: TME_LEAVE,
-            hwndTrack: HWND(source_hwnd as *mut _),
-            dwHoverTime: 0,
-        };
-        if unsafe { TrackMouseEvent(&mut track) }.is_ok() {
+        if track_mouse_leave(source_hwnd) {
             if source_hwnd == self.panel_hwnd {
                 self.tracking_panel_mouse = true;
             } else {
@@ -178,7 +170,10 @@ impl Bar {
         if self.notch.panel_expansion() > 0.55
             && let Some(
                 target @ (HitTarget::Notch
-                | HitTarget::FocusMode(_)
+                | HitTarget::PomodoroCategoryPill
+                | HitTarget::PomodoroDurationDec
+                | HitTarget::PomodoroDurationInc
+                | HitTarget::PomodoroTimeEdit
                 | HitTarget::PomodoroPreset(_)
                 | HitTarget::PomodoroPlayPause
                 | HitTarget::PomodoroReset
@@ -261,9 +256,7 @@ impl Bar {
             if let Some(ratio) = self.seek_ratio_at(x)
                 && self.notch.begin_seek_drag(ratio)
             {
-                unsafe {
-                    let _ = SetCapture(HWND(source_hwnd as *mut _));
-                }
+                capture_mouse(source_hwnd);
                 self.io.seek_drag_hwnd = Some(source_hwnd);
                 self.present(runtime);
             }
@@ -273,9 +266,7 @@ impl Bar {
         if let HitTarget::ShelfItem(slot) = target
             && let Some(payload) = self.notch.shelf_item_payload(slot)
         {
-            unsafe {
-                let _ = SetCapture(HWND(source_hwnd as *mut _));
-            }
+            capture_mouse(source_hwnd);
             self.io.pending_shelf_drag = Some(PendingShelfDrag {
                 slot,
                 source_hwnd,

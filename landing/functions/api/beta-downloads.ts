@@ -40,8 +40,7 @@ export function summarizeReleases(releases: GitHubRelease[]): ReleaseSummary {
       }
       return Date.parse(right.created_at) - Date.parse(left.created_at);
     });
-  const installerFor = (release: GitHubRelease) =>
-    release.assets.find((asset) => INSTALLER_NAME.test(asset.name));
+  const installerFor = (release: GitHubRelease) => release.assets.find((asset) => INSTALLER_NAME.test(asset.name));
   const latest = publishedReleases.find((release) => {
     const installer = installerFor(release);
     return installer?.browser_download_url.startsWith(INSTALLER_URL);
@@ -113,9 +112,7 @@ function json(body: Record<string, unknown>, status = 200, cache = false): Respo
   });
 }
 
-export type ReleaseSummaryResult =
-  | { ok: true; summary: ReleaseSummary }
-  | { ok: false; status: number; error: string };
+export type ReleaseSummaryResult = { ok: true; summary: ReleaseSummary } | { ok: false; status: number; error: string };
 
 export async function fetchReleaseSummary(requestUrl: string): Promise<ReleaseSummaryResult> {
   const cacheKey = new Request(new URL("/api/beta-downloads", requestUrl));
@@ -124,11 +121,7 @@ export async function fetchReleaseSummary(requestUrl: string): Promise<ReleaseSu
   if (cached) {
     try {
       const payload = (await cached.clone().json()) as unknown;
-      if (
-        isRecord(payload) &&
-        Number.isInteger(payload.downloads) &&
-        Number(payload.downloads) >= 0
-      ) {
+      if (isRecord(payload) && Number.isInteger(payload.downloads) && Number(payload.downloads) >= 0) {
         return {
           ok: true,
           summary: {
@@ -139,8 +132,7 @@ export async function fetchReleaseSummary(requestUrl: string): Promise<ReleaseSu
           },
         };
       }
-    } catch {
-    }
+    } catch {}
   }
 
   try {

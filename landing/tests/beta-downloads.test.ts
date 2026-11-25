@@ -24,12 +24,14 @@ describe("beta-downloads release counting", () => {
         assets: [
           {
             name: "otto-os-setup-1.3.1-x64.exe",
-            browser_download_url: "https://github.com/howlil/otto-os/releases/download/v1.3.1/otto-os-setup-1.3.1-x64.exe",
+            browser_download_url:
+              "https://github.com/howlil/otto-os/releases/download/v1.3.1/otto-os-setup-1.3.1-x64.exe",
             download_count: 5,
           },
           {
             name: "otto-os-1.3.1-windows-x64.zip",
-            browser_download_url: "https://github.com/howlil/otto-os/releases/download/v1.3.1/otto-os-1.3.1-windows-x64.zip",
+            browser_download_url:
+              "https://github.com/howlil/otto-os/releases/download/v1.3.1/otto-os-1.3.1-windows-x64.zip",
             download_count: 1,
           },
           {
@@ -52,12 +54,14 @@ describe("beta-downloads release counting", () => {
         assets: [
           {
             name: "otto-os-setup-1.3.0-x64.exe",
-            browser_download_url: "https://github.com/howlil/otto-os/releases/download/v1.3.0/otto-os-setup-1.3.0-x64.exe",
+            browser_download_url:
+              "https://github.com/howlil/otto-os/releases/download/v1.3.0/otto-os-setup-1.3.0-x64.exe",
             download_count: 33,
           },
           {
             name: "otto-os-1.3.0-windows-x64.zip",
-            browser_download_url: "https://github.com/howlil/otto-os/releases/download/v1.3.0/otto-os-1.3.0-windows-x64.zip",
+            browser_download_url:
+              "https://github.com/howlil/otto-os/releases/download/v1.3.0/otto-os-1.3.0-windows-x64.zip",
             download_count: 3,
           },
         ],
@@ -70,7 +74,8 @@ describe("beta-downloads release counting", () => {
         assets: [
           {
             name: "otto-os-setup-1.4.0-x64.exe",
-            browser_download_url: "https://github.com/howlil/otto-os/releases/download/v1.4.0-draft/otto-os-setup-1.4.0-x64.exe",
+            browser_download_url:
+              "https://github.com/howlil/otto-os/releases/download/v1.4.0-draft/otto-os-setup-1.4.0-x64.exe",
             download_count: 99,
           },
         ],

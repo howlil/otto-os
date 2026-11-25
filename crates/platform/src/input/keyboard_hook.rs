@@ -1,5 +1,5 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -8,7 +8,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_KANA,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    VIRTUAL_KEY, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_HOME, VK_KANA,
     VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RCONTROL,
     VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
     VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
@@ -25,6 +26,7 @@ use crate::worker::{HookStartup, HookThread, install_hook_thread, uninstall_hook
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const INJECTED_FLAG: u32 = 0x10;
+const WIN_MENU_MASK_VK: u16 = 0x00FF;
 const WHEEL_UP: i16 = 120;
 const WHEEL_DOWN: i16 = -120;
 const ROUTE_IDLE_LIMIT_MS: u64 = 15_000;
@@ -36,6 +38,8 @@ static ROUTE: Mutex<Route> = Mutex::new(Route::IDLE);
 static ROUTE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SWALLOWED_KEY_DOWNS: SwallowedKeys = SwallowedKeys::empty();
 static VOLUME_HUD_HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
+static FINDER_HOOK_TARGET: AtomicIsize = AtomicIsize::new(0);
+static FINDER_HOOK_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static KEYSTROKE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[must_use]
@@ -76,6 +80,21 @@ pub fn is_volume_hud_hook_enabled() -> bool {
     VOLUME_HUD_HOOK_ENABLED.load(Ordering::Acquire)
 }
 
+pub fn set_finder_shortcut_hook(target_hwnd: isize, message: u32) {
+    if target_hwnd == 0 || message == 0 {
+        FINDER_HOOK_TARGET.store(0, Ordering::Release);
+        FINDER_HOOK_MESSAGE.store(0, Ordering::Release);
+    } else {
+        FINDER_HOOK_MESSAGE.store(message, Ordering::Release);
+        FINDER_HOOK_TARGET.store(target_hwnd, Ordering::Release);
+    }
+}
+
+#[must_use]
+pub fn is_finder_shortcut_hook_enabled() -> bool {
+    FINDER_HOOK_TARGET.load(Ordering::Acquire) != 0
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VolumeKey {
     Up,
@@ -87,6 +106,12 @@ enum VolumeKey {
 struct Modifiers {
     shift: bool,
     ctrl_alt_or_win: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FinderShortcutModifiers {
+    win: bool,
+    ctrl_alt_or_shift: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +177,11 @@ impl SwallowedKeys {
         }
     }
 
+    fn is_swallowed(&self, virtual_key: u32) -> bool {
+        Self::word_and_mask(virtual_key)
+            .is_some_and(|(word, mask)| self.0[word].load(Ordering::Acquire) & mask != 0)
+    }
+
     fn take(&self, virtual_key: u32) -> bool {
         let Some((word, mask)) = Self::word_and_mask(virtual_key) else {
             return false;
@@ -175,6 +205,17 @@ fn volume_key(virtual_key: u32, flags: u32) -> Option<VolumeKey> {
     }
 }
 
+const fn is_finder_shortcut_key(
+    virtual_key: u32,
+    flags: u32,
+    modifiers: FinderShortcutModifiers,
+) -> bool {
+    flags & INJECTED_FLAG == 0
+        && virtual_key == VK_E.0 as u32
+        && modifiers.win
+        && !modifiers.ctrl_alt_or_shift
+}
+
 fn bar_key(virtual_key: u32, flags: u32, modifiers: Modifiers) -> Option<BarKey> {
     if flags & INJECTED_FLAG != 0 || modifiers.ctrl_alt_or_win {
         return None;
@@ -191,6 +232,9 @@ fn bar_key(virtual_key: u32, flags: u32, modifiers: Modifiers) -> Option<BarKey>
         key if key == VK_ESCAPE.0 => Some(BarKey::Exit),
         key if key == VK_TAB.0 && modifiers.shift => Some(BarKey::PreviousTab),
         key if key == VK_TAB.0 => Some(BarKey::NextTab),
+        0x30..=0x39 if !modifiers.shift => Some(BarKey::Digit((key - 0x30) as u8)),
+        0x60..=0x69 => Some(BarKey::Digit((key - 0x60) as u8)),
+        0x08 => Some(BarKey::Backspace),
         _ => None,
     }
 }
@@ -203,6 +247,15 @@ fn current_modifiers() -> Modifiers {
     Modifiers {
         shift: key_is_down(VK_SHIFT.0),
         ctrl_alt_or_win: [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+            .into_iter()
+            .any(|key| key_is_down(key.0)),
+    }
+}
+
+fn current_finder_modifiers() -> FinderShortcutModifiers {
+    FinderShortcutModifiers {
+        win: key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0),
+        ctrl_alt_or_shift: [VK_CONTROL, VK_MENU, VK_SHIFT]
             .into_iter()
             .any(|key| key_is_down(key.0)),
     }
@@ -317,6 +370,53 @@ fn post_bar_key(key: BarKey) -> bool {
     true
 }
 
+fn post_finder_shortcut(target_hwnd: isize, message: u32) -> bool {
+    let mask = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(WIN_MENU_MASK_VK),
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let posted = unsafe {
+        let _ = SendInput(&[mask], size_of::<INPUT>() as i32);
+        PostMessageW(
+            Some(HWND(target_hwnd as *mut _)),
+            message,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
+    posted.is_ok()
+}
+
+fn try_swallow_finder_shortcut(virtual_key: u32, flags: u32) -> bool {
+    if flags & INJECTED_FLAG != 0 || virtual_key != u32::from(VK_E.0) {
+        return false;
+    }
+    let target = FINDER_HOOK_TARGET.load(Ordering::Acquire);
+    if target == 0 {
+        return false;
+    }
+    let message = FINDER_HOOK_MESSAGE.load(Ordering::Acquire);
+    if message == 0 || !is_finder_shortcut_key(virtual_key, flags, current_finder_modifiers()) {
+        return false;
+    }
+    if SWALLOWED_KEY_DOWNS.is_swallowed(virtual_key) {
+        return true;
+    }
+    if post_finder_shortcut(target, message) {
+        record_key_down(virtual_key, true);
+        return true;
+    }
+    false
+}
+
 fn is_key_down(message: usize) -> bool {
     message == WM_KEYDOWN as usize || message == WM_SYSKEYDOWN as usize
 }
@@ -340,10 +440,15 @@ fn apply_volume_key(key: VolumeKey) -> bool {
 fn swallow_key_down(virtual_key: u32, flags: u32) -> bool {
     let routed = ROUTE_ACTIVE.load(Ordering::Acquire)
         && bar_key(virtual_key, flags, current_modifiers()).is_some_and(post_bar_key);
-    record_key_down(virtual_key, routed);
-    routed
-        || (is_volume_hud_hook_enabled()
-            && volume_key(virtual_key, flags).is_some_and(apply_volume_key))
+    if routed {
+        record_key_down(virtual_key, true);
+        return true;
+    }
+    if try_swallow_finder_shortcut(virtual_key, flags) {
+        return true;
+    }
+    record_key_down(virtual_key, false);
+    is_volume_hud_hook_enabled() && volume_key(virtual_key, flags).is_some_and(apply_volume_key)
 }
 
 fn swallow_key_up(virtual_key: u32, flags: u32) -> bool {
@@ -430,13 +535,13 @@ unsafe extern "system" fn low_level_keyboard_proc(
 }
 
 fn hook_thread_main(startup: &HookStartup) {
-    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0) };
-    let Ok(hook) = hook else {
-        let _ = startup.publish(None);
-        return;
-    };
-    let mut message = MSG::default();
     unsafe {
+        let Ok(hook) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0)
+        else {
+            let _ = startup.publish(None);
+            return;
+        };
+        let mut message = MSG::default();
         let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
         if !startup.publish(Some(GetCurrentThreadId())) {
             let _ = UnhookWindowsHookEx(hook);
@@ -463,21 +568,23 @@ pub fn install_keyboard_hook() -> bool {
 
 pub fn uninstall_keyboard_hook() {
     stop_routing_bar_keys();
+    set_finder_shortcut_hook(0, 0);
     uninstall_hook_thread(&HOOK_THREAD, SHUTDOWN_TIMEOUT);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HOOK_THREAD, INJECTED_FLAG, Modifiers, Route, SwallowedKeys, VolumeKey, WakeModifiers,
-        bar_key, install_keyboard_hook, is_key_down, is_routing_bar_keys, route_bar_keys,
-        route_live, should_wake_status_with, uninstall_keyboard_hook, volume_key,
+        FinderShortcutModifiers, HOOK_THREAD, INJECTED_FLAG, Modifiers, Route, SwallowedKeys,
+        VolumeKey, WakeModifiers, bar_key, install_keyboard_hook, is_finder_shortcut_hook_enabled,
+        is_finder_shortcut_key, is_key_down, is_routing_bar_keys, route_bar_keys, route_live,
+        set_finder_shortcut_hook, should_wake_status_with, uninstall_keyboard_hook, volume_key,
     };
     use otto_core::BarKey;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_A, VK_CAPITAL, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_HOME, VK_LEFT, VK_NUMLOCK,
-        VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
-        VK_VOLUME_UP,
+        VK_A, VK_CAPITAL, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_HOME, VK_LEFT,
+        VK_NUMLOCK, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_VOLUME_DOWN,
+        VK_VOLUME_MUTE, VK_VOLUME_UP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN};
 
@@ -676,5 +783,44 @@ mod tests {
             super::WPARAM(WM_KEYDOWN as usize),
             super::LPARAM(0)
         ));
+    }
+
+    #[test]
+    fn win_e_matches_finder_shortcut_only_without_extra_modifiers() {
+        let win_only = FinderShortcutModifiers {
+            win: true,
+            ctrl_alt_or_shift: false,
+        };
+        let win_with_extra = FinderShortcutModifiers {
+            win: true,
+            ctrl_alt_or_shift: true,
+        };
+        let no_win = FinderShortcutModifiers::default();
+
+        assert!(is_finder_shortcut_key(u32::from(VK_E.0), 0, win_only));
+        assert!(!is_finder_shortcut_key(
+            u32::from(VK_E.0),
+            INJECTED_FLAG,
+            win_only
+        ));
+        assert!(!is_finder_shortcut_key(
+            u32::from(VK_E.0),
+            0,
+            win_with_extra
+        ));
+        assert!(!is_finder_shortcut_key(u32::from(VK_E.0), 0, no_win));
+        assert!(!is_finder_shortcut_key(u32::from(VK_A.0), 0, win_only));
+    }
+
+    #[test]
+    fn finder_shortcut_hook_toggles_and_clears_cleanly() {
+        set_finder_shortcut_hook(0, 0);
+        assert!(!is_finder_shortcut_hook_enabled());
+        set_finder_shortcut_hook(42, 0x803F);
+        assert!(is_finder_shortcut_hook_enabled());
+        set_finder_shortcut_hook(42, 0);
+        assert!(!is_finder_shortcut_hook_enabled());
+        set_finder_shortcut_hook(0, 0x803F);
+        assert!(!is_finder_shortcut_hook_enabled());
     }
 }

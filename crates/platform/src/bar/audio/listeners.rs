@@ -55,7 +55,7 @@ pub(super) struct CaptureSessionNotification {
 }
 
 impl IAudioSessionNotification_Impl for CaptureSessionNotification_Impl {
-    fn OnSessionCreated(&self, _newsession: Ref<IAudioSessionControl>) -> Result<()> {
+    fn OnSessionCreated(&self, _newsession: Ref<'_, IAudioSessionControl>) -> Result<()> {
         if let Ok(worker) = self.worker.lock() {
             let _ = worker.send(AudioCommand::CaptureSessionsChanged);
         }

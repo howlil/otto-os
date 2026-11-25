@@ -69,10 +69,11 @@ impl BarControlsController {
         active_app: String,
         active_window: Option<WindowInfo>,
     ) -> ForegroundChange {
+        let window_changed = self.active_window.as_ref().map(|window| window.identity)
+            != active_window.as_ref().map(|window| window.identity);
         let change = ForegroundChange {
             app: self.active_app != active_app,
-            window: self.active_window.as_ref().map(|window| window.identity)
-                != active_window.as_ref().map(|window| window.identity),
+            window: window_changed,
         };
         self.active_app = active_app;
         self.active_window = active_window;

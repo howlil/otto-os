@@ -6,16 +6,21 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 
 use otto_core::{
-    Appearance, PixelLimits, Rect, RgbBuffer, SpotlightLayout, SpotlightMode, SpotlightView, scale,
+    Appearance, AppleIconKind, PixelLimits, RgbBuffer, SpotlightLayout, SpotlightMode,
+    SpotlightView, scale,
 };
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND,
+    D2D1_STROKE_STYLE_PROPERTIES, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1StrokeStyle,
+};
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, IDWriteTextFormat,
 };
 use windows::core::Result;
 
+pub(super) use crate::CLEAR;
 use crate::appearance::glass::GlassPainter;
 use crate::appearance::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery, upload_bgra_bitmap,
@@ -23,17 +28,11 @@ use crate::appearance::surface::{
 use crate::appearance::theme::{BrushPalette, LiquidGlassPalette};
 use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
 
-pub(super) const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
-};
-
 #[derive(Clone, Copy)]
 pub struct SpotlightPaintEntry<'a> {
     pub key: &'a str,
     pub title: &'a str,
+    pub apple_icon: Option<AppleIconKind>,
 }
 
 pub struct SpotlightPaintState<'paint, 'text> {
@@ -61,6 +60,7 @@ pub(super) struct CachedSpotlightIcon {
 pub struct SpotlightRenderer {
     pub(super) factory: ID2D1Factory,
     pub(super) target: ID2D1DCRenderTarget,
+    pub(super) stroke_style: ID2D1StrokeStyle,
     pub(super) brushes: BrushPalette,
     pub(super) search_format: IDWriteTextFormat,
     pub(super) label_format: IDWriteTextFormat,
@@ -77,6 +77,16 @@ impl SpotlightRenderer {
         unsafe {
             let factory = shared_d2d_factory()?;
             let target = create_dc_render_target(&factory)?;
+            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 2.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            };
+            let stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
             let brushes = BrushPalette::new(&target)?;
             let dwrite = shared_dwrite_factory()?;
             let search_format = create_text_format(
@@ -106,6 +116,7 @@ impl SpotlightRenderer {
             Ok(Self {
                 factory,
                 target,
+                stroke_style,
                 brushes,
                 search_format,
                 label_format,
@@ -248,19 +259,4 @@ impl SpotlightRenderer {
 pub(super) fn with_opacity(mut color: D2D1_COLOR_F, opacity: f32) -> D2D1_COLOR_F {
     color.a *= opacity.clamp(0.0, 1.0);
     color
-}
-
-pub(super) trait RectExt {
-    fn to_d2d(self) -> D2D_RECT_F;
-}
-
-impl RectExt for Rect {
-    fn to_d2d(self) -> D2D_RECT_F {
-        D2D_RECT_F {
-            left: self.x as f32,
-            top: self.y as f32,
-            right: self.right() as f32,
-            bottom: self.bottom() as f32,
-        }
-    }
 }

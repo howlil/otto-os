@@ -8,7 +8,6 @@ use std::fs;
 use windows::Win32::UI::WindowsAndMessaging::WNDPROC;
 use windows::core::{Error, PCWSTR, Result, w};
 
-use crate::window_controls;
 use otto_core::{AppPreferences, DockPreferences};
 use otto_platform::replace_file_atomically;
 
@@ -51,7 +50,7 @@ pub(super) const fn toggleable_plugin_index(plugin: PluginId) -> Option<usize> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum PluginId {
+pub(crate) enum PluginId {
     PopupMenu,
     TopBar,
     Spotlight,
@@ -113,7 +112,7 @@ pub(super) const DOCK_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
     topmost: true,
 };
 pub(super) const WINDOW_CONTROLS_SURFACE: SurfaceDescriptor = SurfaceDescriptor {
-    class_name: window_controls::OVERLAY_CLASS,
+    class_name: w!("OttoWindowControls"),
     wnd_proc: Some(window_controls_window_proc),
     slot: SurfaceSlot::WindowControls,
     topmost: false,

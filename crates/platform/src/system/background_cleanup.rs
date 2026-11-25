@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
-use std::mem::size_of;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -12,60 +11,59 @@ use otto_core::{
     ProcessThrottleKind, RawProcessAuditSample, WindowPresence, classify_process_protection,
     summarize_process_audit,
 };
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, FILETIME, HANDLE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-};
-use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
-use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass, GetProcessTimes,
-    IsProcessCritical, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_CREATION_FLAGS,
-    PROCESS_NAME_WIN32, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE,
-    ProcessPowerThrottling, QueryFullProcessImageNameW, SetPriorityClass, SetProcessInformation,
-    TerminateProcess,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetPriorityClass,
+    NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_CREATION_FLAGS,
+    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    SetPriorityClass, TerminateProcess,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
-use windows::core::{BOOL, PWSTR};
 
-use crate::worker::join_within;
+use super::process_policy::{ProcessOrigin, ThrottleLedger, ThrottleReason};
+use super::process_win32::{
+    OwnedProcess, apply_power_throttling, foreground_process_id, is_verified_non_critical,
+    list_processes, open_controllable, open_query, open_terminatable, process_executable_path,
+    process_memory_bytes, process_session_id, process_times, query_power_throttling,
+};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const JOIN_POLL: Duration = Duration::from_millis(10);
+const MAX_RETIRED_WORKERS: usize = 8;
 const MIN_CPU_DELTA_WINDOW: Duration = Duration::from_millis(250);
 
 struct CleanupState {
     runtime: Option<CleanupRuntime>,
-    auto_origins: HashMap<u32, Origin>,
-    manual_origins: HashMap<u32, Origin>,
+    worker_generation: u64,
+    retired_workers: Vec<JoinHandle<()>>,
+    ledger: ThrottleLedger,
     prev_cpu_sample: Option<(Instant, HashMap<u32, u64>)>,
 }
 
 static STATE: LazyLock<Mutex<CleanupState>> = LazyLock::new(|| {
     Mutex::new(CleanupState {
         runtime: None,
-        auto_origins: HashMap::new(),
-        manual_origins: HashMap::new(),
+        worker_generation: 0,
+        retired_workers: Vec::new(),
+        ledger: ThrottleLedger::default(),
         prev_cpu_sample: None,
     })
 });
 
 struct CleanupRuntime {
     stop: Sender<()>,
+    stop_flag: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
 
-struct Origin {
-    created: u64,
-    lowered_from: Option<u32>,
-}
-
-struct OwnedProcess(HANDLE);
-
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        let _ = unsafe { CloseHandle(self.0) };
+fn reap_retired_workers(retired: &mut Vec<JoinHandle<()>>) {
+    let mut i = 0;
+    while i < retired.len() {
+        if retired[i].is_finished() {
+            let done = retired.remove(i);
+            let _ = done.join();
+        } else {
+            i += 1;
+        }
     }
 }
 
@@ -74,13 +72,22 @@ pub fn set_background_cleanup(enabled: bool) {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
+        reap_retired_workers(&mut guard.retired_workers);
         if guard.runtime.is_none() {
+            guard.worker_generation = guard.worker_generation.wrapping_add(1);
+            let generation = guard.worker_generation;
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let worker_flag = Arc::clone(&stop_flag);
             let (stop, signal) = channel();
             if let Ok(handle) = thread::Builder::new()
                 .name(String::from("otto-cleanup"))
-                .spawn(move || cleanup_worker(&signal))
+                .spawn(move || cleanup_worker(generation, &worker_flag, &signal))
             {
-                guard.runtime = Some(CleanupRuntime { stop, handle });
+                guard.runtime = Some(CleanupRuntime {
+                    stop,
+                    stop_flag,
+                    handle,
+                });
             }
         }
         return;
@@ -90,17 +97,33 @@ pub fn set_background_cleanup(enabled: bool) {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
-        guard.runtime.take()
+        guard.worker_generation = guard.worker_generation.wrapping_add(1);
+        let rt = guard.runtime.take();
+        if let Some(ref rt) = rt {
+            rt.stop_flag.store(true, Ordering::Release);
+        }
+        rt
     };
     if let Some(runtime) = runtime {
         drop(runtime.stop);
-        let _ = join_within(runtime.handle, SHUTDOWN_TIMEOUT);
+        let start = Instant::now();
+        while !runtime.handle.is_finished() && start.elapsed() < SHUTDOWN_TIMEOUT {
+            thread::sleep(JOIN_POLL);
+        }
+        if runtime.handle.is_finished() {
+            let _ = runtime.handle.join();
+        } else if let Ok(mut guard) = STATE.lock() {
+            reap_retired_workers(&mut guard.retired_workers);
+            if guard.retired_workers.len() < MAX_RETIRED_WORKERS {
+                guard.retired_workers.push(runtime.handle);
+            }
+        }
     }
-    let released: Vec<(u32, Origin)> = {
+    let released = {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
-        guard.auto_origins.drain().collect()
+        guard.ledger.release_all_for_reason(ThrottleReason::AUTO)
     };
     for (pid, origin) in released {
         restore(pid, &origin);
@@ -109,23 +132,62 @@ pub fn set_background_cleanup(enabled: bool) {
 
 pub fn shutdown_background_cleanup() {
     set_background_cleanup(false);
-    let released: Vec<(u32, Origin)> = {
+    let released = {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
-        guard.manual_origins.drain().collect()
+        guard.ledger.release_all()
     };
     for (pid, origin) in released {
         restore(pid, &origin);
     }
 }
 
-fn cleanup_worker(signal: &Receiver<()>) {
+pub(super) fn throttle_exe_for_focus(exe_name: &str) -> usize {
+    let target = exe_name.to_ascii_lowercase();
+    let pids: Vec<u32> = list_processes()
+        .into_iter()
+        .filter(|(pid, name)| *pid > 4 && name.eq_ignore_ascii_case(&target))
+        .map(|(pid, _)| pid)
+        .collect();
+    let mut count = 0usize;
+    for pid in pids {
+        if acquire_throttle_for_reason(pid, ThrottleReason::FOCUS) {
+            count += 1;
+        }
+    }
+    count
+}
+
+pub(super) fn release_focus_throttles() {
+    let released = {
+        let Ok(mut guard) = STATE.lock() else {
+            return;
+        };
+        guard.ledger.release_all_for_reason(ThrottleReason::FOCUS)
+    };
+    for (pid, origin) in released {
+        restore(pid, &origin);
+    }
+}
+
+fn is_worker_active(generation: u64, stop_flag: &AtomicBool) -> bool {
+    !stop_flag.load(Ordering::Acquire)
+        && STATE
+            .lock()
+            .is_ok_and(|guard| guard.worker_generation == generation)
+}
+
+fn cleanup_worker(generation: u64, stop_flag: &AtomicBool, signal: &Receiver<()>) {
     let mut tracker = HogTracker::default();
     let mut last_sample = Instant::now();
-    while let Err(RecvTimeoutError::Timeout) =
-        signal.recv_timeout(Duration::from_secs(HOG_SAMPLE_INTERVAL_SECS))
+    while !stop_flag.load(Ordering::Acquire)
+        && signal.recv_timeout(Duration::from_secs(HOG_SAMPLE_INTERVAL_SECS))
+            == Err(RecvTimeoutError::Timeout)
     {
+        if !is_worker_active(generation, stop_flag) {
+            break;
+        }
         let now = Instant::now();
         let elapsed_100ns =
             u64::try_from(now.duration_since(last_sample).as_nanos() / 100).unwrap_or(u64::MAX);
@@ -148,62 +210,54 @@ fn cleanup_worker(signal: &Receiver<()>) {
             })
             .collect();
         let decision = tracker.update(&samples, elapsed_100ns, foreground_name);
+        if !is_worker_active(generation, stop_flag) {
+            break;
+        }
 
-        let throttle_targets: Vec<u32> = {
-            let Ok(guard) = STATE.lock() else {
+        for pid in decision.throttle {
+            if !is_worker_active(generation, stop_flag) {
+                break;
+            }
+            let _ = acquire_throttle_for_reason(pid, ThrottleReason::AUTO);
+        }
+        let restore_targets = {
+            let Ok(mut guard) = STATE.lock() else {
                 continue;
             };
-            decision
-                .throttle
-                .into_iter()
-                .filter(|pid| !guard.manual_origins.contains_key(pid))
-                .collect()
-        };
-        let mut newly_throttled = Vec::new();
-        for pid in throttle_targets {
-            if let Some(origin) = throttle(pid) {
-                newly_throttled.push((pid, origin));
+            if stop_flag.load(Ordering::Acquire) || guard.worker_generation != generation {
+                break;
             }
-        }
-        let restore_targets: Vec<(u32, Origin)> = if let Ok(mut guard) = STATE.lock() {
             let mut out = Vec::new();
             for pid in decision.restore {
-                if let Some(origin) = guard.auto_origins.remove(&pid) {
+                if let Some(origin) = guard.ledger.release_reason(pid, ThrottleReason::AUTO) {
                     out.push((pid, origin));
                 }
             }
+            let live: HashSet<u32> = processes.iter().map(|(pid, _)| *pid).collect();
+            guard.ledger.prune_dead(&live);
             out
-        } else {
-            Vec::new()
         };
         for (pid, origin) in restore_targets {
             restore(pid, &origin);
         }
-
-        let live: HashSet<u32> = processes.iter().map(|(pid, _)| *pid).collect();
-        if let Ok(mut guard) = STATE.lock() {
-            for (pid, origin) in newly_throttled {
-                guard.auto_origins.insert(pid, origin);
-            }
-            guard.auto_origins.retain(|pid, _| live.contains(pid));
-            guard.manual_origins.retain(|pid, _| live.contains(pid));
-        }
     }
 
-    let to_release: Vec<(u32, Origin)> = {
+    let to_release = {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
-        let mut out = Vec::new();
-        for pid in tracker.release_all() {
-            if let Some(origin) = guard.auto_origins.remove(&pid) {
-                out.push((pid, origin));
+        if guard.worker_generation == generation {
+            let mut out = Vec::new();
+            for pid in tracker.release_all() {
+                if let Some(origin) = guard.ledger.release_reason(pid, ThrottleReason::AUTO) {
+                    out.push((pid, origin));
+                }
             }
+            out.extend(guard.ledger.release_all_for_reason(ThrottleReason::AUTO));
+            out
+        } else {
+            Vec::new()
         }
-        for (pid, origin) in guard.auto_origins.drain() {
-            out.push((pid, origin));
-        }
-        out
     };
     for (pid, origin) in to_release {
         restore(pid, &origin);
@@ -211,16 +265,21 @@ fn cleanup_worker(signal: &Receiver<()>) {
 }
 
 struct AuditLockSnapshot {
-    auto_throttled: HashSet<u32>,
-    manual_throttled: HashSet<u32>,
+    throttle_kinds: HashMap<u32, ProcessThrottleKind>,
     prev_cpu_sample: Option<(Instant, HashMap<u32, u64>)>,
 }
 
-fn snapshot_audit_state() -> Option<AuditLockSnapshot> {
+fn snapshot_audit_state(pids: &[u32]) -> Option<AuditLockSnapshot> {
     let guard = STATE.lock().ok()?;
+    let mut throttle_kinds = HashMap::with_capacity(pids.len());
+    for &pid in pids {
+        let kind = guard.ledger.throttle_kind(pid);
+        if kind != ProcessThrottleKind::None {
+            throttle_kinds.insert(pid, kind);
+        }
+    }
     Some(AuditLockSnapshot {
-        auto_throttled: guard.auto_origins.keys().copied().collect(),
-        manual_throttled: guard.manual_origins.keys().copied().collect(),
+        throttle_kinds,
         prev_cpu_sample: guard.prev_cpu_sample.clone(),
     })
 }
@@ -264,6 +323,7 @@ fn cpu_tenths_since_prev(
 #[must_use]
 pub fn collect_process_audit(own_pid: u32) -> ProcessAuditReport {
     let processes = list_processes();
+    let pids: Vec<u32> = processes.iter().map(|(pid, _)| *pid).collect();
     let fg_pid = foreground_process_id();
     let fg_exe = fg_pid.and_then(|pid| {
         processes
@@ -272,7 +332,7 @@ pub fn collect_process_audit(own_pid: u32) -> ProcessAuditReport {
             .map(|(_, name)| name.clone())
     });
     let (visible_pids, visible_exes) = collect_visible_window_sets(own_pid);
-    let Some(snapshot) = snapshot_audit_state() else {
+    let Some(snapshot) = snapshot_audit_state(&pids) else {
         return ProcessAuditReport::default();
     };
 
@@ -300,7 +360,9 @@ pub fn collect_process_audit(own_pid: u32) -> ProcessAuditReport {
         }
         let session_id = process_session_id(pid).unwrap_or(0);
         let query_handle = open_query(pid);
-        let is_critical = query_handle.as_ref().is_some_and(process_is_critical);
+        let is_critical = query_handle
+            .as_ref()
+            .is_none_or(|handle| !is_verified_non_critical(handle));
         let memory_bytes = query_handle.as_ref().map_or(0, process_memory_bytes);
         let cpu_now = query_handle
             .as_ref()
@@ -331,13 +393,11 @@ pub fn collect_process_audit(own_pid: u32) -> ProcessAuditReport {
             && pid != own_pid
             && controllable
             && open_terminatable(pid).is_some();
-        let throttle_kind = if snapshot.manual_throttled.contains(&pid) {
-            ProcessThrottleKind::ManualEcoQos
-        } else if snapshot.auto_throttled.contains(&pid) {
-            ProcessThrottleKind::AutoEcoQos
-        } else {
-            ProcessThrottleKind::None
-        };
+        let throttle_kind = snapshot
+            .throttle_kinds
+            .get(&pid)
+            .copied()
+            .unwrap_or(ProcessThrottleKind::None);
 
         samples.push(RawProcessAuditSample {
             pid,
@@ -378,27 +438,27 @@ pub fn toggle_process_group_throttle(exe_name: &str) -> Option<bool> {
         return None;
     }
 
-    let restore_list: Option<Vec<(u32, Origin)>> = {
+    let restore_list: Option<Vec<(u32, ProcessOrigin)>> = {
         let Ok(mut guard) = STATE.lock() else {
             return None;
         };
         let is_throttled = pids.iter().any(|pid| {
-            guard.manual_origins.contains_key(pid) || guard.auto_origins.contains_key(pid)
+            guard
+                .ledger
+                .has_reason(*pid, ThrottleReason::MANUAL | ThrottleReason::AUTO)
         });
-        if is_throttled {
+        is_throttled.then(|| {
             let mut out = Vec::new();
             for pid in &pids {
-                if let Some(origin) = guard.manual_origins.remove(pid) {
-                    out.push((*pid, origin));
-                }
-                if let Some(origin) = guard.auto_origins.remove(pid) {
+                if let Some(origin) = guard
+                    .ledger
+                    .release_reason(*pid, ThrottleReason::MANUAL | ThrottleReason::AUTO)
+                {
                     out.push((*pid, origin));
                 }
             }
-            Some(out)
-        } else {
-            None
-        }
+            out
+        })
     };
 
     if let Some(to_restore) = restore_list {
@@ -408,31 +468,29 @@ pub fn toggle_process_group_throttle(exe_name: &str) -> Option<bool> {
         return Some(false);
     }
 
-    let mut newly_throttled = Vec::new();
+    let mut throttled_any = false;
     for pid in pids {
         if process_session_id(pid).is_none_or(|sid| sid == 0) {
             continue;
         }
-        if open_query(pid).is_none_or(|handle| process_is_critical(&handle)) {
-            continue;
-        }
-        if let Some(origin) = throttle(pid) {
-            newly_throttled.push((pid, origin));
+        if acquire_throttle_for_reason(pid, ThrottleReason::MANUAL) {
+            throttled_any = true;
         }
     }
-    if newly_throttled.is_empty() {
-        return None;
-    }
-    if let Ok(mut guard) = STATE.lock() {
-        for (pid, origin) in newly_throttled {
-            guard.manual_origins.insert(pid, origin);
-        }
-    }
-    Some(true)
+    throttled_any.then_some(true)
 }
 
 #[must_use]
 pub fn terminate_process_group(exe_name: &str, own_pid: u32) -> CommandOutcome {
+    terminate_process_group_matching(exe_name, None, own_pid)
+}
+
+#[must_use]
+pub(crate) fn terminate_process_group_matching(
+    exe_name: &str,
+    expected_exe_path: Option<&str>,
+    own_pid: u32,
+) -> CommandOutcome {
     let target = exe_name.trim().to_ascii_lowercase();
     if target.is_empty() || classify_process_protection(&target, 100, 1, false, true).is_some() {
         return CommandOutcome::Denied;
@@ -461,28 +519,51 @@ pub fn terminate_process_group(exe_name: &str, own_pid: u32) -> CommandOutcome {
     let mut any_denied = false;
     let mut terminated_pids = Vec::new();
     for pid in pids {
-        if process_session_id(pid).is_none_or(|sid| sid == 0) {
+        let Some(sid) = process_session_id(pid).filter(|&sid| sid != 0) else {
             any_denied = true;
             continue;
-        }
-        if open_query(pid).is_none_or(|handle| process_is_critical(&handle)) {
-            any_denied = true;
-            continue;
-        }
-        match unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) } {
-            Ok(handle) => {
-                let process = OwnedProcess(handle);
-                if unsafe { TerminateProcess(process.0, 1) }.is_ok() {
-                    any_completed = true;
-                    terminated_pids.push(pid);
-                } else {
-                    any_denied = true;
-                }
-            }
+        };
+        let process = match unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+        } {
+            Ok(handle) => OwnedProcess(handle),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {
                 any_denied = true;
+                continue;
             }
-            Err(_) => {}
+            Err(_) => continue,
+        };
+        if process_times(&process).is_none() || !is_verified_non_critical(&process) {
+            any_denied = true;
+            continue;
+        }
+        let Some(exe_path) = process_executable_path(&process) else {
+            any_denied = true;
+            continue;
+        };
+        let basename_ok = Path::new(&exe_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(&target));
+        let full_path_ok =
+            expected_exe_path.is_none_or(|expected| exe_path.eq_ignore_ascii_case(expected.trim()));
+        if !basename_ok
+            || !full_path_ok
+            || classify_process_protection(&target, pid, sid, false, true).is_some()
+            || foreground_process_id() == Some(pid)
+        {
+            any_denied = true;
+            continue;
+        }
+        if unsafe { TerminateProcess(process.0, 1) }.is_ok() {
+            any_completed = true;
+            terminated_pids.push(pid);
+        } else {
+            any_denied = true;
         }
     }
 
@@ -490,197 +571,87 @@ pub fn terminate_process_group(exe_name: &str, own_pid: u32) -> CommandOutcome {
         && let Ok(mut guard) = STATE.lock()
     {
         for pid in terminated_pids {
-            guard.auto_origins.remove(&pid);
-            guard.manual_origins.remove(&pid);
+            let _ = guard.ledger.release_reason(
+                pid,
+                ThrottleReason::AUTO | ThrottleReason::MANUAL | ThrottleReason::FOCUS,
+            );
         }
     }
 
-    if any_completed {
-        CommandOutcome::Completed
-    } else if any_denied {
+    if any_denied {
         CommandOutcome::Denied
+    } else if any_completed {
+        CommandOutcome::Completed
     } else {
         CommandOutcome::TargetGone
     }
 }
 
-fn list_processes() -> Vec<(u32, String)> {
-    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-        return Vec::new();
-    };
-    let snapshot = OwnedProcess(snapshot);
-    let mut entry = PROCESSENTRY32W {
-        dwSize: size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-    let mut processes = Vec::new();
-    if unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_err() {
-        return processes;
-    }
-    loop {
-        let len = entry
-            .szExeFile
-            .iter()
-            .position(|&ch| ch == 0)
-            .unwrap_or(entry.szExeFile.len());
-        if let Ok(name) = String::from_utf16(&entry.szExeFile[..len]) {
-            processes.push((entry.th32ProcessID, name.to_ascii_lowercase()));
-        }
-        if unsafe { Process32NextW(snapshot.0, &mut entry) }.is_err() {
-            break;
-        }
-    }
-    processes
-}
-
-fn foreground_process_id() -> Option<u32> {
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return None;
-    }
-    let mut pid = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
-    (pid != 0).then_some(pid)
-}
-
-fn open_query(pid: u32) -> Option<OwnedProcess> {
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    Some(OwnedProcess(handle))
-}
-
-fn open_controllable(pid: u32) -> Option<OwnedProcess> {
-    let handle = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION,
-            false,
-            pid,
-        )
-    }
-    .ok()?;
-    Some(OwnedProcess(handle))
-}
-
-fn open_terminatable(pid: u32) -> Option<OwnedProcess> {
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }.ok()?;
-    Some(OwnedProcess(handle))
-}
-
-fn process_session_id(pid: u32) -> Option<u32> {
-    let mut session_id = 0u32;
-    unsafe { ProcessIdToSessionId(pid, &raw mut session_id) }.ok()?;
-    Some(session_id)
-}
-
-fn process_is_critical(process: &OwnedProcess) -> bool {
-    let mut critical = BOOL::default();
-    unsafe { IsProcessCritical(process.0, &raw mut critical) }.is_ok() && critical.as_bool()
-}
-
-fn process_memory_bytes(process: &OwnedProcess) -> u64 {
-    let mut pmc = PROCESS_MEMORY_COUNTERS_EX {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-        ..Default::default()
-    };
-    if unsafe { K32GetProcessMemoryInfo(process.0, (&raw mut pmc).cast(), pmc.cb) }.as_bool() {
-        let bytes = if pmc.PrivateUsage > 0 {
-            pmc.PrivateUsage
-        } else {
-            pmc.WorkingSetSize
-        };
-        u64::try_from(bytes).unwrap_or(0)
-    } else {
-        0
-    }
-}
-
-fn process_executable_path(process: &OwnedProcess) -> Option<String> {
-    let mut buffer = [0u16; 1024];
-    let mut length = u32::try_from(buffer.len()).unwrap_or(1024);
-    unsafe {
-        QueryFullProcessImageNameW(
-            process.0,
-            PROCESS_NAME_WIN32,
-            PWSTR(buffer.as_mut_ptr()),
-            &raw mut length,
-        )
-    }
-    .ok()?;
-    let path = String::from_utf16_lossy(&buffer[..length as usize]);
-    (!path.trim().is_empty()).then_some(path)
-}
-
-fn file_time(ft: FILETIME) -> u64 {
-    (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
-}
-
-fn process_times(process: &OwnedProcess) -> Option<(u64, u64)> {
-    let (mut created, mut exited, mut kernel, mut user) = (
-        FILETIME::default(),
-        FILETIME::default(),
-        FILETIME::default(),
-        FILETIME::default(),
-    );
-    unsafe { GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user) }
-        .ok()?;
-    Some((file_time(created), file_time(kernel) + file_time(user)))
-}
-
 fn controllable_cpu_time(pid: u32) -> Option<u64> {
     let process = open_controllable(pid)?;
-    if process_is_critical(&process) {
+    if !is_verified_non_critical(&process) {
         return None;
     }
     process_times(&process).map(|(_, cpu)| cpu)
 }
 
-fn set_eco_qos(process: &OwnedProcess, eco: bool) -> bool {
-    let state = PROCESS_POWER_THROTTLING_STATE {
-        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: if eco {
-            PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-        } else {
-            0
-        },
-        StateMask: if eco {
-            PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-        } else {
-            0
-        },
-    };
-    unsafe {
-        SetProcessInformation(
-            process.0,
-            ProcessPowerThrottling,
-            (&raw const state).cast::<c_void>(),
-            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-        )
-    }
-    .is_ok()
-}
-
-fn throttle(pid: u32) -> Option<Origin> {
-    let process = open_controllable(pid)?;
-    let (created, _) = process_times(&process)?;
+fn throttle_process(process: &OwnedProcess, created: u64) -> Option<ProcessOrigin> {
+    let original_power = query_power_throttling(process);
     let priority = unsafe { GetPriorityClass(process.0) };
     let lowerable =
         priority == NORMAL_PRIORITY_CLASS.0 || priority == ABOVE_NORMAL_PRIORITY_CLASS.0;
     let lowered =
         lowerable && unsafe { SetPriorityClass(process.0, BELOW_NORMAL_PRIORITY_CLASS) }.is_ok();
-    let eco = set_eco_qos(&process, true);
-    (lowered || eco).then_some(Origin {
+    let eco = original_power.is_some()
+        && apply_power_throttling(
+            process,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        );
+    (lowered || eco).then_some(ProcessOrigin {
         created,
         lowered_from: lowered.then_some(priority),
+        power_throttling: eco.then_some(original_power).flatten(),
     })
 }
 
-fn restore(pid: u32, origin: &Origin) {
+fn acquire_throttle_for_reason(pid: u32, reason: u8) -> bool {
+    let Some(process) = open_controllable(pid) else {
+        return false;
+    };
+    if !is_verified_non_critical(&process) {
+        return false;
+    }
+    let Some((created, _)) = process_times(&process) else {
+        return false;
+    };
+    if let Ok(mut guard) = STATE.lock()
+        && guard.ledger.add_reason_if_present(pid, created, reason)
+    {
+        return true;
+    }
+    let Some(origin) = throttle_process(&process, created) else {
+        return false;
+    };
+    if let Ok(mut guard) = STATE.lock() {
+        guard.ledger.record_or_add_reason(pid, reason, origin);
+        true
+    } else {
+        restore(pid, &origin);
+        false
+    }
+}
+
+fn restore(pid: u32, origin: &ProcessOrigin) {
     let Some(process) = open_controllable(pid) else {
         return;
     };
     if process_times(&process).is_none_or(|(created, _)| created != origin.created) {
         return;
     }
-    set_eco_qos(&process, false);
+    if let Some(snap) = origin.power_throttling {
+        let _ = apply_power_throttling(&process, snap.control_mask, snap.state_mask);
+    }
     if let Some(priority) = origin.lowered_from {
         let _ = unsafe { SetPriorityClass(process.0, PROCESS_CREATION_FLAGS(priority)) };
     }
@@ -690,6 +661,15 @@ fn restore(pid: u32, origin: &Origin) {
 mod tests {
     use super::*;
 
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn own_process_is_listed_and_foreground_lookup_does_not_panic() {
         let own = std::process::id();
@@ -698,34 +678,56 @@ mod tests {
     }
 
     #[test]
-    fn throttle_lowers_then_restores_a_child_process() {
-        let mut child = std::process::Command::new("cmd")
+    fn throttle_lowers_then_restores_a_child_process_and_power_throttling() {
+        let child = std::process::Command::new("cmd")
             .args(["/C", "ping -n 20 127.0.0.1 >NUL"])
             .spawn()
             .expect("spawn child");
-        let pid = child.id();
+        let guard = ChildGuard(child);
+        let pid = guard.0.id();
         let process = open_controllable(pid).expect("open child");
         unsafe { SetPriorityClass(process.0, NORMAL_PRIORITY_CLASS) }.expect("normalize child");
+        assert!(is_verified_non_critical(&process));
         let original = unsafe { GetPriorityClass(process.0) };
         assert_eq!(original, NORMAL_PRIORITY_CLASS.0);
-        let origin = throttle(pid).expect("throttle child");
+
+        let before_power = query_power_throttling(&process).expect("query power throttling");
+        let (created, _) = process_times(&process).expect("process times");
+        let origin = throttle_process(&process, created).expect("throttle child");
         assert_eq!(
             unsafe { GetPriorityClass(process.0) },
             BELOW_NORMAL_PRIORITY_CLASS.0
         );
+        let throttled_power = query_power_throttling(&process).expect("query throttled");
+        assert_eq!(
+            throttled_power.state_mask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        );
         restore(pid, &origin);
         assert_eq!(unsafe { GetPriorityClass(process.0) }, original);
-        drop(process);
-        let _ = child.kill();
-        let _ = child.wait();
+        assert_eq!(query_power_throttling(&process), Some(before_power));
+
+        assert!(apply_power_throttling(
+            &process,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            0
+        ));
+        let explicit_before = query_power_throttling(&process).expect("query explicit");
+        let origin2 = throttle_process(&process, created).expect("throttle explicit child");
+        restore(pid, &origin2);
+        assert_eq!(query_power_throttling(&process), Some(explicit_before));
     }
 
     #[test]
-    fn enabling_and_disabling_is_idempotent() {
-        set_background_cleanup(true);
-        set_background_cleanup(true);
-        set_background_cleanup(false);
-        set_background_cleanup(false);
+    fn enabling_and_disabling_is_idempotent_across_rapid_cycles() {
+        for _ in 0..3 {
+            set_background_cleanup(true);
+            set_background_cleanup(true);
+            set_background_cleanup(false);
+            set_background_cleanup(false);
+        }
+        let is_none = STATE.lock().expect("state lock").runtime.is_none();
+        assert!(is_none);
     }
 
     #[test]
@@ -742,5 +744,25 @@ mod tests {
             terminate_process_group("svchost.exe", std::process::id()),
             CommandOutcome::Denied
         );
+    }
+
+    #[test]
+    fn terminate_matching_rejects_mismatched_executable_path() {
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 20 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("spawn child");
+        let guard = ChildGuard(child);
+        let outcome = terminate_process_group_matching(
+            "cmd.exe",
+            Some(r"C:\nonexistent-mismatch\cmd.exe"),
+            std::process::id(),
+        );
+        assert!(matches!(
+            outcome,
+            CommandOutcome::Denied | CommandOutcome::TargetGone
+        ));
+        let process = open_query(guard.0.id()).expect("child still alive");
+        assert!(process_times(&process).is_some());
     }
 }

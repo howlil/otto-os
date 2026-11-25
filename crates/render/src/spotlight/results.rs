@@ -1,18 +1,18 @@
-use otto_core::{SpotlightLayout, SpotlightMode, scale};
+use otto_core::{AppleIconKind, SpotlightLayout, SpotlightMode, scale};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS, IDWriteTextFormat,
-};
+use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows_numerics::Vector2;
 
 use crate::appearance::theme::LiquidGlassPalette;
-use crate::shared_dwrite_factory;
+use crate::kit::draw::{fill_squircle_or_rounded, measure_text_width};
+use crate::kit::icons::{GlyphCtx, draw_finder_tile};
+use crate::rect_to_d2d;
 
-use super::{RectExt, SpotlightPaintEntry, SpotlightRenderer, with_opacity};
+use super::{SpotlightPaintEntry, SpotlightRenderer, with_opacity};
 
 impl SpotlightRenderer {
     pub(super) fn draw_result(
@@ -24,26 +24,42 @@ impl SpotlightRenderer {
         opacity: f32,
         palette: &LiquidGlassPalette,
     ) {
-        let tile = D2D1_ROUNDED_RECT {
-            rect: layout.tile.to_d2d(),
-            radiusX: scale(12, self.dpi) as f32,
-            radiusY: scale(12, self.dpi) as f32,
-        };
         if selected || hovered {
             let fill = if selected {
                 palette.menu_hover_fill
             } else {
-                palette.card_fill
+                palette.hover_pill
             };
-            unsafe {
-                self.target.FillRoundedRectangle(
-                    &tile,
-                    &self.brushes.color_brush(with_opacity(fill, opacity)),
-                );
-            }
+            let brush = self.brushes.color_brush(with_opacity(fill, opacity));
+            fill_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                layout.tile,
+                scale(12, self.dpi) as f32,
+                self.dpi,
+                &brush,
+            );
         }
-        let icon_bounds = layout.icon.to_d2d();
-        if let Some(icon) = self.icons.get(entry.key) {
+        let icon_bounds = rect_to_d2d(layout.icon);
+        if entry.apple_icon == Some(AppleIconKind::Finder) {
+            let radius = (icon_bounds.right - icon_bounds.left) * 0.225;
+            let tile = D2D1_ROUNDED_RECT {
+                rect: icon_bounds,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let _ = draw_finder_tile(
+                GlyphCtx {
+                    factory: &self.factory,
+                    target: &self.target,
+                    stroke_style: &self.stroke_style,
+                },
+                &self.brushes,
+                &tile,
+                opacity,
+                true,
+            );
+        } else if let Some(icon) = self.icons.get(entry.key) {
             unsafe {
                 self.target.DrawBitmap(
                     &icon.bitmap,
@@ -54,19 +70,17 @@ impl SpotlightRenderer {
                 );
             }
         } else {
-            let icon_tile = D2D1_ROUNDED_RECT {
-                rect: icon_bounds,
-                radiusX: scale(13, self.dpi) as f32,
-                radiusY: scale(13, self.dpi) as f32,
-            };
-            unsafe {
-                self.target.FillRoundedRectangle(
-                    &icon_tile,
-                    &self
-                        .brushes
-                        .color_brush(with_opacity(palette.card_fill, opacity)),
-                );
-            }
+            let fill = self
+                .brushes
+                .color_brush(with_opacity(palette.card_fill, opacity));
+            fill_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                layout.icon,
+                scale(13, self.dpi) as f32,
+                self.dpi,
+                &fill,
+            );
             let label = entry.title.chars().next().map_or_else(
                 || String::from("•"),
                 |character| character.to_uppercase().to_string(),
@@ -84,13 +98,13 @@ impl SpotlightRenderer {
         let label_color = if selected {
             palette.on_accent
         } else {
-            palette.text_muted
+            palette.text_primary
         };
         let label_brush = self.brushes.color_brush(with_opacity(label_color, opacity));
         self.draw_text(
             &self.label_format,
             entry.title,
-            &layout.label.to_d2d(),
+            &rect_to_d2d(layout.label),
             &label_brush,
         );
     }
@@ -113,7 +127,7 @@ impl SpotlightRenderer {
         self.draw_text(
             &self.search_format,
             message,
-            &layout.empty_state.to_d2d(),
+            &rect_to_d2d(layout.empty_state),
             &brush,
         );
     }
@@ -161,7 +175,7 @@ impl SpotlightRenderer {
                     Vector2::new(right as f32, (bottom - inset) as f32),
                     &color,
                     scale(1, self.dpi) as f32,
-                    None,
+                    &self.stroke_style,
                 );
             }
         }
@@ -174,30 +188,17 @@ impl SpotlightRenderer {
         bounds: &D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
-        if text.is_empty() {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.target.DrawText(
-                &wide,
-                format,
-                bounds,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
+        crate::kit::draw::draw_text_on(
+            &self.target,
+            text,
+            format,
+            *bounds,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
     }
 
     pub(super) fn measure_text_width(text: &str, format: &IDWriteTextFormat) -> Option<f32> {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let dwrite = shared_dwrite_factory().ok()?;
-        unsafe {
-            let layout = dwrite.CreateTextLayout(&wide, format, 4096.0, 64.0).ok()?;
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            layout.GetMetrics(&mut metrics).ok()?;
-            Some(metrics.widthIncludingTrailingWhitespace)
-        }
+        measure_text_width(text, format, 4096.0)
     }
 }

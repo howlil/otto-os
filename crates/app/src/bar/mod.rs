@@ -8,35 +8,35 @@ use crate::notch_io::NotchIo;
 use crate::win_msg::{
     DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, DEADLINE_TIMER,
     HUD_ANIM_TIMER, STATUS_TIMER, WM_APP_BAR_BACKDROP, WM_APP_BAR_BLUETOOTH_HUD,
-    WM_APP_BAR_CAPTURE, WM_APP_BAR_KEY, WM_APP_IDLE_WAKE, WM_DEVICECHANGE, WM_GETOBJECT,
-    WM_MOUSELEAVE, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-    WM_POWERBROADCAST,
+    WM_APP_BAR_CAPTURE, WM_APP_BAR_KEY, WM_APP_IDLE_WAKE, WM_APP_NATIVE_MINIMIZE, WM_DEVICECHANGE,
+    WM_GETOBJECT, WM_MOUSELEAVE, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERUP,
+    WM_POINTERUPDATE, WM_POWERBROADCAST,
 };
 use otto_core::Rect;
 use otto_core::{
     BarFocus, BarHideMode, BarKey, BarVisibility, ChangeGate, HitTarget, Layout,
     MenuBarPreferences, Metrics, MotionPreference, NotchExpandedTab, NotchHudKind,
     NotchLayoutInput, NotchPort, NowPlaying, TickCadence, compute_layout_with_notch,
-    decode_bar_hit_target, scale,
+    decode_bar_hit_target,
 };
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
     AppBar, PowerNotificationGuard, PrimaryScreen, QuickCaptureInput, WM_APP_SHELF_EVENT,
     WM_APP_UIA_INVOKE, WM_CLIPBOARDUPDATE, WindowsNotchPort, acknowledge_idle_wake,
-    current_process_id, foreground_application, load_tasks, motion_preference,
-    notify_bluetooth_hardware_change, primary_screen, read_system_status,
-    register_bluetooth_hud_target, register_capture_hotkey, save_focus_activity,
-    stop_routing_bar_keys, take_bluetooth_hud_event, unregister_bluetooth_hud_target,
+    current_process_id, foreground_application, hide_window, install_native_minimize_hook,
+    kill_window_timer, load_tasks, motion_preference, notify_bluetooth_hardware_change,
+    primary_screen, read_system_status, register_bluetooth_hud_target, register_capture_hotkey,
+    save_focus_activity, set_native_minimize_intercept_enabled, stop_routing_bar_keys,
+    take_bluetooth_hud_event, uninstall_native_minimize_hook, unregister_bluetooth_hud_target,
     unregister_capture_hotkey, unregister_idle_wake, watch_top_edge,
 };
 use otto_render::Renderer;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, MA_NOACTIVATE, PostQuitMessage, SW_HIDE, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER,
+    MA_NOACTIVATE, PostQuitMessage, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
 };
 use windows::core::Result;
 
@@ -44,12 +44,17 @@ mod actions;
 pub(crate) mod controls;
 mod keyboard;
 mod modal;
+mod monitors;
 mod notch_bridge;
 pub(crate) mod notch_io;
 mod pointer;
 mod presentation;
+mod secondary_input;
 mod settings;
 mod timing;
+
+pub(crate) use self::monitors::on_taskbar_created;
+use self::presentation::max_panel_surface_size;
 
 pub(crate) use self::modal::DeferredModalAction;
 pub(crate) use self::modal::PreparedModalAction;
@@ -58,31 +63,31 @@ use self::modal::handle_shelf_drop_events;
 pub(crate) use self::modal::prepare_modal_action;
 use self::modal::queue_modal_action;
 pub(crate) use self::modal::run_prepared_modal_action;
-pub use self::settings::activate_hidden_target;
-pub use self::settings::apply_appearance;
-pub use self::settings::control_center_anchor;
-pub use self::settings::focus_session_status;
-pub use self::settings::leave_keyboard_focus;
-pub use self::settings::refresh_plugin_layout;
-pub use self::settings::search_slot_trigger;
-pub use self::settings::set_brand_icon;
-pub use self::settings::set_capture_visible;
-pub use self::settings::set_clipboard_history_enabled;
-pub use self::settings::set_dock_taskbar_hidden;
-pub use self::settings::set_drop_shelf_enabled;
-pub use self::settings::set_focus_module_enabled;
-pub use self::settings::set_glass_enabled;
-pub use self::settings::set_hotkeys_enabled;
-pub use self::settings::set_media_module_enabled;
-pub use self::settings::set_menu_bar_preferences;
-pub use self::settings::set_notch_enabled;
-pub use self::settings::set_notch_hud_enabled;
-pub use self::settings::set_notch_style;
-pub use self::settings::set_online_lyrics_enabled;
-pub use self::settings::set_privacy_indicators_enabled;
-pub use self::settings::set_quick_capture_enabled;
-pub use self::settings::set_top_bar_enabled;
-pub use self::settings::sync_focus_blocklist;
+pub(crate) use self::settings::activate_hidden_target;
+pub(crate) use self::settings::apply_appearance;
+pub(crate) use self::settings::control_center_anchor;
+pub(crate) use self::settings::focus_session_status;
+pub(crate) use self::settings::leave_keyboard_focus;
+pub(crate) use self::settings::refresh_plugin_layout;
+pub(crate) use self::settings::search_slot_trigger;
+pub(crate) use self::settings::set_brand_icon;
+pub(crate) use self::settings::set_capture_visible;
+pub(crate) use self::settings::set_clipboard_history_enabled;
+pub(crate) use self::settings::set_dock_taskbar_hidden;
+pub(crate) use self::settings::set_drop_shelf_enabled;
+pub(crate) use self::settings::set_focus_module_enabled;
+pub(crate) use self::settings::set_glass_enabled;
+pub(crate) use self::settings::set_hotkeys_enabled;
+pub(crate) use self::settings::set_media_module_enabled;
+pub(crate) use self::settings::set_menu_bar_preferences;
+pub(crate) use self::settings::set_notch_enabled;
+pub(crate) use self::settings::set_notch_hud_enabled;
+pub(crate) use self::settings::set_notch_style;
+pub(crate) use self::settings::set_online_lyrics_enabled;
+pub(crate) use self::settings::set_privacy_indicators_enabled;
+pub(crate) use self::settings::set_quick_capture_enabled;
+pub(crate) use self::settings::set_top_bar_enabled;
+pub(crate) use self::settings::sync_focus_blocklist;
 
 const SWIPE_COLLAPSE_THRESHOLD_PT: i32 = 24;
 const MIN_DEADLINE_MS: u128 = 10;
@@ -136,13 +141,15 @@ pub(crate) struct Bar {
     last_focus_save: Instant,
     last_blocked_window: Option<(isize, Instant)>,
     last_browser_url: Option<(isize, String)>,
+    last_focus_relief_active: bool,
     stats_icon_hints: std::collections::HashMap<String, String>,
     stats_catalog: Option<std::collections::HashMap<String, (String, String)>>,
     stats_icons_attempted: std::collections::HashSet<String>,
+    secondary_bars: Vec<self::monitors::SecondaryBar>,
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn start(
+pub(crate) fn start(
     runtime: &RuntimeContext,
     hwnd: isize,
     panel_hwnd: isize,
@@ -185,6 +192,7 @@ pub fn start(
     notch.set_focus_enabled(focus_enabled);
     if let Ok(fa) = runtime.focus_activity.try_borrow() {
         notch.set_focus_blocklist(fa.blocklist.clone());
+        notch.set_focus_categories(fa.categories.clone());
     }
     notch.set_shelf_enabled(shelf_enabled);
     notch.set_clipboard_enabled(clipboard_enabled);
@@ -312,9 +320,11 @@ pub fn start(
         last_focus_save: Instant::now(),
         last_blocked_window: None,
         last_browser_url: None,
+        last_focus_relief_active: false,
         stats_icon_hints: std::collections::HashMap::new(),
         stats_catalog: None,
         stats_icons_attempted: std::collections::HashSet::new(),
+        secondary_bars: Vec::new(),
     };
     if let Some(win) = bar.controls.active_window().cloned() {
         bar.remember_app_icon_hint(&win.executable, &win.executable);
@@ -334,9 +344,11 @@ pub fn start(
     bar.sync_backdrop(runtime, true);
     bar.place();
     bar.present(runtime);
+    bar.sync_secondary_bars(runtime);
     if !bar.shown() || !bar.visibility.is_visible() {
         bar.apply_visibility(runtime);
     }
+    bar.log_started();
     bar.schedule_deadline();
 
     if any_surface_enabled {
@@ -346,6 +358,8 @@ pub fn start(
     if notch_enabled && hud_enabled {
         register_bluetooth_hud_target(hwnd, WM_APP_BAR_BLUETOOTH_HUD);
     }
+    set_native_minimize_intercept_enabled(runtime.genie_enabled.get());
+    let _ = install_native_minimize_hook(hwnd, WM_APP_NATIVE_MINIMIZE);
 
     let mut slot = runtime
         .bar
@@ -355,7 +369,9 @@ pub fn start(
     Ok(())
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
+    set_native_minimize_intercept_enabled(false);
+    uninstall_native_minimize_hook();
     unregister_idle_wake();
     unregister_bluetooth_hud_target();
     if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut()
@@ -367,14 +383,13 @@ pub fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.bar.try_borrow_mut()
         && let Some(mut bar) = guard.take()
     {
+        bar.teardown_secondary_bars(runtime);
         bar.stop_anim_timer();
-        unsafe {
-            let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), STATUS_TIMER);
-            let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), HUD_ANIM_TIMER);
-            let _ = KillTimer(Some(HWND(bar.hwnd as *mut _)), DEADLINE_TIMER);
-            let _ = ShowWindow(HWND(bar.hwnd as *mut _), SW_HIDE);
-            let _ = ShowWindow(HWND(bar.panel_hwnd as *mut _), SW_HIDE);
-        }
+        kill_window_timer(bar.hwnd, STATUS_TIMER);
+        kill_window_timer(bar.hwnd, HUD_ANIM_TIMER);
+        kill_window_timer(bar.hwnd, DEADLINE_TIMER);
+        hide_window(bar.hwnd);
+        hide_window(bar.panel_hwnd);
         watch_top_edge(false, bar.screen.width, bar.screen.height);
         unregister_capture_hotkey(bar.hwnd);
         bar.io.disable_quick_capture();
@@ -388,7 +403,7 @@ fn is_primary_bar_window(runtime: &RuntimeContext, hwnd: isize) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,
@@ -396,6 +411,13 @@ pub fn handle_message(
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     wake_for_message(runtime, message);
+    if !is_primary_bar_window(runtime, hwnd)
+        && with_bar_result(runtime, |bar| bar.has_secondary_hwnd(hwnd)).unwrap_or(false)
+    {
+        return self::secondary_input::handle_secondary_message(
+            runtime, hwnd, message, wparam, lparam,
+        );
+    }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_QUERYENDSESSION => Some(LRESULT(1)),
@@ -403,9 +425,7 @@ pub fn handle_message(
             if is_primary_bar_window(runtime, hwnd) {
                 unsafe { PostQuitMessage(0) };
             } else {
-                unsafe {
-                    let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
-                }
+                hide_window(hwnd);
                 with_bar(runtime, |bar| {
                     bar.panel_visible = false;
                     bar.last_panel_rect = None;
@@ -432,6 +452,10 @@ pub fn handle_message(
         }
         WM_APP_BAR_BACKDROP => {
             with_bar(runtime, |bar| bar.on_backdrop(runtime));
+            Some(LRESULT(0))
+        }
+        WM_APP_NATIVE_MINIMIZE => {
+            crate::window_controls::minimize_from_native_button(runtime, wparam.0 as isize);
             Some(LRESULT(0))
         }
         WM_ENDSESSION => {
@@ -598,7 +622,9 @@ pub fn handle_message(
             Some(LRESULT(0))
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            with_bar(runtime, |bar| bar.rebuild(runtime));
+            if is_primary_bar_window(runtime, hwnd) {
+                with_bar(runtime, |bar| bar.rebuild(runtime));
+            }
             Some(LRESULT(0))
         }
         WM_SETTINGCHANGE => {
@@ -651,7 +677,7 @@ fn wake_for_message(runtime: &RuntimeContext, message: u32) {
     }
 }
 
-pub fn wake(runtime: &RuntimeContext) {
+pub(crate) fn wake(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| bar.wake(runtime));
     crate::dock::wake(runtime);
 }
@@ -680,28 +706,6 @@ fn initial_visibility(menu_bar: MenuBarPreferences, top_bar_enabled: bool) -> Ba
     visibility
 }
 
-fn max_panel_surface_size(dpi: u32) -> (i32, i32) {
-    let classic = Metrics::MACBOOK_PRO_14;
-    let island = Metrics::DYNAMIC_ISLAND;
-    let max_pts_w = (classic.notch_expanded_width + classic.notch_expanded_ear_radius * 2 + 8)
-        .max(island.notch_expanded_width + island.notch_expanded_ear_radius * 2 + 8);
-    let max_pts_h = (classic.notch_top_inset
-        + classic
-            .notch_expanded_height
-            .max(classic.notch_lyrics_height)
-            .max(classic.notch_stats_height)
-        + 4)
-    .max(
-        island.notch_top_inset
-            + island
-                .notch_expanded_height
-                .max(island.notch_lyrics_height)
-                .max(island.notch_stats_height)
-            + 4,
-    );
-    (scale(max_pts_w, dpi), scale(max_pts_h, dpi))
-}
-
 fn keyboard_seek_delta(key: BarKey) -> Option<i64> {
     match key {
         BarKey::Previous => Some(-otto_core::KEYBOARD_SEEK_STEP_MS),
@@ -725,11 +729,11 @@ fn is_notch_target(target: HitTarget) -> bool {
     target.scope().is_notch_surface() && target != HitTarget::MediaSeekbar
 }
 
-pub fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) {
+pub(crate) fn enter_keyboard_focus_from_dock(runtime: &RuntimeContext, from_end: bool) {
     with_bar(runtime, |bar| bar.enter_from_dock(runtime, from_end));
 }
 
-pub fn toggle_focus_mode(runtime: &RuntimeContext) {
+pub(crate) fn toggle_focus_mode(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| {
         if !bar.notch_enabled {
             return;
@@ -742,7 +746,7 @@ pub fn toggle_focus_mode(runtime: &RuntimeContext) {
     });
 }
 
-pub fn open_notch_media(runtime: &RuntimeContext) {
+pub(crate) fn open_notch_media(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| {
         if !bar.notch_enabled || !bar.notch.media_enabled() || bar.notch.media().is_none() {
             return;

@@ -153,11 +153,11 @@ pub fn pick_blocked_app_executable(owner_hwnd: isize) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-pub fn resume_focus_uia_task() {
+pub(crate) fn resume_focus_uia_task() {
     SHUTTING_DOWN.store(false, Ordering::Release);
 }
 
-pub fn shutdown_focus_uia_task() {
+pub(crate) fn shutdown_focus_uia_task() {
     SHUTTING_DOWN.store(true, Ordering::Release);
     let (_, condvar) = queue_pair();
     condvar.notify_all();
@@ -189,9 +189,11 @@ pub fn request_browser_url_inspection(hwnd: isize) {
     }
     ensure_worker_started();
     let (mutex, condvar) = queue_pair();
-    let mut state = mutex.lock().unwrap_or_else(PoisonError::into_inner);
-    state.pending_hwnd = hwnd;
-    state.pending_seq = state.pending_seq.wrapping_add(1);
+    {
+        let mut state = mutex.lock().unwrap_or_else(PoisonError::into_inner);
+        state.pending_hwnd = hwnd;
+        state.pending_seq = state.pending_seq.wrapping_add(1);
+    }
     condvar.notify_one();
 }
 

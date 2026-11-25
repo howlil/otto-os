@@ -5,10 +5,10 @@ use super::input::NotchLayoutInput;
 use super::metrics::Metrics;
 use super::model::Layout;
 
-pub const MENU_SLOT_HORIZONTAL_PAD_POINTS: i32 = 10;
+pub(super) const MENU_SLOT_HORIZONTAL_PAD_POINTS: i32 = 10;
 
 #[must_use]
-pub fn estimate_menu_text_width_points(label: &str) -> i32 {
+pub(super) fn estimate_menu_text_width_points(label: &str) -> i32 {
     label
         .chars()
         .take(16)
@@ -64,7 +64,7 @@ impl SlotRow {
         self.slots
             .iter()
             .find(|(candidate, _)| *candidate == target)
-            .map_or(self.overflow_anchor(), |(_, rect)| *rect)
+            .map_or_else(|| self.overflow_anchor(), |(_, rect)| *rect)
     }
 
     pub(super) const fn overflow_anchor(&self) -> Rect {

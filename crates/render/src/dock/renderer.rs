@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use otto_core::{
-    Appearance, AppleIconKind, DockItemLayout, DockLayout, GlassShape, PixelLimits, RgbBuffer,
-    ShapeTokens, scale,
+    Appearance, AppleIconKind, DockItemLayout, DockLayout, GlassShape, PixelLimits, Rect,
+    RgbBuffer, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
@@ -17,8 +17,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1Factory, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_TEXT_ALIGNMENT_CENTER, IDWriteTextFormat,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER,
+    IDWriteTextFormat,
 };
 use windows::core::Result;
 use windows_numerics::Vector2;
@@ -28,14 +28,16 @@ use crate::appearance::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery, upload_bgra_bitmap,
 };
 use crate::appearance::theme::{BrushPalette, LiquidGlassPalette};
-use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
-
-const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
+use crate::appearance::tokens::{SYSTEM_RED_LIGHT, WHITE, with_alpha};
+use crate::kit::draw::{
+    draw_focus_ring_for, draw_framed_squircle_shell, draw_text_on, measure_text_width,
 };
+use crate::kit::icons::{GlyphCtx, draw_finder_tile};
+use crate::{
+    CLEAR, create_text_format, draw_dwrite_tabular_text, rgb, shared_d2d_factory,
+    shared_dwrite_factory,
+};
+
 const ICON_SHADOW: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0.0,
     g: 0.0,
@@ -51,15 +53,6 @@ const ICON_RIM: D2D1_COLOR_F = D2D1_COLOR_F {
 
 struct CachedDockIcon {
     bitmap: ID2D1Bitmap,
-}
-
-const fn rgb(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: (r as f32) / 255.0,
-        g: (g as f32) / 255.0,
-        b: (b as f32) / 255.0,
-        a,
-    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -311,7 +304,7 @@ impl DockRenderer {
                         && count > 0
                         && slot.opacity > 0.5
                     {
-                        self.draw_badge(&effective_slot, count);
+                        self.draw_badge(&effective_slot, count, &palette);
                     }
                 }
 
@@ -370,7 +363,17 @@ impl DockRenderer {
             self.target.FillRoundedRectangle(&shadow, shadow_brush);
 
             match kind {
-                AppleIconKind::Finder => self.draw_finder_tile(&tile)?,
+                AppleIconKind::Finder => draw_finder_tile(
+                    GlyphCtx {
+                        factory: &self.factory,
+                        target: &self.target,
+                        stroke_style: &self.stroke_style,
+                    },
+                    &self.brushes,
+                    &tile,
+                    1.0,
+                    false,
+                )?,
                 AppleIconKind::Launchpad => self.draw_launchpad_tile(&tile),
                 AppleIconKind::Trash => self.draw_trash_tile(&tile, false)?,
                 AppleIconKind::TrashFull => self.draw_trash_tile(&tile, true)?,
@@ -386,93 +389,6 @@ impl DockRenderer {
             let rim_brush = &self.brushes.color_brush(ICON_RIM);
             self.target
                 .DrawRoundedRectangle(&tile, rim_brush, 1.1, None);
-        }
-        Ok(())
-    }
-
-    fn draw_finder_tile(&self, tile: &D2D1_ROUNDED_RECT) -> Result<()> {
-        let r = tile.rect;
-        let w = r.right - r.left;
-        let h = r.bottom - r.top;
-        let cx = r.left + w * 0.5;
-
-        unsafe {
-            let light_blue = &self.brushes.color_brush(rgb(138, 214, 255, 1.0));
-            let deep_blue = &self.brushes.color_brush(rgb(28, 120, 242, 1.0));
-            let feature = &self.brushes.color_brush(rgb(20, 44, 84, 0.96));
-
-            self.target.FillRoundedRectangle(tile, light_blue);
-
-            let left_half = D2D_RECT_F {
-                left: r.left,
-                top: r.top,
-                right: cx,
-                bottom: r.bottom,
-            };
-            let left_round = D2D1_ROUNDED_RECT {
-                rect: left_half,
-                radiusX: tile.radiusX,
-                radiusY: tile.radiusY,
-            };
-            self.target.FillRoundedRectangle(&left_round, deep_blue);
-            let seam_fill = D2D_RECT_F {
-                left: cx - tile.radiusX * 0.6,
-                top: r.top,
-                right: cx + w * 0.02,
-                bottom: r.bottom,
-            };
-            self.target.FillRectangle(&seam_fill, deep_blue);
-
-            let stroke = (w * 0.045).max(1.5);
-            let nose = self.factory.CreatePathGeometry()?;
-            let sink = nose.Open()?;
-            sink.BeginFigure(
-                Vector2::new(cx + w * 0.03, r.top + h * 0.06),
-                D2D1_FIGURE_BEGIN_HOLLOW,
-            );
-            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                point1: Vector2::new(cx - w * 0.04, r.top + h * 0.30),
-                point2: Vector2::new(cx - w * 0.06, r.top + h * 0.44),
-                point3: Vector2::new(cx + w * 0.06, r.top + h * 0.54),
-            });
-            sink.AddLine(Vector2::new(cx - w * 0.01, r.bottom - h * 0.06));
-            sink.EndFigure(D2D1_FIGURE_END_OPEN);
-            sink.Close()?;
-            self.target
-                .DrawGeometry(&nose, feature, stroke, &self.stroke_style);
-
-            let eye_w = (w * 0.035).max(1.3);
-            let eye_h = h * 0.11;
-            let eye_y = r.top + h * 0.29;
-            for ex in [r.left + w * 0.29, r.left + w * 0.71] {
-                let eye = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: ex - eye_w,
-                        top: eye_y,
-                        right: ex + eye_w,
-                        bottom: eye_y + eye_h,
-                    },
-                    radiusX: eye_w,
-                    radiusY: eye_w,
-                };
-                self.target.FillRoundedRectangle(&eye, feature);
-            }
-
-            let smile = self.factory.CreatePathGeometry()?;
-            let s_sink = smile.Open()?;
-            s_sink.BeginFigure(
-                Vector2::new(r.left + w * 0.24, r.top + h * 0.65),
-                D2D1_FIGURE_BEGIN_HOLLOW,
-            );
-            s_sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                point1: Vector2::new(r.left + w * 0.38, r.top + h * 0.82),
-                point2: Vector2::new(r.left + w * 0.62, r.top + h * 0.82),
-                point3: Vector2::new(r.left + w * 0.76, r.top + h * 0.65),
-            });
-            s_sink.EndFigure(D2D1_FIGURE_END_OPEN);
-            s_sink.Close()?;
-            self.target
-                .DrawGeometry(&smile, feature, stroke, &self.stroke_style);
         }
         Ok(())
     }
@@ -1024,27 +940,22 @@ impl DockRenderer {
     }
 
     fn draw_focus_ring(&self, slot: &DockItemLayout) {
-        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
-        let stroke = shape.focus_ring_width as f32;
-        let inset = stroke * 0.5;
-        let rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: slot.x + inset - 2.0,
-                top: slot.y + inset - 2.0,
-                right: slot.x + slot.size - inset + 2.0,
-                bottom: slot.y + slot.size - inset + 2.0,
-            },
-            radiusX: shape.focus_ring_radius as f32,
-            radiusY: shape.focus_ring_radius as f32,
+        let pad = scale(2, self.dpi) as f32;
+        let rect = D2D_RECT_F {
+            left: slot.x - pad,
+            top: slot.y - pad,
+            right: slot.x + slot.size + pad,
+            bottom: slot.y + slot.size + pad,
         };
-        unsafe {
-            self.target.DrawRoundedRectangle(
-                &rect,
-                &self.brushes.text_primary,
-                stroke,
-                &self.stroke_style,
-            );
-        }
+        let radius = (slot.size * (49.0 / 256.0) + pad).max(scale(7, self.dpi) as f32);
+        draw_focus_ring_for(
+            &self.factory,
+            &self.target,
+            rect,
+            radius,
+            self.dpi,
+            &self.brushes.text_primary,
+        );
     }
 
     fn draw_progress_pill(
@@ -1083,16 +994,21 @@ impl DockRenderer {
             radiusX: radius,
             radiusY: radius,
         };
+        let track_brush = self.brushes.color_brush(palette.slider_track);
+        let fill_brush = self.brushes.color_brush(palette.slider_fill);
+        let rim = if palette.is_high_contrast || palette.is_dark {
+            self.brushes.specular_rim.clone()
+        } else {
+            self.brushes.color_brush(palette.menu_outer_border)
+        };
         unsafe {
-            let track_brush = &self.brushes.color_brush(palette.slider_track);
-            self.target.FillRoundedRectangle(&track, track_brush);
-            self.target.FillRoundedRectangle(&fill, &self.brushes.white);
-            self.target
-                .DrawRoundedRectangle(&track, &self.brushes.specular_rim, 0.75, None);
+            self.target.FillRoundedRectangle(&track, &track_brush);
+            self.target.FillRoundedRectangle(&fill, &fill_brush);
+            self.target.DrawRoundedRectangle(&track, &rim, 0.75, None);
         }
     }
 
-    fn draw_badge(&self, slot: &DockItemLayout, count: u32) {
+    fn draw_badge(&self, slot: &DockItemLayout, count: u32, palette: &LiquidGlassPalette) {
         let label = if count > 99 {
             String::from("99+")
         } else {
@@ -1114,57 +1030,39 @@ impl DockRenderer {
             radiusX: h * 0.5,
             radiusY: h * 0.5,
         };
-        let wide: Vec<u16> = label.encode_utf16().collect();
-        unsafe {
-            let badge_fill = &self.brushes.color_brush(rgb(255, 59, 48, 0.98));
-            let rim = &self.brushes.color_brush(rgb(255, 255, 255, 0.85));
-            self.target.FillRoundedRectangle(&pill, badge_fill);
-            self.target.DrawRoundedRectangle(&pill, rim, 1.0, None);
-            self.target.DrawText(
-                &wide,
-                &self.badge_format,
-                &rect,
+        let (badge_fill, rim, ink) = if palette.is_high_contrast {
+            (
+                self.brushes.color_brush(palette.toggle_active),
+                self.brushes.specular_rim.clone(),
+                &self.brushes.on_accent,
+            )
+        } else {
+            (
+                self.brushes.color_brush(with_alpha(SYSTEM_RED_LIGHT, 0.98)),
+                self.brushes.color_brush(with_alpha(WHITE, 0.85)),
                 &self.brushes.white,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+            )
+        };
+        unsafe {
+            self.target.FillRoundedRectangle(&pill, &badge_fill);
+            self.target.DrawRoundedRectangle(&pill, &rim, 1.0, None);
         }
+        draw_dwrite_tabular_text(&self.target, &label, &self.badge_format, rect, ink);
     }
 
     fn draw_pill(&self, layout: &DockLayout, palette: &LiquidGlassPalette) {
-        let p = layout.pill;
-        let r = layout.pill_radius;
-        let outer = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: p.x as f32,
-                top: p.y as f32,
-                right: p.right() as f32,
-                bottom: p.bottom() as f32,
-            },
-            radiusX: r,
-            radiusY: r,
-        };
-        let inner = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: p.x as f32 + 1.0,
-                top: p.y as f32 + 1.0,
-                right: p.right() as f32 - 1.0,
-                bottom: p.bottom() as f32 - 1.0,
-            },
-            radiusX: (r - 1.0).max(1.0),
-            radiusY: (r - 1.0).max(1.0),
-        };
-        unsafe {
-            let fill = &self.brushes.color_brush(palette.dock_fill);
-            let outer_border = &self.brushes.color_brush(palette.dock_outer_border);
-            let inner_border = &self.brushes.color_brush(palette.dock_inner_border);
-
-            self.target.FillRoundedRectangle(&outer, fill);
-            self.target
-                .DrawRoundedRectangle(&outer, outer_border, 1.0, None);
-            self.target
-                .DrawRoundedRectangle(&inner, inner_border, 1.0, None);
-        }
+        let fill = self.brushes.color_brush(palette.dock_fill);
+        let outer_border = self.brushes.color_brush(palette.dock_outer_border);
+        let inner_border = self.brushes.color_brush(palette.dock_inner_border);
+        draw_framed_squircle_shell(
+            &self.factory,
+            &self.target,
+            layout.pill,
+            layout.pill_radius,
+            &fill,
+            &outer_border,
+            &inner_border,
+        );
     }
 
     fn draw_tooltip(
@@ -1176,58 +1074,65 @@ impl DockRenderer {
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
         let pad_h = scale(12, self.dpi) as f32;
-        let est_w = (title.chars().count() as f32 * self.font_px * 0.56 + pad_h * 2.0)
-            .max(scale(52, self.dpi) as f32);
+        let max_w = (self.surface.size().0 as f32 - 8.0).max(scale(52, self.dpi) as f32);
+        let text_w = measure_text_width(title, &self.tooltip_format, max_w)
+            .unwrap_or_else(|| title.chars().count() as f32 * self.font_px * 0.56);
+        let est_w = (text_w + pad_h * 2.0)
+            .max(scale(52, self.dpi) as f32)
+            .min(max_w);
         let h = layout.tooltip_height;
         let bottom = icon_top_y - layout.tooltip_gap;
         let top = (bottom - h).max(2.0);
         let left = (center_x - est_w * 0.5)
             .clamp(4.0, (self.surface.size().0 as f32 - est_w - 4.0).max(4.0));
-        let right = left + est_w;
         let radius = scale(6, self.dpi) as f32;
         let arrow_size = scale(5, self.dpi) as f32;
-
-        let pill = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left,
-                top,
-                right,
-                bottom,
-            },
-            radiusX: radius,
-            radiusY: radius,
+        let bounds = Rect {
+            x: left.round() as i32,
+            y: top.round() as i32,
+            width: est_w.ceil().max(1.0) as i32,
+            height: h.ceil().max(1.0) as i32,
         };
-
+        let bg = self.brushes.color_brush(palette.menu_fill);
+        let outer = self.brushes.color_brush(palette.menu_outer_border);
+        let inner = self.brushes.color_brush(palette.dock_inner_border);
+        draw_framed_squircle_shell(
+            &self.factory,
+            &self.target,
+            bounds,
+            radius,
+            &bg,
+            &outer,
+            &inner,
+        );
         unsafe {
-            let bg = &self.brushes.color_brush(palette.menu_fill);
-            let border = &self.brushes.color_brush(palette.dock_inner_border);
-            let text_brush = &self.brushes.color_brush(palette.text_primary);
-
-            self.target.FillRoundedRectangle(&pill, bg);
-            self.target.DrawRoundedRectangle(&pill, border, 1.0, None);
-
             let pointer = self.factory.CreatePathGeometry()?;
             let sink = pointer.Open()?;
+            let tip_y = bounds.bottom() as f32;
             sink.BeginFigure(
-                Vector2::new(center_x - arrow_size, bottom - 0.5),
+                Vector2::new(center_x - arrow_size, tip_y - 0.5),
                 D2D1_FIGURE_BEGIN_FILLED,
             );
-            sink.AddLine(Vector2::new(center_x + arrow_size, bottom - 0.5));
-            sink.AddLine(Vector2::new(center_x, bottom + arrow_size));
+            sink.AddLine(Vector2::new(center_x + arrow_size, tip_y - 0.5));
+            sink.AddLine(Vector2::new(center_x, tip_y + arrow_size));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
-            self.target.FillGeometry(&pointer, bg, None);
-
-            let wide: Vec<u16> = title.encode_utf16().collect();
-            self.target.DrawText(
-                &wide,
-                &self.tooltip_format,
-                &pill.rect,
-                text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+            self.target.FillGeometry(&pointer, &bg, None);
         }
+        let text_rect = D2D_RECT_F {
+            left: bounds.x as f32 + pad_h * 0.5,
+            top: bounds.y as f32,
+            right: bounds.right() as f32 - pad_h * 0.5,
+            bottom: bounds.bottom() as f32,
+        };
+        draw_text_on(
+            &self.target,
+            title,
+            &self.tooltip_format,
+            text_rect,
+            &self.brushes.text_primary,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
         Ok(())
     }
 }

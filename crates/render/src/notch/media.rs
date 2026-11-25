@@ -3,23 +3,21 @@ use otto_core::{
     unsupported_command,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BRUSH_PROPERTIES,
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush,
-};
-use windows::Win32::Graphics::DirectWrite::{DWRITE_TEXT_METRICS, IDWriteTextFormat};
+use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush};
+use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows::core::Result;
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use crate::appearance::palette::{TonePalette, muted};
+use crate::appearance::tokens::SYSTEM_RED as LIVE_RED;
+use crate::kit::draw::{center_of, fill_squircle_bitmap, measure_text_width};
 use crate::{
-    BLACK, CoverArt, DISABLED_CONTROL_ALPHA, FOREGROUND, MUSIC_ACCENT, Renderer, brighten,
-    rect_to_d2d, rgb, shared_dwrite_factory, translate_rect,
+    BLACK, CoverArt, DISABLED_CONTROL_ALPHA, MUSIC_ACCENT, Renderer, brighten, rect_to_d2d,
+    translate_rect,
 };
 
 const ART_TINT_MUTING: f32 = 0.25;
 const PAUSED_COVER_FADE: f32 = 0.45;
-const LIVE_RED: D2D1_COLOR_F = rgb(255, 69, 58, 1.0);
 
 pub(crate) fn media_palette(accent: Option<D2D1_COLOR_F>, dim: f32) -> TonePalette {
     let accent = muted(accent.unwrap_or(MUSIC_ACCENT), ART_TINT_MUTING);
@@ -32,13 +30,6 @@ pub(crate) fn media_palette(accent: Option<D2D1_COLOR_F>, dim: f32) -> TonePalet
     .dimmed(dim)
 }
 
-fn center_of(rect: Rect) -> Vector2 {
-    Vector2::new(
-        rect.x as f32 + rect.width as f32 * 0.5,
-        rect.y as f32 + rect.height as f32 * 0.5,
-    )
-}
-
 impl Renderer {
     pub(crate) fn draw_cover_tile(
         &self,
@@ -48,18 +39,20 @@ impl Renderer {
         opacity: f32,
         alpha: f32,
     ) {
-        let shape = D2D1_ROUNDED_RECT {
-            rect: rect_to_d2d(tile),
-            radiusX: radius,
-            radiusY: radius,
-        };
+        let circular = radius + 0.5 >= tile.width.min(tile.height) as f32 * 0.5;
         if let Some(art) = art
-            && self.fill_cover(&shape, tile, art, opacity)
+            && fill_squircle_bitmap(
+                &self.factory,
+                &self.target,
+                tile,
+                circular,
+                radius,
+                &art.bitmap,
+                opacity,
+            )
         {
-            let rim = self.brushes.alpha_brush(FOREGROUND, 0.15 * alpha);
-            unsafe {
-                self.target.DrawRoundedRectangle(&shape, &rim, 1.0, None);
-            }
+            let rim = self.brushes.alpha_brush(self.notch_ink(), 0.15 * alpha);
+            self.draw_rounded_box_stroke(tile, radius, &rim, 1.0);
             return;
         }
         let tile_bg = self.brushes.alpha_brush(MUSIC_ACCENT, 0.20 * alpha);
@@ -69,61 +62,8 @@ impl Renderer {
         self.draw_music_note_glyph(center.X, center.Y, tile.width as f32 * 0.26, &note);
     }
 
-    fn fill_cover(
-        &self,
-        shape: &D2D1_ROUNDED_RECT,
-        tile: Rect,
-        art: &CoverArt,
-        opacity: f32,
-    ) -> bool {
-        unsafe {
-            let size = art.bitmap.GetSize();
-            if size.width <= 0.0 || size.height <= 0.0 {
-                return false;
-            }
-            let properties = D2D1_BRUSH_PROPERTIES {
-                opacity,
-                transform: Matrix3x2 {
-                    M11: tile.width as f32 / size.width,
-                    M12: 0.0,
-                    M21: 0.0,
-                    M22: tile.height as f32 / size.height,
-                    M31: tile.x as f32,
-                    M32: tile.y as f32,
-                },
-            };
-            let bitmap_properties = D2D1_BITMAP_BRUSH_PROPERTIES {
-                extendModeX: D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-            };
-            let Ok(brush) = self.target.CreateBitmapBrush(
-                &art.bitmap,
-                Some(&raw const bitmap_properties),
-                Some(&raw const properties),
-            ) else {
-                return false;
-            };
-            self.target.FillRoundedRectangle(shape, &brush);
-        }
-        true
-    }
-
     fn text_width(text: &str, format: &IDWriteTextFormat) -> f32 {
-        let Ok(dwrite) = shared_dwrite_factory() else {
-            return 0.0;
-        };
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            let Ok(layout) = dwrite.CreateTextLayout(&wide, format, 4096.0, 64.0) else {
-                return 0.0;
-            };
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            if layout.GetMetrics(&mut metrics).is_err() {
-                return 0.0;
-            }
-            metrics.width
-        }
+        measure_text_width(text, format, 4096.0).unwrap_or(0.0)
     }
 
     #[must_use]
@@ -147,7 +87,7 @@ impl Renderer {
         }
         let step = (scale(2, self.dpi) as f32).max(1.8) * 2.0;
         let radius = (scale(1, self.dpi) as f32).max(0.9);
-        let brush = self.brushes.alpha_brush(FOREGROUND, 0.40 * alpha);
+        let brush = self.brushes.alpha_brush(self.notch_ink(), 0.40 * alpha);
         for offset in [-1.5f32, -0.5, 0.5, 1.5] {
             unsafe {
                 self.target.FillEllipse(
@@ -201,12 +141,13 @@ impl Renderer {
             alpha,
         );
 
+        let fg = self.notch_ink();
         let title_rect = layout.compact_title;
         let ink = 0.92 - 0.30 * scene.dim;
         if let Some(peek) = &scene.peek {
             let strength = peek.alpha.clamp(0.0, 1.0) * alpha;
-            let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * strength);
-            let strong = self.brushes.alpha_brush(FOREGROUND, 0.95 * strength);
+            let muted = self.brushes.alpha_brush(fg, 0.55 * strength);
+            let strong = self.brushes.alpha_brush(fg, 0.95 * strength);
             let label_width =
                 Self::text_width(peek.label, &self.text_leading) + scale(6, self.dpi) as f32;
             let title_width = Self::text_width(&peek.title, &self.text_leading);
@@ -238,7 +179,7 @@ impl Renderer {
             let brush = if view.compact_is_lyric {
                 self.brushes.alpha_brush(palette.accent, 0.95 * alpha)
             } else {
-                self.brushes.alpha_brush(FOREGROUND, ink * alpha)
+                self.brushes.alpha_brush(fg, ink * alpha)
             };
             self.draw_text(
                 &view.compact_text,
@@ -308,7 +249,7 @@ impl Renderer {
             view.progress.clamp(0.08, 1.0)
         };
         let active_brush = self.brushes.alpha_brush(palette.accent, 0.92 * alpha);
-        let track_brush = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+        let track_brush = self.brushes.alpha_brush(self.notch_ink(), 0.16 * alpha);
         self.draw_progress_ring(
             center.X,
             center.Y,
@@ -382,8 +323,9 @@ impl Renderer {
             alpha,
         );
 
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.60 * alpha);
+        let ink = self.notch_ink();
+        let fg = self.brushes.alpha_brush(ink, 0.96 * alpha);
+        let muted = self.brushes.alpha_brush(ink, 0.60 * alpha);
         self.draw_text(
             &media.title,
             &self.text_alert_title,
@@ -425,7 +367,7 @@ impl Renderer {
             );
         }
 
-        let source_brush = self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
+        let source_brush = self.brushes.alpha_brush(ink, 0.55 * alpha);
         self.draw_text(
             &view.source,
             &self.text_pomodoro_sub_trailing,
@@ -467,24 +409,25 @@ impl Renderer {
         expanded: bool,
         palette: &TonePalette,
     ) {
+        let ink = self.notch_ink();
         let radius = scale(8, self.dpi) as f32;
         let (colour, strength) = if expanded {
             (palette.accent, 0.90)
         } else if hovered {
-            (brighten(FOREGROUND, 0.2), 0.20)
+            (ink, 0.20)
         } else {
-            (FOREGROUND, 0.10)
+            (ink, 0.10)
         };
         let fill = self.brushes.alpha_brush(colour, strength * alpha);
         self.draw_rounded_box(rect, radius, &fill);
-        let glyph_colour = if expanded {
-            BLACK
+        let (glyph_colour, glyph_alpha) = if expanded {
+            (BLACK, 0.92)
         } else if hovered {
-            FOREGROUND
+            (ink, 0.92)
         } else {
-            rgb(200, 205, 215, 1.0)
+            (ink, 0.78)
         };
-        let glyph = self.brushes.alpha_brush(glyph_colour, 0.92 * alpha);
+        let glyph = self.brushes.alpha_brush(glyph_colour, glyph_alpha * alpha);
         self.draw_quote_glyph(center_of(rect), scale(5, self.dpi) as f32, &glyph);
     }
 
@@ -543,7 +486,7 @@ impl Renderer {
             self.draw_progress_lip(track, view.progress, &lit, alpha);
             if engaged && view.seekable {
                 let thumb_x = track.x as f32 + track.width as f32 * view.progress.clamp(0.0, 1.0);
-                let thumb = self.brushes.alpha_brush(FOREGROUND, 0.98 * alpha);
+                let thumb = self.brushes.alpha_brush(self.notch_ink(), 0.98 * alpha);
                 let radius = scale(5, self.dpi) as f32;
                 unsafe {
                     self.target.FillEllipse(
@@ -557,9 +500,10 @@ impl Renderer {
                 }
             }
         }
+        let ink = self.notch_ink();
         let label_top = (track.bottom() + scale(4, self.dpi)) as f32;
         let label_bottom = label_top + scale(14, self.dpi) as f32;
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
+        let muted = self.brushes.alpha_brush(ink, 0.55 * alpha);
         self.draw_tabular_text(
             &view.elapsed,
             &self.text_pomodoro_sub,
@@ -572,7 +516,7 @@ impl Renderer {
             &muted,
         );
         let remaining_brush = if view.live {
-            self.brushes.alpha_brush(FOREGROUND, 0.85 * alpha)
+            self.brushes.alpha_brush(ink, 0.85 * alpha)
         } else {
             muted
         };
@@ -600,10 +544,11 @@ impl Renderer {
     ) -> Result<()> {
         let media = &scene.media;
         let capabilities = media.capabilities;
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let ink = self.notch_ink();
+        let fg = self.brushes.alpha_brush(ink, 0.96 * alpha);
         let disabled = self
             .brushes
-            .alpha_brush(FOREGROUND, DISABLED_CONTROL_ALPHA * alpha);
+            .alpha_brush(ink, DISABLED_CONTROL_ALPHA * alpha);
         let fill_for = |target: HitTarget, enabled: bool| {
             let strength = if !enabled {
                 0.06
@@ -612,7 +557,7 @@ impl Renderer {
             } else {
                 0.14
             };
-            self.brushes.alpha_brush(FOREGROUND, strength * alpha)
+            self.brushes.alpha_brush(ink, strength * alpha)
         };
         let size = scale(6, self.dpi) as f32;
 
@@ -672,6 +617,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rgb;
 
     fn saturation(colour: D2D1_COLOR_F) -> f32 {
         colour.r.max(colour.g).max(colour.b) - colour.r.min(colour.g).min(colour.b)

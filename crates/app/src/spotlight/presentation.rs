@@ -47,18 +47,14 @@ impl SpotlightSurface {
         if !force && renderer.has_backdrop() {
             return;
         }
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let pad = scale(BACKDROP_PADDING_PT, self.monitor.dpi);
         let capture_rect = if self.morph_progress.is_some() {
             self.target_window
         } else {
             self.window
         };
-        let Some(region) = CaptureRegion::padded_to_screen(
-            capture_rect,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
+        let Some(region) = CaptureRegion::padded_to_bounds(capture_rect, pad, self.monitor.bounds)
+        else {
             return;
         };
         if let Some(pixels) =
@@ -73,7 +69,7 @@ impl SpotlightSurface {
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
         let appearance = crate::theme_state::appearance(runtime);
-        let wanted = self.visible
+        let wanted = self.phase.is_visible()
             && self.hwnd != 0
             && capture_wanted(&appearance, runtime.glass_enabled.get());
         if !wanted {
@@ -104,21 +100,17 @@ impl SpotlightSurface {
                 runtime.capture_visible.get(),
             ));
         }
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
+        let pad = scale(BACKDROP_PADDING_PT, self.monitor.dpi);
         let capture_rect = if self.morph_progress.is_some() {
             self.target_window
         } else {
             self.window
         };
-        let Some(region) = CaptureRegion::padded_to_screen(
-            capture_rect,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
+        let Some(region) = CaptureRegion::padded_to_bounds(capture_rect, pad, self.monitor.bounds)
+        else {
             return;
         };
-        let interval = capture_interval_for(is_running_on_battery(), self.visible);
+        let interval = capture_interval_for(is_running_on_battery(), self.phase.is_visible());
         if let Some(feed) = self.backdrop.as_mut() {
             feed.request(region, interval, force);
         }
@@ -126,13 +118,13 @@ impl SpotlightSurface {
 
     pub(super) fn ensure_renderer(&mut self) -> windows::core::Result<()> {
         if self.renderer.is_none() {
-            self.renderer = Some(SpotlightRenderer::new(self.screen.dpi)?);
+            self.renderer = Some(SpotlightRenderer::new(self.monitor.dpi)?);
         }
         Ok(())
     }
 
     pub(super) fn present(&mut self, runtime: &RuntimeContext) {
-        if !self.visible || self.hwnd == 0 {
+        if !self.phase.is_visible() || self.hwnd == 0 {
             return;
         }
         if let Err(error) = self.ensure_renderer() {
@@ -144,7 +136,7 @@ impl SpotlightSurface {
             (self.window.x, self.window.y),
             self.window.width,
             self.window.height,
-            self.screen.dpi,
+            self.monitor.dpi,
             self.view,
             self.filtered.len(),
             self.first_visible,
@@ -170,7 +162,8 @@ impl SpotlightSurface {
             let Some(entry) = self.apps.get(app_index) else {
                 continue;
             };
-            if self.icons_attempted.insert(entry.key.clone())
+            if entry.apple_icon.is_none()
+                && self.icons_attempted.insert(entry.key.clone())
                 && let Some(icon) = extract_dock_icon(entry)
             {
                 icons.push((entry.key.clone(), icon));
@@ -183,6 +176,7 @@ impl SpotlightSurface {
             .map(|entry| SpotlightPaintEntry {
                 key: &entry.key,
                 title: &entry.title,
+                apple_icon: entry.apple_icon,
             })
             .collect();
         let state = SpotlightPaintState {

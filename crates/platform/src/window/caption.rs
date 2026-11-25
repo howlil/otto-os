@@ -15,19 +15,22 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, ReleaseCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_HWNDNEXT, GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindow,
-    GetWindowLongW, GetWindowRect, HTCAPTION, HTRIGHT, HTTOP, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOP,
-    HWND_TOPMOST, IsWindow, IsWindowVisible, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowPos, WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindowLongW, GetWindowRect, HTCAPTION, HTRIGHT,
+    HTTOP, HTTOPRIGHT, IsWindow, IsZoomed, PostMessageW, SM_CXDRAG, SM_CYDRAG, SetForegroundWindow,
+    WM_NCLBUTTONDOWN, WM_NCRBUTTONUP, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+    WS_THICKFRAME,
 };
-use windows::core::BOOL;
 
 use crate::gdi::{CaptureCanvas, ScreenDc};
+use crate::window::caption_probe::{
+    ProbeEntry, cached_probe_entry, custom_chrome_eligible, fallback_caption_height_px,
+    is_ghost_overlay_window, lookup_or_queue_probe, window_class_string,
+};
 
 const CORNER_DO_NOT_ROUND: u32 = 1;
 const INVALID_PIXEL: u32 = 0xFFFF_FFFF;
+const MIN_DWM_CAPTION_HEIGHT_DIP: i32 = 24;
+const MAX_DWM_CAPTION_HEIGHT_DIP: i32 = 64;
 
 pub(crate) fn dwm_rect(window: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<RECT> {
     let mut rect = RECT::default();
@@ -54,14 +57,62 @@ struct ScreenCaptionBounds {
     frame_right: i32,
     top: i32,
     height: i32,
+    button_top_offset: i32,
     measured_width: i32,
 }
 
-fn screen_caption_bounds(frame: RECT, window: RECT, buttons: RECT) -> ScreenCaptionBounds {
-    let buttons_top = (window.top + buttons.top).max(frame.top);
-    let buttons_height = (buttons.bottom - buttons.top).max(0);
-    let height = if buttons_height > 0 {
-        (buttons_top - frame.top) + buttons_height
+fn normalize_dwm_buttons_for_dpi(
+    buttons: RECT,
+    window: RECT,
+    window_dpi: u32,
+    monitor_dpi: u32,
+) -> RECT {
+    if window_dpi == 0 || monitor_dpi == 0 || window_dpi == monitor_dpi {
+        return buttons;
+    }
+    let physical_width = window.right - window.left;
+    if physical_width <= 0 || buttons.right <= 0 {
+        return buttons;
+    }
+    let expected_logical = (i64::from(physical_width) * i64::from(window_dpi)
+        + i64::from(monitor_dpi / 2))
+        / i64::from(monitor_dpi);
+    let dist_logical = (i64::from(buttons.right) - expected_logical).abs();
+    let dist_physical = (i64::from(buttons.right) - i64::from(physical_width)).abs();
+    if dist_logical * 2 < dist_physical {
+        let scale_coord = |value: i32| -> i32 {
+            ((i64::from(value) * i64::from(monitor_dpi) + i64::from(window_dpi / 2))
+                / i64::from(window_dpi)) as i32
+        };
+        return RECT {
+            left: scale_coord(buttons.left),
+            top: scale_coord(buttons.top),
+            right: scale_coord(buttons.right),
+            bottom: scale_coord(buttons.bottom),
+        };
+    }
+    buttons
+}
+
+fn screen_caption_bounds(
+    frame: RECT,
+    window: RECT,
+    buttons: RECT,
+    window_dpi: u32,
+    monitor_dpi: u32,
+) -> ScreenCaptionBounds {
+    let buttons = normalize_dwm_buttons_for_dpi(buttons, window, window_dpi, monitor_dpi);
+    let raw_top = window.top + buttons.top;
+    let raw_bottom = window.top + buttons.bottom;
+    let visible_top = raw_top.max(frame.top);
+    let visible_bottom = raw_bottom.max(visible_top);
+    let height = if buttons.bottom > buttons.top {
+        (visible_bottom - frame.top).max(0)
+    } else {
+        0
+    };
+    let button_top_offset = if height > 0 {
+        (visible_top - frame.top).clamp(0, (height - 1).max(0))
     } else {
         0
     };
@@ -69,6 +120,7 @@ fn screen_caption_bounds(frame: RECT, window: RECT, buttons: RECT) -> ScreenCapt
         frame_right: frame.right,
         top: frame.top,
         height,
+        button_top_offset,
         measured_width: buttons.right - buttons.left,
     }
 }
@@ -87,14 +139,20 @@ pub(crate) fn effective_caption_style(
     has_dwm_buttons: bool,
     full_screen: bool,
 ) -> NativeCaptionStyle {
+    effective_caption_style_with_eligibility(raw_style, has_dwm_buttons, full_screen, true)
+}
+
+fn effective_caption_style_with_eligibility(
+    raw_style: u32,
+    has_dwm_buttons: bool,
+    full_screen: bool,
+    allow_custom_chrome: bool,
+) -> NativeCaptionStyle {
     let base = caption_style(raw_style);
     if full_screen {
         return base;
     }
-    let custom_chrome = !base.has_caption
-        && (has_dwm_buttons
-            || raw_style & (WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0)
-                != 0);
+    let custom_chrome = !base.has_caption && allow_custom_chrome;
     let custom_resizable = custom_chrome && (raw_style & WS_THICKFRAME.0 != 0);
     NativeCaptionStyle {
         has_caption: base.has_caption || custom_chrome,
@@ -104,6 +162,44 @@ pub(crate) fn effective_caption_style(
         can_minimize: base.can_minimize || custom_resizable,
         can_maximize: base.can_maximize || custom_resizable,
     }
+}
+
+pub(crate) fn effective_caption_style_for_window(
+    window: HWND,
+    raw_style: u32,
+    full_screen: bool,
+) -> NativeCaptionStyle {
+    let (ex_style, zoomed) = unsafe {
+        (
+            GetWindowLongW(window, GWL_EXSTYLE) as u32,
+            IsZoomed(window).as_bool(),
+        )
+    };
+    if is_ghost_overlay_window(window, raw_style, ex_style) {
+        return NativeCaptionStyle {
+            has_caption: false,
+            has_system_menu: false,
+            can_minimize: false,
+            can_maximize: false,
+        };
+    }
+    let has_dwm_buttons = has_dwm_caption_buttons(window);
+    let base = caption_style(raw_style);
+    if base.has_caption {
+        return effective_caption_style_with_eligibility(
+            raw_style,
+            has_dwm_buttons,
+            full_screen,
+            false,
+        );
+    }
+    let class = window_class_string(window);
+    let probe = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS).and_then(|frame| {
+        let (_, monitor_dpi) = caption_window_and_monitor_dpi(window);
+        cached_probe_entry(window, frame, monitor_dpi, zoomed)
+    });
+    let allow_custom = custom_chrome_eligible(&class, raw_style, has_dwm_buttons, probe);
+    effective_caption_style_with_eligibility(raw_style, has_dwm_buttons, full_screen, allow_custom)
 }
 
 fn corner_preference(window: HWND) -> Option<u32> {
@@ -124,22 +220,36 @@ fn has_rounded_top_right(window: HWND, maximized: bool) -> bool {
     !maximized && corner_preference(window).is_some_and(|value| value != CORNER_DO_NOT_ROUND)
 }
 
-fn caption_dpi(window: HWND) -> u32 {
-    let window_dpi = unsafe { GetDpiForWindow(window) };
-    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+fn caption_window_and_monitor_dpi(window: HWND) -> (u32, u32) {
     let (mut dpi_x, mut dpi_y) = (0_u32, 0_u32);
-    let monitor_dpi =
-        if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) }
-            .is_ok()
-        {
-            dpi_x
-        } else {
-            0
-        };
-    match window_dpi.max(monitor_dpi) {
+    let (window_dpi, monitor_dpi) = unsafe {
+        let win_dpi = GetDpiForWindow(window);
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+        let mon_dpi =
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y).is_ok()
+            {
+                dpi_x
+            } else {
+                0
+            };
+        (win_dpi, mon_dpi)
+    };
+    let effective = match window_dpi.max(monitor_dpi) {
         0 => 96,
         dpi => dpi,
-    }
+    };
+    (
+        if window_dpi == 0 {
+            effective
+        } else {
+            window_dpi
+        },
+        effective,
+    )
+}
+
+fn caption_dpi(window: HWND) -> u32 {
+    caption_window_and_monitor_dpi(window).1
 }
 
 pub(crate) fn has_dwm_caption_buttons(window: HWND) -> bool {
@@ -152,13 +262,16 @@ fn native_caption_with_buttons(
     style: NativeCaptionStyle,
     frame: RECT,
     buttons: RECT,
+    maximized: bool,
 ) -> Option<NativeCaption> {
     let window_rect = window_screen_rect(window)?;
-    let bounds = screen_caption_bounds(frame, window_rect, buttons);
-    if bounds.measured_width <= 0 || bounds.height <= 0 {
+    let (window_dpi, monitor_dpi) = caption_window_and_monitor_dpi(window);
+    let bounds = screen_caption_bounds(frame, window_rect, buttons, window_dpi, monitor_dpi);
+    let min_height = scale(MIN_DWM_CAPTION_HEIGHT_DIP, monitor_dpi);
+    let max_height = scale(MAX_DWM_CAPTION_HEIGHT_DIP, monitor_dpi);
+    if bounds.measured_width <= 0 || bounds.height < min_height || bounds.height > max_height {
         return None;
     }
-    let maximized = unsafe { IsZoomed(window) }.as_bool();
     let rounded_top_right = has_rounded_top_right(window, maximized);
     NativeCaption::new(
         style,
@@ -166,46 +279,59 @@ fn native_caption_with_buttons(
         bounds.top,
         bounds.height,
         rounded_top_right,
-        caption_dpi(window),
+        monitor_dpi,
     )
     .map(|caption| {
         caption
             .measured(bounds.measured_width)
             .with_top_border_inset(top_border_inset_for(rounded_top_right))
+            .with_button_top_offset(bounds.button_top_offset)
     })
 }
 
 #[must_use]
 pub(crate) fn native_caption_of(window: HWND) -> Option<NativeCaption> {
-    let raw_style = unsafe { GetWindowLongW(window, GWL_STYLE) } as u32;
+    let (raw_style, zoomed) = unsafe {
+        (
+            GetWindowLongW(window, GWL_STYLE) as u32,
+            IsZoomed(window).as_bool(),
+        )
+    };
     let frame = dwm_rect(window, DWMWA_EXTENDED_FRAME_BOUNDS)?;
     let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)
         .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)?;
-    let zoomed = unsafe { IsZoomed(window) }.as_bool();
-    let full_screen = !zoomed
-        && (raw_style & WS_CAPTION.0 != WS_CAPTION.0)
-        && crate::window::model::covers_monitor(window);
+    let full_screen = crate::window::model::is_full_screen(
+        crate::window::model::covers_monitor(window),
+        zoomed,
+        raw_style,
+    );
     let style = effective_caption_style(raw_style, true, full_screen);
-    native_caption_with_buttons(window, style, frame, buttons)
+    native_caption_with_buttons(window, style, frame, buttons, zoomed)
 }
 
 const fn top_border_inset_for(rounded_top_right: bool) -> bool {
     rounded_top_right
 }
 
-fn standard_caption_of_with_frame(
+fn framework_caption_of_with_frame(
     window: HWND,
+    class: &str,
     style: NativeCaptionStyle,
     frame: RECT,
+    maximized: bool,
+    dpi: u32,
 ) -> Option<NativeCaption> {
-    let maximized = unsafe { IsZoomed(window) }.as_bool();
-    NativeCaption::standard(
+    let rounded_top_right = has_rounded_top_right(window, maximized);
+    let height = fallback_caption_height_px(window, class, dpi, maximized);
+    NativeCaption::new(
         style,
         frame.right,
         frame.top,
-        has_rounded_top_right(window, maximized),
-        caption_dpi(window),
+        height,
+        rounded_top_right,
+        dpi,
     )
+    .map(|caption| caption.with_top_border_inset(top_border_inset_for(rounded_top_right)))
 }
 
 #[must_use]
@@ -214,16 +340,62 @@ pub(crate) fn covering_caption_of_with_frame(
     raw_style: u32,
     frame: RECT,
 ) -> Option<NativeCaption> {
+    let (ex_style, zoomed) = unsafe {
+        (
+            GetWindowLongW(window, GWL_EXSTYLE) as u32,
+            IsZoomed(window).as_bool(),
+        )
+    };
+    if is_ghost_overlay_window(window, raw_style, ex_style) {
+        return None;
+    }
+    let full_screen = crate::window::model::is_full_screen(
+        crate::window::model::covers_monitor(window),
+        zoomed,
+        raw_style,
+    );
+    if full_screen {
+        return None;
+    }
     let buttons = dwm_rect(window, DWMWA_CAPTION_BUTTON_BOUNDS)
         .filter(|rect| rect.right > rect.left && rect.bottom > rect.top);
-    let zoomed = unsafe { IsZoomed(window) }.as_bool();
-    let full_screen = !zoomed
-        && (raw_style & WS_CAPTION.0 != WS_CAPTION.0)
-        && crate::window::model::covers_monitor(window);
-    let style = effective_caption_style(raw_style, buttons.is_some(), full_screen);
-    buttons
-        .and_then(|buttons| native_caption_with_buttons(window, style, frame, buttons))
-        .or_else(|| standard_caption_of_with_frame(window, style, frame))
+    let dpi = caption_dpi(window);
+    let base = caption_style(raw_style);
+    let class = window_class_string(window);
+    let custom_chrome = !base.has_caption;
+    let probe = lookup_or_queue_probe(window, frame, dpi, zoomed, custom_chrome);
+    let allow_custom =
+        !custom_chrome || custom_chrome_eligible(&class, raw_style, buttons.is_some(), probe);
+    let style =
+        effective_caption_style_with_eligibility(raw_style, buttons.is_some(), false, allow_custom);
+    if !style.has_caption || !style.has_system_menu {
+        return None;
+    }
+    if let Some(ProbeEntry::Measured(measured)) = probe {
+        let rounded_top_right = has_rounded_top_right(window, zoomed);
+        if let Some(caption) = NativeCaption::new(
+            style,
+            frame.right,
+            frame.top,
+            measured.height,
+            rounded_top_right,
+            dpi,
+        ) {
+            return Some(
+                caption
+                    .measured(measured.width)
+                    .with_top_border_inset(top_border_inset_for(rounded_top_right))
+                    .with_button_top_offset(measured.top_offset),
+            );
+        }
+    }
+    if !custom_chrome
+        && let Some(buttons) = buttons
+        && let Some(caption) = native_caption_with_buttons(window, style, frame, buttons, zoomed)
+    {
+        return Some(caption);
+    }
+    framework_caption_of_with_frame(window, &class, style, frame, zoomed, dpi)
 }
 
 #[must_use]
@@ -241,11 +413,9 @@ pub fn native_caption(window_hwnd: isize) -> Option<NativeCaption> {
 #[must_use]
 pub fn window_corner_radius_px(window_hwnd: isize) -> f32 {
     let window = HWND(window_hwnd as *mut _);
-    if !unsafe { IsWindow(Some(window)).as_bool() } {
-        return 0.0;
-    }
-    let maximized = unsafe { IsZoomed(window).as_bool() };
-    if !has_rounded_top_right(window, maximized) {
+    let (valid, maximized) =
+        unsafe { (IsWindow(Some(window)).as_bool(), IsZoomed(window).as_bool()) };
+    if !valid || !has_rounded_top_right(window, maximized) {
         return 0.0;
     }
     scale(NATIVE_CORNER_RADIUS_DIP, caption_dpi(window)) as f32
@@ -383,157 +553,13 @@ pub fn forward_caption_context_menu(target_hwnd: isize, screen_x: i32, screen_y:
 }
 
 #[must_use]
-pub fn place_overlay_above(overlay_hwnd: isize, target_hwnd: isize) -> bool {
-    let overlay = HWND(overlay_hwnd as *mut _);
-    let target = HWND(target_hwnd as *mut _);
-    unsafe {
-        if !IsWindow(Some(overlay)).as_bool() || !IsWindow(Some(target)).as_bool() {
-            return false;
-        }
-        let target_ex = GetWindowLongW(target, GWL_EXSTYLE) as u32;
-        let overlay_ex = GetWindowLongW(overlay, GWL_EXSTYLE) as u32;
-        let target_topmost = target_ex & WS_EX_TOPMOST.0 != 0;
-        let overlay_topmost = overlay_ex & WS_EX_TOPMOST.0 != 0;
-        if overlay_topmost && !target_topmost {
-            let _ = SetWindowPos(
-                overlay,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
-        let prev = GetWindow(target, GW_HWNDPREV)
-            .ok()
-            .filter(|hwnd| !hwnd.0.is_null());
-        if prev == Some(overlay) && overlay_topmost == target_topmost {
-            if !IsWindowVisible(overlay).as_bool() {
-                let _ = SetWindowPos(
-                    overlay,
-                    None,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-            }
-            return true;
-        }
-        let insert_after = if target_topmost {
-            prev.unwrap_or(HWND_TOPMOST)
-        } else {
-            match prev {
-                Some(hwnd) if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0 => {
-                    HWND_TOP
-                }
-                Some(hwnd) => hwnd,
-                None => HWND_TOP,
-            }
-        };
-        let _ = SetWindowPos(
-            overlay,
-            Some(insert_after),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
-    }
-    true
-}
-
-fn lowest_anchor_hwnd(overlay: HWND, anchors: &[isize]) -> Option<HWND> {
-    struct Probe<'a> {
-        overlay: HWND,
-        anchors: &'a [isize],
-        lowest: Option<HWND>,
-    }
-    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let probe = unsafe { &mut *(lparam.0 as *mut Probe<'_>) };
-        let raw = hwnd.0 as isize;
-        if hwnd != probe.overlay
-            && probe.anchors.contains(&raw)
-            && unsafe { IsWindowVisible(hwnd).as_bool() }
-            && (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0) != 0
-        {
-            probe.lowest = Some(hwnd);
-        }
-        BOOL(1)
-    }
-    if anchors.is_empty() {
-        return None;
-    }
-    let mut probe = Probe {
-        overlay,
-        anchors,
-        lowest: None,
-    };
-    unsafe {
-        let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
-    }
-    probe.lowest
-}
-
-#[must_use]
-pub fn place_overlay_below(overlay_hwnd: isize, anchors: &[isize]) -> bool {
-    let overlay = HWND(overlay_hwnd as *mut _);
-    unsafe {
-        if !IsWindow(Some(overlay)).as_bool() {
-            return false;
-        }
-        let Some(anchor) = lowest_anchor_hwnd(overlay, anchors) else {
-            return SetWindowPos(
-                overlay,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-            .is_ok();
-        };
-        let overlay_topmost = (GetWindowLongW(overlay, GWL_EXSTYLE) as u32) & WS_EX_TOPMOST.0 != 0;
-        if !overlay_topmost {
-            let _ = SetWindowPos(
-                overlay,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
-        let already_below = GetWindow(anchor, GW_HWNDNEXT)
-            .ok()
-            .is_some_and(|next| next == overlay);
-        if already_below {
-            return true;
-        }
-        SetWindowPos(
-            overlay,
-            Some(anchor),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-        .is_ok()
-    }
-}
-
-#[must_use]
 pub fn drag_threshold() -> (i32, i32) {
-    (
-        unsafe { GetSystemMetrics(SM_CXDRAG) }.max(1),
-        unsafe { GetSystemMetrics(SM_CYDRAG) }.max(1),
-    )
+    unsafe {
+        (
+            GetSystemMetrics(SM_CXDRAG).max(1),
+            GetSystemMetrics(SM_CYDRAG).max(1),
+        )
+    }
 }
 
 #[must_use]
@@ -687,13 +713,14 @@ mod tests {
             right: 914,
             bottom: 48,
         };
-        let bounds = screen_caption_bounds(frame, window, buttons);
+        let bounds = screen_caption_bounds(frame, window, buttons, 96, 96);
         assert_eq!(
             bounds,
             ScreenCaptionBounds {
                 frame_right: 900,
                 top: 108,
                 height: 40,
+                button_top_offset: 4,
                 measured_width: 144,
             }
         );
@@ -719,11 +746,14 @@ mod tests {
             right: 914,
             bottom: 42,
         };
-        assert_eq!(screen_caption_bounds(frame, window, buttons).top, 108);
+        assert_eq!(
+            screen_caption_bounds(frame, window, buttons, 96, 96).top,
+            108
+        );
     }
 
     #[test]
-    fn maximized_window_caption_starts_at_the_visible_frame_not_the_hidden_border() {
+    fn maximized_window_caption_clips_hidden_top_border_to_visible_height() {
         let frame = RECT {
             left: 0,
             top: 60,
@@ -743,14 +773,40 @@ mod tests {
             bottom: 44,
         };
         assert_eq!(
-            screen_caption_bounds(frame, window, buttons),
+            screen_caption_bounds(frame, window, buttons, 144, 144),
             ScreenCaptionBounds {
                 frame_right: 2240,
                 top: 60,
-                height: 44,
+                height: 33,
+                button_top_offset: 0,
                 measured_width: 220,
             }
         );
+    }
+
+    #[test]
+    fn dpi_virtualized_dwm_buttons_scale_to_physical_monitor_pixels() {
+        let frame = RECT {
+            left: 0,
+            top: 100,
+            right: 1500,
+            bottom: 900,
+        };
+        let window = RECT {
+            left: 0,
+            top: 100,
+            right: 1500,
+            bottom: 900,
+        };
+        let logical_buttons = RECT {
+            left: 862,
+            top: 0,
+            right: 1000,
+            bottom: 30,
+        };
+        let bounds = screen_caption_bounds(frame, window, logical_buttons, 96, 144);
+        assert_eq!(bounds.height, 45);
+        assert_eq!(bounds.measured_width, 207);
     }
 
     #[test]
@@ -773,7 +829,10 @@ mod tests {
             right: 690,
             bottom: 44,
         };
-        assert_eq!(screen_caption_bounds(frame, window, buttons).top, 300);
+        assert_eq!(
+            screen_caption_bounds(frame, window, buttons, 144, 144).top,
+            300
+        );
     }
 
     #[test]
@@ -796,11 +855,5 @@ mod tests {
         assert!(!drag_threshold_exceeded((100, 20), (103, 22), (4, 4)));
         assert!(drag_threshold_exceeded((100, 20), (104, 20), (4, 4)));
         assert!(drag_threshold_exceeded((100, 20), (100, 24), (4, 4)));
-    }
-
-    #[test]
-    fn invalid_handles_reject_corner_radius_and_below_placement() {
-        assert!((super::window_corner_radius_px(0) - 0.0).abs() < 0.001);
-        assert!(!super::place_overlay_below(0, &[1, 2]));
     }
 }

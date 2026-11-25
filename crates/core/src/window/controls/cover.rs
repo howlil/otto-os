@@ -328,7 +328,7 @@ pub fn cover_row_bands(rows: &[[u8; 3]], height: usize, border_inset: bool) -> V
 }
 
 pub const NATIVE_CAPTION_BUTTON_DIP: i32 = 46;
-pub const NATIVE_CAPTION_HEIGHT_DIP: i32 = 30;
+pub(super) const NATIVE_CAPTION_HEIGHT_DIP: i32 = 30;
 pub const NATIVE_CORNER_RADIUS_DIP: i32 = 8;
 pub const COVER_RIGHT_MARGIN_DIP: i32 = 14;
 pub const COVER_FEATHER_DIP: i32 = 6;

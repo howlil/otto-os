@@ -70,10 +70,7 @@ export const WORKSPACES: WorkspaceMeta[] = [
   {
     id: "focus",
     label: ["Focus", "Focus"],
-    summary: [
-      "Pomodoro empat siklus, timer cepat, dan stopwatch langsung dari notch.",
-      "Four-cycle Pomodoro, quick timer and stopwatch directly inside the notch.",
-    ],
+    summary: ["Pomodoro empat siklus langsung dari notch.", "Four-cycle Pomodoro directly inside the notch."],
   },
   {
     id: "time",
@@ -160,7 +157,11 @@ export const POCKET_ITEMS: { kind: Kind; label: [string, string] }[] = [
 ];
 
 export const CLIP_ITEMS: { kind: Kind; label: [string, string]; size: string }[] = [
-  { kind: "text", label: ["cargo clippy --workspace --all-targets", "cargo clippy --workspace --all-targets"], size: "38 B" },
+  {
+    kind: "text",
+    label: ["cargo clippy --workspace --all-targets", "cargo clippy --workspace --all-targets"],
+    size: "38 B",
+  },
   { kind: "link", label: ["github.com/howlil/otto-os/releases", "github.com/howlil/otto-os/releases"], size: "34 B" },
   { kind: "file", label: ["otto-os-setup-1.3.1-x64.exe", "otto-os-setup-1.3.1-x64.exe"], size: "1 item" },
   { kind: "text", label: ["Ctrl+Alt+Space · Spotlight", "Ctrl+Alt+Space · Spotlight"], size: "26 B" },
@@ -195,13 +196,41 @@ export type HudEvent = {
 
 export const HUD_EVENTS: HudEvent[] = [
   { id: "vol", glyph: "volume", label: ["Volume", "Volume"], tone: "neutral", value: ["64%", "64%"], level: 0.64 },
-  { id: "bright", glyph: "sun", label: ["Brightness", "Brightness"], tone: "neutral", value: ["78%", "78%"], level: 0.78 },
-  { id: "bt", glyph: "headphones", label: ["WH-1000XM5", "WH-1000XM5"], tone: "positive", value: ["84%", "84%"], level: 0.84 },
+  {
+    id: "bright",
+    glyph: "sun",
+    label: ["Brightness", "Brightness"],
+    tone: "neutral",
+    value: ["78%", "78%"],
+    level: 0.78,
+  },
+  {
+    id: "bt",
+    glyph: "headphones",
+    label: ["WH-1000XM5", "WH-1000XM5"],
+    tone: "positive",
+    value: ["84%", "84%"],
+    level: 0.84,
+  },
   { id: "caps", glyph: "caps", label: ["Caps Lock", "Caps Lock"], tone: "positive", pill: ["On", "On"] },
-  { id: "charge", glyph: "bolt", label: ["Charging", "Charging"], tone: "positive", value: ["86%", "86%"], level: 0.86 },
+  {
+    id: "charge",
+    glyph: "bolt",
+    label: ["Charging", "Charging"],
+    tone: "positive",
+    value: ["86%", "86%"],
+    level: 0.86,
+  },
   { id: "dnd", glyph: "dnd", label: ["Do Not Disturb", "Do Not Disturb"], tone: "neutral", pill: ["On", "On"] },
   { id: "lang", glyph: "lang", label: ["Keyboard", "Keyboard"], tone: "neutral", pill: ["EN", "EN"] },
-  { id: "low", glyph: "battery", label: ["Low battery", "Low battery"], tone: "warning", value: ["16%", "16%"], level: 0.16 },
+  {
+    id: "low",
+    glyph: "battery",
+    label: ["Low battery", "Low battery"],
+    tone: "warning",
+    value: ["16%", "16%"],
+    level: 0.16,
+  },
   { id: "mute", glyph: "volumeMuted", label: ["Volume", "Volume"], tone: "muted", value: ["Muted", "Muted"], level: 0 },
 ];
 

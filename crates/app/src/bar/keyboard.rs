@@ -135,6 +135,19 @@ impl Bar {
         runtime: &RuntimeContext,
         key: BarKey,
     ) -> Option<DeferredModalAction> {
+        if self.notch.is_editing_custom_time() {
+            let update = match key {
+                BarKey::Digit(d) => self.notch.handle_custom_time_char((b'0' + d) as char),
+                BarKey::Backspace => self.notch.handle_custom_time_backspace(),
+                BarKey::Activate => self.notch.commit_custom_time(),
+                BarKey::Exit => self.notch.cancel_custom_time(),
+                _ => return None,
+            };
+            if update.changed {
+                self.apply_notch_update(runtime, update);
+            }
+            return None;
+        }
         let targets = self.keyboard_targets();
         if let Some(from_end) = self.focus.dock_handoff(key, &targets)
             && crate::dock::keyboard_entry_count(runtime) > 0

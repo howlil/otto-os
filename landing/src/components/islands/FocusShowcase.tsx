@@ -1,10 +1,10 @@
-import { useEffect, useReducer, useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
-import { ArrowLeft, Code2, Gamepad2, Globe, MessageCircle, Moon, Music, Play, Search, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { ArrowLeft, Code2, Gamepad2, Globe, MessageCircle, Moon, Music, Play, Search, ShieldAlert } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
+import { useEffect, useReducer, useState } from "react";
 import { T } from "../lib/T";
 import { FocusPanel } from "./notch/Panels";
-import { PALETTE, WEEKLY_SCREEN_TIME, formatMinutesBrief } from "./notch/spec";
+import { formatMinutesBrief, PALETTE, WEEKLY_SCREEN_TIME } from "./notch/spec";
 import { Switch } from "./Switch";
 
 type Phase = "focus" | "break" | "rest";
@@ -32,15 +32,16 @@ const BREAK_SECONDS = 5 * 60;
 const REST_SECONDS = 15 * 60;
 const INITIAL: Cycle = { phase: "focus", completed: 1, minutes: 25, remaining: 25 * 60, running: true };
 
-const BLOCK_CATALOG: { id: string; name: string; detail: string; icon: LucideIcon; tint: string; recent?: boolean }[] = [
-  { id: "discord", name: "Discord", detail: "38m today", icon: MessageCircle, tint: "#5865f2", recent: true },
-  { id: "youtube.com", name: "YouTube", detail: "youtube.com", icon: Play, tint: "#ff375f", recent: true },
-  { id: "steam", name: "Steam", detail: "Launcher", icon: Gamepad2, tint: "#2c3e55", recent: true },
-  { id: "x.com", name: "X / Twitter", detail: "x.com", icon: Globe, tint: "#3a3a3c", recent: true },
-  { id: "riot", name: "Riot Client", detail: "Game client", icon: Gamepad2, tint: "#d13639" },
-  { id: "spotify", name: "Spotify", detail: "1h 12m today", icon: Music, tint: "#1db954", recent: true },
-  { id: "vscode", name: "VS Code", detail: "2h 14m today", icon: Code2, tint: "#0a84ff", recent: true },
-];
+const BLOCK_CATALOG: { id: string; name: string; detail: string; icon: LucideIcon; tint: string; recent?: boolean }[] =
+  [
+    { id: "discord", name: "Discord", detail: "38m today", icon: MessageCircle, tint: "#5865f2", recent: true },
+    { id: "youtube.com", name: "YouTube", detail: "youtube.com", icon: Play, tint: "#ff375f", recent: true },
+    { id: "steam", name: "Steam", detail: "Launcher", icon: Gamepad2, tint: "#2c3e55", recent: true },
+    { id: "x.com", name: "X / Twitter", detail: "x.com", icon: Globe, tint: "#3a3a3c", recent: true },
+    { id: "riot", name: "Riot Client", detail: "Game client", icon: Gamepad2, tint: "#d13639" },
+    { id: "spotify", name: "Spotify", detail: "1h 12m today", icon: Music, tint: "#1db954", recent: true },
+    { id: "vscode", name: "VS Code", detail: "2h 14m today", icon: Code2, tint: "#0a84ff", recent: true },
+  ];
 
 const PREVIEW_TARGETS: [PreviewTarget, string][] = [
   ["work", "VS Code"],
@@ -157,7 +158,9 @@ export function FocusShowcase() {
                 disabled={cycle.running || cycle.phase !== "focus"}
                 onClick={() => dispatch({ type: "preset", minutes })}
                 className={`h-8 rounded-full px-3.5 text-[12.5px] font-medium ring-1 ring-inset transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff] disabled:opacity-40 ${
-                  on ? "bg-stage-ink text-stage ring-stage-ink" : "text-stage-muted ring-stage-line hover:text-stage-ink"
+                  on
+                    ? "bg-stage-ink text-stage ring-stage-ink"
+                    : "text-stage-muted ring-stage-line hover:text-stage-ink"
                 }`}
               >
                 {minutes}m
@@ -166,7 +169,10 @@ export function FocusShowcase() {
           })}
           <span className="ml-auto flex gap-1.5" aria-hidden="true">
             {[0, 1, 2, 3].map((index) => (
-              <span key={index} className={`size-2 rounded-full ${index < cycle.completed ? "bg-[#ff9230]" : "bg-stage-line"}`} />
+              <span
+                key={index}
+                className={`size-2 rounded-full ${index < cycle.completed ? "bg-[#ff9230]" : "bg-stage-line"}`}
+              />
             ))}
           </span>
         </div>
@@ -206,7 +212,8 @@ export function FocusShowcase() {
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-[14.5px] font-semibold text-stage-ink">
-                  {previewTarget === "youtube.com" ? "YouTube" : "Discord"} <T id="diblokir saat Focus" en="paused during Focus" />
+                  {previewTarget === "youtube.com" ? "YouTube" : "Discord"}{" "}
+                  <T id="diblokir saat Focus" en="paused during Focus" />
                 </p>
                 <p className="mt-0.5 text-[12.5px] text-stage-muted">
                   <T id="Tidak ada tab atau kerja yang ditutup." en="Nothing was closed. Step back cleanly." />
@@ -223,15 +230,25 @@ export function FocusShowcase() {
             </motion.div>
           ) : (
             <div className="flex items-center gap-3 rounded-[16px] border border-stage-line p-4">
-              <span className="size-2 shrink-0 rounded-full" style={{ background: focusing ? PALETTE.focus : PALETTE.muted }} aria-hidden="true" />
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{ background: focusing ? PALETTE.focus : PALETTE.muted }}
+                aria-hidden="true"
+              />
               <p className="min-w-0 flex-1 text-[13.5px] text-stage-ink">
                 {previewTarget === "work" ? (
                   <T id="Ruang kerja tetap terbuka dan tenang." en="Your workspace stays open and undisturbed." />
                 ) : (
-                  <T id="Situs dan aplikasi pengalih tidak ditutup paksa." en="Blocked apps and tabs are never force-closed." />
+                  <T
+                    id="Situs dan aplikasi pengalih tidak ditutup paksa."
+                    en="Blocked apps and tabs are never force-closed."
+                  />
                 )}
               </p>
-              <span className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium" style={{ color: focusing ? PALETTE.focus : PALETTE.muted }}>
+              <span
+                className="flex shrink-0 items-center gap-1.5 text-[12px] font-medium"
+                style={{ color: focusing ? PALETTE.focus : PALETTE.muted }}
+              >
                 <Moon size={12} strokeWidth={2.2} aria-hidden="true" />
                 {focusing ? "Focus On" : "Paused"}
               </span>
@@ -246,7 +263,11 @@ export function FocusShowcase() {
             <p className="text-[22px] font-medium tracking-[-0.02em]">Focus</p>
             <p className="mt-1 text-[12.5px] tabular-nums text-stage-muted">3h 48m today · 2h 35m focus · 4 blocked</p>
           </div>
-          <div className="inline-flex rounded-full border border-stage-line p-1" role="tablist" aria-label="Focus settings tabs">
+          <div
+            className="inline-flex rounded-full border border-stage-line p-1"
+            role="tablist"
+            aria-label="Focus settings tabs"
+          >
             {(
               [
                 ["block", "Block apps"],
@@ -305,7 +326,11 @@ export function FocusShowcase() {
                 const Icon = item.icon;
                 return (
                   <li key={item.id} className="flex items-center gap-3.5 border-b border-stage-line py-3.5">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-[10px] text-white" style={{ background: item.tint }} aria-hidden="true">
+                    <span
+                      className="grid size-9 shrink-0 place-items-center rounded-[10px] text-white"
+                      style={{ background: item.tint }}
+                      aria-hidden="true"
+                    >
                       <Icon size={17} strokeWidth={1.9} />
                     </span>
                     <div className="min-w-0 flex-1">
@@ -349,12 +374,18 @@ export function FocusShowcase() {
             <div>
               <div className="flex flex-wrap items-center justify-between gap-3 text-[12.5px]">
                 <span className="font-medium tabular-nums text-stage-ink">
-                  {activeDay.today ? `Today (${activeDay.day})` : activeDay.day} · Total {formatMinutesBrief(activeDay.totalMinutes)} · Focus{" "}
-                  {formatMinutesBrief(activeDay.focusMinutes)}
+                  {activeDay.today ? `Today (${activeDay.day})` : activeDay.day} · Total{" "}
+                  {formatMinutesBrief(activeDay.totalMinutes)} · Focus {formatMinutesBrief(activeDay.focusMinutes)}
                 </span>
                 <span className="flex items-center gap-3 text-[11.5px] text-stage-muted">
-                  <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-[#0a84ff]" />Screen</span>
-                  <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-[#ff9230]" />Focus</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-2 rounded-full bg-[#0a84ff]" />
+                    Screen
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-2 rounded-full bg-[#ff9230]" />
+                    Focus
+                  </span>
                 </span>
               </div>
               <div className="mt-5 flex h-[132px] items-end gap-2.5">
@@ -377,10 +408,15 @@ export function FocusShowcase() {
                           }`}
                           style={{ height: h, background: "#0a84ff" }}
                         >
-                          <span className="absolute inset-x-0 bottom-0 rounded-t-[3px]" style={{ height: fh, background: "#ff9230" }} />
+                          <span
+                            className="absolute inset-x-0 bottom-0 rounded-t-[3px]"
+                            style={{ height: fh, background: "#ff9230" }}
+                          />
                         </div>
                       </div>
-                      <span className={`text-[11px] font-medium ${active ? "text-stage-ink" : "text-stage-muted"}`}>{day.day}</span>
+                      <span className={`text-[11px] font-medium ${active ? "text-stage-ink" : "text-stage-muted"}`}>
+                        {day.day}
+                      </span>
                     </button>
                   );
                 })}

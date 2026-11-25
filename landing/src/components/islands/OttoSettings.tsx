@@ -1,4 +1,4 @@
-import { useState } from "react";
+import type { LucideIcon } from "lucide-react";
 import {
   CheckCircle2,
   CircleDot,
@@ -25,10 +25,10 @@ import {
   Timer,
   Wind,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { useState } from "react";
 import { T } from "../lib/T";
+import { Badge, COLORS, Row, Section, Sidebar, SidebarGroup, SidebarItem, type Theme, WindowFrame } from "./OttoWindow";
 import { Switch } from "./Switch";
-import { Badge, COLORS, Row, Section, Sidebar, SidebarGroup, SidebarItem, WindowFrame, type Theme } from "./OttoWindow";
 
 const TINT = {
   blue: "#0a84ff",
@@ -57,26 +57,98 @@ type ModuleRowDef = {
 };
 
 const MODULES: ModuleRowDef[] = [
-  { label: "Top Bar", subtitle: "Menus, tray, status, calendar, clock", group: "Surfaces", icon: PanelTop, tint: TINT.cyan },
-  { label: "Notch", subtitle: "Focus, Time, music, HUD, notifications", group: "Surfaces", icon: Pill, tint: TINT.graphite },
-  { label: "Dock", subtitle: "Apps, Downloads stack, Recycle Bin", group: "Surfaces", icon: PanelBottom, tint: TINT.violet },
-  { label: "Window Controls", subtitle: "Top-right circles & Tiling menu", group: "Surfaces", icon: CircleDot, tint: TINT.amber },
+  {
+    label: "Top Bar",
+    subtitle: "Menus, tray, status, calendar, clock",
+    group: "Surfaces",
+    icon: PanelTop,
+    tint: TINT.cyan,
+  },
+  {
+    label: "Notch",
+    subtitle: "Focus, Time, music, HUD, notifications",
+    group: "Surfaces",
+    icon: Pill,
+    tint: TINT.graphite,
+  },
+  {
+    label: "Dock",
+    subtitle: "Apps, Downloads stack, Recycle Bin",
+    group: "Surfaces",
+    icon: PanelBottom,
+    tint: TINT.violet,
+  },
+  {
+    label: "Window Controls",
+    subtitle: "Top-right circles & Tiling menu",
+    group: "Surfaces",
+    icon: CircleDot,
+    tint: TINT.amber,
+  },
   { label: "Genie", subtitle: "Hardware mesh minimize into the Dock", group: "Surfaces", icon: Wind, tint: TINT.amber },
-  { label: "Spotlight", subtitle: "Local app search (always ready)", group: "Surfaces", icon: Search, tint: TINT.gray, required: true },
-  { label: "Control Center", subtitle: "Sound, DDC/CI display, now playing", group: "Surfaces", icon: SlidersHorizontal, tint: TINT.slate, required: true },
-  { label: "Now Playing", subtitle: "Playback & synced lyrics in the Notch", group: "Notch tools", icon: Music, tint: TINT.graphite },
+  {
+    label: "Spotlight",
+    subtitle: "Local app search (always ready)",
+    group: "Surfaces",
+    icon: Search,
+    tint: TINT.gray,
+    required: true,
+  },
+  {
+    label: "Control Center",
+    subtitle: "Sound, DDC/CI display, now playing",
+    group: "Surfaces",
+    icon: SlidersHorizontal,
+    tint: TINT.slate,
+    required: true,
+  },
+  {
+    label: "Now Playing",
+    subtitle: "Playback & synced lyrics in the Notch",
+    group: "Notch tools",
+    icon: Music,
+    tint: TINT.graphite,
+  },
   { label: "Focus", subtitle: "Pomodoro, Shield & Screen Time", group: "Notch tools", icon: Timer, tint: TINT.indigo },
-  { label: "Clipboard", subtitle: "12 ephemeral RAM-only copies", group: "Notch tools", icon: ClipboardList, tint: TINT.graphite },
-  { label: "Pocket", subtitle: "12-item file & link drop shelf", group: "Notch tools", icon: Inbox, tint: TINT.graphite },
-  { label: "Quick Capture", subtitle: "Inline Tasks & Ctrl+Alt+Q capture", group: "Notch tools", icon: ListTodo, tint: TINT.graphite },
-  { label: "Background Cleanup", subtitle: "EcoQoS throttling & process audit", group: "System", icon: Gauge, tint: TINT.gray },
+  {
+    label: "Clipboard",
+    subtitle: "12 ephemeral RAM-only copies",
+    group: "Notch tools",
+    icon: ClipboardList,
+    tint: TINT.graphite,
+  },
+  {
+    label: "Pocket",
+    subtitle: "12-item file & link drop shelf",
+    group: "Notch tools",
+    icon: Inbox,
+    tint: TINT.graphite,
+  },
+  {
+    label: "Quick Capture",
+    subtitle: "Inline Tasks & Ctrl+Alt+Q capture",
+    group: "Notch tools",
+    icon: ListTodo,
+    tint: TINT.graphite,
+  },
+  {
+    label: "Background Cleanup",
+    subtitle: "EcoQoS throttling & process audit",
+    group: "System",
+    icon: Gauge,
+    tint: TINT.gray,
+  },
 ];
 
 const OFF_BY_DEFAULT = new Set(["Quick Capture", "Background Cleanup"]);
 
 const SECTIONS: { group: Group; title: string; footer?: string }[] = [
   { group: "Surfaces", title: "Surfaces", footer: "A module you turn off stops right away. Its settings are kept." },
-  { group: "Notch tools", title: "Notch tools", footer: "Notch tools pause while the Notch is off. Their switches stay as set." },
+  {
+    group: "Notch tools",
+    title: "Notch tools",
+    footer: "Notch tools pause while the Notch is off. Their switches stay as set.",
+  },
   { group: "System", title: "System" },
 ];
 
@@ -123,11 +195,61 @@ type ProcessItem = {
 };
 
 const INITIAL_PROCESSES: ProcessItem[] = [
-  { id: "chrome-bg", name: "Chrome Helper", count: 6, ramMb: 412, cpu: "8.4%", safety: "background", reason: "Hidden memory buffer", throttled: true, safeToEnd: true },
-  { id: "updater", name: "Electron Renderer", count: 3, ramMb: 268, cpu: "6.1%", safety: "background", reason: "Background CPU hog", throttled: false, safeToEnd: true },
-  { id: "discord-bg", name: "Discord", count: 4, ramMb: 194, cpu: "2.3%", safety: "background", reason: "Headless background", throttled: false, safeToEnd: true },
-  { id: "dwm", name: "dwm.exe", count: 1, ramMb: 112, cpu: "1.4%", safety: "protected", reason: "Desktop Window Manager", throttled: false, safeToEnd: false },
-  { id: "explorer", name: "explorer.exe", count: 1, ramMb: 96, cpu: "0.6%", safety: "protected", reason: "Windows Shell", throttled: false, safeToEnd: false },
+  {
+    id: "chrome-bg",
+    name: "Chrome Helper",
+    count: 6,
+    ramMb: 412,
+    cpu: "8.4%",
+    safety: "background",
+    reason: "Hidden memory buffer",
+    throttled: true,
+    safeToEnd: true,
+  },
+  {
+    id: "updater",
+    name: "Electron Renderer",
+    count: 3,
+    ramMb: 268,
+    cpu: "6.1%",
+    safety: "background",
+    reason: "Background CPU hog",
+    throttled: false,
+    safeToEnd: true,
+  },
+  {
+    id: "discord-bg",
+    name: "Discord",
+    count: 4,
+    ramMb: 194,
+    cpu: "2.3%",
+    safety: "background",
+    reason: "Headless background",
+    throttled: false,
+    safeToEnd: true,
+  },
+  {
+    id: "dwm",
+    name: "dwm.exe",
+    count: 1,
+    ramMb: 112,
+    cpu: "1.4%",
+    safety: "protected",
+    reason: "Desktop Window Manager",
+    throttled: false,
+    safeToEnd: false,
+  },
+  {
+    id: "explorer",
+    name: "explorer.exe",
+    count: 1,
+    ramMb: 96,
+    cpu: "0.6%",
+    safety: "protected",
+    reason: "Windows Shell",
+    throttled: false,
+    safeToEnd: false,
+  },
 ];
 
 const SHORTCUTS: [string, string][] = [
@@ -220,7 +342,11 @@ export function OttoSettingsWindow() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="inline-flex flex-wrap items-center gap-1.5 rounded-full bg-black/[0.05] p-1 ring-1 ring-inset ring-line" role="tablist" aria-label="Otto Settings pages">
+        <div
+          className="inline-flex flex-wrap items-center gap-1.5 rounded-full bg-black/[0.05] p-1 ring-1 ring-inset ring-line"
+          role="tablist"
+          aria-label="Otto Settings pages"
+        >
           {(
             [
               ["Modules", "13 Modul", "13 Modules"],
@@ -256,45 +382,48 @@ export function OttoSettingsWindow() {
         sidebar={<SettingsSidebar theme="light" selected={page} onSelect={setPage} />}
       >
         <div className="quiet-scroll flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-4 sm:p-5">
-          {page === "Modules" ? (
-            SECTIONS.map((section) => (
-              <Section key={section.group} theme="light" title={section.title} footer={section.footer}>
-                {MODULES.filter((module) => module.group === section.group).map((module) => {
-                  const paused = module.group === "Notch tools" && !notchOn;
-                  return (
-                    <Row
-                      key={module.label}
-                      theme="light"
-                      icon={module.icon}
-                      tint={module.tint}
-                      title={module.label}
-                      subtitle={paused ? "Needs Notch" : module.subtitle}
-                      muted={paused}
-                      trailing={
-                        <div className="flex shrink-0 items-center gap-2.5">
-                          <Badge theme="light" tone={paused ? "neutral" : enabled[module.label] ? "good" : "neutral"}>
-                            {paused ? "Paused" : enabled[module.label] ? "Running" : "Off"}
-                          </Badge>
-                          {module.required ? (
-                            <span className="w-[38px] text-center text-[11px] font-medium" style={{ color: c.secondary }}>
-                              Core
-                            </span>
-                          ) : (
-                            <Switch
-                              tone="system-light"
-                              checked={enabled[module.label] ?? false}
-                              onChange={(next) => setEnabled((curr) => ({ ...curr, [module.label]: next }))}
-                              label={[module.label, module.label]}
-                            />
-                          )}
-                        </div>
-                      }
-                    />
-                  );
-                })}
-              </Section>
-            ))
-          ) : null}
+          {page === "Modules"
+            ? SECTIONS.map((section) => (
+                <Section key={section.group} theme="light" title={section.title} footer={section.footer}>
+                  {MODULES.filter((module) => module.group === section.group).map((module) => {
+                    const paused = module.group === "Notch tools" && !notchOn;
+                    return (
+                      <Row
+                        key={module.label}
+                        theme="light"
+                        icon={module.icon}
+                        tint={module.tint}
+                        title={module.label}
+                        subtitle={paused ? "Needs Notch" : module.subtitle}
+                        muted={paused}
+                        trailing={
+                          <div className="flex shrink-0 items-center gap-2.5">
+                            <Badge theme="light" tone={paused ? "neutral" : enabled[module.label] ? "good" : "neutral"}>
+                              {paused ? "Paused" : enabled[module.label] ? "Running" : "Off"}
+                            </Badge>
+                            {module.required ? (
+                              <span
+                                className="w-[38px] text-center text-[11px] font-medium"
+                                style={{ color: c.secondary }}
+                              >
+                                Core
+                              </span>
+                            ) : (
+                              <Switch
+                                tone="system-light"
+                                checked={enabled[module.label] ?? false}
+                                onChange={(next) => setEnabled((curr) => ({ ...curr, [module.label]: next }))}
+                                label={[module.label, module.label]}
+                              />
+                            )}
+                          </div>
+                        }
+                      />
+                    );
+                  })}
+                </Section>
+              ))
+            : null}
 
           {page === "General" ? (
             <>
@@ -320,15 +449,21 @@ export function OttoSettingsWindow() {
                 />
                 <div className="grid grid-cols-3 divide-x divide-black/[0.08] px-2 py-3 text-center sm:text-left">
                   <div className="px-2.5">
-                    <p className="text-[11px]" style={{ color: c.secondary }}>Background RAM</p>
+                    <p className="text-[11px]" style={{ color: c.secondary }}>
+                      Background RAM
+                    </p>
                     <p className="mt-0.5 text-[17px] font-semibold tabular-nums">{bgRam} MB</p>
                   </div>
                   <div className="px-2.5">
-                    <p className="text-[11px]" style={{ color: c.secondary }}>EcoQoS Throttled</p>
+                    <p className="text-[11px]" style={{ color: c.secondary }}>
+                      EcoQoS Throttled
+                    </p>
                     <p className="mt-0.5 text-[17px] font-semibold tabular-nums">{throttledCount}</p>
                   </div>
                   <div className="px-2.5">
-                    <p className="text-[11px]" style={{ color: c.secondary }}>System Protected</p>
+                    <p className="text-[11px]" style={{ color: c.secondary }}>
+                      System Protected
+                    </p>
                     <p className="mt-0.5 text-[17px] font-semibold tabular-nums">{protectedCount}</p>
                   </div>
                 </div>
@@ -355,7 +490,9 @@ export function OttoSettingsWindow() {
                         aria-pressed={auditFilter === id}
                         onClick={() => setAuditFilter(id)}
                         className={`h-7 rounded-full px-2.5 text-[11.5px] font-medium transition-colors ${
-                          auditFilter === id ? "bg-[#007aff] text-white" : "bg-black/[0.06] text-ink-soft hover:text-ink"
+                          auditFilter === id
+                            ? "bg-[#007aff] text-white"
+                            : "bg-black/[0.06] text-ink-soft hover:text-ink"
                         }`}
                       >
                         {label}
@@ -382,14 +519,18 @@ export function OttoSettingsWindow() {
                     subtitle={`${proc.ramMb} MB · ${proc.cpu} · ${proc.reason}`}
                     trailing={
                       proc.safety === "protected" ? (
-                        <Badge theme="light" tone="warning">Protected</Badge>
+                        <Badge theme="light" tone="warning">
+                          Protected
+                        </Badge>
                       ) : (
                         <div className="flex shrink-0 items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() =>
                               setProcesses((curr) =>
-                                curr.map((item) => (item.id === proc.id ? { ...item, throttled: !item.throttled } : item)),
+                                curr.map((item) =>
+                                  item.id === proc.id ? { ...item, throttled: !item.throttled } : item,
+                                ),
                               )
                             }
                             className={`h-7 rounded-full px-2.5 text-[11.5px] font-semibold transition-colors ${
@@ -491,8 +632,24 @@ export function OttoSettingsWindow() {
                 title="Recovery & Diagnostics"
                 footer="Run otto-os.exe --restore-shell if you ever need to restore the native Windows taskbar immediately."
               >
-                <Row theme="light" title="Settings folder" trailing={<span className="font-mono text-[11.5px]" style={{ color: c.secondary }}>%LOCALAPPDATA%\otto-os</span>} />
-                <Row theme="light" title="Telemetry" trailing={<Badge theme="light" tone="good">None</Badge>} />
+                <Row
+                  theme="light"
+                  title="Settings folder"
+                  trailing={
+                    <span className="font-mono text-[11.5px]" style={{ color: c.secondary }}>
+                      %LOCALAPPDATA%\otto-os
+                    </span>
+                  }
+                />
+                <Row
+                  theme="light"
+                  title="Telemetry"
+                  trailing={
+                    <Badge theme="light" tone="good">
+                      None
+                    </Badge>
+                  }
+                />
               </Section>
             </>
           ) : null}

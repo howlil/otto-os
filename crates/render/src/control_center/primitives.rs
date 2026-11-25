@@ -1,20 +1,18 @@
-use crate::{CLEAR, LiquidGlassPalette, rect_to_d2d, scale};
-use otto_core::{
-    Appearance, ControlCenterHitTarget, ControlCenterLayout, GlassShape, Rect, ShapeTokens,
-};
+use crate::appearance::tokens::pressed_overlay;
+use crate::kit::draw::{draw_focus_ring_for, squircle_threshold};
+use crate::kit::icons::{ChevronDir, draw_chevron_glyph};
+use crate::{LiquidGlassPalette, rect_to_d2d, scale};
+use otto_core::{ControlCenterHitTarget, ControlCenterLayout, Rect, ShapeTokens};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
     ID2D1Brush, ID2D1PathGeometry, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
-use windows::core::Result;
+use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows_numerics::Vector2;
 
 use super::ControlCenterRenderer;
 use super::ControlVisualState;
-use super::d2d_rect_inset;
-use super::d2d_rect_size;
 
 impl ControlCenterRenderer {
     pub(super) fn draw_focus_ring(
@@ -29,8 +27,6 @@ impl ControlCenterRenderer {
             return;
         };
         let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
-        let stroke = shape.focus_ring_width as f32;
-        let inset = stroke * 0.5;
         let max_radius = (slot.width.min(slot.height) as f32 * 0.5).max(1.0);
         let radius = if matches!(
             target,
@@ -70,24 +66,14 @@ impl ControlCenterRenderer {
         } else {
             (shape.focus_ring_radius as f32).min(max_radius)
         };
-        let rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: slot.x as f32 + inset,
-                top: slot.y as f32 + inset,
-                right: slot.right() as f32 - inset,
-                bottom: slot.bottom() as f32 - inset,
-            },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target.DrawRoundedRectangle(
-                &rect,
-                &self.brushes.text_primary,
-                stroke,
-                &self.stroke_style,
-            );
-        }
+        draw_focus_ring_for(
+            &self.factory,
+            &self.target,
+            rect_to_d2d(slot),
+            radius,
+            self.dpi,
+            &self.brushes.text_primary,
+        );
     }
 
     #[cfg(test)]
@@ -96,7 +82,8 @@ impl ControlCenterRenderer {
     }
 
     pub(super) fn squircle_path(&self, rect: D2D_RECT_F, radius: f32) -> Option<ID2D1PathGeometry> {
-        (radius >= scale(10, self.dpi) as f32)
+        let min_dim = (rect.right - rect.left).min(rect.bottom - rect.top);
+        (radius >= squircle_threshold(self.dpi) && radius + 0.5 < min_dim * 0.5)
             .then(|| crate::build_squircle_path(&self.factory, rect, radius).ok())
             .flatten()
     }
@@ -108,20 +95,7 @@ impl ControlCenterRenderer {
         geom: Option<&ID2D1PathGeometry>,
         brush: &ID2D1Brush,
     ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.FillGeometry(geom, brush, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target.FillRoundedRectangle(&rounded, brush);
-        }
+        crate::kit::draw::fill_shape(&self.target, rect, radius, geom, brush);
     }
 
     pub(super) fn draw_shape(
@@ -132,21 +106,7 @@ impl ControlCenterRenderer {
         brush: &ID2D1Brush,
         stroke_width: f32,
     ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.DrawGeometry(geom, brush, stroke_width, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target
-                .DrawRoundedRectangle(&rounded, brush, stroke_width, None);
-        }
+        crate::kit::draw::stroke_shape(&self.target, rect, radius, geom, brush, stroke_width);
     }
 
     pub(super) fn draw_squircle_or_rounded(
@@ -158,48 +118,6 @@ impl ControlCenterRenderer {
     ) {
         let geom = self.squircle_path(rect, radius);
         self.draw_shape(rect, radius, geom.as_ref(), brush, stroke_width);
-    }
-
-    pub(super) fn draw_shell(
-        &self,
-        width: i32,
-        height: i32,
-        radius: f32,
-        appearance: &Appearance,
-        palette: &LiquidGlassPalette,
-    ) -> Result<()> {
-        let transparent = CLEAR;
-        unsafe {
-            self.target.Clear(Some(&raw const transparent));
-        }
-        let shell_shape = GlassShape::from_rect(
-            Rect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
-            radius,
-        );
-        if self
-            .glass
-            .draw(&self.target, appearance, self.dpi, shell_shape, true)?
-        {
-            return Ok(());
-        }
-
-        let fill = self.brushes.color_brush(palette.menu_fill);
-        let outer = self.brushes.color_brush(palette.menu_outer_border);
-        let rim = &self.brushes.specular_rim;
-
-        let outer_rect = d2d_rect_size(width, height);
-        let outer_geom = self.squircle_path(outer_rect, radius);
-        let inner_rect = d2d_rect_inset(width, height, 0.75);
-        let inner_radius = (radius - 0.75).max(1.0);
-        self.fill_shape(outer_rect, radius, outer_geom.as_ref(), &fill);
-        self.draw_squircle_or_rounded(inner_rect, inner_radius, rim, 1.0);
-        self.draw_shape(outer_rect, radius, outer_geom.as_ref(), &outer, 1.0);
-        Ok(())
     }
 
     pub(super) fn draw_card(
@@ -228,7 +146,7 @@ impl ControlCenterRenderer {
                 b: 1.0,
                 a: 0.0,
             };
-            if let Ok(sheen) = crate::notch::glow::linear_gradient(
+            if let Ok(sheen) = crate::kit::draw::linear_gradient(
                 &self.target,
                 Vector2::new(d2d_r.left, d2d_r.top),
                 Vector2::new(d2d_r.left, d2d_r.top + rect.height as f32 * 0.48),
@@ -268,7 +186,7 @@ impl ControlCenterRenderer {
                     b: 1.0,
                     a: if palette.is_dark { 0.05 } else { 0.36 },
                 };
-                if let Ok(rim) = crate::notch::glow::linear_gradient(
+                if let Ok(rim) = crate::kit::draw::linear_gradient(
                     &self.target,
                     Vector2::new(d2d_r.left, d2d_r.top),
                     Vector2::new(d2d_r.right, d2d_r.bottom),
@@ -318,21 +236,7 @@ impl ControlCenterRenderer {
             self.squircle_path(d2d_r, radius)
         };
         if pressed {
-            let press_color = if palette.is_dark {
-                D2D1_COLOR_F {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.22,
-                }
-            } else {
-                D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.12,
-                }
-            };
+            let press_color = pressed_overlay(palette.hover_pill, palette.is_high_contrast);
             let brush = self.brushes.color_brush(press_color);
             self.fill_shape(d2d_r, radius, geom.as_ref(), &brush);
         } else {
@@ -568,20 +472,14 @@ impl ControlCenterRenderer {
         rect: D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
-        if rect.right <= rect.left || rect.bottom <= rect.top {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.target.DrawText(
-                &wide,
-                format,
-                &rect,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
+        crate::kit::draw::draw_text_on(
+            &self.target,
+            text,
+            format,
+            rect,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
     }
 
     pub(super) fn draw_chevron(
@@ -592,25 +490,20 @@ impl ControlCenterRenderer {
         right: bool,
         brush: &ID2D1SolidColorBrush,
     ) {
-        let dir = if right { 1.0 } else { -1.0 };
-        let dx = size * 0.45 * dir;
-        let dy = size * 0.80;
+        let dir = if right {
+            ChevronDir::Right
+        } else {
+            ChevronDir::Left
+        };
         let stroke = (scale(2, self.dpi) as f32 * 0.72).max(1.3);
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(cx - dx, cy - dy),
-                Vector2::new(cx + dx, cy),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(cx + dx, cy),
-                Vector2::new(cx - dx, cy + dy),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
+        draw_chevron_glyph(
+            &self.target,
+            &self.stroke_style,
+            Vector2::new(cx, cy),
+            size,
+            stroke,
+            dir,
+            brush,
+        );
     }
 }

@@ -124,7 +124,7 @@ const fn combine_dnd_state(focus_session: Option<bool>, quns_dnd: Option<bool>) 
 }
 
 #[must_use]
-pub fn read_system_dnd_active() -> Option<bool> {
+pub(crate) fn read_system_dnd_active() -> Option<bool> {
     let cache = DND_CACHE.get_or_init(|| Mutex::new(None));
     let now = Instant::now();
     if let Ok(guard) = cache.lock()
@@ -263,17 +263,14 @@ fn read_lcd_brightness() -> Option<u8> {
         )
         .is_ok();
         let _ = CloseHandle(handle);
-        if ok && returned >= size_of::<DisplayBrightness>() as u32 {
+        (ok && returned >= size_of::<DisplayBrightness>() as u32).then(|| {
             let level = if info.policy == 1 {
                 info.ac_percent
             } else {
                 info.dc_percent.max(info.ac_percent)
-            }
-            .min(100);
-            Some(level)
-        } else {
-            None
-        }
+            };
+            level.min(100)
+        })
     }
 }
 
@@ -371,12 +368,14 @@ fn ddc_writer_shared() -> &'static DdcWriteShared {
 pub fn shutdown_status_task() {
     DDC_SHUTTING_DOWN.store(true, Ordering::Release);
     if let Some(shared) = DDC_WRITER_SHARED.get() {
-        let mut mailbox = shared
-            .mailbox
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        mailbox.stopping = true;
-        mailbox.pending = None;
+        {
+            let mut mailbox = shared
+                .mailbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            mailbox.stopping = true;
+            mailbox.pending = None;
+        }
         shared.wake.notify_all();
     }
     let probe_handle = DDC_PROBE_TASK.lock().ok().and_then(|mut task| task.take());
@@ -551,8 +550,8 @@ fn enqueue_ddc_brightness(monitor_key: isize, target: u8, generation: u64) -> bo
             return false;
         }
         mailbox.pending = Some((monitor_key, target, generation));
-        shared.wake.notify_one();
     }
+    shared.wake.notify_one();
     ensure_ddc_writer_running()
 }
 
@@ -566,12 +565,10 @@ fn set_ddc_brightness(target: u8) -> Option<u8> {
         if ddc_cache_is_fresh(&state, monitor_key) && state.supported == Some(false) {
             return None;
         }
-        if state.monitor == monitor_key && state.supported == Some(true) {
+        (state.monitor == monitor_key && state.supported == Some(true)).then(|| {
             state.store_set(monitor_key, target, true, Instant::now());
-            Some(state.generation)
-        } else {
-            None
-        }
+            state.generation
+        })
     } else {
         None
     };

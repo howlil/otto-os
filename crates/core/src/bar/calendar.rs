@@ -17,7 +17,7 @@ const MONTH_NAMES: [&str; 12] = [
 ];
 
 #[must_use]
-pub const fn is_leap_year(year: u16) -> bool {
+pub(crate) const fn is_leap_year(year: u16) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
@@ -92,9 +92,9 @@ pub fn month_grid(year: u16, month: u8) -> [CalendarDay; GRID_CELLS] {
     })
 }
 
-pub const GRID_COLUMNS: usize = 7;
-pub const GRID_ROWS: usize = 6;
-pub const GRID_CELLS: usize = GRID_COLUMNS * GRID_ROWS;
+pub(crate) const GRID_COLUMNS: usize = 7;
+pub(crate) const GRID_ROWS: usize = 6;
+pub(crate) const GRID_CELLS: usize = GRID_COLUMNS * GRID_ROWS;
 pub const CALENDAR_POPUP_WIDTH: i32 = 252;
 
 const INSET_X: i32 = 8;
