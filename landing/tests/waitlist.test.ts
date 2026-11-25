@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { onRequestPost } from "../functions/api/waitlist";
 import { WAITLIST_PLATFORMS, WAITLIST_USAGES } from "../src/domain/waitlist";
@@ -174,8 +174,20 @@ describe("profile", () => {
   test("values outside the allowlist are rejected", async () => {
     const { db } = createDb();
     const joined = await call(db, { email: "a@x.io" });
-    const badPlatform = await call(db, { email: "a@x.io", token: joined.body.token, profile: true, platform: "Linux", usage: "Jarang" });
-    const badUsage = await call(db, { email: "a@x.io", token: joined.body.token, profile: true, platform: PROFILE.platform, usage: "<script>" });
+    const badPlatform = await call(db, {
+      email: "a@x.io",
+      token: joined.body.token,
+      profile: true,
+      platform: "Linux",
+      usage: "Jarang",
+    });
+    const badUsage = await call(db, {
+      email: "a@x.io",
+      token: joined.body.token,
+      profile: true,
+      platform: PROFILE.platform,
+      usage: "<script>",
+    });
     expect(badPlatform.status).toBe(422);
     expect(badUsage.status).toBe(422);
   });

@@ -93,6 +93,14 @@ impl Host {
             }
         };
         self.runtime.bar_hwnd.set(bar.0 as isize);
+        otto_platform::set_finder_shortcut_hook(
+            if self.runtime.finder_enabled.get() {
+                bar.0 as isize
+            } else {
+                0
+            },
+            crate::win_msg::WM_APP_OPEN_FINDER,
+        );
         self.tray_icon = otto_platform::TrayIcon::register(bar.0 as isize);
         self.taskbar_created_message = self
             .tray_icon
@@ -336,12 +344,8 @@ impl Host {
             }
             return Err(error);
         }
-        match descriptor.slot {
-            SurfaceSlot::Dock => self.runtime.dock_hwnd.set(surface.0 as isize),
-            SurfaceSlot::WindowControls => {
-                self.runtime.window_controls_hwnd.set(surface.0 as isize);
-            }
-            _ => {}
+        if matches!(descriptor.slot, SurfaceSlot::Dock) {
+            self.runtime.dock_hwnd.set(surface.0 as isize);
         }
         Ok(surface)
     }
@@ -350,10 +354,8 @@ impl Host {
         let Some(descriptor) = descriptor(plugin).surface else {
             return;
         };
-        match descriptor.slot {
-            SurfaceSlot::Dock => self.runtime.dock_hwnd.set(0),
-            SurfaceSlot::WindowControls => self.runtime.window_controls_hwnd.set(0),
-            _ => {}
+        if matches!(descriptor.slot, SurfaceSlot::Dock) {
+            self.runtime.dock_hwnd.set(0);
         }
         let Some(surfaces) = self.surfaces.as_mut() else {
             return;
@@ -405,6 +407,11 @@ impl Host {
         let settings_hwnd = settings_window::take_hwnd(&self.runtime);
         if allow_real_hwnd {
             self.runtime.queue_destroy_hwnd(settings_hwnd);
+        }
+        if let Some(finder_hwnd) = crate::finder::take_hwnd(&self.runtime)
+            && allow_real_hwnd
+        {
+            self.runtime.queue_destroy_hwnd(finder_hwnd);
         }
         bar::stop(&self.runtime);
         self.tray_icon = None;

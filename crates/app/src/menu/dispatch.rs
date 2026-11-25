@@ -1,17 +1,17 @@
 use crate::host::RuntimeContext;
 use otto_core::{
-    CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY, CMD_CONTROL_CENTER,
-    CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK, CMD_TOGGLE_NOTCH,
-    CMD_TOGGLE_TOP_BAR, Capability, CommandOutcome, ControlCenterAction, ControlCenterPage,
-    DownloadsEffect, WindowCommand, WindowInfo, WindowMenuEffect, dock_overflow_choice,
-    dock_settings_effect, downloads_effect, overflow_menu_target, shift_month, window_menu_effect,
+    CMD_APP_ACTIVATE, CMD_CAL_NEXT, CMD_CAL_PREVIOUS, CMD_CAL_SETTINGS, CMD_CAL_TODAY,
+    CMD_CONTROL_CENTER, CMD_FILE_NEW, CMD_OPEN_LOGS, CMD_OTTO_SETTINGS, CMD_QUIT, CMD_TOGGLE_DOCK,
+    CMD_TOGGLE_NOTCH, CMD_TOGGLE_TOP_BAR, Capability, CommandOutcome, ControlCenterAction,
+    ControlCenterPage, DownloadsEffect, WindowCommand, WindowInfo, WindowMenuEffect,
+    dock_overflow_choice, dock_settings_effect, downloads_effect, overflow_menu_target,
+    shift_month, window_menu_effect,
 };
 use otto_platform::{
     current_process_id, execute_top_bar_command, open_downloads_folder, open_path,
-    signal_command_failure, window_command_capability,
+    post_window_message, signal_command_failure, window_command_capability,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
 
 use super::MenuSource;
 use super::open::open_calendar;
@@ -32,6 +32,16 @@ pub(super) fn execute_window_menu_command(
     cmd: usize,
     window: Option<&WindowInfo>,
 ) -> bool {
+    if runtime.finder_enabled.get() && crate::finder::handle_top_bar_command(runtime, cmd) {
+        return false;
+    }
+    if runtime.finder_enabled.get()
+        && window.is_none()
+        && matches!(cmd, CMD_APP_ACTIVATE | CMD_FILE_NEW)
+    {
+        crate::finder::open(runtime, None);
+        return false;
+    }
     let own_pid = current_process_id();
     let minimize_available = window.is_some_and(|window| {
         window_command_capability(window.identity, WindowCommand::Minimize, own_pid)
@@ -88,17 +98,7 @@ pub(super) fn dispatch_tray_selection(runtime: &RuntimeContext, from_tray: bool,
             let _ = otto_platform::open_logs_folder();
         }
         CMD_QUIT => {
-            let bar_hwnd = runtime.bar_hwnd.get();
-            if bar_hwnd != 0 {
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(HWND(bar_hwnd as *mut _)),
-                        WM_CLOSE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    )
-                };
-            }
+            let _ = post_window_message(runtime.bar_hwnd.get(), WM_CLOSE, 0, 0);
         }
         _ => {}
     }
@@ -110,14 +110,7 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
             bar_hwnd, window, ..
         } => {
             if execute_window_menu_command(runtime, cmd, window.as_ref()) {
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(HWND(bar_hwnd as *mut _)),
-                        WM_CLOSE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    )
-                };
+                let _ = post_window_message(bar_hwnd, WM_CLOSE, 0, 0);
             }
         }
         MenuSource::Overflow => {
@@ -164,9 +157,19 @@ pub(super) fn dispatch_selection(runtime: &RuntimeContext, source: MenuSource, c
             }
         }
         MenuSource::DownloadsStack { items } => match downloads_effect(cmd, items.len()) {
-            Some(DownloadsEffect::OpenFolder) => open_downloads_folder(),
+            Some(DownloadsEffect::OpenFolder) => {
+                if runtime.finder_enabled.get()
+                    && let Some(home) = std::env::var_os("USERPROFILE")
+                {
+                    let downloads = std::path::PathBuf::from(home).join("Downloads");
+                    crate::finder::open_path(runtime, &downloads.to_string_lossy());
+                } else {
+                    open_downloads_folder();
+                }
+            }
             Some(DownloadsEffect::OpenItem(index)) => open_path(&items[index].path),
             None => {}
         },
+        MenuSource::Finder => crate::finder::execute_menu_command(runtime, cmd),
     }
 }

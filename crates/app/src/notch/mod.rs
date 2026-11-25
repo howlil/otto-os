@@ -2,10 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use otto_core::{
     CallTracker, ClipboardPayload, ClipboardState, ClockTime, CompactContent, CompactSlotKind,
-    FocusBlocklist, FocusStatsRange, FocusSubMode, LyricsStatus, MotionPreference, NotchAction,
-    NotchExpandedTab, NotchHudKind, NotificationQueue, NowPlaying, PendingSeek, PomodoroClock,
-    PomodoroState, PrivacyState, QuickTimerState, ShelfPayload, ShelfState, StopwatchClock,
-    StopwatchState, TasksState, is_openable_shelf_url, is_valid_shelf_file_path,
+    FocusBlocklist, FocusCategoryStore, FocusStatsRange, HeatmapFilter, LyricsStatus,
+    MotionPreference, NotchAction, NotchExpandedTab, NotchHudKind, NotificationQueue, NowPlaying,
+    PendingSeek, PomodoroClock, PomodoroState, PrivacyState, ShelfPayload, ShelfState, TasksState,
+    is_openable_shelf_url, is_valid_shelf_file_path,
 };
 
 mod alerts;
@@ -76,6 +76,15 @@ pub(crate) enum NotchEffect {
         restore_focus: bool,
     },
     OpenFocusActivitySettings,
+    OpenFocusModeSettings,
+    SelectFocusCategory(String),
+    UpdateFocusDuration {
+        category_id: String,
+        minutes: u32,
+    },
+    RecordCompletedSession {
+        category_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,9 +113,6 @@ pub(crate) struct NotchController {
     hud_level: f32,
     hud_until: Option<Instant>,
     pomodoro: PomodoroState,
-    focus_mode: FocusSubMode,
-    quick_timer: QuickTimerState,
-    stopwatch: StopwatchState,
     privacy: PrivacyState,
     shelf: ShelfState,
     clipboard: ClipboardState,
@@ -136,8 +142,6 @@ pub(crate) struct NotchController {
     call: CallTracker,
     call_shown: bool,
     clock: PomodoroClock,
-    timer_clock: PomodoroClock,
-    stopwatch_clock: StopwatchClock,
     epoch: Instant,
     last_anim_instant: Instant,
     media: Option<NowPlaying>,
@@ -183,6 +187,12 @@ pub(crate) struct NotchController {
     compact_title_target: f32,
     compact_title_measured: Option<(String, f32)>,
     focus_blocklist: FocusBlocklist,
+    focus_categories: FocusCategoryStore,
+    category_picker_open: bool,
+    custom_time_input: Option<String>,
+    focus_relief_summary: String,
+    heatmap_filter: HeatmapFilter,
+    heatmap_selected_cell: Option<usize>,
 }
 
 impl NotchController {
@@ -197,9 +207,6 @@ impl NotchController {
             hud_level: 0.0,
             hud_until: None,
             pomodoro: PomodoroState::new(),
-            focus_mode: FocusSubMode::Pomodoro,
-            quick_timer: QuickTimerState::new(),
-            stopwatch: StopwatchState::new(),
             privacy: PrivacyState::default(),
             shelf: ShelfState::default(),
             clipboard: ClipboardState::default(),
@@ -229,8 +236,6 @@ impl NotchController {
             call: CallTracker::default(),
             call_shown: false,
             clock: PomodoroClock::default(),
-            timer_clock: PomodoroClock::default(),
-            stopwatch_clock: StopwatchClock::default(),
             epoch: Instant::now(),
             last_anim_instant: Instant::now(),
             media,
@@ -276,6 +281,12 @@ impl NotchController {
             compact_title_target: 0.0,
             compact_title_measured: None,
             focus_blocklist: FocusBlocklist::default(),
+            focus_categories: FocusCategoryStore::default(),
+            category_picker_open: false,
+            custom_time_input: None,
+            focus_relief_summary: String::new(),
+            heatmap_filter: HeatmapFilter::All,
+            heatmap_selected_cell: None,
         }
     }
 }

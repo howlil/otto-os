@@ -1,10 +1,11 @@
 use otto_core::{
-    AccentColor, AppearancePreferences, AppearanceStyle, DayKey, FocusAppFilter, FocusCatalogApp,
-    FocusPageState, FocusSessionStatus, FocusSettingsTab, FocusTextField, GeneralPageState,
-    OttoSettingsSnapshot, PluginSettingsState, ProcessAuditFilter, ProcessThrottleKind,
-    RawProcessAuditSample, ReleaseUpdateInfo, ResolvedTheme, Rgba, SettingsHit, SettingsPage,
-    ThemeMode, UpdateState, build_content, compute_content_layout, compute_settings_layout,
-    inspect_browser_context, resolve_modules, summarize_process_audit,
+    AccentColor, AppearancePreferences, AppearanceStyle, BarWindowControlsView, ContrastColors,
+    DayKey, FocusAppFilter, FocusCatalogApp, FocusPageState, FocusSessionStatus, FocusSettingsTab,
+    FocusTextField, GeneralPageState, OttoSettingsSnapshot, PluginSettingsState,
+    ProcessAuditFilter, ProcessThrottleKind, RawProcessAuditSample, ReleaseUpdateInfo,
+    ResolvedTheme, Rgba, SettingsHit, SettingsPage, ThemeMode, UpdateState, WindowControlsState,
+    build_content, compute_content_layout, compute_settings_layout, inspect_browser_context,
+    resolve_modules, summarize_process_audit,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -12,11 +13,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::w;
 
+use super::palette::{CARD_RADIUS_POINTS, Palette};
 use super::{SettingsPaintState, SettingsRenderer};
 use crate::release_shared_factories;
 
 const TEST_ACCENT: Rgba = Rgba::new(0.0, 0.412, 0.922, 1.0);
 const TEST_ON_ACCENT: Rgba = Rgba::new(1.0, 1.0, 1.0, 1.0);
+const ACTIVE_CONTROLS: BarWindowControlsView = BarWindowControlsView {
+    state: WindowControlsState {
+        active: true,
+        close: true,
+        minimize: true,
+        zoom: true,
+        alt_zoom_glyph: false,
+    },
+    maximized: false,
+    hovered: false,
+    pressed: None,
+};
 
 fn host_window() -> HWND {
     unsafe {
@@ -120,9 +134,11 @@ fn draws_every_page_in_both_themes_and_survives_resize_and_dpi_change() {
                     page,
                     scroll: 0,
                     hovered: None,
+                    window_controls: ACTIVE_CONTROLS,
                     dark,
                     glass: true,
                     high_contrast: false,
+                    contrast: None,
                     accent: TEST_ACCENT,
                     on_accent: TEST_ON_ACCENT,
                 })
@@ -148,9 +164,11 @@ fn draws_every_page_in_both_themes_and_survives_resize_and_dpi_change() {
                 page: SettingsPage::About,
                 scroll: 0,
                 hovered: None,
+                window_controls: ACTIVE_CONTROLS,
                 dark: true,
                 glass: true,
                 high_contrast: false,
+                contrast: None,
                 accent: TEST_ACCENT,
                 on_accent: TEST_ON_ACCENT,
             })
@@ -178,9 +196,11 @@ fn draws_every_page_in_both_themes_and_survives_resize_and_dpi_change() {
             page: SettingsPage::Modules,
             scroll,
             hovered: None,
+            window_controls: ACTIVE_CONTROLS,
             dark: true,
             glass: false,
             high_contrast: false,
+            contrast: None,
             accent: TEST_ACCENT,
             on_accent: TEST_ON_ACCENT,
         })
@@ -201,7 +221,7 @@ fn draws_focus_tabs_chart_and_high_contrast_modes() {
     let layout = compute_settings_layout(900, 600, 96);
     let focus_states = [
         FocusPageState {
-            tab: FocusSettingsTab::BlockApps,
+            tab: FocusSettingsTab::Modes,
             app_filter: FocusAppFilter::AllApps,
             app_search: String::from("ch"),
             website_input: String::from("bad"),
@@ -219,7 +239,7 @@ fn draws_focus_tabs_chart_and_high_contrast_modes() {
             ..FocusPageState::default()
         },
         FocusPageState {
-            tab: FocusSettingsTab::Activity,
+            tab: FocusSettingsTab::Insights,
             details_expanded: true,
             selected_bar_day: Some(6),
             ..FocusPageState::default()
@@ -243,9 +263,11 @@ fn draws_focus_tabs_chart_and_high_contrast_modes() {
                 page: SettingsPage::Focus,
                 scroll: 0,
                 hovered: Some(SettingsHit::Row { section: 1, row: 2 }),
+                window_controls: ACTIVE_CONTROLS,
                 dark: true,
                 glass: !high_contrast,
                 high_contrast,
+                contrast: None,
                 accent: TEST_ACCENT,
                 on_accent: TEST_ON_ACCENT,
             })
@@ -323,9 +345,11 @@ fn draws_appearance_page_across_styles_themes_and_accents() {
                     row: 0,
                     part: 2,
                 }),
+                window_controls: ACTIVE_CONTROLS,
                 dark: resolved_theme.is_dark(),
                 glass: style.uses_glass() && !high_contrast,
                 high_contrast,
+                contrast: None,
                 accent: resolved_accent.fill,
                 on_accent: resolved_accent.on_accent,
             })
@@ -435,13 +459,103 @@ fn draws_general_process_audit_across_themes_and_high_contrast() {
                     row: 2,
                     part: 1,
                 }),
+                window_controls: ACTIVE_CONTROLS,
                 dark,
                 glass: !high_contrast,
                 high_contrast,
+                contrast: None,
                 accent: TEST_ACCENT,
                 on_accent: TEST_ON_ACCENT,
             })
             .expect("draw general audit page");
+    }
+    drop(renderer);
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+    release_shared_factories();
+}
+
+#[test]
+fn palette_aligns_switch_accent_and_honors_system_contrast_colors() {
+    assert_eq!(CARD_RADIUS_POINTS, 12);
+    let accent = Rgba::new(0.85, 0.22, 0.42, 1.0);
+    let on_accent = Rgba::new(1.0, 1.0, 1.0, 1.0);
+    for (dark, glass) in [(true, true), (true, false), (false, true), (false, false)] {
+        let palette = Palette::pick(dark, glass, false, None, accent, on_accent);
+        assert!(!palette.high_contrast);
+        assert!((palette.switch_on.r - accent.r).abs() < f32::EPSILON);
+        assert!((palette.switch_on.g - accent.g).abs() < f32::EPSILON);
+        assert!((palette.switch_on.b - accent.b).abs() < f32::EPSILON);
+    }
+
+    let hc_white = ContrastColors {
+        window: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        window_text: Rgba::new(0.0, 0.0, 0.0, 1.0),
+        highlight: Rgba::new(0.0, 0.0, 0.5, 1.0),
+        highlight_text: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        button_face: Rgba::new(0.95, 0.95, 0.95, 1.0),
+        gray_text: Rgba::new(0.35, 0.35, 0.35, 1.0),
+    };
+    let hc = Palette::pick(false, true, true, Some(hc_white), accent, on_accent);
+    assert!(hc.high_contrast);
+    assert!(!hc.glass);
+    assert!((hc.background.r - 1.0).abs() < f32::EPSILON);
+    assert!((hc.text.r - 0.0).abs() < f32::EPSILON);
+    assert!((hc.accent.b - 0.5).abs() < f32::EPSILON);
+    assert!((hc.switch_on.b - 0.5).abs() < f32::EPSILON);
+    assert!((hc.on_accent.r - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn draws_settings_with_high_contrast_black_and_white_system_palettes() {
+    let hwnd = host_window();
+    let snapshot = populated_snapshot();
+    let modules = resolve_modules(&snapshot, |_| None);
+    let mut renderer = SettingsRenderer::new(hwnd.0 as isize, 900, 600, 96).expect("renderer");
+    let layout = compute_settings_layout(900, 600, 96);
+    let default_focus = FocusPageState::default();
+    let hc_white = ContrastColors {
+        window: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        window_text: Rgba::new(0.0, 0.0, 0.0, 1.0),
+        highlight: Rgba::new(0.0, 0.0, 0.5, 1.0),
+        highlight_text: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        button_face: Rgba::new(0.95, 0.95, 0.95, 1.0),
+        gray_text: Rgba::new(0.35, 0.35, 0.35, 1.0),
+    };
+    for (dark, contrast) in [(true, ContrastColors::BLACK_THEME), (false, hc_white)] {
+        for page in [
+            SettingsPage::Appearance,
+            SettingsPage::Focus,
+            SettingsPage::Modules,
+        ] {
+            let content = build_content(
+                &snapshot,
+                page,
+                &modules,
+                "1.0.0",
+                &UpdateState::Idle,
+                &default_focus,
+            );
+            let blocks = compute_content_layout(layout.viewport, &content, 96, 0);
+            renderer
+                .draw(&SettingsPaintState {
+                    layout: &layout,
+                    content: &content,
+                    blocks: &blocks,
+                    page,
+                    scroll: 0,
+                    hovered: Some(SettingsHit::Row { section: 0, row: 0 }),
+                    window_controls: ACTIVE_CONTROLS,
+                    dark,
+                    glass: false,
+                    high_contrast: true,
+                    contrast: Some(contrast),
+                    accent: TEST_ACCENT,
+                    on_accent: TEST_ON_ACCENT,
+                })
+                .expect("draw high-contrast settings page");
+        }
     }
     drop(renderer);
     unsafe {

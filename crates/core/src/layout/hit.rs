@@ -1,5 +1,4 @@
 use crate::notch::focus_stats_view::FocusStatsRange;
-use crate::notch::pomodoro::FocusSubMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
@@ -19,9 +18,16 @@ pub enum HitTarget {
     PomodoroStartNext,
     PomodoroExtendFive,
     PomodoroPreset(u8),
-    FocusMode(FocusSubMode),
+    PomodoroCategoryPill,
+    PomodoroCategoryOption(u8),
+    PomodoroDurationDec,
+    PomodoroDurationInc,
+    PomodoroTimeEdit,
+    PomodoroOpenSettings,
     FocusStatsRange(FocusStatsRange),
     FocusStatsDay(u8),
+    FocusHeatmapFilter(u8),
+    FocusHeatmapCell(u8),
     FocusStatsOpenSettings,
     NotchTabPomodoro,
     NotchTabStats,
@@ -130,9 +136,16 @@ impl HitTarget {
             | Self::PomodoroStartNext
             | Self::PomodoroExtendFive
             | Self::PomodoroPreset(_)
-            | Self::FocusMode(_)
+            | Self::PomodoroCategoryPill
+            | Self::PomodoroCategoryOption(_)
+            | Self::PomodoroDurationDec
+            | Self::PomodoroDurationInc
+            | Self::PomodoroTimeEdit
+            | Self::PomodoroOpenSettings
             | Self::FocusStatsRange(_)
             | Self::FocusStatsDay(_)
+            | Self::FocusHeatmapFilter(_)
+            | Self::FocusHeatmapCell(_)
             | Self::FocusStatsOpenSettings => TargetScope::Focus,
             Self::ShelfAdd
             | Self::ShelfClear

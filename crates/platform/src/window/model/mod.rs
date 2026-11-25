@@ -26,6 +26,7 @@ pub(crate) use self::inspect::covers_monitor;
 pub use self::inspect::enumerate_windows;
 pub use self::inspect::foreground_application;
 pub use self::inspect::inspect_window;
+pub(crate) use self::inspect::is_full_screen;
 pub(crate) use self::inspect::owner_ids;
 pub(crate) use self::process::is_window_uipi_blocked;
 
@@ -356,7 +357,7 @@ mod tests {
     use super::process::filetime_value;
     use otto_core::{CommandOutcome, Rect, WindowIdentity};
     use windows::Win32::Foundation::{FILETIME, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_POPUP};
+    use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_POPUP, WS_THICKFRAME};
 
     #[test]
     fn windows_owned_by_a_hidden_framework_window_are_application_windows() {
@@ -369,6 +370,8 @@ mod tests {
     #[test]
     fn maximized_window_filling_the_monitor_is_not_full_screen() {
         assert!(!is_full_screen(true, true, WS_CAPTION.0));
+        assert!(!is_full_screen(true, true, WS_THICKFRAME.0));
+        assert!(is_full_screen(true, false, WS_THICKFRAME.0));
         assert!(is_full_screen(true, false, WS_POPUP.0));
         assert!(is_full_screen(true, true, WS_POPUP.0));
         assert!(!is_full_screen(false, false, WS_POPUP.0));

@@ -1,7 +1,9 @@
 pub(crate) mod caption;
+pub(crate) mod caption_probe;
 pub(crate) mod corners;
 pub(crate) mod hidden;
 pub(crate) mod model;
 pub(crate) mod native_minimize;
 pub(crate) mod ops;
+pub(crate) mod overlay_zorder;
 pub(crate) mod shield;

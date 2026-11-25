@@ -1,15 +1,15 @@
 use crate::host::RuntimeContext;
 use otto_core::{
-    ClipboardPayload, NotchPort, SpotlightHit, SpotlightMode, SpotlightMove, SpotlightView,
-    move_spotlight_selection,
+    ClipboardPayload, DockItemKind, NotchPort, SpotlightHit, SpotlightMode, SpotlightMove,
+    SpotlightView, move_spotlight_selection,
 };
 use otto_platform::{
-    ClipboardRead, WindowsNotchPort, cursor_position, launch_new_instance, read_clipboard_payload,
+    ClipboardRead, WindowsNotchPort, capture_mouse, cursor_position, is_virtual_key_down,
+    launch_new_instance, monitor_at, read_clipboard_payload, release_mouse_capture,
 };
-use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
-    VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+    VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB,
+    VK_UP,
 };
 
 use super::PointerDrag;
@@ -101,7 +101,7 @@ impl SpotlightSurface {
     }
 
     pub(super) fn on_keydown(&mut self, runtime: &RuntimeContext, key: u16) {
-        let ctrl_down = (unsafe { GetAsyncKeyState(0x11) } as u16 & 0x8000) != 0;
+        let ctrl_down = is_virtual_key_down(0x11);
         if ctrl_down && self.on_ctrl_keydown(runtime, key) {
             return;
         }
@@ -111,7 +111,7 @@ impl SpotlightSurface {
             caret_nav_all || self.filtered.is_empty() || self.view == SpotlightView::List;
         match key {
             value if value == VK_ESCAPE.0 => self.request_close(true),
-            value if value == VK_RETURN.0 => self.activate_selected(),
+            value if value == VK_RETURN.0 => self.activate_selected(runtime),
             value if value == VK_BACK.0 => {
                 self.backspace();
                 self.present(runtime);
@@ -250,12 +250,12 @@ impl SpotlightSurface {
         self.selected = Some(self.first_visible.min(self.filtered.len() - 1));
     }
 
-    pub(super) fn activate_selected(&mut self) {
+    pub(super) fn activate_selected(&mut self, runtime: &RuntimeContext) {
         if let Some(selected) = self
             .selected
             .or_else(|| (!self.filtered.is_empty()).then_some(0))
         {
-            self.launch_result(selected);
+            self.launch_result(runtime, selected);
             return;
         }
         if let Some(result) = self.math_result.clone() {
@@ -264,7 +264,7 @@ impl SpotlightSurface {
         }
     }
 
-    pub(super) fn launch_result(&mut self, selected: usize) {
+    pub(super) fn launch_result(&mut self, runtime: &RuntimeContext, selected: usize) {
         let Some(app_index) = self.filtered.get(selected).copied() else {
             return;
         };
@@ -272,7 +272,11 @@ impl SpotlightSurface {
             return;
         };
         self.hide();
-        launch_new_instance(&entry);
+        if runtime.finder_enabled.get() && matches!(entry.kind, DockItemKind::Finder) {
+            crate::finder::open(runtime, None);
+        } else {
+            launch_new_instance(&entry);
+        }
     }
 
     pub(super) fn handle_click(&mut self, runtime: &RuntimeContext, hit: SpotlightHit) {
@@ -293,7 +297,7 @@ impl SpotlightSurface {
                 self.toggle_view(SpotlightView::List);
                 self.present(runtime);
             }
-            SpotlightHit::Result(index) => self.launch_result(index),
+            SpotlightHit::Result(index) => self.launch_result(runtime, index),
             SpotlightHit::SearchField | SpotlightHit::Drag | SpotlightHit::Resize => {}
         }
     }
@@ -305,9 +309,7 @@ impl SpotlightSurface {
                 start_window: self.window,
                 resizing: hit == SpotlightHit::Resize,
             });
-            unsafe {
-                let _ = SetCapture(HWND(self.hwnd as *mut _));
-            }
+            capture_mouse(self.hwnd);
         } else if let SpotlightHit::Result(index) = hit {
             self.selected = Some(index);
             self.pending_click = Some(hit);
@@ -330,6 +332,14 @@ impl SpotlightSurface {
             } else {
                 rect.x += delta.0;
                 rect.y += delta.1;
+                let next_monitor = monitor_at(cursor.0, cursor.1);
+                if next_monitor.id != self.monitor.id {
+                    if next_monitor.dpi != self.monitor.dpi {
+                        self.renderer = None;
+                    }
+                    self.monitor = next_monitor;
+                    self.work_area = next_monitor.work_area;
+                }
             }
             self.window = self.clamp_window(rect, self.work_area);
             self.target_window = self.window;
@@ -357,9 +367,7 @@ impl SpotlightSurface {
 
     pub(super) fn end_pointer_action(&mut self, runtime: &RuntimeContext, x: i32, y: i32) {
         if self.dragging.take().is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            release_mouse_capture();
             self.sync_backdrop(runtime, true);
             self.present(runtime);
             return;

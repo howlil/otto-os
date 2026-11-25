@@ -1,0 +1,124 @@
+name: Issue Triage (Forward Pressure)
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    name: Classify Expected Pain & Repro Scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Classify area, expected-pain tier, and verification checklist
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+
+            const areaMatch = body.match(/### (?:Affected Area|Feature Area)\s*\r?\n+([^\r\n]+)/);
+            const area = areaMatch ? areaMatch[1].trim() : "Other";
+
+            const deepAreas = new Set([
+              "Installer / Updater / Shell Recovery",
+              "Packaging / Distribution",
+              "Otto Settings / Modules / Process Audit",
+              "Window Controls / Tiling / Rounded Corners",
+              "Window Controls / Tiling",
+            ]);
+            const lightAreas = new Set(["Other"]);
+
+            let tier = "Medium";
+            let tierLabel = "pain:medium";
+            if (deepAreas.has(area)) {
+              tier = "Deep";
+              tierLabel = "pain:deep";
+            } else if (lightAreas.has(area) && /typo|copy|docs|readme|landing/i.test(`${issue.title}\n${body}`)) {
+              tier = "Light";
+              tierLabel = "pain:light";
+            }
+
+            const e2eMap = {
+              "Top Bar / Menu Bar / Calendar": "success",
+              "Top Bar / Menu Bar": "success",
+              "Dynamic Island / Classic Notch": "edge",
+              "Dynamic Island / Notch": "edge",
+              "Dock / Downloads Stack / Trash": "dock",
+              "Dock / Genie": "dock",
+              "Genie Minimize / Restore": "genie",
+              "Window Controls / Tiling / Rounded Corners": "window-cover",
+              "Window Controls / Tiling": "window-cover",
+              "Appearance / Liquid Glass": "appearance",
+              "Appearance / Materials": "appearance",
+              "Installer / Updater / Shell Recovery": "recovery",
+            };
+            const scenario = e2eMap[area] || "all";
+
+            const labelsToEnsure = [
+              { name: tierLabel, color: tier === "Deep" ? "b60205" : tier === "Medium" ? "fbca04" : "0e8a16" },
+            ];
+
+            for (const item of labelsToEnsure) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: item.name,
+                });
+              } catch {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: item.name,
+                  color: item.color,
+                });
+              }
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: [tierLabel],
+            });
+
+            const marker = "<!-- otto-triage-summary -->";
+            const existing = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+            });
+            if (existing.data.some((c) => (c.body || "").includes(marker))) {
+              return;
+            }
+
+            const comment = [
+              marker,
+              "### Automated Triage & Verification Scope",
+              "",
+              "| Field | Value |",
+              "|---|---|",
+              `| **Area** | \`${area}\` |`,
+              `| **Preliminary Expected-Pain Tier** | **${tier}** |`,
+              `| **Local Gate** | \`.\u005cscripts\u005cgate.ps1\` |`,
+              `| **Targeted Desktop E2E** | \`.\u005ctests\u005ce2e\u005cwindows-e2e.ps1 -Scenario ${scenario}\` |`,
+              "",
+              tier === "Deep"
+                ? "> **Deep-tier reminder**: Align on a concise spec/visual contract and rollback plan with a maintainer before opening an implementation PR."
+                : "> Maintainers can confirm scope and reproduce with a focused unit/fitness test before agent or contributor implementation.",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: comment,
+            });

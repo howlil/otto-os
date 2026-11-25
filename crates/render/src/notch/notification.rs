@@ -10,27 +10,19 @@ use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::appearance::surface::fnv1a_hash;
+use crate::appearance::tokens::{CALL_ACCEPT_GREEN, SYSTEM_RED as CALL_RED};
+use crate::kit::draw::{draw_focus_ring_for, inset_rect_f};
+use crate::kit::icons::draw_close_x_glyph;
 use crate::{
     BLACK, CachedCoverArt, CoverArt, EQUALIZER_GREEN, FOREGROUND, Renderer, brighten,
-    build_squircle_path, decode_image_bytes, rect_to_d2d, rgb, translate_rect,
+    build_squircle_path, decode_image_bytes, rect_to_d2d, rect_to_d2d as text_rect, rgb,
+    translate_rect,
 };
-
-const CALL_RED: D2D1_COLOR_F = rgb(255, 69, 58, 1.0);
-const CALL_ACCEPT_GREEN: D2D1_COLOR_F = rgb(36, 161, 72, 1.0);
 const STACK_LIP_FILL: D2D1_COLOR_F = rgb(14, 14, 18, 1.0);
 const NOTIF_ICON_CACHE_CAP: usize = 16;
 const RING_PULSE_PERIOD_SECS: f32 = 1.4;
 const CALL_WAVE_WEIGHTS: [f32; 5] = [0.55, 0.85, 1.0, 0.80, 0.50];
 const CALL_WAVE_STATIC: [f32; 5] = [0.45, 0.72, 0.90, 0.68, 0.42];
-
-fn text_rect(rect: Rect) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: rect.x as f32,
-        top: rect.y as f32,
-        right: rect.right() as f32,
-        bottom: rect.bottom() as f32,
-    }
-}
 
 fn badge_color(rgb_bytes: [u8; 3]) -> D2D1_COLOR_F {
     rgb(rgb_bytes[0], rgb_bytes[1], rgb_bytes[2], 1.0)
@@ -85,8 +77,16 @@ impl Renderer {
             bottom: lip.bottom() as f32,
         };
         let radius = (layout.notch_corner_radius as f32 - scale(4, self.dpi) as f32).max(8.0);
-        let fill = self.brushes.alpha_brush(STACK_LIP_FILL, 0.84 * alpha);
-        let rim = self.brushes.alpha_brush(FOREGROUND, 0.12 * alpha);
+        let ink = self.notch_ink();
+        let fill = if self.high_contrast.get() {
+            self.brushes.card_fill.clone()
+        } else {
+            self.brushes.alpha_brush(STACK_LIP_FILL, 0.84 * alpha)
+        };
+        let rim = self.brushes.alpha_brush(
+            ink,
+            if self.high_contrast.get() { 0.85 } else { 0.12 } * alpha,
+        );
         if let Ok(geom) = build_squircle_path(&self.factory, backing, radius) {
             unsafe {
                 self.target.FillGeometry(&geom, &fill, None);
@@ -105,6 +105,7 @@ impl Renderer {
         if alpha <= 0.01 {
             return;
         }
+        let fg = self.notch_ink();
         let badge_size = scale(20, self.dpi);
         let ring = layout.compact_ring;
         let badge = Rect {
@@ -126,7 +127,7 @@ impl Renderer {
                 ..layout.compact_title
             }
         };
-        let ink = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let ink = self.brushes.alpha_brush(fg, 0.96 * alpha);
         self.draw_text(
             &content.headline,
             &self.text_leading,
@@ -149,8 +150,8 @@ impl Renderer {
                 width: pill_w,
                 height: pill_h,
             };
-            let pill_bg = self.brushes.alpha_brush(FOREGROUND, 0.14 * alpha);
-            let pill_ink = self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
+            let pill_bg = self.brushes.alpha_brush(fg, 0.14 * alpha);
+            let pill_ink = self.brushes.alpha_brush(fg, 0.92 * alpha);
             self.draw_rounded_box(pill, pill_h as f32 * 0.5, &pill_bg);
             self.draw_tabular_text(&count_text, &self.text_tab, text_rect(pill), &pill_ink);
         }
@@ -198,18 +199,14 @@ impl Renderer {
         hovered: Option<HitTarget>,
         focused: Option<HitTarget>,
     ) {
+        let fg = self.notch_ink();
         let over_card = matches!(
             hovered,
             Some(HitTarget::NotificationCard | HitTarget::NotificationClose)
         );
         if over_card {
-            let lift = self.brushes.alpha_brush(FOREGROUND, 0.04 * alpha);
-            let card_r = layout.notch_corner_radius as f32;
-            if let Ok(geom) = build_squircle_path(&self.factory, rect_to_d2d(card.card), card_r) {
-                unsafe {
-                    self.target.FillGeometry(&geom, &lift, None);
-                }
-            }
+            let lift = self.brushes.alpha_brush(fg, 0.04 * alpha);
+            self.draw_rounded_box(card.card, layout.notch_corner_radius as f32, &lift);
         }
 
         let badge_radius = scale(12, self.dpi) as f32;
@@ -223,10 +220,10 @@ impl Renderer {
         let text_alpha = alpha * (0.35 + 0.65 * coalesce);
         let text_shift = ((1.0 - coalesce) * scale(6, self.dpi) as f32).round();
 
-        let meta_brush = self.brushes.alpha_brush(FOREGROUND, 0.60 * alpha);
-        let age_brush = self.brushes.alpha_brush(FOREGROUND, 0.52 * alpha);
-        let primary = self.brushes.alpha_brush(FOREGROUND, 0.96 * text_alpha);
-        let body = self.brushes.alpha_brush(FOREGROUND, 0.78 * text_alpha);
+        let meta_brush = self.brushes.alpha_brush(fg, 0.60 * alpha);
+        let age_brush = self.brushes.alpha_brush(fg, 0.52 * alpha);
+        let primary = self.brushes.alpha_brush(fg, 0.96 * text_alpha);
+        let body = self.brushes.alpha_brush(fg, 0.78 * text_alpha);
 
         let meta = if content.count > 1 {
             format!("{} \u{b7} {}", content.app_name, content.count)
@@ -321,8 +318,9 @@ impl Renderer {
             false,
         );
 
-        let meta_brush = self.brushes.alpha_brush(FOREGROUND, 0.62 * alpha);
-        let primary = self.brushes.alpha_brush(FOREGROUND, 0.98 * alpha);
+        let fg = self.notch_ink();
+        let meta_brush = self.brushes.alpha_brush(fg, 0.62 * alpha);
+        let primary = self.brushes.alpha_brush(fg, 0.98 * alpha);
 
         let mut meta_box = text_rect(card.meta);
         if content.video {
@@ -494,7 +492,7 @@ impl Renderer {
     }
 
     fn draw_badge_rim(&self, d2d_rect: D2D_RECT_F, circular: bool, radius: f32, alpha: f32) {
-        let rim = self.brushes.alpha_brush(FOREGROUND, 0.14 * alpha);
+        let rim = self.brushes.alpha_brush(self.notch_ink(), 0.14 * alpha);
         unsafe {
             if circular {
                 let cx = (d2d_rect.left + d2d_rect.right) * 0.5;
@@ -517,22 +515,17 @@ impl Renderer {
     }
 
     fn draw_inset_squircle_focus_ring(&self, rect: Rect, outer_radius: f32, alpha: f32) {
-        let shape = ShapeTokens::GOLDEN_GATE.scaled(self.dpi);
-        let stroke = shape.focus_ring_width as f32;
-        let inset = scale(2, self.dpi) as f32 + stroke * 0.5;
-        let inner = D2D_RECT_F {
-            left: rect.x as f32 + inset,
-            top: rect.y as f32 + inset,
-            right: rect.right() as f32 - inset,
-            bottom: rect.bottom() as f32 - inset,
-        };
-        let radius = (outer_radius - inset).max(4.0);
-        let brush = self.brushes.alpha_brush(FOREGROUND, 0.90 * alpha);
-        if let Ok(geom) = build_squircle_path(&self.factory, inner, radius) {
-            unsafe {
-                self.target.DrawGeometry(&geom, &brush, stroke, None);
-            }
-        }
+        let inset = scale(2, self.dpi) as f32;
+        let inner = inset_rect_f(rect_to_d2d(rect), inset);
+        let brush = self.brushes.alpha_brush(self.notch_ink(), 0.90 * alpha);
+        draw_focus_ring_for(
+            &self.factory,
+            &self.target,
+            inner,
+            (outer_radius - inset).max(4.0),
+            self.dpi,
+            &brush,
+        );
     }
 
     fn draw_circle_focus_ring(&self, rect: Rect, alpha: f32) {
@@ -542,7 +535,7 @@ impl Renderer {
         let cx = rect.x as f32 + rect.width as f32 * 0.5;
         let cy = rect.y as f32 + rect.height as f32 * 0.5;
         let r = rect.width.min(rect.height) as f32 * 0.5 + grow;
-        let brush = self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
+        let brush = self.brushes.alpha_brush(self.notch_ink(), 0.92 * alpha);
         unsafe {
             self.target.DrawEllipse(
                 &D2D1_ELLIPSE {
@@ -558,16 +551,16 @@ impl Renderer {
     }
 
     fn draw_close_control(&self, rect: Rect, hovered: bool, alpha: f32) {
+        let fg = self.notch_ink();
         let cx = rect.x as f32 + rect.width as f32 * 0.5;
         let cy = rect.y as f32 + rect.height as f32 * 0.5;
         let visual_r = (scale(20, self.dpi) as f32 * 0.5).min(rect.width as f32 * 0.5);
         let disc = self
             .brushes
-            .alpha_brush(FOREGROUND, if hovered { 0.24 } else { 0.14 } * alpha);
+            .alpha_brush(fg, if hovered { 0.24 } else { 0.14 } * alpha);
         let glyph = self
             .brushes
-            .alpha_brush(FOREGROUND, if hovered { 0.96 } else { 0.84 } * alpha);
-        let arm = visual_r * 0.34;
+            .alpha_brush(fg, if hovered { 0.96 } else { 0.84 } * alpha);
         unsafe {
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
@@ -577,16 +570,15 @@ impl Renderer {
                 },
                 &disc,
             );
-            for sign in [-1.0_f32, 1.0] {
-                self.target.DrawLine(
-                    Vector2::new(cx - arm, cy - arm * sign),
-                    Vector2::new(cx + arm, cy + arm * sign),
-                    &glyph,
-                    (self.dpi as f32 / 96.0 * 1.4).max(1.2),
-                    &self.stroke_style,
-                );
-            }
         }
+        draw_close_x_glyph(
+            &self.target,
+            &self.stroke_style,
+            Vector2::new(cx, cy),
+            visual_r * 0.34,
+            (self.dpi as f32 / 96.0 * 1.4).max(1.2),
+            &glyph,
+        );
     }
 
     fn draw_call_button(
@@ -715,8 +707,9 @@ impl Renderer {
             EQUALIZER_GREEN
         };
         let accent = self.brushes.alpha_brush(accent_color, alpha);
+        let fg = self.notch_ink();
         if scene.muted {
-            let slash = self.brushes.alpha_brush(FOREGROUND, alpha);
+            let slash = self.brushes.alpha_brush(fg, alpha);
             self.draw_mic_glyph(
                 cx,
                 cy,
@@ -738,7 +731,7 @@ impl Renderer {
             accent_color,
             alpha,
         );
-        let ink = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let ink = self.brushes.alpha_brush(fg, 0.96 * alpha);
         self.draw_tabular_text(
             &scene.elapsed,
             &self.text_compact_time,

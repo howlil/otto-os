@@ -161,6 +161,7 @@ pub(crate) fn take_kind(kind: Concealment) -> Vec<LedgerEntry> {
     if !taken.is_empty() {
         persist(&ledger);
     }
+    drop(ledger);
     taken
 }
 

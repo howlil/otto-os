@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+set -eu
+
+staged_rs=$(git diff --cached --name-only --diff-filter=ACMR -- 'crates/*.rs' 'crates/**/*.rs' || true)
+staged_docs=$(git diff --cached --name-only --diff-filter=ACMR -- 'AGENTS.md' '.agents/*' '.agents/**/*' || true)
+staged_ps=$(git diff --cached --name-only --diff-filter=ACMR -- 'scripts/*.ps1' 'tests/e2e/*.ps1' 'tests/visual/reference/manifest.json' || true)
+
+if [ -n "$staged_rs" ]; then
+  echo "== pre-commit: cargo fmt --check"
+  cargo fmt --all -- --check
+fi
+
+if [ -n "$staged_rs" ] || [ -n "$staged_docs" ]; then
+  echo "== pre-commit: architecture & forge fitness tests"
+  cargo test -p otto-os host::fitness_tests -- --nocapture
+fi
+
+if [ -n "$staged_ps" ]; then
+  echo "== pre-commit: static E2E and manifest check"
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-e2e.ps1
+fi
+
+staged_landing=$(git diff --cached --name-only --diff-filter=ACMR -- 'landing/*' 'landing/**/*' || true)
+if [ -n "$staged_landing" ]; then
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "pre-commit: bun is required when committing landing/ changes" >&2
+    exit 1
+  fi
+  echo "== pre-commit: landing biome check"
+  (cd landing && bun x biome check --no-errors-on-unmatched .)
+fi

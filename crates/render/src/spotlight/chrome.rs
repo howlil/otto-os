@@ -1,66 +1,17 @@
-use otto_core::{
-    Appearance, GlassShape, Rect, SpotlightLayout, SpotlightMode, SpotlightView, scale,
-};
+use otto_core::{Appearance, Rect, SpotlightLayout, SpotlightMode, SpotlightView, scale};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1Brush, ID2D1PathGeometry,
-};
+use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::appearance::theme::LiquidGlassPalette;
+use crate::kit::draw::{fill_squircle_or_rounded, stroke_squircle_or_rounded};
+use crate::kit::icons::draw_search_magnifier_glyph;
+use crate::{draw_dwrite_tabular_text, rect_to_d2d};
 
-use super::{CLEAR, RectExt, SpotlightPaintState, SpotlightRenderer, with_opacity};
+use super::{SpotlightPaintState, SpotlightRenderer, with_opacity};
 
 impl SpotlightRenderer {
-    fn fill_shape(
-        &self,
-        rect: D2D_RECT_F,
-        radius: f32,
-        geom: Option<&ID2D1PathGeometry>,
-        brush: &ID2D1Brush,
-    ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.FillGeometry(geom, brush, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target.FillRoundedRectangle(&rounded, brush);
-        }
-    }
-
-    fn draw_shape(
-        &self,
-        rect: D2D_RECT_F,
-        radius: f32,
-        geom: Option<&ID2D1PathGeometry>,
-        brush: &ID2D1Brush,
-        stroke_width: f32,
-    ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.DrawGeometry(geom, brush, stroke_width, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target
-                .DrawRoundedRectangle(&rounded, brush, stroke_width, None);
-        }
-    }
-
     pub(super) fn draw_shell(
         &self,
         width: i32,
@@ -85,46 +36,56 @@ impl SpotlightRenderer {
             + (radius - start_height as f32 * 0.5) * morph_progress)
             .min(morph_rect.width as f32 * 0.5)
             .min(morph_rect.height as f32 * 0.5);
-        let shape = GlassShape::from_rect(morph_rect, morph_radius);
-        if self
-            .glass
-            .draw(&self.target, appearance, self.dpi, shape, true)?
-        {
-            return Ok(());
-        }
-        let outer_rect = D2D_RECT_F {
-            left: morph_rect.x as f32 + 0.5,
-            top: morph_rect.y as f32 + 0.5,
-            right: morph_rect.right() as f32 - 0.5,
-            bottom: morph_rect.bottom() as f32 - 0.5,
-        };
-        let inner_rect = D2D_RECT_F {
-            left: morph_rect.x as f32 + 1.5,
-            top: morph_rect.y as f32 + 1.5,
-            right: morph_rect.right() as f32 - 1.5,
-            bottom: morph_rect.bottom() as f32 - 1.5,
-        };
-        let inner_radius = (morph_radius - 1.0).max(1.0);
-        let outer_geom = crate::build_squircle_path(&self.factory, outer_rect, morph_radius).ok();
-        let inner_geom = crate::build_squircle_path(&self.factory, inner_rect, inner_radius).ok();
-        let fill = self.brushes.color_brush(palette.menu_fill);
-        let outer_border = self.brushes.color_brush(palette.menu_outer_border);
-        self.fill_shape(outer_rect, morph_radius, outer_geom.as_ref(), &fill);
-        self.draw_shape(
-            outer_rect,
+        crate::kit::draw::draw_glass_or_fallback_shell(
+            &self.factory,
+            &self.target,
+            &self.glass,
+            &self.brushes,
+            morph_rect,
             morph_radius,
-            outer_geom.as_ref(),
-            &outer_border,
+            self.dpi,
+            appearance,
+            palette,
+        )
+    }
+
+    fn draw_search_field_chrome(
+        &self,
+        layout: &SpotlightLayout,
+        opacity: f32,
+        palette: &LiquidGlassPalette,
+    ) {
+        let radius =
+            (layout.corner_radius - layout.search_field.x as f32).max(scale(10, self.dpi) as f32);
+        let fill = self
+            .brushes
+            .color_brush(with_opacity(palette.card_fill, opacity));
+        fill_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            layout.search_field,
+            radius,
+            self.dpi,
+            &fill,
+        );
+        let border_color = if palette.is_high_contrast {
+            palette.specular_rim
+        } else {
+            palette.menu_outer_border
+        };
+        let border = self
+            .brushes
+            .color_brush(with_opacity(border_color, opacity));
+        stroke_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            layout.search_field,
+            radius,
+            self.dpi,
+            &border,
             1.0,
         );
-        self.draw_shape(
-            inner_rect,
-            inner_radius,
-            inner_geom.as_ref(),
-            &self.brushes.specular_rim,
-            1.0,
-        );
-        Ok(())
+        self.draw_search_magnifier(layout, opacity, palette);
     }
 
     pub(super) fn draw_search(
@@ -135,15 +96,7 @@ impl SpotlightRenderer {
     ) {
         let layout = state.layout;
         let query = state.query;
-        let rect = layout.search_field.to_d2d();
-        let radius =
-            (layout.corner_radius - layout.search_field.x as f32).max(scale(10, self.dpi) as f32);
-        let geom = crate::build_squircle_path(&self.factory, rect, radius).ok();
-        let fill = self
-            .brushes
-            .color_brush(with_opacity(palette.card_fill, opacity));
-        self.fill_shape(rect, radius, geom.as_ref(), &fill);
-        self.draw_search_magnifier(layout, opacity, palette);
+        self.draw_search_field_chrome(layout, opacity, palette);
         let mut text_rect = D2D_RECT_F {
             left: (layout.search_field.x + scale(42, self.dpi)) as f32,
             top: layout.search_field.y as f32,
@@ -171,7 +124,8 @@ impl SpotlightRenderer {
                 + Self::measure_text_width(&query[..cursor_byte], &self.search_format)
                     .unwrap_or(0.0)
         };
-        if state.selected_all && !query.is_empty() {
+        let is_selected_all = state.selected_all && !query.is_empty();
+        if is_selected_all {
             let total_w = Self::measure_text_width(query, &self.search_format).unwrap_or(0.0);
             let sel_right = (text_rect.left + total_w).min(text_rect.right);
             let sel_shape = D2D1_ROUNDED_RECT {
@@ -195,12 +149,14 @@ impl SpotlightRenderer {
         }
         let text_color = if query.is_empty() {
             palette.text_muted
+        } else if is_selected_all {
+            palette.on_accent
         } else {
             palette.text_primary
         };
         let text_brush = self.brushes.color_brush(with_opacity(text_color, opacity));
         self.draw_text(&self.search_format, text, &text_rect, &text_brush);
-        let caret_width = scale(1, self.dpi).max(1) as f32;
+        let caret_width = (scale(2, self.dpi) as f32 * 0.75).max(1.5);
         let max_caret_x = (text_rect.right - caret_width).max(text_rect.left);
         let caret_x = caret_x.clamp(text_rect.left, max_caret_x);
         let caret = D2D_RECT_F {
@@ -211,7 +167,7 @@ impl SpotlightRenderer {
         };
         let caret_brush = self
             .brushes
-            .color_brush(with_opacity(palette.text_primary, opacity));
+            .color_brush(with_opacity(palette.toggle_active, opacity));
         unsafe {
             self.target.FillRectangle(&caret, &caret_brush);
         }
@@ -223,39 +179,21 @@ impl SpotlightRenderer {
         opacity: f32,
         palette: &LiquidGlassPalette,
     ) {
-        let icon_center = (
-            layout.search_field.x + scale(20, self.dpi),
-            layout.search_field.y + layout.search_field.height / 2,
+        let icon_center = Vector2::new(
+            (layout.search_field.x + scale(20, self.dpi)) as f32,
+            (layout.search_field.y + layout.search_field.height / 2) as f32,
         );
-        let magnifier = D2D1_ELLIPSE {
-            point: Vector2::new(icon_center.0 as f32, icon_center.1 as f32),
-            radiusX: scale(6, self.dpi) as f32,
-            radiusY: scale(6, self.dpi) as f32,
-        };
         let icon_brush = self
             .brushes
             .color_brush(with_opacity(palette.text_muted, opacity));
-        unsafe {
-            self.target.DrawEllipse(
-                &magnifier,
-                &icon_brush,
-                scale(2, self.dpi) as f32 * 0.9,
-                None,
-            );
-            self.target.DrawLine(
-                Vector2::new(
-                    (icon_center.0 + scale(4, self.dpi)) as f32,
-                    (icon_center.1 + scale(4, self.dpi)) as f32,
-                ),
-                Vector2::new(
-                    (icon_center.0 + scale(9, self.dpi)) as f32,
-                    (icon_center.1 + scale(9, self.dpi)) as f32,
-                ),
-                &icon_brush,
-                scale(2, self.dpi) as f32 * 0.9,
-                None,
-            );
-        }
+        draw_search_magnifier_glyph(
+            &self.target,
+            &self.stroke_style,
+            icon_center,
+            scale(6, self.dpi) as f32,
+            (scale(2, self.dpi) as f32 * 0.9).max(1.5),
+            &icon_brush,
+        );
     }
 
     fn draw_math_pill(
@@ -300,8 +238,51 @@ impl SpotlightRenderer {
         let pill_brush = self
             .brushes
             .color_brush(with_opacity(palette.on_accent, opacity));
-        self.draw_text(&self.label_format, &pill_text, &pill_rect, &pill_brush);
+        draw_dwrite_tabular_text(
+            &self.target,
+            &pill_text,
+            &self.label_format,
+            pill_rect,
+            &pill_brush,
+        );
         (pill_left - scale(10, self.dpi) as f32).max(text_rect.left)
+    }
+
+    fn draw_segmented_track(
+        &self,
+        bounds: Rect,
+        radius: f32,
+        opacity: f32,
+        palette: &LiquidGlassPalette,
+    ) {
+        let track_fill = self
+            .brushes
+            .color_brush(with_opacity(palette.card_fill, opacity));
+        fill_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            bounds,
+            radius,
+            self.dpi,
+            &track_fill,
+        );
+        let border_color = if palette.is_high_contrast {
+            palette.specular_rim
+        } else {
+            palette.menu_outer_border
+        };
+        let track_border = self
+            .brushes
+            .color_brush(with_opacity(border_color, opacity));
+        stroke_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            bounds,
+            radius,
+            self.dpi,
+            &track_border,
+            1.0,
+        );
     }
 
     pub(super) fn draw_tabs(
@@ -312,6 +293,18 @@ impl SpotlightRenderer {
         opacity: f32,
         palette: &LiquidGlassPalette,
     ) {
+        self.draw_segmented_track(
+            layout.search_tab.union(&layout.apps_tab),
+            scale(10, self.dpi) as f32,
+            opacity,
+            palette,
+        );
+        self.draw_segmented_track(
+            layout.grid_view.union(&layout.list_view),
+            scale(8, self.dpi) as f32,
+            opacity,
+            palette,
+        );
         self.draw_tab(
             layout.search_tab,
             "Search",
@@ -350,19 +343,25 @@ impl SpotlightRenderer {
         opacity: f32,
         palette: &LiquidGlassPalette,
     ) {
-        let shape = D2D1_ROUNDED_RECT {
-            rect: bounds.to_d2d(),
-            radiusX: scale(10, self.dpi) as f32,
-            radiusY: scale(10, self.dpi) as f32,
-        };
-        let fill = if active {
-            with_opacity(palette.menu_hover_fill, opacity)
-        } else {
-            with_opacity(CLEAR, opacity)
-        };
-        unsafe {
-            self.target
-                .FillRoundedRectangle(&shape, &self.brushes.color_brush(fill));
+        if active {
+            let inset = scale(2, self.dpi);
+            let pill = Rect {
+                x: bounds.x + inset,
+                y: bounds.y + inset,
+                width: (bounds.width - inset * 2).max(1),
+                height: (bounds.height - inset * 2).max(1),
+            };
+            let fill = self
+                .brushes
+                .color_brush(with_opacity(palette.menu_hover_fill, opacity));
+            fill_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                pill,
+                scale(8, self.dpi) as f32,
+                self.dpi,
+                &fill,
+            );
         }
         let text_color = if active {
             palette.on_accent
@@ -370,7 +369,7 @@ impl SpotlightRenderer {
             palette.text_muted
         };
         let text_brush = self.brushes.color_brush(with_opacity(text_color, opacity));
-        self.draw_text(&self.label_format, label, &bounds.to_d2d(), &text_brush);
+        self.draw_text(&self.label_format, label, &rect_to_d2d(bounds), &text_brush);
     }
 
     fn draw_view_button(
@@ -381,19 +380,25 @@ impl SpotlightRenderer {
         opacity: f32,
         palette: &LiquidGlassPalette,
     ) {
-        let shape = D2D1_ROUNDED_RECT {
-            rect: bounds.to_d2d(),
-            radiusX: scale(8, self.dpi) as f32,
-            radiusY: scale(8, self.dpi) as f32,
-        };
-        let fill = if active {
-            with_opacity(palette.menu_hover_fill, opacity)
-        } else {
-            with_opacity(CLEAR, opacity)
-        };
-        unsafe {
-            self.target
-                .FillRoundedRectangle(&shape, &self.brushes.color_brush(fill));
+        if active {
+            let inset = scale(2, self.dpi);
+            let pill = Rect {
+                x: bounds.x + inset,
+                y: bounds.y + inset,
+                width: (bounds.width - inset * 2).max(1),
+                height: (bounds.height - inset * 2).max(1),
+            };
+            let fill = self
+                .brushes
+                .color_brush(with_opacity(palette.menu_hover_fill, opacity));
+            fill_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                pill,
+                scale(6, self.dpi) as f32,
+                self.dpi,
+                &fill,
+            );
         }
         let text_color = if active {
             palette.on_accent

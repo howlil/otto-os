@@ -14,7 +14,15 @@ Thank you for your interest in contributing to Otto OS! Whether you are reportin
 - **Windows 11 22H2+** (build `22621+`, `x64`).
 - **Rust toolchain** matching [`rust-toolchain.toml`](rust-toolchain.toml) (Rust edition 2024, `rustfmt`, `clippy`, target `x86_64-pc-windows-msvc`).
 - **Windows 10/11 SDK** (required for `rc.exe` resource compilation in `crates/app/build.rs`).
-- Optional (only if editing `landing/`): [Bun](https://bun.sh/).
+- Optional (required when editing `landing/`): [Bun](https://bun.sh/).
+- Optional (enforced in CI): `cargo-deny` (`cargo install cargo-deny --locked`).
+
+### One-Time Clone Setup
+Enable the repository's pre-commit hooks (`.githooks/pre-commit`) and verify local tooling:
+
+```powershell
+.\scripts\setup-dev.ps1
+```
 
 ### Running Locally
 Debug builds isolate their data directory to `%LOCALAPPDATA%\otto-os-dev` so local testing will not overwrite an installed production configuration:
@@ -75,20 +83,28 @@ If your changes touch `landing/`:
 ```powershell
 cd landing
 bun install --frozen-lockfile
+bun x biome ci .
+bun run check
 bun x tsc --noEmit
 bun test
 bun run build
+bun run smoke
 ```
 
-For UI, rendering, AppBar, Dock, or Genie behavior changes, also run the interactive Windows E2E acceptance suite on an unlocked desktop:
+For UI, rendering, AppBar, Dock, Genie, or pre-release verification on an unlocked Windows 11 desktop:
 
 ```powershell
-.\tests\e2e\windows-e2e.ps1 -Scenario all
+.\tests\e2e\windows-e2e.ps1 -Scenario full
+# Or run the complete pre-release verification suite (gate + ignored native/leak tests + full E2E + MSIX smoke):
+.\scripts\release-verify.ps1 -E2EScenario full
 ```
 
 ## Pull Request Guidelines
 
-- Keep each PR focused on one coherent change (avoid mixing unrelated refactors, formatting sweeps, and feature work).
+- Classify your PR's Expected-Pain tier (`Light` / `Medium` / `Deep`) in the PR template and align visually before coding on Medium/Deep changes.
+- Keep each PR focused on one coherent change (never mix mechanical formatting sweeps with behavioral diffs).
+- Gate experimental or uncertain changes behind `OTTO_EXPERIMENTAL_FLAGS` (`otto-core::runtime::flags`) instead of mutating `plugins.txt` v1 prematurely.
+- Disclose AI assistance transparently and confirm a human owner has audited the diff and verification evidence.
 - Add or update focused unit/regression tests for behavioral changes and bug fixes.
 - Update [`CHANGELOG.md`](CHANGELOG.md) under `## [Unreleased]` for user-visible changes.
 - Never commit secrets, certificates, local `target/` output, or machine-specific artifacts.

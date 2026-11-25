@@ -16,7 +16,7 @@ pub enum ResizeEdge {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowControlsMetrics {
     pub width: i32,
     pub height: i32,

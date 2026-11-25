@@ -55,36 +55,20 @@ fn main_layout(dpi: u32) -> ControlCenterLayout {
 fn main_layout_places_window_within_work_area_across_dpis() {
     for dpi in [96, 144, 192] {
         let layout = main_layout(dpi);
-        assert!(layout.window.width > 0 && layout.window.height > 0);
-        assert!(layout.window.right() <= bounds().right());
-        assert!(layout.window.bottom() <= bounds().bottom());
+        assert_eq!(layout.window, bounds());
+        assert!(layout.canvas_panel.width > 0 && layout.canvas_panel.height > 0);
+        assert!(layout.canvas_panel.right() <= bounds().right());
+        assert!(layout.canvas_panel.bottom() <= bounds().bottom());
         assert!(layout.connectivity_card.width > 0);
-        assert_eq!(layout.focus_toggle.x, layout.battery_tile.x);
         assert_eq!(layout.focus_toggle.width, layout.battery_tile.width);
         assert_eq!(layout.focus_toggle.height, layout.battery_tile.height);
-        assert_eq!(layout.focus_toggle.height, layout.display_card.height);
-        assert_eq!(layout.display_card.height, layout.sound_card.height);
-        assert!(layout.focus_toggle.bottom() < layout.battery_tile.y);
-        assert_eq!(layout.wifi_toggle.width, layout.bluetooth_toggle.width);
-        assert_eq!(layout.wifi_toggle.width, layout.focus_icon.width);
-        assert_eq!(layout.wifi_toggle.width, layout.battery_icon.width);
-        assert_eq!(layout.wifi_toggle.width, layout.media_play_pause.width);
-        let inset = layout.wifi_toggle.x - layout.connectivity_card.x;
-        assert_eq!(layout.focus_icon.x - layout.focus_toggle.x, inset);
-        assert_eq!(layout.battery_icon.x - layout.battery_tile.x, inset);
-        assert_eq!(layout.display_slider.x - layout.display_card.x, inset);
-        assert_eq!(layout.sound_slider.x - layout.sound_card.x, inset);
-        assert!(layout.display_slider.width > 200);
-        assert_eq!(layout.sound_slider.x, layout.display_slider.x);
-        assert_eq!(layout.sound_slider.width, layout.display_slider.width);
+        assert!(layout.display_slider.height > layout.display_slider.width);
+        assert!(layout.sound_slider.height > layout.sound_slider.width);
         assert_eq!(layout.sound_slider.height, layout.display_slider.height);
-        assert_eq!(layout.sound_mute.x, layout.sound_slider.x);
-        assert_eq!(layout.sound_mute.y, layout.sound_slider.y);
-        assert_eq!(layout.sound_mute.width, layout.display_icon.width);
-        assert_eq!(layout.sound_mute.height, layout.sound_slider.height);
+        assert_eq!(layout.sound_mute.width, layout.sound_slider.width);
+        assert_eq!(layout.sound_mute.bottom(), layout.sound_slider.bottom());
         assert!(layout.sound_mute.height >= scale(24, dpi));
-        assert!(layout.focus_settings.width >= scale(24, dpi));
-        assert!(layout.media_body.right() <= layout.media_prev.x);
+        assert!(layout.media_body.width > 0);
     }
 }
 
@@ -112,11 +96,6 @@ fn hit_test_prioritizes_nested_connectivity_media_and_sound_controls() {
         layout.hit_test(battery_x, battery_y),
         Some(ControlCenterHitTarget::BatteryTile)
     );
-    let (fsx, fsy) = center(layout.focus_settings);
-    assert_eq!(
-        layout.hit_test(fsx, fsy),
-        Some(ControlCenterHitTarget::FocusOpenSettings)
-    );
     assert_eq!(
         layout.hit_test(
             layout.focus_toggle.x + 12,
@@ -130,7 +109,7 @@ fn hit_test_prioritizes_nested_connectivity_media_and_sound_controls() {
         Some(ControlCenterHitTarget::SoundMuteToggle)
     );
     assert_eq!(
-        layout.hit_test(layout.sound_mute.right() + 12, my),
+        layout.hit_test(mx, layout.sound_slider.y + 12),
         Some(ControlCenterHitTarget::SoundSlider)
     );
     let (px, py) = center(layout.media_play_pause);
@@ -142,6 +121,10 @@ fn hit_test_prioritizes_nested_connectivity_media_and_sound_controls() {
     assert_eq!(
         layout.hit_test(mbx, mby),
         Some(ControlCenterHitTarget::MediaBody)
+    );
+    assert_eq!(
+        layout.hit_test(8, 8),
+        Some(ControlCenterHitTarget::CanvasBackground)
     );
 }
 
@@ -389,7 +372,11 @@ fn focus_targets_respect_page_and_capabilities() {
     assert!(!limited.contains(&ControlCenterHitTarget::BluetoothToggle));
     assert!(!limited.contains(&ControlCenterHitTarget::DisplaySlider));
     assert!(limited.contains(&ControlCenterHitTarget::SoundSlider));
-    assert_eq!(limited.last(), Some(&ControlCenterHitTarget::MediaBody));
+    assert!(limited.contains(&ControlCenterHitTarget::MediaBody));
+    assert_eq!(
+        limited.last(),
+        Some(&ControlCenterHitTarget::TileAction(10))
+    );
 
     snap.wifi.supported = true;
     snap.bluetooth.supported = true;
@@ -602,11 +589,7 @@ fn focus_row_separates_pomodoro_toggle_and_windows_dnd_settings_trigger() {
         })
     );
     let layout = main_layout(96);
-    assert!(layout.focus_toggle.contains(
-        layout.focus_settings.x + layout.focus_settings.width / 2,
-        layout.focus_settings.y + layout.focus_settings.height / 2
-    ));
-    assert!(layout.focus_settings.width >= 20);
+    assert!(layout.focus_toggle.width > 0 && layout.focus_toggle.height > 0);
 }
 
 #[test]
@@ -616,6 +599,123 @@ fn control_center_shell_and_cards_are_concentric() {
     let layout = main_layout(96);
     assert_eq!(layout.shell_radius, 26);
     assert_eq!(layout.card_radius, 14);
-    assert_eq!(layout.connectivity_card.x, 12);
-    assert_eq!(layout.connectivity_card.y, 12);
+    assert_eq!(layout.connectivity_card.x, layout.canvas_panel.x);
+    assert_eq!(layout.connectivity_card.y, layout.grid_origin.1);
+}
+
+#[test]
+fn modular_grid_resizes_moves_adds_removes_and_persists_cleanly() {
+    use super::grid::{ControlCenterGrid, ControlKind};
+
+    let mut grid = ControlCenterGrid::default_ipad_grid();
+    assert!(grid.contains_kind(ControlKind::Connectivity));
+    assert!(grid.contains_kind(ControlKind::Brightness));
+    assert!(!grid.contains_kind(ControlKind::Wifi));
+
+    let wifi_id = grid.add_control(ControlKind::Wifi).expect("add wifi");
+    assert!(grid.contains_kind(ControlKind::Wifi));
+    assert!(grid.add_control(ControlKind::Wifi).is_none());
+
+    assert!(grid.resize_tile(wifi_id, 2, 1));
+    assert_eq!(grid.tile(wifi_id).map(|t| (t.cols, t.rows)), Some((2, 1)));
+    for (idx, a) in grid.tiles.iter().enumerate() {
+        for b in grid.tiles.iter().skip(idx + 1) {
+            assert!(!a.overlaps(b), "tiles {a:?} and {b:?} overlap");
+        }
+    }
+
+    assert!(grid.move_tile(wifi_id, 0, 0));
+    for (idx, a) in grid.tiles.iter().enumerate() {
+        for b in grid.tiles.iter().skip(idx + 1) {
+            assert!(!a.overlaps(b), "tiles {a:?} and {b:?} overlap after move");
+        }
+    }
+
+    let serialized = grid.format_config();
+    let parsed = ControlCenterGrid::parse_config(&serialized);
+    assert_eq!(parsed.tiles.len(), grid.tiles.len());
+    assert!(ControlCenterGrid::is_future_version("version=2\n"));
+    assert!(!ControlCenterGrid::is_future_version("version=1\n"));
+
+    assert!(grid.remove_tile(wifi_id));
+    assert!(!grid.contains_kind(ControlKind::Wifi));
+    grid.reset();
+    assert_eq!(grid.tiles.len(), ControlCenterGrid::default().tiles.len());
+}
+
+#[test]
+fn vertical_and_horizontal_sliders_and_edit_mode_hit_testing_work() {
+    let layout = main_layout(96);
+    let r = layout.display_slider;
+    assert_eq!(
+        layout.slider_value_at_point(ControlCenterHitTarget::DisplaySlider, r.x + 10, r.bottom()),
+        Some(0)
+    );
+    assert_eq!(
+        layout.slider_value_at_point(ControlCenterHitTarget::DisplaySlider, r.x + 10, r.y),
+        Some(100)
+    );
+    let mid_pct = layout
+        .slider_value_at_point(
+            ControlCenterHitTarget::DisplaySlider,
+            r.x + 10,
+            r.y + r.height / 2,
+        )
+        .unwrap();
+    assert!((48..=52).contains(&mid_pct));
+
+    let mut snap = ControlCenterSnapshot {
+        editing: true,
+        ..ControlCenterSnapshot::default()
+    };
+    let edit_layout = compute_control_center_layout_for_snapshot(
+        &ControlCenterMetrics::DEFAULT,
+        ControlCenterPlacement {
+            bounds: bounds(),
+            dpi: 96,
+            anchor_right: 1750,
+            anchor_y: 36,
+            page: ControlCenterPage::Main,
+            item_count: 0,
+            scroll_offset: 0,
+        },
+        &snap,
+    );
+    let first = edit_layout.tiles[0];
+    assert_eq!(
+        edit_layout.hit_test_with_editing(first.remove_badge.x + 4, first.remove_badge.y + 4, true),
+        Some(ControlCenterHitTarget::TileRemove(first.id))
+    );
+    assert_eq!(
+        edit_layout.hit_test_with_editing(
+            first.resize_handle.right() - 4,
+            first.resize_handle.bottom() - 4,
+            true
+        ),
+        Some(ControlCenterHitTarget::TileResize(first.id))
+    );
+    assert_eq!(
+        edit_layout.hit_test_with_editing(
+            first.rect.x + first.rect.width / 2,
+            first.rect.y + first.rect.height / 2,
+            true
+        ),
+        Some(ControlCenterHitTarget::TileMove(first.id))
+    );
+    snap.page = ControlCenterPage::Gallery;
+    let gallery_layout = compute_control_center_layout_for_snapshot(
+        &ControlCenterMetrics::DEFAULT,
+        ControlCenterPlacement {
+            bounds: bounds(),
+            dpi: 96,
+            anchor_right: 1750,
+            anchor_y: 36,
+            page: ControlCenterPage::Gallery,
+            item_count: snap.subpanel_item_count(ControlCenterPage::Gallery),
+            scroll_offset: 0,
+        },
+        &snap,
+    );
+    assert_eq!(gallery_layout.items.len(), 17);
+    assert!(gallery_layout.canvas_panel.x > 1000);
 }

@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useReducedMotion } from "motion/react";
+import { useState } from "react";
 import { useEased } from "../lib/spring";
 
 export type PartId = "bar" | "notch" | "window" | "cc" | "spotlight" | "dock";
@@ -199,11 +199,7 @@ function circle(c: Pt, r: number): Pt[] {
 }
 
 function toPath(points: Pt[]) {
-  return (
-    points
-      .map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`)
-      .join(" ") + " Z"
-  );
+  return `${points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`).join(" ")} Z`;
 }
 
 function faceAt(rect: Rect, r: number, z: number) {
@@ -233,12 +229,7 @@ export function ExplodedDiagram({ explode, initial, active, onSelect, className 
   const shown = hover ?? active ?? null;
 
   return (
-    <svg
-      viewBox="70 -26 560 560"
-      className={className}
-      role="img"
-      aria-label="Otto OS architecture layers"
-    >
+    <svg viewBox="70 -26 560 560" className={className} role="img" aria-label="Otto OS architecture layers">
       {PARTS.map((part) => {
         const z = part.lift * e;
         const [cu, cv] = centerOf(part.rect);
@@ -261,21 +252,38 @@ export function ExplodedDiagram({ explode, initial, active, onSelect, className 
               />
             )}
             <path d={faceAt(part.rect, part.r, z - part.thick)} fill={part.edge} />
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: interactive isometric architecture layer */}
             <path
               d={faceAt(part.rect, part.r, z)}
               fill={part.fill}
-              stroke={isActive ? "#075bef" : part.id === "notch" || part.id === "spotlight" ? "rgb(255 255 255 / 0.16)" : "rgb(27 27 29 / 0.14)"}
+              stroke={
+                isActive
+                  ? "#075bef"
+                  : part.id === "notch" || part.id === "spotlight"
+                    ? "rgb(255 255 255 / 0.16)"
+                    : "rgb(27 27 29 / 0.14)"
+              }
               strokeWidth={isActive ? 2 : 0.9}
               style={{ cursor: interactive ? "pointer" : "default", transition: "stroke 180ms" }}
               onPointerEnter={interactive ? () => setHover(part.id as PartId) : undefined}
               onPointerLeave={interactive ? () => setHover(null) : undefined}
               onClick={interactive && onSelect ? () => onSelect(part.id as PartId) : undefined}
             />
-            {part.details?.map((detail, index) => (
-              <path key={index} d={faceAt(detail.rect, detail.r ?? 0, z)} fill={detail.fill} pointerEvents="none" />
+            {part.details?.map((detail) => (
+              <path
+                key={`${detail.rect.join(",")}-${detail.fill}`}
+                d={faceAt(detail.rect, detail.r ?? 0, z)}
+                fill={detail.fill}
+                pointerEvents="none"
+              />
             ))}
-            {part.dots?.map((dot, index) => (
-              <path key={index} d={dotAt(dot, z)} fill={dot.fill} pointerEvents="none" />
+            {part.dots?.map((dot) => (
+              <path
+                key={`${dot.c[0]}-${dot.c[1]}-${dot.fill}`}
+                d={dotAt(dot, z)}
+                fill={dot.fill}
+                pointerEvents="none"
+              />
             ))}
             {e > 0.65 && isActive && part.label && (
               <g pointerEvents="none">

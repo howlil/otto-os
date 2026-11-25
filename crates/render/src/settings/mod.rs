@@ -1,5 +1,6 @@
 mod appearance;
 mod focus;
+mod focus_heatmap;
 mod palette;
 mod rows;
 #[cfg(test)]
@@ -9,33 +10,22 @@ mod tiles;
 use std::collections::{HashMap, HashSet};
 
 use otto_core::{
-    ContentLayout, PixelLimits, Rect, Rgba, SettingsContent, SettingsHit, SettingsLayout,
-    SettingsPage, scale,
+    BarWindowControlsView, ContentLayout, ContrastColors, PixelLimits, Rect, Rgba, SettingsContent,
+    SettingsHit, SettingsLayout, SettingsPage, scale,
 };
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Bitmap,
-    ID2D1HwndRenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
-};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    IDWriteTextFormat,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::core::Result;
 
-use crate::appearance::surface::upload_bgra_bitmap;
-use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
+use crate::kit::canvas::{HwndCanvas, make_text_format};
+use crate::window::controls::{HighContrastTrafficLights, TrafficLightsStyle};
 
 use self::palette::{
-    HERO_TILE_POINTS, Palette, ROW_PAD_POINTS, SIDEBAR_RADIUS_POINTS, SIDEBAR_TILE_POINTS, d2d,
-    rgba,
+    HERO_TILE_POINTS, Palette, ROW_PAD_POINTS, SIDEBAR_RADIUS_POINTS, SIDEBAR_TILE_POINTS, rgba,
 };
 
 const MAX_SETTINGS_APP_ICONS: usize = 64;
@@ -47,9 +37,11 @@ pub struct SettingsPaintState<'a> {
     pub page: SettingsPage,
     pub scroll: i32,
     pub hovered: Option<SettingsHit>,
+    pub window_controls: BarWindowControlsView,
     pub dark: bool,
     pub glass: bool,
     pub high_contrast: bool,
+    pub contrast: Option<ContrastColors>,
     pub accent: Rgba,
     pub on_accent: Rgba,
 }
@@ -73,70 +65,63 @@ pub(super) struct Formats {
 
 impl Formats {
     fn new(dpi: u32) -> Result<Self> {
-        unsafe {
-            let dwrite = shared_dwrite_factory()?;
-            let make = |points: i32, weight, align| {
-                create_text_format(&dwrite, scale(points, dpi) as f32, weight, align)
-            };
-            let footer = make(
+        let make = |points: i32, weight, align| make_text_format(points, dpi, weight, align, false);
+        let footer = make_text_format(
+            11,
+            dpi,
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+            true,
+        )?;
+        Ok(Self {
+            label: make(13, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            subtitle: make(
                 11,
                 DWRITE_FONT_WEIGHT_REGULAR,
                 DWRITE_TEXT_ALIGNMENT_LEADING,
-            )?;
-            footer.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
-            footer.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
-            Ok(Self {
-                label: make(13, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-                subtitle: make(
-                    11,
-                    DWRITE_FONT_WEIGHT_REGULAR,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                section: make(12, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING)?,
-                footer,
-                title: make(
-                    15,
-                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                sidebar: make(
-                    13,
-                    DWRITE_FONT_WEIGHT_REGULAR,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                value: make(
-                    13,
-                    DWRITE_FONT_WEIGHT_REGULAR,
-                    DWRITE_TEXT_ALIGNMENT_TRAILING,
-                )?,
-                keycap: make(11, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-                chip: make(12, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-                kpi_value: make(
-                    20,
-                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                caption_center: make(10, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-                caption_leading: make(
-                    10,
-                    DWRITE_FONT_WEIGHT_REGULAR,
-                    DWRITE_TEXT_ALIGNMENT_LEADING,
-                )?,
-                hero_title: make(
-                    22,
-                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                    DWRITE_TEXT_ALIGNMENT_CENTER,
-                )?,
-                hero_subtitle: make(13, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_TEXT_ALIGNMENT_CENTER)?,
-            })
-        }
+            )?,
+            section: make(12, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+            footer,
+            title: make(
+                15,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?,
+            sidebar: make(
+                13,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?,
+            value: make(
+                13,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_TEXT_ALIGNMENT_TRAILING,
+            )?,
+            keycap: make(11, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            chip: make(12, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            kpi_value: make(
+                20,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?,
+            caption_center: make(10, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+            caption_leading: make(
+                10,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_TEXT_ALIGNMENT_LEADING,
+            )?,
+            hero_title: make(
+                22,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?,
+            hero_subtitle: make(13, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+        })
     }
 }
 
 pub struct SettingsRenderer {
-    pub(super) target: ID2D1HwndRenderTarget,
-    pub(super) brush: ID2D1SolidColorBrush,
-    pub(super) stroke: ID2D1StrokeStyle,
+    pub(super) canvas: HwndCanvas,
     pub(super) formats: Formats,
     pub(super) dpi: u32,
     pub(super) app_icons: HashMap<String, ID2D1Bitmap>,
@@ -144,48 +129,12 @@ pub struct SettingsRenderer {
 
 impl SettingsRenderer {
     pub fn new(hwnd: isize, width: i32, height: i32, dpi: u32) -> Result<Self> {
-        unsafe {
-            let factory = shared_d2d_factory()?;
-            let target = factory.CreateHwndRenderTarget(
-                &D2D1_RENDER_TARGET_PROPERTIES {
-                    pixelFormat: D2D1_PIXEL_FORMAT {
-                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                    },
-                    ..D2D1_RENDER_TARGET_PROPERTIES::default()
-                },
-                &D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                    hwnd: HWND(hwnd as *mut _),
-                    pixelSize: D2D_SIZE_U {
-                        width: width.max(1) as u32,
-                        height: height.max(1) as u32,
-                    },
-                    presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-                },
-            )?;
-            target.SetDpi(96.0, 96.0);
-            let brush = target.CreateSolidColorBrush(&rgba(0, 1.0), None)?;
-            let stroke = factory.CreateStrokeStyle(
-                &D2D1_STROKE_STYLE_PROPERTIES {
-                    startCap: D2D1_CAP_STYLE_ROUND,
-                    endCap: D2D1_CAP_STYLE_ROUND,
-                    dashCap: D2D1_CAP_STYLE_ROUND,
-                    lineJoin: D2D1_LINE_JOIN_ROUND,
-                    miterLimit: 2.0,
-                    dashStyle: D2D1_DASH_STYLE_SOLID,
-                    dashOffset: 0.0,
-                },
-                None,
-            )?;
-            Ok(Self {
-                target,
-                brush,
-                stroke,
-                formats: Formats::new(dpi)?,
-                dpi,
-                app_icons: HashMap::new(),
-            })
-        }
+        Ok(Self {
+            canvas: HwndCanvas::new(hwnd, width, height)?,
+            formats: Formats::new(dpi)?,
+            dpi,
+            app_icons: HashMap::new(),
+        })
     }
 
     #[must_use]
@@ -203,7 +152,9 @@ impl SettingsRenderer {
         if self.app_icons.len() >= MAX_SETTINGS_APP_ICONS && !self.app_icons.contains_key(&key) {
             self.app_icons.clear();
         }
-        let bitmap = upload_bgra_bitmap(&self.target, width, height, pixels, PixelLimits::ICON)?;
+        let bitmap = self
+            .canvas
+            .upload_bitmap(width, height, pixels, PixelLimits::ICON)?;
         self.app_icons.insert(key, bitmap);
         Ok(())
     }
@@ -213,12 +164,7 @@ impl SettingsRenderer {
     }
 
     pub fn resize(&self, width: i32, height: i32) -> Result<()> {
-        unsafe {
-            self.target.Resize(&D2D_SIZE_U {
-                width: width.max(1) as u32,
-                height: height.max(1) as u32,
-            })
-        }
+        self.canvas.resize(width, height)
     }
 
     pub fn set_dpi(&mut self, dpi: u32) -> Result<()> {
@@ -234,6 +180,7 @@ impl SettingsRenderer {
             state.dark,
             state.glass,
             state.high_contrast,
+            state.contrast,
             state.accent,
             state.on_accent,
         );
@@ -242,15 +189,12 @@ impl SettingsRenderer {
         } else {
             palette.background
         };
-        unsafe {
-            self.target.BeginDraw();
-            self.target.Clear(Some(&clear));
-        }
+        self.canvas.begin_frame(clear);
         self.draw_body(state, &palette);
         self.draw_hover_detail_bar(state, &palette);
         self.draw_toolbar(state, &palette);
         self.draw_sidebar(state, &palette);
-        unsafe { self.target.EndDraw(None, None) }
+        self.canvas.end_frame()
     }
 
     pub(super) fn px(&self, points: i32) -> i32 {
@@ -295,6 +239,29 @@ impl SettingsRenderer {
             },
             palette.hairline,
         );
+        if !layout.window_controls_group.is_empty() {
+            let slots = layout.window_controls.map(|slot| (slot.action, slot.rect));
+            let radius = self.px(if layout.rail { 10 } else { 12 }) as f32 * 0.5;
+            let high_contrast = (state.high_contrast || state.contrast.is_some()).then_some(
+                HighContrastTrafficLights {
+                    window: palette.background,
+                    text: palette.text,
+                    disabled: palette.secondary,
+                },
+            );
+            self.canvas.draw_traffic_lights(
+                &slots,
+                radius,
+                TrafficLightsStyle {
+                    state: state.window_controls.state,
+                    maximized: state.window_controls.maximized,
+                    hovered: state.window_controls.hovered,
+                    pressed: state.window_controls.pressed,
+                    dark_surface: state.dark,
+                    high_contrast,
+                },
+            );
+        }
         let radius = self.px(SIDEBAR_RADIUS_POINTS) as f32;
         let tile = self.px(SIDEBAR_TILE_POINTS);
         let pad = self.px(8);
@@ -359,10 +326,7 @@ impl SettingsRenderer {
             width: layout.content.width,
             height: layout.content.height - layout.header.height,
         };
-        unsafe {
-            self.target
-                .PushAxisAlignedClip(&d2d(area), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        }
+        self.canvas.push_clip(area);
         if let Some(hero) = &state.content.hero {
             self.draw_hero(
                 state.blocks.hero,
@@ -393,9 +357,7 @@ impl SettingsRenderer {
                 self.text(footer, &self.formats.footer, card.footer, palette.secondary);
             }
         }
-        unsafe {
-            self.target.PopAxisAlignedClip();
-        }
+        self.canvas.pop_clip();
     }
 
     fn draw_hero(&self, rect: Rect, title: &str, subtitle: &str, palette: &Palette) {

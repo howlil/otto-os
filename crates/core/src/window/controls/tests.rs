@@ -480,3 +480,41 @@ fn alt_zoom_glyph_defaults_to_false_and_toggles_via_builder() {
             .alt_zoom_glyph
     );
 }
+
+#[test]
+fn active_bar_window_controls_reflects_foreground_capability_and_inactive_absence() {
+    let inactive = super::active_bar_window_controls(None);
+    assert!(!inactive.active);
+    assert!(!inactive.close);
+    assert!(!inactive.minimize);
+    assert!(!inactive.zoom);
+
+    let standard = window(WindowTraits::STANDARD);
+    let active = super::active_bar_window_controls(Some(&standard));
+    assert!(active.active);
+    assert!(active.close);
+    assert!(active.minimize);
+    assert!(active.zoom);
+
+    let elevated = window(WindowTraits {
+        elevated: true,
+        ..WindowTraits::STANDARD
+    });
+    let blocked = super::active_bar_window_controls(Some(&elevated));
+    assert!(!blocked.active);
+    assert!(!blocked.close);
+}
+
+#[test]
+fn button_top_offset_centers_traffic_lights_inside_actual_button_band() {
+    let base = NativeCaption::new(STANDARD_STYLE, 1000, 100, 40, true, 96)
+        .unwrap()
+        .with_button_top_offset(6);
+    let layout = compute_cover_layout(base, &WindowControlsMetrics::default()).unwrap();
+    assert!((layout.center_y - 23.0).abs() < 0.01);
+
+    let clamped = NativeCaption::new(STANDARD_STYLE, 1000, 100, 40, true, 96)
+        .unwrap()
+        .with_button_top_offset(50);
+    assert_eq!(clamped.button_top_offset, 0);
+}

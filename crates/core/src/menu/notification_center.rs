@@ -8,20 +8,19 @@ use super::notifications::{NotificationAccess, NotificationSummary};
 pub const NOTIFICATION_CENTER_WIDTH: i32 = 328;
 pub const NOTIFICATION_CENTER_MAX_HEIGHT: i32 = 580;
 pub const NOTIFICATION_CENTER_PAD: i32 = 8;
-pub const NOTIFICATION_CENTER_SHELL_RADIUS: i32 = 20;
+pub(super) const NOTIFICATION_CENTER_SHELL_RADIUS: i32 = 20;
 pub const NOTIFICATION_CENTER_CARD_RADIUS: i32 = 12;
-pub const NOTIFICATION_CENTER_PILL_RADIUS: i32 = 8;
-pub const NOTIFICATION_CENTER_HEADER_HEIGHT: i32 = 24;
-pub const NOTIFICATION_CENTER_GROUP_HEADER_HEIGHT: i32 = 24;
-pub const NOTIFICATION_CENTER_CARD_COMPACT_HEIGHT: i32 = 50;
+pub(super) const NOTIFICATION_CENTER_PILL_RADIUS: i32 = 8;
+pub(super) const NOTIFICATION_CENTER_HEADER_HEIGHT: i32 = 24;
+pub(super) const NOTIFICATION_CENTER_GROUP_HEADER_HEIGHT: i32 = 24;
+pub(super) const NOTIFICATION_CENTER_CARD_COMPACT_HEIGHT: i32 = 50;
 pub const NOTIFICATION_CENTER_CARD_HEIGHT: i32 = 64;
-pub const NOTIFICATION_CENTER_CARD_TALL_HEIGHT: i32 = 76;
-pub const NOTIFICATION_CENTER_STACK_LIP_STEP: i32 = 4;
-pub const NOTIFICATION_CENTER_EMPTY_HEIGHT: i32 = 108;
-pub const NOTIFICATION_CENTER_FOOTER_HEIGHT: i32 = 24;
-pub const NOTIFICATION_CENTER_CARD_GAP: i32 = 6;
-pub const NOTIFICATION_CENTER_CLOSE_HIT_SIZE: i32 = 24;
-pub const NOTIFICATION_CENTER_SCREEN_MARGIN: i32 = 6;
+pub(super) const NOTIFICATION_CENTER_CARD_TALL_HEIGHT: i32 = 76;
+pub(super) const NOTIFICATION_CENTER_STACK_LIP_STEP: i32 = 4;
+pub(super) const NOTIFICATION_CENTER_EMPTY_HEIGHT: i32 = 108;
+pub(super) const NOTIFICATION_CENTER_CARD_GAP: i32 = 6;
+pub(super) const NOTIFICATION_CENTER_CLOSE_HIT_SIZE: i32 = 24;
+pub(super) const NOTIFICATION_CENTER_SCREEN_MARGIN: i32 = 6;
 const SINGLE_LINE_BODY_CHAR_LIMIT: usize = 38;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +42,6 @@ pub enum NotificationCenterHit {
     OpenCard(u32),
     CloseCard(u32),
     AccessAction,
-    OpenWindowsNotifications,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +94,6 @@ pub struct NotificationCenterLayout {
     pub header_rect: Rect,
     pub title_rect: Rect,
     pub clear_all_rect: Option<Rect>,
-    pub footer_rect: Rect,
-    pub footer_button_rect: Rect,
     pub content_height: i32,
     pub scroll_offset: i32,
     pub shell_radius: f32,
@@ -240,7 +236,7 @@ fn state_copy(
         ),
         NotificationAccess::Unavailable => (
             String::from("Notifications Unavailable"),
-            String::from("Turn on Windows notification access or open the system feed."),
+            String::from("Turn on Windows notification access to see alerts here."),
             Some(String::from("Enable Notification Feed")),
             NotificationCenterHit::AccessAction,
         ),
@@ -261,7 +257,6 @@ pub fn compute_notification_center_layout(
     let margin = scale(NOTIFICATION_CENTER_SCREEN_MARGIN, dpi);
     let pad = scale(NOTIFICATION_CENTER_PAD, dpi);
     let header_h = scale(NOTIFICATION_CENTER_HEADER_HEIGHT, dpi);
-    let footer_h = scale(NOTIFICATION_CENTER_FOOTER_HEIGHT, dpi);
     let gap = scale(NOTIFICATION_CENTER_CARD_GAP, dpi);
     let width = scale(NOTIFICATION_CENTER_WIDTH, dpi).min((bounds.width - margin * 2).max(120));
     let inner_w = (width - pad * 2).max(1);
@@ -281,7 +276,7 @@ pub fn compute_notification_center_layout(
         width: clear_w,
         height: clear_h,
     });
-    let title_right = clear_all_rect.map_or(header_rect.right(), |r| r.x - gap);
+    let title_right = clear_all_rect.map_or_else(|| header_rect.right(), |r| r.x - gap);
     let title_rect = Rect {
         x: header_rect.x + scale(4, dpi),
         y: header_rect.y,
@@ -330,10 +325,10 @@ pub fn compute_notification_center_layout(
         content_h = empty_h;
     }
 
+    let chrome_h = pad * 2 + header_h + gap;
     let max_win_h = (bounds.height - margin * 2)
         .min(scale(NOTIFICATION_CENTER_MAX_HEIGHT, dpi))
-        .max(pad * 2 + header_h + footer_h + gap * 2 + 1);
-    let chrome_h = pad * 2 + header_h + footer_h + gap * 2;
+        .max(chrome_h + 1);
     let available_viewport_h = (max_win_h - chrome_h).max(1);
     let viewport_h = content_h.min(available_viewport_h);
     let height = chrome_h + viewport_h;
@@ -445,14 +440,6 @@ pub fn compute_notification_center_layout(
         });
     }
 
-    let footer_rect = Rect {
-        x: pad,
-        y: viewport.bottom() + gap,
-        width: inner_w,
-        height: footer_h,
-    };
-    let footer_button_rect = footer_rect;
-
     let min_x = bounds.x + margin;
     let min_y = bounds.y + margin;
     let win_x = (anchor_right - width).clamp(min_x, (bounds.right() - width - margin).max(min_x));
@@ -470,8 +457,6 @@ pub fn compute_notification_center_layout(
         header_rect,
         title_rect,
         clear_all_rect,
-        footer_rect,
-        footer_button_rect,
         content_height: content_h,
         scroll_offset: clamped_scroll,
         shell_radius: scale(NOTIFICATION_CENTER_SHELL_RADIUS, dpi) as f32,
@@ -511,9 +496,6 @@ impl NotificationCenterLayout {
             && clear.contains(local_x, local_y)
         {
             return NotificationCenterHit::ClearAll;
-        }
-        if self.footer_button_rect.contains(local_x, local_y) {
-            return NotificationCenterHit::OpenWindowsNotifications;
         }
         if !self.viewport.contains(local_x, local_y) {
             return NotificationCenterHit::None;
@@ -587,7 +569,6 @@ impl NotificationCenterLayout {
         {
             hits.push(state.action_hit);
         }
-        hits.push(NotificationCenterHit::OpenWindowsNotifications);
         hits
     }
 
@@ -614,7 +595,6 @@ impl NotificationCenterLayout {
         match hit {
             NotificationCenterHit::None => None,
             NotificationCenterHit::ClearAll => self.clear_all_rect,
-            NotificationCenterHit::OpenWindowsNotifications => Some(self.footer_button_rect),
             NotificationCenterHit::AccessAction => {
                 self.state_card.as_ref().and_then(|s| s.action_rect)
             }
@@ -661,9 +641,6 @@ impl NotificationCenterLayout {
         };
         if rect.y < self.viewport.y && matches!(hit, NotificationCenterHit::ClearAll) {
             return 0;
-        }
-        if matches!(hit, NotificationCenterHit::OpenWindowsNotifications) {
-            return self.scroll_offset;
         }
         let above = self.viewport.y - rect.y;
         let below = rect.bottom() - self.viewport.bottom();
@@ -821,6 +798,15 @@ mod tests {
             0,
         );
         assert!(empty.clear_all_rect.is_none());
+        assert!(empty.interactive_hits().is_empty());
+        assert_eq!(
+            empty.next_hit(NotificationCenterHit::None),
+            NotificationCenterHit::None
+        );
+        assert_eq!(
+            empty.prev_hit(NotificationCenterHit::None),
+            NotificationCenterHit::None
+        );
         let state = empty.state_card.as_ref().expect("empty state card");
         assert_eq!(state.title, "No Notifications");
         assert!(state.action_rect.is_none());

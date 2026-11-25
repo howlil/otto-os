@@ -5,11 +5,7 @@ export const WAITLIST_PLATFORMS = [
   "Windows 10 atau lainnya",
 ] as const;
 
-export const WAITLIST_USAGES = [
-  "Jarang",
-  "Kadang-kadang",
-  "Hampir setiap hari",
-] as const;
+export const WAITLIST_USAGES = ["Jarang", "Kadang-kadang", "Hampir setiap hari"] as const;
 
 export const WAITLIST_SOURCES = ["hero"] as const;
 

@@ -176,3 +176,35 @@ fn overlay_starts_without_renderer_and_updates_layout_lazily() {
     overlay.hide();
     assert!(overlay.renderer.is_none());
 }
+
+#[test]
+fn auto_hiding_top_bar_reports_zero_effective_height_so_maximized_windows_stay_covered() {
+    use otto_core::{BarHideMode, MenuBarPreferences, NotchStyle};
+
+    let runtime = crate::host::RuntimeContext::new(false);
+    runtime.top_bar_enabled.set(true);
+    runtime.menu_bar.set(MenuBarPreferences {
+        hide_mode: BarHideMode::Always,
+        ..MenuBarPreferences::default()
+    });
+    assert_eq!(
+        super::effective_bar_height(&runtime, NotchStyle::DynamicIsland),
+        0
+    );
+    runtime.menu_bar.set(MenuBarPreferences {
+        hide_mode: BarHideMode::DesktopOnly,
+        ..MenuBarPreferences::default()
+    });
+    assert_eq!(
+        super::effective_bar_height(&runtime, NotchStyle::DynamicIsland),
+        0
+    );
+    runtime.menu_bar.set(MenuBarPreferences {
+        hide_mode: BarHideMode::FullScreenOnly,
+        ..MenuBarPreferences::default()
+    });
+    assert_eq!(
+        super::effective_bar_height(&runtime, NotchStyle::DynamicIsland),
+        Metrics::DYNAMIC_ISLAND.bar_height
+    );
+}

@@ -22,7 +22,9 @@ impl Dock {
         let updated = self.combined_entries();
         sync_icons(&mut self.renderer, &updated);
         self.recompute_layout();
+        self.sync_secondary_entries(false);
         self.present(runtime);
+        self.present_secondary_docks(runtime);
     }
 
     pub(super) fn combined_entries(&self) -> Vec<DockEntry> {
@@ -158,6 +160,7 @@ impl Dock {
         let all = self.combined_entries();
         sync_icons(&mut self.renderer, &all);
         self.recompute_layout();
+        self.sync_secondary_entries(need_anim);
         true
     }
 

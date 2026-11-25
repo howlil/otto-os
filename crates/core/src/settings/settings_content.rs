@@ -1,14 +1,19 @@
 use super::appearance_settings::{accent_for_part, build_appearance_page, style_for_part};
+use super::focus_insights_settings::{
+    FOCUS_HEATMAP_ROW_HEIGHT_POINTS, build_focus_page, focus_heatmap_parts, kpi_parts,
+    weekly_chart_parts,
+};
 use super::focus_settings::{
-    FilterChip, FocusAppFilter, FocusPageState, FocusSettingsTab, FocusTextField, KpiItem,
-    SegmentedOption, WeeklyChart, build_focus_page,
+    FilterChip, FocusAppFilter, FocusDisclosure, FocusPageState, FocusSettingsTab, FocusTextField,
+    KpiItem, SegmentedOption, WeeklyChart,
 };
 use super::general_settings::build_general_page;
 use super::model::{OttoSettingItem, OttoSettingKind, OttoSettingSection, OttoSettingsSnapshot};
 use crate::appearance::theme::{AccentColor, AppearanceStyle, ThemeMode};
 use crate::control_center::UpdateState;
-use crate::dock::layout::{DOCK_ICON_LARGE, DOCK_ICON_MEDIUM, DOCK_ICON_SMALL};
 use crate::layout::{Rect, scale};
+use crate::notch::focus_heatmap::FocusHeatmapView;
+use crate::notch::focus_mode::{CategoryColor, FocusRulePolicy};
 use crate::runtime::process_hog::ProcessAuditFilter;
 use crate::settings_window::{
     ModuleGroup, ModuleId, ModuleRow, ModuleStatus, SettingsPage, modules_running,
@@ -41,6 +46,7 @@ pub enum SettingsAction {
     Toggle(OttoSettingKind),
     CycleDockIconSize,
     CycleMenuBarHide,
+    CycleBrandIcon,
     Open(SettingsPage),
     OpenLogs,
     CheckForUpdates,
@@ -60,6 +66,26 @@ pub enum SettingsAction {
     ExpandFocusAllApps,
     SelectFocusChartDay(usize),
     ToggleFocusActivityDetails,
+    SelectFocusCategory(String),
+    SubmitFocusCategory,
+    SubmitRenameFocusCategory,
+    DeleteFocusCategory(String),
+    CycleFocusCategoryColor,
+    SetFocusCategoryColor(CategoryColor),
+    AdjustFocusCategoryDuration(i32),
+    CycleFocusCategoryBreaks,
+    ToggleFocusCategoryPolicy,
+    SetFocusCategoryPolicy(FocusRulePolicy),
+    CycleFocusCategoryBackgroundPolicy,
+    ApplyFocusCategorySuggestions,
+    ToggleCategoryAllowedApp(String),
+    ToggleCategoryBlockedApp(String),
+    ToggleCategoryApp(String),
+    ToggleCategoryWebsite(String),
+    ToggleCategoryCloseApp(String),
+    ToggleFocusDisclosure(FocusDisclosure),
+    SetFocusHeatmapFilter(Option<String>),
+    SelectFocusHeatmapCell(usize),
     SetAppearanceStyle(AppearanceStyle),
     SetAppearanceTheme(ThemeMode),
     SetAppearanceAccent(AccentColor),
@@ -103,6 +129,7 @@ pub enum SettingsRowValue {
     },
     KpiStrip([KpiItem; 3]),
     WeeklyChart(WeeklyChart),
+    FocusHeatmap(FocusHeatmapView),
     UsageBar {
         duration: String,
         percent: u8,
@@ -187,6 +214,7 @@ impl SettingsRow {
             }
             SettingsRowValue::KpiStrip(_) => KPI_ROW_HEIGHT_POINTS,
             SettingsRowValue::WeeklyChart(_) => WEEKLY_CHART_ROW_HEIGHT_POINTS,
+            SettingsRowValue::FocusHeatmap(_) => FOCUS_HEATMAP_ROW_HEIGHT_POINTS,
             SettingsRowValue::UsageBar { .. } | SettingsRowValue::ProcessAudit { .. } => {
                 USAGE_BAR_ROW_HEIGHT_POINTS
             }
@@ -250,12 +278,19 @@ impl SettingsContent {
                 ..
             } => match part {
                 0 => Some(SettingsAction::FocusInput(*field)),
-                1 if button_label.is_some() => Some(SettingsAction::SubmitBlockedWebsite),
+                1 if button_label.is_some() => Some(match field {
+                    FocusTextField::CategoryName => SettingsAction::SubmitFocusCategory,
+                    FocusTextField::CategoryRename => SettingsAction::SubmitRenameFocusCategory,
+                    _ => SettingsAction::SubmitBlockedWebsite,
+                }),
                 1 if !text.is_empty() => Some(SettingsAction::ClearFocusInput(*field)),
                 _ => None,
             },
             SettingsRowValue::WeeklyChart(chart) => {
                 (part < chart.days.len()).then_some(SettingsAction::SelectFocusChartDay(part))
+            }
+            SettingsRowValue::FocusHeatmap(heatmap) => {
+                (part < heatmap.cells.len()).then_some(SettingsAction::SelectFocusHeatmapCell(part))
             }
             SettingsRowValue::StylePicker { .. } => {
                 style_for_part(part).map(SettingsAction::SetAppearanceStyle)
@@ -275,15 +310,6 @@ impl SettingsContent {
             SettingsRowValue::KpiStrip(_) => None,
             _ => row.action.clone(),
         }
-    }
-}
-
-const fn dock_size_label(size: i32) -> &'static str {
-    match size {
-        DOCK_ICON_SMALL => "Small",
-        DOCK_ICON_MEDIUM => "Medium",
-        DOCK_ICON_LARGE => "Large",
-        _ => "Custom",
     }
 }
 
@@ -348,12 +374,16 @@ pub(crate) fn setting_row(
             SettingsAction::Toggle(kind),
         ),
         OttoSettingItem::DockIconSize => (
-            SettingsRowValue::Choice(dock_size_label(snapshot.dock.icon_size)),
+            SettingsRowValue::Choice(snapshot.dock_size_label()),
             SettingsAction::CycleDockIconSize,
         ),
         OttoSettingItem::MenuBarHide => (
             SettingsRowValue::Choice(snapshot.menu_bar.hide_mode.label()),
             SettingsAction::CycleMenuBarHide,
+        ),
+        OttoSettingItem::BrandLogo => (
+            SettingsRowValue::Choice(snapshot.system.brand_icon.label()),
+            SettingsAction::CycleBrandIcon,
         ),
     };
     let row =
@@ -928,60 +958,6 @@ fn text_input_parts(
     }
 }
 
-fn kpi_parts(rect: Rect, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
-    if inner_w <= 0 {
-        return Vec::new();
-    }
-    let gap = scale(10, dpi);
-    let y = rect.y + scale(10, dpi);
-    let h = (rect.height - scale(20, dpi)).max(0);
-    let col_w = (inner_w - gap * 2).max(3) / 3;
-    (0..3)
-        .map(|index| {
-            let x = inner_x + index * (col_w + gap);
-            let width = if index == 2 {
-                (inner_x + inner_w - x).max(col_w)
-            } else {
-                col_w
-            };
-            Rect {
-                x,
-                y,
-                width,
-                height: h,
-            }
-        })
-        .collect()
-}
-
-fn weekly_chart_parts(rect: Rect, count: usize, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
-    if count == 0 || inner_w <= 0 {
-        return Vec::new();
-    }
-    let plot_top = rect.y + scale(58, dpi);
-    let plot_bottom = rect.bottom() - scale(10, dpi);
-    let plot_h = (plot_bottom - plot_top).max(scale(48, dpi));
-    let gap = scale(6, dpi);
-    let usable = (inner_w - gap * (count as i32 - 1)).max(count as i32);
-    let col_w = usable / count as i32;
-    (0..count)
-        .map(|index| {
-            let x = inner_x + index as i32 * (col_w + gap);
-            let width = if index + 1 == count {
-                (inner_x + inner_w - x).max(col_w)
-            } else {
-                col_w
-            };
-            Rect {
-                x,
-                y: plot_top,
-                width,
-                height: plot_h,
-            }
-        })
-        .collect()
-}
-
 fn style_picker_parts(rect: Rect, inner_x: i32, inner_w: i32, dpi: u32) -> Vec<Rect> {
     let count = AppearanceStyle::ALL.len();
     if inner_w <= 0 {
@@ -1091,6 +1067,9 @@ fn compute_row_parts(rect: Rect, value: &SettingsRowValue, dpi: u32) -> Vec<Rect
         SettingsRowValue::KpiStrip(_) => kpi_parts(rect, inner_x, inner_w, dpi),
         SettingsRowValue::WeeklyChart(chart) => {
             weekly_chart_parts(rect, chart.days.len(), inner_x, inner_w, dpi)
+        }
+        SettingsRowValue::FocusHeatmap(heatmap) => {
+            focus_heatmap_parts(rect, heatmap.weeks, inner_x, inner_w, dpi)
         }
         SettingsRowValue::StylePicker { .. } => style_picker_parts(rect, inner_x, inner_w, dpi),
         SettingsRowValue::AccentSwatches { .. } => accent_swatch_parts(rect, inner_x, inner_w, dpi),
@@ -1226,6 +1205,7 @@ mod tests {
                 focus_module: true,
                 clipboard_history: true,
                 drop_shelf: true,
+                finder_enabled: true,
                 ..SystemSettingsState::default()
             },
             ..OttoSettingsSnapshot::default()
@@ -1311,7 +1291,7 @@ mod tests {
         let content = content(&snapshot, SettingsPage::Overview);
         let hero = content.hero.as_ref().unwrap();
         assert_eq!(hero.title, "Otto OS");
-        assert!(hero.subtitle.contains("11 of 13 modules running"));
+        assert!(hero.subtitle.contains("12 of 14 modules running"));
         let links = content
             .sections
             .iter()
@@ -1574,18 +1554,22 @@ mod tests {
         let block_layout = compute_content_layout(viewport(), &block_page, 96, 0);
         let tab_parts = &block_layout.cards[0].row_parts[1];
         assert_eq!(tab_parts.len(), 2);
-        let second_tab = tab_parts[1];
+        let insights_tab = tab_parts[1];
         assert_eq!(
-            block_layout.part_at(second_tab.x + 4, second_tab.y + 4),
+            block_layout.part_at(insights_tab.x + 4, insights_tab.y + 4),
             Some((0, 1, 1))
         );
         assert_eq!(
+            block_page.part_action(0, 1, 0),
+            Some(SettingsAction::SetFocusTab(FocusSettingsTab::Modes))
+        );
+        assert_eq!(
             block_page.part_action(0, 1, 1),
-            Some(SettingsAction::SetFocusTab(FocusSettingsTab::Activity))
+            Some(SettingsAction::SetFocusTab(FocusSettingsTab::Insights))
         );
 
         let activity_state = FocusPageState {
-            tab: FocusSettingsTab::Activity,
+            tab: FocusSettingsTab::Insights,
             details_expanded: true,
             ..FocusPageState::default()
         };
@@ -1598,8 +1582,12 @@ mod tests {
             &activity_state,
         );
         let activity_layout = compute_content_layout(viewport(), &activity_page, 96, 0);
-        assert_eq!(activity_layout.cards[1].row_parts[0].len(), 3);
-        assert_eq!(activity_layout.cards[2].row_parts[0].len(), 7);
+        let chart_card = activity_layout
+            .cards
+            .iter()
+            .find(|card| card.row_parts.first().is_some_and(|p| p.len() == 7))
+            .expect("7-day chart card");
+        assert_eq!(chart_card.row_parts[0].len(), 7);
         let labels: Vec<&str> = activity_page
             .sections
             .iter()

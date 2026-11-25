@@ -1,0 +1,17 @@
+* text=auto
+
+*.sh text eol=lf
+.githooks/* text eol=lf
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+landing/**/*.ts text eol=lf
+landing/**/*.tsx text eol=lf
+landing/**/*.js text eol=lf
+landing/**/*.mjs text eol=lf
+landing/**/*.css text eol=lf
+landing/**/*.json text eol=lf
+landing/**/*.astro text eol=lf
+*.dxbc binary
+*.ico binary
+*.png binary
+*.webp binary

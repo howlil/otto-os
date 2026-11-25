@@ -27,7 +27,10 @@ pub use self::shell::{
     open_task_view,
 };
 pub(crate) use self::shell::{
-    open_external_url, open_night_light_settings, open_power_settings, shell_exec_ok,
+    lock_screen, open_external_url, open_night_light_settings, open_power_settings, shell_exec_ok,
+    trigger_screenshot,
 };
 pub use self::system::{play_pomodoro_chime, signal_command_failure, trim_working_set};
-pub use self::tray::{TrayOverflowOutcome, close_tray_overflow, toggle_tray_overflow};
+pub use self::tray::{
+    TrayOverflowOutcome, close_tray_overflow, toggle_tray_overflow, toggle_tray_overflow_in_bounds,
+};

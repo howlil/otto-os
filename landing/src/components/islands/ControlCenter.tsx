@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import type { LucideIcon } from "lucide-react";
 import {
   BatteryMedium,
   Bluetooth,
@@ -18,7 +18,7 @@ import {
   VolumeX,
   Wifi,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { type CSSProperties, useState } from "react";
 
 export type SurfaceStyleId = "liquid" | "frosted" | "tinted" | "solid";
 export type ThemeAppearance = "light" | "dark";
@@ -164,7 +164,10 @@ export function ControlCenter({
   const secondaryInk = dark ? "text-[#a1a1a6]" : "text-ink-soft";
 
   return (
-    <div className={`w-full max-w-[376px] rounded-[26px] border p-3 transition-all duration-300 ${dark ? "border-white/[0.12]" : "border-black/[0.08]"}`} style={shellStyle}>
+    <div
+      className={`w-full max-w-[376px] rounded-[26px] border p-3 transition-all duration-300 ${dark ? "border-white/[0.12]" : "border-black/[0.08]"}`}
+      style={shellStyle}
+    >
       <div className="grid grid-cols-2 gap-2">
         <div className={`flex h-36 flex-col overflow-hidden rounded-[14px] ${cardBg}`}>
           <ConnectionRow
@@ -253,7 +256,11 @@ export function ControlCenter({
             }`}
           >
             {OUTPUT_DEVICES.find((d) => d.id === device)?.name}
-            <ChevronRight size={11} className={`transition-transform ${audioMenu ? "rotate-90" : ""}`} aria-hidden="true" />
+            <ChevronRight
+              size={11}
+              className={`transition-transform ${audioMenu ? "rotate-90" : ""}`}
+              aria-hidden="true"
+            />
           </button>
         </div>
         <div className="flex items-center gap-2.5">
@@ -266,12 +273,25 @@ export function ControlCenter({
               dark ? "hover:bg-white/10" : "hover:bg-black/5"
             } ${FOCUS_RING}`}
           >
-            {muted ? <VolumeX size={15} strokeWidth={2} aria-hidden="true" /> : <Volume2 size={15} strokeWidth={2} aria-hidden="true" />}
+            {muted ? (
+              <VolumeX size={15} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <Volume2 size={15} strokeWidth={2} aria-hidden="true" />
+            )}
           </button>
-          <Slider label="Output volume" value={sound} accent={accent} dark={dark} onChange={setSound} disabled={muted} />
+          <Slider
+            label="Output volume"
+            value={sound}
+            accent={accent}
+            dark={dark}
+            onChange={setSound}
+            disabled={muted}
+          />
         </div>
         {audioMenu ? (
-          <div className={`mt-1 flex flex-col gap-0.5 border-t pt-1.5 ${dark ? "border-white/10" : "border-black/[0.08]"}`}>
+          <div
+            className={`mt-1 flex flex-col gap-0.5 border-t pt-1.5 ${dark ? "border-white/10" : "border-black/[0.08]"}`}
+          >
             {OUTPUT_DEVICES.map((item) => {
               const Icon = item.icon;
               const selected = item.id === device;
@@ -328,7 +348,11 @@ export function ControlCenter({
             className={`grid size-8 place-items-center rounded-full text-white transition-transform active:scale-95 ${FOCUS_RING}`}
             style={{ background: accent }}
           >
-            {playing ? <Pause size={14} fill="currentColor" aria-hidden="true" /> : <Play size={14} fill="currentColor" aria-hidden="true" />}
+            {playing ? (
+              <Pause size={14} fill="currentColor" aria-hidden="true" />
+            ) : (
+              <Play size={14} fill="currentColor" aria-hidden="true" />
+            )}
           </button>
           <button
             type="button"

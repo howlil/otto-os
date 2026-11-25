@@ -175,7 +175,7 @@ fn parse_dwm_accent_abgr(value: u32) -> Rgba {
 }
 
 #[must_use]
-pub fn read_system_accent_color() -> Option<Rgba> {
+pub(crate) fn read_system_accent_color() -> Option<Rgba> {
     let mut hkey = HKEY::default();
     let subkey = w!("Software\\Microsoft\\Windows\\DWM");
     let open_status =

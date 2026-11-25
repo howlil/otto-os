@@ -670,7 +670,7 @@ mod tests {
     fn sample(pid: u32, name: &str, cpu: u64) -> ProcessSample {
         ProcessSample {
             pid,
-            name: name.to_string(),
+            name: name.to_owned(),
             cpu_100ns: cpu,
         }
     }

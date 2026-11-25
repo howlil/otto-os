@@ -220,7 +220,12 @@ fn descriptors_are_declared_in_dependency_order() {
 #[test]
 fn descriptors_register_surfaces_and_virtual_features() {
     assert!(descriptor(PluginId::Dock).surface.is_some());
-    assert!(descriptor(PluginId::WindowControls).surface.is_some());
+    assert!(
+        descriptor(PluginId::WindowControls)
+            .surface
+            .is_some_and(|surface| !surface.topmost)
+    );
+    assert!(descriptor(PluginId::WindowControls).start.is_some());
     assert!(descriptor(PluginId::Genie).surface.is_some());
     assert!(descriptor(PluginId::ControlCenter).surface.is_some());
     assert!(descriptor(PluginId::Dock).start.is_some());
@@ -470,7 +475,7 @@ fn preferences_round_trip_through_plugin_config() {
     let mut config = PluginConfig::default();
     config.preferences.capture_visible = true;
     config.preferences.hotkeys_enabled = false;
-    config.preferences.classic_logo = true;
+    config.preferences.brand_icon = otto_core::BrandIcon::Windows;
     config.preferences.notch_enabled = false;
     config.preferences.onboarding_seen = true;
     let serialized = format!(

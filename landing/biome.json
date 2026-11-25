@@ -1,0 +1,127 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "src/**",
+      "functions/**",
+      "scripts/**",
+      "tests/**",
+      "astro.config.mjs",
+      "package.json",
+      "tsconfig.json",
+      "!**/dist",
+      "!**/.astro",
+      "!**/node_modules",
+      "!**/*.astro"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "a11y": {
+        "useSemanticElements": "off"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": {
+          "level": "error",
+          "options": {
+            "maxAllowedComplexity": 25
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/styles/global.css"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noImportantStyles": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["functions/api/waitlist.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": {
+              "level": "error",
+              "options": { "maxAllowedComplexity": 32 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/components/islands/ControlCenter.tsx", "src/components/islands/OttoSettings.tsx"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": {
+              "level": "error",
+              "options": { "maxAllowedComplexity": 28 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/components/islands/IslandStage.tsx"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": {
+              "level": "error",
+              "options": { "maxAllowedComplexity": 56 }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

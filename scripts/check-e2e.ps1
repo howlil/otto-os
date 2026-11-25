@@ -17,11 +17,14 @@ $validateSet = [regex]::Match($text, 'ValidateSet\(([^)]*)\)\]\s*\r?\n\s*\[strin
 $scenarios = @([regex]::Matches($validateSet, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
 if ($scenarios.Count -eq 0) { $failures.Add('could not read the Scenario ValidateSet') }
 
-$allLine = [regex]::Match($text, "\`$scenarios = if \(\`$Scenario -eq 'all'\) \{ @\(([^)]*)\) \}").Groups[1].Value
+$allLine = [regex]::Match($text, "\`$allScenarioList = @\(([^)]*)\)").Groups[1].Value
 $allScenarios = @([regex]::Matches($allLine, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+$fullLine = [regex]::Match($text, "\`$fullScenarioList = @\(([^)]*)\)").Groups[1].Value
+$fullScenarios = @([regex]::Matches($fullLine, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
 
+$concreteScenarios = @($scenarios | Where-Object { $_ -ne 'all' -and $_ -ne 'full' })
 $dispatchBlock = [regex]::Match($text, 'switch \(\$current\) \{(.*?)\n\s{12}\}', 'Singleline').Groups[1].Value
-foreach ($name in ($scenarios | Where-Object { $_ -ne 'all' })) {
+foreach ($name in $concreteScenarios) {
     $dispatch = [regex]::Match($dispatchBlock, "'$([regex]::Escape($name))'\s*\{\s*(Run-[A-Za-z]+)\s*\}")
     if (-not $dispatch.Success) {
         $failures.Add("scenario '$name' has no dispatch case")
@@ -34,8 +37,19 @@ foreach ($name in ($scenarios | Where-Object { $_ -ne 'all' })) {
 }
 
 foreach ($name in $allScenarios) {
-    if ($scenarios -notcontains $name) {
+    if ($concreteScenarios -notcontains $name) {
         $failures.Add("'all' includes '$name', which is not in the Scenario ValidateSet")
+    }
+}
+
+foreach ($name in $concreteScenarios) {
+    if ($fullScenarios -notcontains $name) {
+        $failures.Add("'full' is missing concrete scenario '$name'")
+    }
+}
+foreach ($name in $fullScenarios) {
+    if ($concreteScenarios -notcontains $name) {
+        $failures.Add("'full' includes '$name', which is not in the Scenario ValidateSet")
     }
 }
 
@@ -94,4 +108,4 @@ if ($failures.Count -gt 0) {
     foreach ($failure in $failures) { Write-Output " - $failure" }
     exit 1
 }
-Write-Output "E2E CHECK PASSED: $($scenarios.Count) scenarios, $($allScenarios.Count) in all, manifest valid"
+Write-Output "E2E CHECK PASSED: $($concreteScenarios.Count) concrete scenarios, $($allScenarios.Count) in all, $($fullScenarios.Count) in full, manifest valid"

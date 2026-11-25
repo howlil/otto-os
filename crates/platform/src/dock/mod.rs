@@ -21,8 +21,7 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, HWND, LPARAM, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint,
-    MonitorFromWindow,
+    HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MonitorFromWindow,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -60,7 +59,7 @@ use crate::window::ops::visible_window_rect;
 use crate::window::ops::window_is_fullscreen_on_primary;
 
 #[must_use]
-pub fn window_overlaps_zone(zone: otto_core::Rect, own_pid: u32) -> bool {
+pub(crate) fn window_overlaps_zone(zone: otto_core::Rect, own_pid: u32) -> bool {
     struct Probe {
         zone: RECT,
         own_pid: u32,
@@ -94,58 +93,89 @@ pub fn window_overlaps_zone(zone: otto_core::Rect, own_pid: u32) -> bool {
     probe.found
 }
 
+const fn window_is_fullscreen_on_monitor(
+    on_monitor: bool,
+    zoomed: bool,
+    rect: RECT,
+    bounds: otto_core::Rect,
+) -> bool {
+    on_monitor
+        && !zoomed
+        && bounds.width > 0
+        && bounds.height > 0
+        && rect.left <= bounds.x
+        && rect.top <= bounds.y
+        && rect.right >= bounds.right()
+        && rect.bottom >= bounds.bottom()
+}
+
 #[must_use]
-pub fn fullscreen_on_primary(screen_width: i32, screen_height: i32, own_pid: u32) -> bool {
+pub fn fullscreen_on_monitor(bounds: otto_core::Rect, own_pid: u32) -> bool {
     struct Probe {
-        screen_width: i32,
-        screen_height: i32,
+        bounds: otto_core::Rect,
         own_pid: u32,
-        primary_monitor: HMONITOR,
+        target_monitor: HMONITOR,
         found: bool,
     }
 
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let probe = unsafe { &mut *(lparam.0 as *mut Probe) };
-        if is_normal_visible_window(hwnd, probe.own_pid) {
-            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-            let on_primary = monitor == probe.primary_monitor;
-            let zoomed = on_primary && unsafe { IsZoomed(hwnd) }.as_bool();
-            let rect = if on_primary && !zoomed {
-                visible_window_rect(hwnd)
-            } else {
-                RECT::default()
-            };
-            if window_is_fullscreen_on_primary(
-                on_primary,
-                zoomed,
-                rect,
-                probe.screen_width,
-                probe.screen_height,
-            ) {
-                probe.found = true;
-                return BOOL(0);
+        unsafe {
+            let probe = &mut *(lparam.0 as *mut Probe);
+            if is_normal_visible_window(hwnd, probe.own_pid) {
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let on_monitor = monitor == probe.target_monitor;
+                let zoomed = on_monitor && IsZoomed(hwnd).as_bool();
+                let rect = if on_monitor && !zoomed {
+                    visible_window_rect(hwnd)
+                } else {
+                    RECT::default()
+                };
+                if window_is_fullscreen_on_monitor(on_monitor, zoomed, rect, probe.bounds) {
+                    probe.found = true;
+                    return BOOL(0);
+                }
             }
+            BOOL(1)
         }
-        BOOL(1)
     }
 
-    let primary_monitor =
-        unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    if bounds.width <= 0 || bounds.height <= 0 {
+        return false;
+    }
+
+    let center = POINT {
+        x: bounds.x + bounds.width / 2,
+        y: bounds.y + bounds.height / 2,
+    };
     let mut probe = Probe {
-        screen_width,
-        screen_height,
+        bounds,
         own_pid,
-        primary_monitor,
+        target_monitor: HMONITOR::default(),
         found: false,
     };
     unsafe {
+        probe.target_monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
         let _ = EnumWindows(Some(visit), LPARAM(&raw mut probe as isize));
     }
     probe.found
 }
 
 #[must_use]
-pub fn pin_entry_at_target(entry: &DockEntry, target_key: &str) -> bool {
+pub(crate) fn fullscreen_on_primary(screen_width: i32, screen_height: i32, own_pid: u32) -> bool {
+    let _ = window_is_fullscreen_on_primary;
+    fullscreen_on_monitor(
+        otto_core::Rect {
+            x: 0,
+            y: 0,
+            width: screen_width,
+            height: screen_height,
+        },
+        own_pid,
+    )
+}
+
+#[must_use]
+pub(crate) fn pin_entry_at_target(entry: &DockEntry, target_key: &str) -> bool {
     let DockItemKind::App { exe_path } = &entry.kind else {
         return false;
     };
@@ -158,7 +188,7 @@ pub fn pin_entry_at_target(entry: &DockEntry, target_key: &str) -> bool {
     save_pinned_apps(&updated)
 }
 
-pub fn reveal_entry_in_explorer(entry: &DockEntry) {
+pub(crate) fn reveal_entry_in_explorer(entry: &DockEntry) {
     match &entry.kind {
         DockItemKind::App { exe_path } if !exe_path.is_empty() => {
             let wide_args = to_wide(&format!("/select,\"{exe_path}\""));
@@ -181,7 +211,7 @@ pub fn reveal_entry_in_explorer(entry: &DockEntry) {
 }
 
 #[must_use]
-pub fn force_quit_entry(entry: &DockEntry, own_pid: u32) -> CommandOutcome {
+pub(crate) fn force_quit_entry(entry: &DockEntry, own_pid: u32) -> CommandOutcome {
     let Some(app) = entry.app.as_ref() else {
         return CommandOutcome::TargetGone;
     };
@@ -230,7 +260,7 @@ pub fn force_quit_entry(entry: &DockEntry, own_pid: u32) -> CommandOutcome {
     }
 }
 
-pub const OVERFLOW_ENTRY_KEY: &str = "__overflow__";
+pub(crate) const OVERFLOW_ENTRY_KEY: &str = "__overflow__";
 
 #[must_use]
 pub fn overflow_dock_entry(hidden: usize) -> DockEntry {

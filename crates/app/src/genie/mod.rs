@@ -9,17 +9,16 @@ use otto_core::{
     WindowIdentity, downsample_bgra_to_fit, genie_canvas,
 };
 use otto_platform::{
-    capture_window, flush_compositor, is_shift_down, is_window_minimized, is_window_uipi,
-    minimize_window_native, minimize_window_native_quiet, motion_preference, place_overlay_below,
-    restore_window_native, restore_window_native_quiet, restored_window_bounds,
-    set_window_transitions_enabled, virtual_screen, window_bounds, window_corner_radius_px,
-    window_identity,
+    capture_window, flush_compositor, hide_window, is_shift_down, is_window_minimized,
+    is_window_uipi, minimize_window_native, minimize_window_native_quiet, motion_preference,
+    place_no_zorder, place_overlay_below, restore_window_native, restore_window_native_quiet,
+    restored_window_bounds, set_window_transitions_enabled, show_window_no_activate,
+    virtual_screen, window_bounds, window_corner_radius_px, window_identity,
 };
 use otto_render::build_fallback_card_snapshot;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MA_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
-    ShowWindow, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE,
+    MA_NOACTIVATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE,
 };
 use windows::core::Result;
 
@@ -50,11 +49,9 @@ pub(crate) struct Genie {
 }
 
 #[allow(clippy::unnecessary_wraps)]
-pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let genie = Genie::new(hwnd);
-    unsafe {
-        let _ = ShowWindow(HWND(hwnd as *mut _), SW_HIDE);
-    }
+    hide_window(hwnd);
     let mut slot = runtime
         .genie
         .try_borrow_mut()
@@ -63,7 +60,7 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     Ok(())
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.genie.try_borrow_mut()
         && let Some(mut genie) = guard.take()
     {
@@ -71,7 +68,7 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     _hwnd: isize,
     message: u32,
@@ -101,12 +98,16 @@ pub fn handle_message(
 }
 
 #[must_use]
-pub fn minimize_window(runtime: &RuntimeContext, hwnd: isize) -> bool {
+pub(crate) fn minimize_window(runtime: &RuntimeContext, hwnd: isize) -> bool {
     minimize_window_to(runtime, hwnd, None)
 }
 
 #[must_use]
-pub fn minimize_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<Rect>) -> bool {
+pub(crate) fn minimize_window_to(
+    runtime: &RuntimeContext,
+    hwnd: isize,
+    target: Option<Rect>,
+) -> bool {
     if !motion_preference().allows_motion() || is_window_uipi(hwnd) || !runtime.genie_enabled.get()
     {
         minimize_window_native(hwnd);
@@ -147,7 +148,11 @@ pub fn minimize_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<
 }
 
 #[must_use]
-pub fn restore_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<Rect>) -> bool {
+pub(crate) fn restore_window_to(
+    runtime: &RuntimeContext,
+    hwnd: isize,
+    target: Option<Rect>,
+) -> bool {
     if !is_window_minimized(hwnd) {
         return false;
     }
@@ -187,12 +192,8 @@ pub fn restore_window_to(runtime: &RuntimeContext, hwnd: isize, target: Option<R
     true
 }
 
-fn overlay_anchors(runtime: &RuntimeContext) -> [isize; 3] {
-    [
-        runtime.bar_hwnd.get(),
-        runtime.dock_hwnd.get(),
-        runtime.window_controls_hwnd.get(),
-    ]
+fn overlay_anchors(runtime: &RuntimeContext) -> Vec<isize> {
+    runtime.overlay_anchor_hwnds()
 }
 
 fn capture_minimize_frame(
@@ -289,17 +290,7 @@ impl Genie {
 
         let generation = self.shared.bump_generation();
         if self.hwnd != 0 {
-            unsafe {
-                let _ = SetWindowPos(
-                    HWND(self.hwnd as *mut _),
-                    None,
-                    canvas.x,
-                    canvas.y,
-                    canvas.width,
-                    canvas.height,
-                    SWP_NOACTIVATE | SWP_NOZORDER,
-                );
-            }
+            place_no_zorder(self.hwnd, canvas);
             let _ = place_overlay_below(self.hwnd, anchors);
         }
 
@@ -326,11 +317,7 @@ impl Genie {
             return false;
         }
 
-        if self.hwnd != 0 {
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_SHOWNOACTIVATE);
-            }
-        }
+        show_window_no_activate(self.hwnd);
         self.animation = Some(GenieAnimation {
             generation,
             window_id,
@@ -491,9 +478,7 @@ impl Genie {
     fn clear_overlay(&mut self, generation: u64) {
         self.shared.send_command(RenderCommand::Clear(generation));
         if self.hwnd != 0 {
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-            }
+            hide_window(self.hwnd);
         }
     }
 
@@ -507,9 +492,7 @@ impl Genie {
         self.cancel_active_animation();
         self.stop_worker();
         if self.hwnd != 0 {
-            unsafe {
-                let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-            }
+            hide_window(self.hwnd);
         }
         self.snapshots.clear();
     }

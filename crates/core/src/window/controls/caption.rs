@@ -31,6 +31,7 @@ pub struct NativeCaption {
     pub top_border_inset: bool,
     pub dpi: u32,
     pub measured_width: i32,
+    pub button_top_offset: i32,
 }
 
 impl NativeCaption {
@@ -61,6 +62,7 @@ impl NativeCaption {
             top_border_inset: rounded_top_right,
             dpi,
             measured_width: 0,
+            button_top_offset: 0,
         })
     }
 
@@ -68,6 +70,19 @@ impl NativeCaption {
     pub const fn with_top_border_inset(self, top_border_inset: bool) -> Self {
         Self {
             top_border_inset,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn with_button_top_offset(self, button_top_offset: i32) -> Self {
+        let clamped = if button_top_offset < 0 || button_top_offset >= self.height {
+            0
+        } else {
+            button_top_offset
+        };
+        Self {
+            button_top_offset: clamped,
             ..self
         }
     }
@@ -197,6 +212,10 @@ pub fn compute_cover_layout(
         let min_x = zoom_x - spacing;
         ([min_x, zoom_x, close_x], COVER_ACTIONS)
     };
+    let top_offset = caption
+        .button_top_offset
+        .clamp(0, (cover.height - 1).max(0)) as f32;
+    let active_height = (cover.height as f32 - top_offset).max(1.0);
     Some(WindowControlsLayout {
         width: cover.width,
         height: cover.height,
@@ -204,7 +223,7 @@ pub fn compute_cover_layout(
         offset_y: 0,
         radius,
         hit_radius,
-        center_y: cover.height as f32 * 0.5,
+        center_y: top_offset + active_height * 0.5,
         centers_x,
         actions,
         slots,

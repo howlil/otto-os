@@ -1,8 +1,9 @@
 use crate::host::RuntimeContext;
 use otto_core::{
-    ControlCenterAction, ControlCenterCommand, ControlCenterPage, control_center_focus_targets,
-    subpanel_opener_target,
+    ControlCenterAction, ControlCenterCommand, ControlCenterPage, ThemeMode,
+    control_center_focus_targets, subpanel_opener_target,
 };
+use otto_platform::{post_window_message, save_control_center_grid};
 
 use super::with_cc;
 
@@ -68,6 +69,90 @@ pub(super) fn execute_command(runtime: &RuntimeContext, command: ControlCenterCo
         ControlCenterCommand::OpenSettings(action) => {
             with_cc(runtime, |surface| surface.port.execute(action));
         }
+        _ => execute_grid_command(runtime, command),
+    }
+}
+
+fn execute_grid_command(runtime: &RuntimeContext, command: ControlCenterCommand) {
+    match command {
+        ControlCenterCommand::ToggleEditMode => {
+            with_cc(runtime, |surface| {
+                surface.snapshot.editing = !surface.snapshot.editing;
+                surface.drag = None;
+                surface.hovered = None;
+                surface.pressed = None;
+            });
+        }
+        ControlCenterCommand::ExitEditMode => {
+            with_cc(runtime, |surface| {
+                surface.snapshot.editing = false;
+                surface.drag = None;
+                surface.hovered = None;
+                surface.pressed = None;
+            });
+        }
+        ControlCenterCommand::OpenGallery => {
+            navigate_open_page(runtime, ControlCenterPage::Gallery);
+        }
+        ControlCenterCommand::AddControl(kind) => {
+            with_cc(runtime, |surface| {
+                if surface.snapshot.grid.add_control(kind).is_some() {
+                    let _ = save_control_center_grid(&surface.snapshot.grid);
+                }
+                surface.snapshot.page = ControlCenterPage::Main;
+                surface.snapshot.editing = true;
+                surface.scroll_offset = 0;
+                surface.hovered = None;
+                surface.pressed = None;
+            });
+        }
+        ControlCenterCommand::RemoveTile(id) => {
+            with_cc(runtime, |surface| {
+                if surface.snapshot.grid.remove_tile(id) {
+                    let _ = save_control_center_grid(&surface.snapshot.grid);
+                }
+                surface.hovered = None;
+                surface.pressed = None;
+            });
+        }
+        ControlCenterCommand::CycleTileSize(id) => {
+            with_cc(runtime, |surface| {
+                if surface.snapshot.grid.cycle_tile_size(id) {
+                    let _ = save_control_center_grid(&surface.snapshot.grid);
+                }
+            });
+        }
+        ControlCenterCommand::ResetGrid => {
+            with_cc(runtime, |surface| {
+                surface.snapshot.grid.reset();
+                let _ = save_control_center_grid(&surface.snapshot.grid);
+                surface.hovered = None;
+                surface.pressed = None;
+            });
+        }
+        ControlCenterCommand::ToggleDarkMode => {
+            let mut prefs = runtime.appearance_preferences.get();
+            prefs.theme = if crate::theme_state::appearance(runtime).theme
+                == otto_core::ResolvedTheme::Dark
+            {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
+            };
+            runtime.appearance_preferences.set(prefs);
+            runtime.pending_appearance.set(Some(prefs));
+            crate::theme_state::refresh_theme(runtime);
+        }
+        ControlCenterCommand::OpenFinder => {
+            let bar_hwnd = runtime.bar_hwnd.get();
+            if bar_hwnd != 0 {
+                let _ = post_window_message(bar_hwnd, crate::win_msg::WM_APP_OPEN_FINDER, 0, 0);
+            }
+        }
+        ControlCenterCommand::OpenSpotlight => {
+            crate::spotlight::toggle_search(runtime, None);
+        }
+        _ => {}
     }
 }
 

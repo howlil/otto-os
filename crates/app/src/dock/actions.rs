@@ -32,7 +32,7 @@ pub(super) fn show_window(runtime: &RuntimeContext, window: WindowIdentity, targ
     report(WindowsDockPort.window_command(window, WindowCommand::Focus, current_process_id()));
 }
 
-pub fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences) {
+pub(crate) fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences) {
     with_dock(runtime, |dock| {
         let trash_changed = dock.preferences.show_trash != preferences.show_trash;
         let entries_changed =
@@ -57,7 +57,7 @@ pub fn apply_preferences(runtime: &RuntimeContext, preferences: DockPreferences)
     });
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_dock(runtime, |dock| {
         if enabled {
             if dock.backdrop.is_none() {
@@ -74,10 +74,11 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
             dock.present(runtime);
         }
         dock.sync_backdrop(runtime, true);
+        dock.set_secondary_glass_enabled(runtime, enabled);
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_dock(runtime, |dock| {
         if let Some(feed) = dock.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -87,14 +88,19 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
         }
         dock.sync_backdrop(runtime, true);
         dock.present(runtime);
+        dock.set_secondary_capture_visible(runtime, visible);
     });
 }
 
-pub fn activate_overflow_entry(runtime: &RuntimeContext, entry: &DockEntry) {
+pub(crate) fn activate_overflow_entry(runtime: &RuntimeContext, entry: &DockEntry) {
     activate_entry(runtime, entry, None);
 }
 
 pub(super) fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target: Option<Rect>) {
+    if runtime.finder_enabled.get() && matches!(entry.kind, DockItemKind::Finder) {
+        crate::finder::open(runtime, None);
+        return;
+    }
     let effect = dock_activation_effect(entry.app.as_ref());
     if !entry.active
         && matches!(effect, DockEffect::ShowWindow(window) if !WindowsDockPort.is_window_minimized(window.hwnd))
@@ -106,7 +112,7 @@ pub(super) fn activate_entry(runtime: &RuntimeContext, entry: &DockEntry, target
     execute_dock_effect(runtime, effect, entry, target);
 }
 
-pub fn execute_dock_menu_command(
+pub(crate) fn execute_dock_menu_command(
     runtime: &RuntimeContext,
     cmd: usize,
     entry: &DockEntry,
@@ -169,6 +175,22 @@ pub(super) fn execute_dock_effect(
     match effect {
         DockEffect::Launch if matches!(entry.kind, DockItemKind::Apps) => {
             crate::spotlight::toggle_apps(runtime, target);
+        }
+        DockEffect::Launch
+            if runtime.finder_enabled.get() && matches!(entry.kind, DockItemKind::Finder) =>
+        {
+            crate::finder::open(runtime, None);
+        }
+        DockEffect::Launch
+            if runtime.finder_enabled.get() && matches!(entry.kind, DockItemKind::Trash { .. }) =>
+        {
+            crate::finder::open_trash(runtime);
+        }
+        DockEffect::RevealInExplorer
+            if runtime.finder_enabled.get()
+                && let DockItemKind::App { exe_path } = &entry.kind =>
+        {
+            crate::finder::reveal_path(runtime, exe_path);
         }
         DockEffect::ShowWindow(window) => show_window(runtime, window, target),
         other => {

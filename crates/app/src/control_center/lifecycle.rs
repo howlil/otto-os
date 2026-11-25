@@ -3,14 +3,13 @@ use std::time::Instant;
 use crate::host::RuntimeContext;
 use crate::win_msg::CC_POLL_TIMER;
 use otto_core::{
-    BluetoothState, ControlCenterPage, MotionMetrics, MotionPreference, WifiState, animate_value,
+    BluetoothState, ControlCenterCommand, ControlCenterPage, MotionMetrics, MotionPreference,
+    WifiState, animate_value,
 };
 use otto_platform::{
-    MenuNavEvent, cursor_position, poll_menu_events, primary_screen, release_capture_if_owned,
-    routes_keys_to,
+    MenuNavEvent, cursor_position, hide_window, kill_window_timer, monitor_at, poll_menu_events,
+    release_capture_if_owned, routes_keys_to, set_window_timer,
 };
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SW_HIDE, SetTimer, ShowWindow};
 
 use super::CC_POLL_MS;
 use super::ControlCenterSurface;
@@ -29,17 +28,22 @@ impl ControlCenterSurface {
         motion: MotionPreference,
     ) {
         let _ = self.leave_keyboard_focus();
-        self.screen = primary_screen();
+        let next_monitor = monitor_at(anchor_right - 1, anchor_y);
+        if next_monitor.dpi != self.monitor.dpi {
+            self.renderer = None;
+        }
+        self.monitor = next_monitor;
         self.anchor_right = anchor_right;
         self.anchor_y = anchor_y;
         self.motion = motion;
         self.start_morph();
         self.snapshot.page = page;
+        self.snapshot.editing = false;
         self.snapshot.audio_switch_failed = false;
         self.scroll_offset = 0;
         self.hovered = None;
         self.pressed = None;
-        self.dragging = None;
+        self.drag = None;
         self.sync_snapshot(runtime);
         self.relayout();
         if focused {
@@ -52,16 +56,8 @@ impl ControlCenterSurface {
         self.visible = true;
         self.prime_backdrop(runtime);
         self.place();
-        self.sync_backdrop(runtime, true);
         self.present(runtime);
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                CC_POLL_TIMER,
-                CC_POLL_MS,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, CC_POLL_TIMER, CC_POLL_MS);
     }
 
     pub(super) fn hide(&mut self) {
@@ -70,16 +66,15 @@ impl ControlCenterSurface {
         }
         let _ = self.leave_keyboard_focus();
         self.visible = false;
+        self.snapshot.editing = false;
         self.hovered = None;
         self.pressed = None;
-        self.dragging = None;
+        self.drag = None;
         self.morph_progress = None;
         self.backdrop = None;
         let _ = release_capture_if_owned(self.hwnd);
-        unsafe {
-            let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), CC_POLL_TIMER);
-            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-        }
+        kill_window_timer(self.hwnd, CC_POLL_TIMER);
+        hide_window(self.hwnd);
         self.renderer = None;
         self.snapshot.media = None;
         self.snapshot.wifi = WifiState::default();
@@ -137,7 +132,14 @@ impl ControlCenterSurface {
             self.opened_at.elapsed() >= OPEN_CLICK_GRACE,
             inside,
         ) {
-            if !matches!(nav_event, Some(MenuNavEvent::Escape)) {
+            if matches!(nav_event, Some(MenuNavEvent::Escape)) {
+                if self.snapshot.page != ControlCenterPage::Main {
+                    return PostClickAction::Command(ControlCenterCommand::Back, false);
+                }
+                if self.snapshot.editing {
+                    return PostClickAction::Command(ControlCenterCommand::ExitEditMode, false);
+                }
+            } else {
                 self.dismissed_outside_at = Some(Instant::now());
             }
             return PostClickAction::Close;
@@ -145,10 +147,9 @@ impl ControlCenterSurface {
         if self.advance_morph() {
             self.present(runtime);
         }
-        if self.dragging.is_some() {
+        if self.drag.is_some() {
             return PostClickAction::None;
         }
-        self.sync_backdrop(runtime, false);
         if cursor != self.last_cursor {
             self.last_cursor = cursor;
             if inside {

@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { motion, useInView, useReducedMotion } from "motion/react";
 import { BatteryMedium, Bell, ChevronLeft, ChevronRight, Search, SlidersHorizontal, Volume2, Wifi } from "lucide-react";
+import { motion, useInView, useReducedMotion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 
 type Pop = "none" | "calendar" | "notif";
@@ -113,13 +113,15 @@ export function TopBarStudio() {
           </div>
         </div>
         <div className="grid grid-cols-7 text-center text-[10.5px] font-semibold text-ink-soft">
-          {["S", "M", "T", "W", "T", "F", "S"].map((letter, index) => (
-            <span key={index} className="py-1">{letter}</span>
+          {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+            <span key={day} className="py-1">
+              {day[0]}
+            </span>
           ))}
         </div>
         <div className="grid grid-cols-7 text-center text-[12px] tabular-nums">
-          {CELLS.map((cell, index) => (
-            <span key={index} className="grid h-7 place-items-center">
+          {CELLS.map((cell) => (
+            <span key={`${cell.muted ? "m" : "c"}-${cell.day}`} className="grid h-7 place-items-center">
               <span
                 className={`grid size-6 place-items-center rounded-full ${
                   cell.day === 23 && !cell.muted
@@ -149,7 +151,9 @@ export function TopBarStudio() {
           <span className="text-[11px] font-medium text-ink-soft">Clear All</span>
         </div>
         <div className="flex items-start gap-2.5 rounded-[12px] border border-line bg-page p-2.5">
-          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#5865f2] text-[12px] font-bold text-white">D</span>
+          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#5865f2] text-[12px] font-bold text-white">
+            D
+          </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] font-medium text-ink-soft">Discord</span>
@@ -159,7 +163,9 @@ export function TopBarStudio() {
           </div>
         </div>
         <div className="mt-1.5 flex items-start gap-2.5 rounded-[12px] border border-line bg-page p-2.5">
-          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#1b1b1d] text-[12px] font-bold text-white">GH</span>
+          <span className="grid size-8 shrink-0 place-items-center rounded-[8px] bg-[#1b1b1d] text-[12px] font-bold text-white">
+            GH
+          </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] font-medium text-ink-soft">GitHub</span>
@@ -177,7 +183,13 @@ export function TopBarStudio() {
         transition={reduced ? { duration: 0 } : POINTER}
       >
         <svg width="18" height="22" viewBox="0 0 18 22" aria-hidden="true">
-          <path d="M1 1 L1 17 L5.2 13.2 L8.2 20 L10.9 18.8 L7.9 12.2 L14 12.2 Z" fill="#ffffff" stroke="#000000" strokeWidth="1.2" strokeLinejoin="round" />
+          <path
+            d="M1 1 L1 17 L5.2 13.2 L8.2 20 L10.9 18.8 L7.9 12.2 L14 12.2 Z"
+            fill="#ffffff"
+            stroke="#000000"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
         </svg>
       </motion.div>
     </div>

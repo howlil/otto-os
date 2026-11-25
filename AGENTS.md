@@ -1,47 +1,51 @@
-# Otto OS — local engineering rules
+# Otto OS — Local Engineering & Software Factory Rules
 
 ## Scope
 
-This directory is a Rust 2024 workspace for a native Windows notch-style top bar. Keep changes inside this workspace and preserve the crate boundaries described in `.agents/engineering.md`.
+This repository is a Rust 2024 monorepo for **Otto OS** (a native Windows 11 desktop shell with Top Bar, Dynamic Island/Notch, Dock, Control Center, Spotlight, zero-overlay Window Controls, Genie, Focus Shield, and Otto Settings) plus its Astro/Cloudflare landing site (`landing/`), Windows installers/MSIX/WinGet packaging (`packaging/`), and interactive E2E suite (`tests/e2e/`).
 
-## Stack and commands
+Keep changes inside this workspace and preserve the crate boundaries in `.agents/engineering.md`.
 
-- Rust edition 2024 with workspace lint settings in `Cargo.toml`.
-- `windows` 0.62 for Win32, Direct2D, DirectWrite, GDI, and shell integration.
-- `windows-numerics` 0.3 for render geometry.
-- Format: `cargo fmt --all -- --check`.
-- Test: `cargo test --workspace`.
-- Build check: `cargo check --workspace`.
-- Lint: `cargo clippy --workspace --all-targets --all-features`.
+## Stack & Verification Gate
 
-## Verification gate
+- **Rust workspace**: Edition 2024 (`rust-toolchain.toml`), `windows` 0.62, `windows-numerics` 0.3, lints in `Cargo.toml` and `clippy.toml`, dependency policy in `deny.toml`.
+- **Landing site**: Bun, Astro, React 19, Tailwind CSS, Biome (`landing/biome.json`), Cloudflare Pages Functions + D1 SQL (`landing/migrations/`).
+- **Local bootstrap (once per clone)**: `.\scripts\setup-dev.ps1` (configures `core.hooksPath = .githooks` and checks local tools).
+- **Canonical local gate**: `.\scripts\gate.ps1` — runs all required checks matching CI:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cargo deny check --all-features` (enforced in CI; install locally via `cargo install cargo-deny --locked`)
+  - `cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1` (includes `host::fitness_tests` `F1`–`F12`)
+  - `cargo test -p otto-platform -- --skip the_screen_grabber_returns_a_frame_of_the_requested_size --test-threads=1`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-e2e.ps1` + PowerShell AST syntax check
+  - `landing/`: `bun x biome ci .`, `bun run check`, `bun x tsc --noEmit`, `bun test`, `bun run build`, `bun run smoke`
+- **Interactive desktop & pre-release gate**: `.\scripts\release-verify.ps1 -E2EScenario full` (runs `gate.ps1`, `the_screen_grabber_returns_a_frame_of_the_requested_size`, all `13` `#[ignore]` native/handle-leak tests, release build, `tests/e2e/windows-e2e.ps1 -Scenario full`, and `packaging/msix/smoke-test.ps1`).
 
-Run formatting, workspace tests, workspace check, and Clippy before declaring a change verified. A Windows-only path must be checked on Windows. A failed pre-existing gate remains a reported blocker; do not hide it with a weaker command.
+Run the relevant checks before declaring any change verified; a failed pre-existing gate remains a reported blocker and must never be hidden behind a weaker command.
 
-## Codebase design rules
+## Expected-Pain Planning Policy
 
-- Source code is comment-free: do not add `//`, `///`, `//!`, or block comments. Put durable rationale in `.agents/engineering.md`.
-- Prefer names, types, small functions, and tests that explain behavior. Do not replace missing explanation with broad abstractions.
-- `otto-core` contains pure models, geometry, formatting, and tests. It must not depend on Windows or rendering.
-- `otto-platform` owns all Win32 and shell integration. Keep FFI behind narrow safe functions and return domain values to callers.
-- `otto-render` owns Direct2D, DirectWrite, GDI, brushes, geometry, and resource cleanup. It consumes core values and does not call platform actions.
-- `otto-os` owns the window procedure, message dispatch, timers, runtime state, and orchestration. It coordinates crates but does not duplicate their policies.
-- Layout metrics and hit regions have one source of truth in `otto-core`. Rendering and input dispatch consume the same resolved layout.
-- Keep visual constants grouped by responsibility. Do not introduce a second copy of notch, slot, DPI, color, or timer values.
-- Use `Result` for startup and resource failures, `Option` for absence, and explicit best-effort handling only at the runtime boundary.
-- Keep unsafe code local to the platform or render boundary. Every owned OS or graphics resource must have an explicit release path.
+Before writing code, classify the task by **Expected Pain = (change likelihood) × (reversal/migration cost)**:
 
-## System boundaries
+- **Deep** (`otto-core` layout/UIA/port schemas, persistent file/SQL formats, Win32 hooks/AppBar/recovery/process throttling, `updates.rs`, packaging, CI/CD, new dependencies): align on a concise spec + visual table/flow and rollback path with human sign-off before coding.
+- **Medium** (new feature slices behind existing ports, render shaders/DPI changes, splitting legacy god files, `landing/functions/` endpoints): write a brief interface/edge-case/acceptance spec first.
+- **Light** (isolated `landing/` tweaks, scoped `otto-core` bug fix with failing test, dark-launched prototype behind `OTTO_EXPERIMENTAL_FLAGS`): iterate quickly behind a reversible boundary.
 
-The dependency direction is `app → render → core` and `app → platform → core`; `core` never points outward. Native input enters through the Windows message procedure, is converted into core coordinates, and is dispatched to platform actions. Native status enters through `platform`, becomes `otto-core` data, and is rendered without another OS query.
+## Codebase Design Rules
 
-Do not add persistence, networking, background services, or cross-crate global state without an explicit system contract and a matching verification path.
+- **Comment-free Rust source**: `crates/*/src/` must contain zero `//`, `///`, `//!`, or block comments (`workspace_rust_sources_remain_comment_free`). Record durable rationale in `.agents/engineering.md`.
+- **Single source of truth**: Layout metrics and hit targets live exclusively in `otto-core`; rendering (`otto-render`) and input dispatch (`otto-os`) consume the same resolved `Layout`.
+- **Crate boundaries (`F1`–`F4`)**: `otto-os -> otto-render -> otto-core` and `otto-os -> otto-platform -> otto-core`. `otto-core` never imports Win32/render or uses `unsafe`; `otto-render` never invokes platform actions.
+- **Ratchets (`F5`–`F12`)**: Never weaken `fitness_tests.rs` budgets (`#[allow]`, `unsafe`, file lines, sibling coupling, doc sizes) to make a change pass—refactor or split instead.
+- **Dark-launch isolation**: Gate uncertain experiments behind `OTTO_EXPERIMENTAL_FLAGS` (`otto-core::runtime::flags`) rather than mutating `plugins.txt` v1 or user settings.
+- **Error & resource discipline**: Use `Result` for startup/resource failures, `Option` for absence, RAII/`Drop` for every OS/graphics handle, and separate mechanical formatting sweeps from behavioral PRs.
 
-## Safety
+## Safety & Project Memory
 
-Do not commit secrets or private data. Do not force-push, publish, deploy, delete user data, or change external state without explicit authorization. Keep generated `target/` output out of source changes.
-
-## Project memory
-
-- System contracts and durable architecture: `.agents/engineering.md`.
-- Product behavior is represented by the current source and tests until a product contract is added.
+- Never commit secrets, certificates, user data, or `target/` output. Never force-push, publish, or alter external state without explicit authorization.
+- **Live project memory** (keep each `<= 8 KB` / hard cap `12 KB`):
+  - Architecture & contracts: `.agents/engineering.md` (history in `.agents/archive/decisions-v1.md`)
+  - Product scope & invariants: `.agents/product.md` (history in `.agents/archive/product-v1.md`)
+  - Native UI/HIG design rules: `.agents/DESIGN.md` (history in `.agents/archive/design-v1.md`)
+  - Landing site contracts: `landing/PRODUCT.md` and `landing/DESIGN.md`

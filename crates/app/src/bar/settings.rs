@@ -9,14 +9,13 @@ use otto_core::{
 use otto_platform::{
     QuickCaptureInput, load_tasks, register_bluetooth_hud_target, register_capture_hotkey,
     stop_idle_connectivity_task, unregister_bluetooth_hud_target, unregister_capture_hotkey,
-    watch_top_edge,
 };
 
 use super::is_notch_target;
 use super::with_bar;
 use super::with_bar_result;
 
-pub fn refresh_plugin_layout(runtime: &RuntimeContext, control_center_enabled: bool) {
+pub(crate) fn refresh_plugin_layout(runtime: &RuntimeContext, control_center_enabled: bool) {
     with_bar(runtime, |bar| {
         bar.control_center_enabled = control_center_enabled;
         bar.recompute_layout();
@@ -24,7 +23,7 @@ pub fn refresh_plugin_layout(runtime: &RuntimeContext, control_center_enabled: b
     });
 }
 
-pub fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
+pub(crate) fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
     with_bar(runtime, |bar| {
         if let Some(action) = BarControlsController::click_action(target) {
             bar.perform(runtime, action);
@@ -32,14 +31,15 @@ pub fn activate_hidden_target(runtime: &RuntimeContext, target: HitTarget) {
     });
 }
 
-pub fn apply_appearance(runtime: &RuntimeContext, _appearance: Appearance) {
+pub(crate) fn apply_appearance(runtime: &RuntimeContext, appearance: Appearance) {
     with_bar(runtime, |bar| {
         bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
+    crate::window_controls::apply_appearance(runtime, appearance);
 }
 
-pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.io.online_lyrics_enabled = enabled;
         bar.notch
@@ -58,20 +58,21 @@ pub fn set_online_lyrics_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         if !enabled {
             bar.backdrop = None;
             if let Some(renderer) = bar.renderer.as_ref() {
                 renderer.clear_bar_backdrop();
             }
+            bar.clear_secondary_backdrops();
             bar.present(runtime);
         }
         bar.sync_backdrop(runtime, true);
     });
 }
 
-pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         if bar.top_bar_enabled == enabled {
             return;
@@ -96,14 +97,11 @@ pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
             }
         }
         bar.recompute_layout();
+        bar.sync_secondary_bars(runtime);
         bar.sync_backdrop(runtime, true);
         bar.apply_visibility(runtime);
         bar.sync_panel_visibility();
-        watch_top_edge(
-            bar.hidden_for_full_screen(),
-            bar.screen.width,
-            bar.screen.height,
-        );
+        bar.sync_top_edge_watches();
         if bar.shown() {
             bar.present(runtime);
         }
@@ -112,9 +110,10 @@ pub fn set_top_bar_enabled(runtime: &RuntimeContext, enabled: bool) {
             bar.release_renderer_if_unused(runtime);
         }
     });
+    crate::window_controls::sync_bar_height(runtime);
 }
 
-pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         if bar.notch_enabled == enabled {
             return;
@@ -176,11 +175,7 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
         bar.recompute_layout();
         bar.apply_visibility(runtime);
         bar.sync_panel_visibility();
-        watch_top_edge(
-            bar.hidden_for_full_screen(),
-            bar.screen.width,
-            bar.screen.height,
-        );
+        bar.sync_top_edge_watches();
         if bar.shown() {
             bar.present(runtime);
         }
@@ -191,7 +186,7 @@ pub fn set_notch_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn leave_keyboard_focus(runtime: &RuntimeContext) {
+pub(crate) fn leave_keyboard_focus(runtime: &RuntimeContext) {
     with_bar(runtime, |bar| {
         if bar.focus.is_active() {
             bar.leave_keyboard_focus(runtime);
@@ -200,32 +195,38 @@ pub fn leave_keyboard_focus(runtime: &RuntimeContext) {
 }
 
 #[must_use]
-pub fn control_center_anchor(
+pub(crate) fn control_center_anchor(
     runtime: &RuntimeContext,
     trigger: HitTarget,
 ) -> Option<(i32, i32, MotionPreference)> {
     with_bar_result(runtime, |bar| {
         bar.top_bar_enabled.then(|| {
-            (
-                bar.anchor_right(trigger),
-                bar.layout.popup_anchor_y(bar.screen.dpi),
-                bar.motion,
-            )
+            bar.secondary_anchor_for_cursor(trigger).unwrap_or_else(|| {
+                (
+                    bar.anchor_right(trigger),
+                    bar.layout.popup_anchor_y(bar.screen.dpi),
+                    bar.motion,
+                )
+            })
         })
     })
     .flatten()
 }
 
 #[must_use]
-pub fn search_slot_trigger(runtime: &RuntimeContext) -> Option<Rect> {
+pub(crate) fn search_slot_trigger(runtime: &RuntimeContext) -> Option<Rect> {
     with_bar_result(runtime, |bar| {
-        (bar.top_bar_enabled && bar.layout.slots.search_slot.width > 0)
-            .then_some(bar.layout.slots.search_slot)
+        if !bar.top_bar_enabled {
+            return None;
+        }
+        bar.secondary_search_trigger_for_cursor().or_else(|| {
+            (bar.layout.slots.search_slot.width > 0).then_some(bar.layout.slots.search_slot)
+        })
     })
     .flatten()
 }
 
-pub fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_privacy_enabled(enabled);
         if enabled && bar.notch_enabled {
@@ -238,7 +239,7 @@ pub fn set_privacy_indicators_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_clipboard_enabled(enabled);
         if enabled && bar.notch_enabled {
@@ -255,7 +256,7 @@ pub fn set_clipboard_history_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_shelf_enabled(enabled);
         if enabled && bar.notch_enabled {
@@ -275,7 +276,7 @@ pub fn set_drop_shelf_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_menu_bar_preferences(runtime: &RuntimeContext, preferences: MenuBarPreferences) {
+pub(crate) fn set_menu_bar_preferences(runtime: &RuntimeContext, preferences: MenuBarPreferences) {
     with_bar(runtime, |bar| {
         let items_changed = bar.menu_prefs.hidden_items != preferences.hidden_items;
         let bg_changed = bar.menu_prefs.show_background != preferences.show_background;
@@ -295,17 +296,15 @@ pub fn set_menu_bar_preferences(runtime: &RuntimeContext, preferences: MenuBarPr
         if visibility_changed {
             bar.apply_visibility(runtime);
         }
-        watch_top_edge(
-            bar.hidden_for_full_screen(),
-            bar.screen.width,
-            bar.screen.height,
-        );
+        bar.apply_secondary_menu_mode(runtime);
+        bar.sync_top_edge_watches();
         bar.present(runtime);
         bar.schedule_deadline();
     });
+    crate::window_controls::sync_bar_height(runtime);
 }
 
-pub fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_hud_enabled(enabled);
         if enabled && bar.notch_enabled {
@@ -322,7 +321,7 @@ pub fn set_notch_hud_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_media_module_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_media_module_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_media_enabled(enabled);
         bar.notch
@@ -348,7 +347,7 @@ pub fn set_media_module_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_focus_module_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_focus_module_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         bar.notch.set_focus_enabled(enabled);
         runtime.focus_active.set(bar.notch.focus_active());
@@ -362,22 +361,24 @@ pub fn set_focus_module_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn sync_focus_blocklist(runtime: &RuntimeContext) {
-    let blocklist = runtime
+pub(crate) fn sync_focus_blocklist(runtime: &RuntimeContext) {
+    let synced = runtime
         .focus_activity
         .try_borrow()
         .ok()
-        .map(|fa| fa.blocklist.clone());
-    if let Some(blocklist) = blocklist {
+        .map(|fa| (fa.blocklist.clone(), fa.categories.clone()));
+    if let Some((blocklist, categories)) = synced {
         with_bar(runtime, |bar| {
             bar.notch.set_focus_blocklist(blocklist);
+            bar.notch.set_focus_categories(categories);
+            bar.recompute_layout();
             bar.present(runtime);
         });
     }
 }
 
 #[must_use]
-pub fn focus_session_status(runtime: &RuntimeContext) -> otto_core::FocusSessionStatus {
+pub(crate) fn focus_session_status(runtime: &RuntimeContext) -> otto_core::FocusSessionStatus {
     with_bar_result(runtime, |bar| {
         if bar.notch_enabled {
             bar.notch.focus_session_status()
@@ -388,7 +389,7 @@ pub fn focus_session_status(runtime: &RuntimeContext) -> otto_core::FocusSession
     .unwrap_or_default()
 }
 
-pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
+pub(crate) fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
     with_bar(runtime, |bar| {
         if hidden {
             bar.appbar.hide_system_taskbar();
@@ -399,7 +400,7 @@ pub fn set_dock_taskbar_hidden(runtime: &RuntimeContext, hidden: bool) {
     });
 }
 
-pub fn set_hotkeys_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_hotkeys_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         if enabled && bar.notch_enabled && bar.io.quick_capture.is_some() {
             register_capture_hotkey(bar.hwnd);
@@ -409,7 +410,7 @@ pub fn set_hotkeys_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_quick_capture_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_quick_capture_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_bar(runtime, |bar| {
         if enabled {
             bar.notch.replace_tasks(load_tasks());
@@ -437,7 +438,7 @@ pub fn set_quick_capture_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_bar(runtime, |bar| {
         if let Some(feed) = bar.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -445,21 +446,23 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
         if visible && let Some(renderer) = bar.renderer.as_ref() {
             renderer.clear_bar_backdrop();
         }
+        bar.apply_secondary_capture_visible(visible);
         bar.sync_backdrop(runtime, true);
         bar.present(runtime);
     });
 }
 
-pub fn set_brand_icon(runtime: &RuntimeContext, brand_icon: BrandIcon) {
+pub(crate) fn set_brand_icon(runtime: &RuntimeContext, brand_icon: BrandIcon) {
     with_bar(runtime, |bar| {
         if let Some(renderer) = bar.renderer.as_ref() {
             renderer.set_brand_icon(brand_icon);
         }
+        bar.apply_secondary_brand_icon(brand_icon);
         bar.present(runtime);
     });
 }
 
-pub fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
+pub(crate) fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
     with_bar(runtime, |bar| {
         let next_metrics = Metrics::for_style(style);
         if next_metrics.bar_height == bar.metrics.bar_height {
@@ -472,4 +475,5 @@ pub fn set_notch_style(runtime: &RuntimeContext, style: NotchStyle) {
             bar.sync_panel_visibility();
         }
     });
+    crate::window_controls::set_notch_style(runtime, style);
 }

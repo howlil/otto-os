@@ -37,10 +37,11 @@ pub use self::layout::{
     PopupMenuRowLayout, compute_popup_menu_layout,
 };
 pub use self::notification_center::{
-    NOTIFICATION_CENTER_CARD_HEIGHT, NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_PAD,
-    NOTIFICATION_CENTER_WIDTH, NotificationCardKind, NotificationCardLayout, NotificationCenterHit,
-    NotificationCenterLayout, NotificationCenterStateCardLayout, NotificationGroup,
-    NotificationGroupHeaderLayout, compute_notification_center_layout, group_notifications,
+    NOTIFICATION_CENTER_CARD_HEIGHT, NOTIFICATION_CENTER_CARD_RADIUS,
+    NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_PAD, NOTIFICATION_CENTER_WIDTH,
+    NotificationCardKind, NotificationCardLayout, NotificationCenterHit, NotificationCenterLayout,
+    NotificationCenterStateCardLayout, NotificationGroup, NotificationGroupHeaderLayout,
+    compute_notification_center_layout, group_notifications,
 };
 pub use self::notifications::{
     NotificationAccess, NotificationBadge, NotificationCenterSnapshot, NotificationSummary,

@@ -13,12 +13,12 @@ const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run
 const STARTUP_VALUE_NAME: PCWSTR = w!("OttoOS");
 
 #[must_use]
-pub fn format_startup_command(exe_path: &Path) -> String {
+pub(crate) fn format_startup_command(exe_path: &Path) -> String {
     format!("\"{}\"", exe_path.display())
 }
 
 #[must_use]
-pub fn is_cargo_target_exe(exe_path: &Path) -> bool {
+pub(crate) fn is_cargo_target_exe(exe_path: &Path) -> bool {
     let mut components = exe_path.components().rev();
     let Some(_exe_name) = components.next() else {
         return false;
@@ -34,7 +34,10 @@ pub fn is_cargo_target_exe(exe_path: &Path) -> bool {
 }
 
 #[must_use]
-pub fn select_startup_exe<'a>(current_exe: &'a Path, installed_exe: Option<&'a Path>) -> &'a Path {
+pub(crate) fn select_startup_exe<'a>(
+    current_exe: &'a Path,
+    installed_exe: Option<&'a Path>,
+) -> &'a Path {
     if is_cargo_target_exe(current_exe)
         && let Some(installed) = installed_exe
     {
@@ -53,7 +56,7 @@ fn installed_program_exe() -> Option<PathBuf> {
 }
 
 #[must_use]
-pub fn is_startup_entry_enabled(value: Option<&str>) -> bool {
+pub(crate) fn is_startup_entry_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|raw| !raw.trim().is_empty())
 }
 

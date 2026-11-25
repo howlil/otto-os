@@ -13,11 +13,11 @@ use windows::core::HSTRING;
 
 use crate::winrt_io::{await_until, read_stream_bounded};
 
-pub const MAX_LYRICS_BYTES: usize = 256 * 1024;
-pub const MAX_LYRICS_RESPONSE_BYTES: usize = 1024 * 1024;
-pub const LYRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-pub const LYRICS_QUEUE_DEPTH: usize = 2;
-pub const LYRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const MAX_LYRICS_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_LYRICS_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const LYRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const LYRICS_QUEUE_DEPTH: usize = 2;
+pub(crate) const LYRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn cache_dir() -> Option<PathBuf> {
     let mut path = crate::file::data_dir()?;
@@ -185,9 +185,9 @@ pub fn clean_track_title(title: &str) -> String {
     }
     let trimmed = result.trim();
     if trimmed.is_empty() {
-        title.trim().to_string()
+        title.trim().to_owned()
     } else {
-        trimmed.to_string()
+        trimmed.to_owned()
     }
 }
 

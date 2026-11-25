@@ -72,7 +72,12 @@ impl DockFocus {
             BarKey::Last => Some(last),
             BarKey::NextTab => current.checked_add(1).filter(|index| *index <= last),
             BarKey::PreviousTab => current.checked_sub(1),
-            BarKey::Up | BarKey::Down | BarKey::Activate | BarKey::Exit => None,
+            BarKey::Up
+            | BarKey::Down
+            | BarKey::Activate
+            | BarKey::Exit
+            | BarKey::Digit(_)
+            | BarKey::Backspace => None,
         };
         match next {
             Some(index) if index == current => DockFocusOutcome::Unchanged,

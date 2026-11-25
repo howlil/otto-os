@@ -55,10 +55,7 @@ async function exceedsRateLimit(db: D1Database, ip: string): Promise<boolean> {
   return (row?.count ?? 0) > RATE_LIMIT;
 }
 
-async function readPayload(
-  request: Request,
-  isForm: boolean,
-): Promise<Record<string, unknown> | null> {
+async function readPayload(request: Request, isForm: boolean): Promise<Record<string, unknown> | null> {
   const text = await request.text();
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     return null;
@@ -88,9 +85,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const payload = await readPayload(request, isForm);
   if (!payload) {
-    return isForm
-      ? redirectToForm(request, "error")
-      : json({ ok: false, error: "invalid_body" }, 400);
+    return isForm ? redirectToForm(request, "error") : json({ ok: false, error: "invalid_body" }, 400);
   }
 
   if (clean(payload.website, 200)) {
@@ -99,16 +94,12 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
   if (await exceedsRateLimit(env.DB, ip)) {
-    return isForm
-      ? redirectToForm(request, "rate_limited")
-      : json({ ok: false, error: "rate_limited" }, 429);
+    return isForm ? redirectToForm(request, "rate_limited") : json({ ok: false, error: "rate_limited" }, 429);
   }
 
   const email = clean(payload.email, MAX_EMAIL_LENGTH)?.toLowerCase() ?? "";
   if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
-    return isForm
-      ? redirectToForm(request, "invalid")
-      : json({ ok: false, error: "invalid_email" }, 422);
+    return isForm ? redirectToForm(request, "invalid") : json({ ok: false, error: "invalid_email" }, 422);
   }
 
   if (payload.profile === true) {
@@ -131,9 +122,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const source = clean(payload.source, 20) ?? (isForm ? "hero" : null);
   const token = crypto.randomUUID();
-  const result = await env.DB.prepare(
-    "INSERT OR IGNORE INTO waitlist (email, source, token_hash) VALUES (?, ?, ?)",
-  )
+  const result = await env.DB.prepare("INSERT OR IGNORE INTO waitlist (email, source, token_hash) VALUES (?, ?, ?)")
     .bind(email, source && SOURCES.has(source) ? source : null, await sha256Hex(token))
     .run();
 

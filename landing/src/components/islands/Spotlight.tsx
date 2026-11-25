@@ -1,7 +1,7 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
-import { Code, Disc3, Folder, Globe, LayoutGrid, List, NotebookPen, Search, Settings2, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Code, Disc3, Folder, Globe, LayoutGrid, List, NotebookPen, Search, Settings2, Terminal } from "lucide-react";
+import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
+import { type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { T } from "../lib/T";
 
 type AppEntry = {
@@ -107,12 +107,19 @@ export function Spotlight() {
               className="w-full bg-transparent text-[19px] text-stage-ink caret-[#75b0ff] outline-none"
             />
             {query.length === 0 && (
-              <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center text-[19px] text-stage-muted" aria-hidden="true">
+              <span
+                className="pointer-events-none absolute inset-y-0 left-0 flex items-center text-[19px] text-stage-muted"
+                aria-hidden="true"
+              >
                 <T id="Cari aplikasi terpasang" en="Search installed apps" />
               </span>
             )}
           </div>
-          <div className="flex items-center gap-1 rounded-full bg-white/[0.07] p-0.5" role="group" aria-label="Spotlight view">
+          <div
+            className="flex items-center gap-1 rounded-full bg-white/[0.07] p-0.5"
+            role="group"
+            aria-label="Spotlight view"
+          >
             <button
               type="button"
               aria-pressed={!grid}
@@ -122,7 +129,9 @@ export function Spotlight() {
               }`}
             >
               <List size={15} strokeWidth={1.9} aria-hidden="true" />
-              <span className="sr-only"><T id="Tampilan daftar" en="List view" /></span>
+              <span className="sr-only">
+                <T id="Tampilan daftar" en="List view" />
+              </span>
             </button>
             <button
               type="button"
@@ -133,7 +142,9 @@ export function Spotlight() {
               }`}
             >
               <LayoutGrid size={15} strokeWidth={1.9} aria-hidden="true" />
-              <span className="sr-only"><T id="Tampilan kisi" en="Grid view" /></span>
+              <span className="sr-only">
+                <T id="Tampilan kisi" en="Grid view" />
+              </span>
             </button>
           </div>
         </div>
@@ -160,10 +171,20 @@ export function Spotlight() {
                       : `flex cursor-pointer items-center gap-3 rounded-[14px] px-3 py-2.5 transition-colors ${selected ? "bg-white/10" : ""}`
                   }
                 >
-                  <span className="grid size-9 place-items-center squircle text-white" style={{ background: app.tint }} aria-hidden="true">
+                  <span
+                    className="grid size-9 place-items-center squircle text-white"
+                    style={{ background: app.tint }}
+                    aria-hidden="true"
+                  >
                     <Icon size={18} strokeWidth={1.8} />
                   </span>
-                  <span className={grid ? "w-full truncate text-center text-[12px] text-stage-ink" : "flex-1 text-[15px] font-medium text-stage-ink"}>
+                  <span
+                    className={
+                      grid
+                        ? "w-full truncate text-center text-[12px] text-stage-ink"
+                        : "flex-1 text-[15px] font-medium text-stage-ink"
+                    }
+                  >
                     {app.name}
                   </span>
                   {!grid ? (

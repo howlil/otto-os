@@ -1,7 +1,9 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VK_LSHIFT, VK_LWIN, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_UP,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
 use windows::core::{PCWSTR, w};
@@ -66,4 +68,12 @@ pub(crate) fn open_night_light_settings() {
 
 pub(crate) fn open_power_settings() {
     shell_exec(w!("ms-settings:powersleep"), PCWSTR::null());
+}
+
+pub(crate) fn lock_screen() {
+    send_key_chord(&[VK_LWIN, vk_char(b'L')]);
+}
+
+pub(crate) fn trigger_screenshot() {
+    send_key_chord(&[VK_LWIN, VK_LSHIFT, vk_char(b'S')]);
 }

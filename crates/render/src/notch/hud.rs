@@ -13,19 +13,20 @@ use windows_numerics::Vector2;
 use crate::AMBER_WARN;
 use crate::BLACK;
 use crate::CHARGING_GREEN;
-use crate::FOREGROUND;
 use crate::Renderer;
 use crate::draw_bluetooth_symbol;
 use crate::draw_crescent_moon;
+use crate::kit::icons::{draw_battery_glyph, draw_sun_glyph};
 use crate::rect_to_d2d;
 
 impl Renderer {
     pub(crate) fn hud_tone_brush(&self, tone: HudTone, alpha: f32) -> ID2D1SolidColorBrush {
+        let ink = self.notch_ink();
         match tone {
-            HudTone::Neutral => self.brushes.alpha_brush(FOREGROUND, 0.95 * alpha),
+            HudTone::Neutral => self.brushes.alpha_brush(ink, 0.95 * alpha),
             HudTone::Positive => self.brushes.alpha_brush(CHARGING_GREEN, 0.96 * alpha),
             HudTone::Warning => self.brushes.alpha_brush(AMBER_WARN, 0.96 * alpha),
-            HudTone::Muted => self.brushes.alpha_brush(FOREGROUND, 0.58 * alpha),
+            HudTone::Muted => self.brushes.alpha_brush(ink, 0.58 * alpha),
         }
     }
 
@@ -35,9 +36,10 @@ impl Renderer {
         let alpha = hud.content_alpha.clamp(0.0, 1.0);
         let geometry = layout.hud;
         let stroke = (layout.icon_size as f32 * 0.105).max(1.35);
+        let ink = self.notch_ink();
         let tone = self.hud_tone_brush(presentation.tone, alpha);
-        let label_brush = self.brushes.alpha_brush(FOREGROUND, 0.95 * alpha);
-        let track = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+        let label_brush = self.brushes.alpha_brush(ink, 0.95 * alpha);
+        let track = self.brushes.alpha_brush(ink, 0.16 * alpha);
 
         let glyph = geometry.glyph;
         let gcx = glyph.x as f32 + glyph.width as f32 * 0.5;
@@ -208,7 +210,7 @@ impl Renderer {
             }
             self.draw_text("ON", &self.text_app_bold, rect, &ink);
         } else {
-            let outline = self.brushes.alpha_brush(FOREGROUND, 0.58 * alpha);
+            let outline = self.brushes.alpha_brush(self.notch_ink(), 0.58 * alpha);
             unsafe {
                 self.target
                     .DrawRoundedRectangle(&rounded, &outline, 1.0, None);
@@ -239,9 +241,10 @@ impl Renderer {
             radiusX: pill_h * 0.5,
             radiusY: pill_h * 0.5,
         };
-        let fill = self.brushes.alpha_brush(FOREGROUND, 0.14 * alpha);
-        let outline = self.brushes.alpha_brush(FOREGROUND, 0.42 * alpha);
-        let ink = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let fg = self.notch_ink();
+        let fill = self.brushes.alpha_brush(fg, 0.14 * alpha);
+        let outline = self.brushes.alpha_brush(fg, 0.42 * alpha);
+        let ink = self.brushes.alpha_brush(fg, 0.96 * alpha);
         unsafe {
             self.target.FillRoundedRectangle(&rounded, &fill);
             self.target
@@ -293,45 +296,14 @@ impl Renderer {
         level: f32,
         brush: &ID2D1SolidColorBrush,
     ) {
-        let body_w = half * 1.44;
-        let body_h = half * 0.88;
-        let left = cx - body_w * 0.5 - half * 0.1;
-        let top = cy - body_h * 0.5;
-        let body = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left,
-                top,
-                right: left + body_w,
-                bottom: top + body_h,
-            },
-            radiusX: half * 0.22,
-            radiusY: half * 0.22,
-        };
-        let inset = stroke * 1.6;
-        let inner_w = (body_w - inset * 2.0).max(0.0);
-        let fill_w = inner_w * level.clamp(0.04, 1.0);
-        let fill = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: left + inset,
-                top: top + inset,
-                right: left + inset + fill_w,
-                bottom: top + body_h - inset,
-            },
-            radiusX: half * 0.08,
-            radiusY: half * 0.08,
-        };
-        let terminal = D2D_RECT_F {
-            left: left + body_w + stroke * 0.5,
-            top: cy - half * 0.14,
-            right: left + body_w + stroke * 0.5 + half * 0.18,
-            bottom: cy + half * 0.14,
-        };
-        unsafe {
-            self.target
-                .DrawRoundedRectangle(&body, brush, stroke * 0.95, None);
-            self.target.FillRectangle(&terminal, brush);
-            self.target.FillRoundedRectangle(&fill, brush);
-        }
+        draw_battery_glyph(
+            &self.target,
+            Vector2::new(cx, cy),
+            half,
+            stroke * 0.95,
+            level.clamp(0.04, 1.0),
+            brush,
+        );
     }
 
     pub(crate) fn draw_sun_icon(
@@ -342,36 +314,14 @@ impl Renderer {
         stroke: f32,
         brush: &ID2D1SolidColorBrush,
     ) {
-        let core_r = r * 0.46;
-        let inner = r * 0.68;
-        let outer = r * 1.04;
-        let diag = 0.707_106_77_f32;
-        unsafe {
-            let core = D2D1_ELLIPSE {
-                point: Vector2::new(cx, cy),
-                radiusX: core_r,
-                radiusY: core_r,
-            };
-            self.target.FillEllipse(&core, brush);
-            for (dx, dy) in [
-                (1.0_f32, 0.0_f32),
-                (-1.0, 0.0),
-                (0.0, 1.0),
-                (0.0, -1.0),
-                (diag, diag),
-                (-diag, diag),
-                (diag, -diag),
-                (-diag, -diag),
-            ] {
-                self.target.DrawLine(
-                    Vector2::new(cx + dx * inner, cy + dy * inner),
-                    Vector2::new(cx + dx * outer, cy + dy * outer),
-                    brush,
-                    stroke * 0.92,
-                    &self.stroke_style,
-                );
-            }
-        }
+        draw_sun_glyph(
+            &self.target,
+            &self.stroke_style,
+            Vector2::new(cx, cy),
+            r,
+            stroke * 0.92,
+            brush,
+        );
     }
 
     pub(crate) fn draw_capslock_icon(

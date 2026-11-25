@@ -1,10 +1,6 @@
-use crate::notch::clipboard::CLIPBOARD_PAGE_SIZE;
 use crate::notch::focus_stats_view::{FocusStatsRange, NOTCH_STATS_DAYS};
 use crate::notch::media::NotchExpandedTab;
-use crate::notch::pomodoro::FocusSubMode;
 use crate::notch::pomodoro_view::PomodoroSurface;
-use crate::notch::shelf::SHELF_PAGE_SIZE;
-use crate::notch::tasks::TASKS_PAGE_SIZE;
 
 use super::clipboard::compute_clipboard_controls;
 use super::geometry::Rect;
@@ -12,112 +8,10 @@ use super::geometry::lerp_points;
 use super::geometry::scale;
 use super::input::NotchLayoutInput;
 use super::metrics::Metrics;
+use super::model::{NOTCH_CATEGORY_OPTIONS, NOTCH_HEATMAP_CELLS, NOTCH_HEATMAP_FILTERS};
+pub(super) use super::panel_types::{ExpandedNotchControls, hero_buttons};
 use super::shelf::compute_shelf_controls;
 use super::tasks::compute_tasks_controls;
-
-#[derive(Default)]
-pub(super) struct ExpandedNotchControls {
-    pub(super) notch_tab_strip: Rect,
-    pub(super) icon: Rect,
-    pub(super) time: Rect,
-    pub(super) subtitle: Rect,
-    pub(super) session_label: Rect,
-    pub(super) segments: [Rect; 4],
-    pub(super) footer_left: Rect,
-    pub(super) footer_right: Rect,
-    pub(super) presets: [Rect; 4],
-    pub(super) focus_modes: [Rect; 3],
-    pub(super) play_button: Rect,
-    pub(super) reset_button: Rect,
-    pub(super) skip_button: Rect,
-    pub(super) alert_start_button: Rect,
-    pub(super) alert_extend_button: Rect,
-    pub(super) stats_body: Rect,
-    pub(super) stats_range_today: Rect,
-    pub(super) stats_range_week: Rect,
-    pub(super) stats_open_settings: Rect,
-    pub(super) stats_days: [Rect; NOTCH_STATS_DAYS],
-    pub(super) notch_tab_pomodoro: Rect,
-    pub(super) notch_tab_stats: Rect,
-    pub(super) notch_tab_shelf: Rect,
-    pub(super) notch_tab_clipboard: Rect,
-    pub(super) notch_tab_tasks: Rect,
-    pub(super) notch_tab_media: Rect,
-    pub(super) shelf_add_button: Rect,
-    pub(super) shelf_clear_button: Rect,
-    pub(super) shelf_pager_button: Rect,
-    pub(super) shelf_dropzone: Rect,
-    pub(super) shelf_cards: [Rect; SHELF_PAGE_SIZE],
-    pub(super) shelf_copy_buttons: [Rect; SHELF_PAGE_SIZE],
-    pub(super) shelf_remove_buttons: [Rect; SHELF_PAGE_SIZE],
-    pub(super) clipboard_pause_button: Rect,
-    pub(super) clipboard_clear_button: Rect,
-    pub(super) clipboard_pager_button: Rect,
-    pub(super) clipboard_body: Rect,
-    pub(super) clipboard_rows: [Rect; CLIPBOARD_PAGE_SIZE],
-    pub(super) clipboard_remove_buttons: [Rect; CLIPBOARD_PAGE_SIZE],
-    pub(super) tasks_add_button: Rect,
-    pub(super) tasks_clear_button: Rect,
-    pub(super) tasks_pager_button: Rect,
-    pub(super) tasks_editor: Rect,
-    pub(super) tasks_editor_input: Rect,
-    pub(super) tasks_body: Rect,
-    pub(super) tasks_rows: [Rect; TASKS_PAGE_SIZE],
-    pub(super) tasks_check_buttons: [Rect; TASKS_PAGE_SIZE],
-    pub(super) tasks_edit_buttons: [Rect; TASKS_PAGE_SIZE],
-    pub(super) tasks_remove_buttons: [Rect; TASKS_PAGE_SIZE],
-    pub(super) privacy_mic_button: Rect,
-    pub(super) media_cover_art: Rect,
-    pub(super) media_source_label: Rect,
-    pub(super) media_title: Rect,
-    pub(super) media_artist: Rect,
-    pub(super) media_reason: Rect,
-    pub(super) media_equalizer: Rect,
-    pub(super) media_lyrics_toggle: Rect,
-    pub(super) media_lyrics_drawer: Rect,
-    pub(super) media_seekbar: Rect,
-    pub(super) media_play_button: Rect,
-    pub(super) media_prev_button: Rect,
-    pub(super) media_next_button: Rect,
-}
-
-pub(super) struct HeroButtons {
-    pub(super) left: Rect,
-    pub(super) primary: Rect,
-    pub(super) right: Rect,
-}
-
-pub(super) fn hero_buttons(
-    content_right: i32,
-    hero_cy: i32,
-    primary: i32,
-    secondary: i32,
-    gap: i32,
-) -> HeroButtons {
-    let right = Rect {
-        x: content_right - secondary,
-        y: hero_cy - secondary / 2,
-        width: secondary,
-        height: secondary,
-    };
-    let middle = Rect {
-        x: right.x - gap - primary,
-        y: hero_cy - primary / 2,
-        width: primary,
-        height: primary,
-    };
-    let left = Rect {
-        x: middle.x - gap - secondary,
-        y: hero_cy - secondary / 2,
-        width: secondary,
-        height: secondary,
-    };
-    HeroButtons {
-        left,
-        primary: middle,
-        right,
-    }
-}
 
 pub(super) const PANEL_PAD_POINTS: i32 = 16;
 pub(super) const PANEL_TAB_TOP_POINTS: i32 = 10;
@@ -126,8 +20,6 @@ pub(super) const PANEL_TAB_ACTIVE_WIDTH_POINTS: i32 = 64;
 pub(super) const PANEL_TAB_ICON_WIDTH_POINTS: i32 = 24;
 pub(super) const PANEL_TAB_GAP_POINTS: i32 = 4;
 pub(super) const PANEL_TAB_STRIP_INSET_POINTS: i32 = 2;
-pub(super) const PANEL_SESSION_LABEL_WIDTH_POINTS: i32 = 72;
-pub(super) const FOCUS_MODE_WIDTH_POINTS: i32 = 24;
 pub(super) const PANEL_HERO_CENTER_POINTS: i32 = 62;
 pub(super) const PANEL_HERO_ICON_POINTS: i32 = 48;
 pub(super) const PANEL_HERO_TEXT_GAP_POINTS: i32 = 12;
@@ -148,8 +40,6 @@ pub(super) const PANEL_PRESET_HEIGHT_POINTS: i32 = 24;
 pub(super) const PANEL_STATS_BODY_TOP_POINTS: i32 = 42;
 pub(super) const PANEL_STATS_INNER_PAD_X_POINTS: i32 = 14;
 pub(super) const PANEL_STATS_INNER_PAD_BOTTOM_POINTS: i32 = 10;
-pub(super) const PANEL_STATS_SEGMENT_WIDTH_POINTS: i32 = 48;
-pub(super) const PANEL_STATS_DETAILS_WIDTH_POINTS: i32 = 60;
 pub(super) const PANEL_STATS_PLOT_TOP_OFFSET_POINTS: i32 = 34;
 pub(super) const PANEL_STATS_DAY_GAP_POINTS: i32 = 6;
 pub(super) const MEDIA_LYRICS_TOGGLE_POINTS: i32 = 24;
@@ -170,41 +60,6 @@ pub(super) const PANEL_ALERT_START_WIDTH_POINTS: i32 = 104;
 pub(super) const PANEL_ALERT_EXTEND_WIDTH_POINTS: i32 = 72;
 pub(super) const PRIVACY_COMPACT_MIC_WIDTH_POINTS: i32 = 40;
 pub(super) const PRIVACY_PANEL_MIC_WIDTH_POINTS: i32 = 88;
-
-pub(super) fn compute_focus_mode_rects(
-    surface: PomodoroSurface,
-    session_left: i32,
-    tab_y: i32,
-    tab_h: i32,
-    dpi: u32,
-) -> [Rect; 3] {
-    if surface == PomodoroSurface::Alert {
-        return [Rect::default(); 3];
-    }
-    let gap = scale(PANEL_TAB_GAP_POINTS, dpi);
-    let item_w = scale(FOCUS_MODE_WIDTH_POINTS, dpi);
-    let total_w = item_w * 3 + gap * 2;
-    let x0 = session_left - gap - total_w;
-    let r0 = Rect {
-        x: x0,
-        y: tab_y,
-        width: item_w,
-        height: tab_h,
-    };
-    let r1 = Rect {
-        x: r0.right() + gap,
-        y: tab_y,
-        width: item_w,
-        height: tab_h,
-    };
-    let r2 = Rect {
-        x: r1.right() + gap,
-        y: tab_y,
-        width: item_w,
-        height: tab_h,
-    };
-    [r0, r1, r2]
-}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn compute_expanded_notch_controls(
@@ -270,14 +125,32 @@ pub(super) fn compute_expanded_notch_controls(
         },
         None => Rect::default(),
     };
-    let session_label_w = scale(PANEL_SESSION_LABEL_WIDTH_POINTS, dpi);
-    let session_label = Rect {
-        x: notch.right() - pad_x - session_label_w,
-        y: tab_y,
-        width: session_label_w,
-        height: tab_h,
-    };
-    let focus_modes = compute_focus_mode_rects(surface, session_label.x, tab_y, tab_h, dpi);
+    let session_label_w = scale(34, dpi);
+    let cat_pill_w = scale(94, dpi);
+    let (pomodoro_open_settings, session_label, category_pill) =
+        if surface == PomodoroSurface::Alert {
+            (Rect::default(), Rect::default(), Rect::default())
+        } else {
+            let open_settings = Rect {
+                x: notch.right() - pad_x - tab_h,
+                y: tab_y,
+                width: tab_h,
+                height: tab_h,
+            };
+            let session_label = Rect {
+                x: open_settings.x - tab_gap - session_label_w,
+                y: tab_y,
+                width: session_label_w,
+                height: tab_h,
+            };
+            let category_pill = Rect {
+                x: session_label.x - tab_gap - cat_pill_w,
+                y: tab_y,
+                width: cat_pill_w,
+                height: tab_h,
+            };
+            (open_settings, session_label, category_pill)
+        };
 
     let content_left = notch.x + pad_x;
     let content_right = notch.right() - pad_x;
@@ -303,10 +176,7 @@ pub(super) fn compute_expanded_notch_controls(
     let mut reset_button = Rect::default();
     let mut skip_button = Rect::default();
     if !alert {
-        if setup
-            || (notch_input.focus_mode == FocusSubMode::Stopwatch
-                && surface == PomodoroSurface::Ready)
-        {
+        if setup {
             play_button = Rect {
                 x: content_right - primary,
                 y: hero_cy - primary / 2,
@@ -317,14 +187,7 @@ pub(super) fn compute_expanded_notch_controls(
             let buttons = hero_buttons(content_right, hero_cy, primary, secondary, btn_gap);
             play_button = buttons.primary;
             reset_button = buttons.left;
-            skip_button = if notch_input.focus_mode == FocusSubMode::Pomodoro
-                || (notch_input.focus_mode == FocusSubMode::Stopwatch
-                    && surface == PomodoroSurface::Running)
-            {
-                buttons.right
-            } else {
-                Rect::default()
-            };
+            skip_button = buttons.right;
         }
     }
     let text_right = if alert {
@@ -336,6 +199,8 @@ pub(super) fn compute_expanded_notch_controls(
     };
     let text_width = (text_right - text_left).max(0);
 
+    let mut duration_dec = Rect::default();
+    let mut duration_inc = Rect::default();
     let (time, subtitle) = if alert {
         let title_h = scale(PANEL_ALERT_TITLE_HEIGHT_POINTS, dpi);
         let title_top = oy + scale(PANEL_ALERT_TITLE_TOP_POINTS, dpi);
@@ -351,6 +216,40 @@ pub(super) fn compute_expanded_notch_controls(
                 y: title_top + title_h,
                 width: text_width,
                 height: scale(PANEL_SUBTITLE_HEIGHT_POINTS, dpi),
+            },
+        )
+    } else if setup {
+        let time_h = scale(PANEL_TIME_HEIGHT_POINTS, dpi);
+        let subtitle_h = scale(PANEL_SUBTITLE_HEIGHT_POINTS, dpi);
+        let block_top = hero_cy - i32::midpoint(time_h, subtitle_h);
+        let step_size = scale(24, dpi);
+        let step_y = block_top + (time_h - step_size) / 2;
+        duration_dec = Rect {
+            x: text_left,
+            y: step_y,
+            width: step_size,
+            height: step_size,
+        };
+        let time_x = duration_dec.right() + tab_gap;
+        let time_w = scale(96, dpi).min((text_right - time_x - tab_gap - step_size).max(48));
+        duration_inc = Rect {
+            x: time_x + time_w + tab_gap,
+            y: step_y,
+            width: step_size,
+            height: step_size,
+        };
+        (
+            Rect {
+                x: time_x,
+                y: block_top,
+                width: time_w,
+                height: time_h,
+            },
+            Rect {
+                x: text_left,
+                y: block_top + time_h,
+                width: text_width,
+                height: subtitle_h,
             },
         )
     } else {
@@ -373,10 +272,8 @@ pub(super) fn compute_expanded_notch_controls(
         )
     };
 
-    let mut segments = [Rect::default(); 4];
-    let mut footer_left = Rect::default();
-    let mut footer_right = Rect::default();
-    if !alert && !setup {
+    let (segments, footer_left, footer_right) = if !alert && !setup {
+        let mut segments = [Rect::default(); 4];
         let segment_gap = scale(PANEL_SEGMENT_GAP_POINTS, dpi);
         let segment_w = (content_width - segment_gap * 3) / 4;
         let segment_y = oy + scale(PANEL_PROGRESS_TOP_POINTS, dpi);
@@ -398,22 +295,47 @@ pub(super) fn compute_expanded_notch_controls(
         let footer_y = oy + scale(PANEL_FOOTER_TOP_POINTS, dpi);
         let footer_h = scale(PANEL_FOOTER_HEIGHT_POINTS, dpi);
         let footer_left_w = content_width * PANEL_FOOTER_LEFT_SHARE_PERCENT / 100;
-        footer_left = Rect {
+        let footer_left = Rect {
             x: content_left,
             y: footer_y,
             width: footer_left_w,
             height: footer_h,
         };
-        footer_right = Rect {
+        let footer_right = Rect {
             x: content_left + footer_left_w,
             y: footer_y,
             width: content_width - footer_left_w,
             height: footer_h,
         };
-    }
+        (segments, footer_left, footer_right)
+    } else {
+        ([Rect::default(); 4], Rect::default(), Rect::default())
+    };
 
     let mut presets = [Rect::default(); 4];
-    if setup {
+    let mut category_options = [Rect::default(); NOTCH_CATEGORY_OPTIONS];
+    if !alert && notch_input.pomodoro_category_picker {
+        let count =
+            usize::from(notch_input.pomodoro_category_count).clamp(1, NOTCH_CATEGORY_OPTIONS);
+        let chip_h = scale(PANEL_PRESET_HEIGHT_POINTS, dpi);
+        let chip_y = oy + scale(PANEL_PRESET_TOP_POINTS, dpi);
+        let chip_gap = scale(6, dpi);
+        let chip_w =
+            ((content_width - chip_gap * (count as i32 - 1)) / count as i32).max(scale(24, dpi));
+        for (index, slot) in category_options.iter_mut().take(count).enumerate() {
+            let x = content_left + (chip_w + chip_gap) * index as i32;
+            *slot = Rect {
+                x,
+                y: chip_y,
+                width: if index + 1 == count {
+                    (content_right - x).max(scale(24, dpi))
+                } else {
+                    chip_w
+                },
+                height: chip_h,
+            };
+        }
+    } else if setup {
         let preset_w = scale(PANEL_PRESET_WIDTH_POINTS, dpi);
         let preset_h = scale(PANEL_PRESET_HEIGHT_POINTS, dpi);
         let preset_y = oy + scale(PANEL_PRESET_TOP_POINTS, dpi);
@@ -441,27 +363,39 @@ pub(super) fn compute_expanded_notch_controls(
     };
     let mut stats_range_today = Rect::default();
     let mut stats_range_week = Rect::default();
+    let mut stats_range_heatmap = Rect::default();
     let mut stats_open_settings = Rect::default();
     let mut stats_days = [Rect::default(); NOTCH_STATS_DAYS];
+    let mut stats_heatmap_filters = [Rect::default(); NOTCH_HEATMAP_FILTERS];
+    let mut stats_heatmap_grid = Rect::default();
+    let mut stats_heatmap_cells = Vec::new();
     if !alert {
-        let seg_w = scale(PANEL_STATS_SEGMENT_WIDTH_POINTS, dpi);
-        let details_w = scale(PANEL_STATS_DETAILS_WIDTH_POINTS, dpi);
+        let details_w = scale(52, dpi);
+        let heat_w = scale(36, dpi);
+        let week_w = scale(32, dpi);
+        let today_w = scale(40, dpi);
         stats_open_settings = Rect {
             x: content_right - details_w,
             y: tab_y,
             width: details_w,
             height: tab_h,
         };
-        stats_range_week = Rect {
-            x: stats_open_settings.x - btn_gap - seg_w,
+        stats_range_heatmap = Rect {
+            x: stats_open_settings.x - tab_gap - heat_w,
             y: tab_y,
-            width: seg_w,
+            width: heat_w,
+            height: tab_h,
+        };
+        stats_range_week = Rect {
+            x: stats_range_heatmap.x - tab_gap - week_w,
+            y: tab_y,
+            width: week_w,
             height: tab_h,
         };
         stats_range_today = Rect {
-            x: stats_range_week.x - tab_gap - seg_w,
+            x: stats_range_week.x - tab_gap - today_w,
             y: tab_y,
-            width: seg_w,
+            width: today_w,
             height: tab_h,
         };
         if notch_input.stats_range == FocusStatsRange::Week && !stats_body.is_empty() {
@@ -490,6 +424,62 @@ pub(super) fn compute_expanded_notch_controls(
                         width,
                         height: plot_h,
                     };
+                }
+            }
+        } else if notch_input.stats_range == FocusStatsRange::Heatmap && !stats_body.is_empty() {
+            let inner_pad_x = scale(12, dpi);
+            let inner_left = stats_body.x + inner_pad_x;
+            let inner_right = stats_body.right() - inner_pad_x;
+            let inner_w = (inner_right - inner_left).max(0);
+            let filter_h = scale(20, dpi);
+            let filter_y = stats_body.y + scale(8, dpi);
+            let filter_count =
+                usize::from(notch_input.heatmap_filter_count).clamp(1, NOTCH_HEATMAP_FILTERS);
+            let filter_gap = scale(4, dpi);
+            let filter_w = ((inner_w - filter_gap * (filter_count as i32 - 1))
+                / filter_count as i32)
+                .min(scale(66, dpi))
+                .max(scale(28, dpi));
+            for (index, slot) in stats_heatmap_filters
+                .iter_mut()
+                .take(filter_count)
+                .enumerate()
+            {
+                *slot = Rect {
+                    x: inner_left + (filter_w + filter_gap) * index as i32,
+                    y: filter_y,
+                    width: filter_w,
+                    height: filter_h,
+                };
+            }
+            let grid_top = filter_y + filter_h + scale(8, dpi);
+            let footer_reserve = scale(22, dpi);
+            let grid_h = (stats_body.bottom() - footer_reserve - grid_top).max(0);
+            let cols = 16i32;
+            let rows = 7i32;
+            let gap = scale(3, dpi).max(2);
+            let cell_by_w = (inner_w - gap * (cols - 1)) / cols;
+            let cell_by_h = (grid_h - gap * (rows - 1)) / rows;
+            let cell = cell_by_w.min(cell_by_h).max(4);
+            let total_w = cols * cell + (cols - 1) * gap;
+            let total_h = rows * cell + (rows - 1) * gap;
+            let gx = inner_left + (inner_w - total_w) / 2;
+            let gy = grid_top + (grid_h - total_h).max(0) / 2;
+            stats_heatmap_grid = Rect {
+                x: gx,
+                y: gy,
+                width: total_w,
+                height: total_h,
+            };
+            stats_heatmap_cells = Vec::with_capacity(NOTCH_HEATMAP_CELLS);
+            for col in 0..cols {
+                for row in 0..rows {
+                    stats_heatmap_cells.push(Rect {
+                        x: gx + col * (cell + gap),
+                        y: gy + row * (cell + gap),
+                        width: cell,
+                        height: cell,
+                    });
                 }
             }
         }
@@ -635,11 +625,15 @@ pub(super) fn compute_expanded_notch_controls(
         time,
         subtitle,
         session_label,
+        category_pill,
+        pomodoro_open_settings,
+        category_options,
+        duration_dec,
+        duration_inc,
         segments,
         footer_left,
         footer_right,
         presets,
-        focus_modes,
         play_button,
         reset_button,
         skip_button,
@@ -648,8 +642,12 @@ pub(super) fn compute_expanded_notch_controls(
         stats_body,
         stats_range_today,
         stats_range_week,
+        stats_range_heatmap,
         stats_open_settings,
         stats_days,
+        stats_heatmap_filters,
+        stats_heatmap_grid,
+        stats_heatmap_cells,
         notch_tab_pomodoro,
         notch_tab_stats,
         notch_tab_shelf,

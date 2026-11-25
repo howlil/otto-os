@@ -8,12 +8,13 @@ pub(crate) const WM_APP_BAR_KEY: u32 = WM_APP_BASE + 21;
 pub(crate) const WM_APP_IDLE_WAKE: u32 = WM_APP_BASE + 22;
 pub(crate) const WM_APP_DOCK_KEY: u32 = WM_APP_BASE + 23;
 pub(crate) const WM_APP_BAR_BACKDROP: u32 = WM_APP_BASE + 24;
-pub(crate) const WM_APP_NATIVE_MINIMIZE: u32 = WM_APP_BASE + 24;
 pub(crate) const WM_APP_DOCK_BACKDROP: u32 = WM_APP_BASE + 25;
 pub(crate) const WM_APP_GENIE_DONE: u32 = WM_APP_BASE + 27;
 pub(crate) const WM_APP_BAR_BLUETOOTH_HUD: u32 = WM_APP_BASE + 28;
 pub(crate) const WM_APP_SPOTLIGHT_BACKDROP: u32 = WM_APP_BASE + 29;
 pub(crate) const WM_APP_BAR_CAPTURE: u32 = WM_APP_BASE + 60;
+pub(crate) const WM_APP_NATIVE_MINIMIZE: u32 = WM_APP_BASE + 62;
+pub(crate) const WM_APP_OPEN_FINDER: u32 = WM_APP_BASE + 63;
 pub(crate) const WM_APP_CONTROL_CENTER_KEY: u32 = WM_APP_BASE + 26;
 pub(crate) const WM_APP_CONTROL_CENTER_BACKDROP: u32 = WM_APP_BASE + 27;
 pub(crate) const WM_APP_MENU_BACKDROP: u32 = WM_APP_BASE + 28;
@@ -30,6 +31,7 @@ pub(crate) const CC_POLL_TIMER: usize = 31;
 pub(crate) const MENU_POLL_TIMER: usize = 30;
 pub(crate) const UPDATE_TIMER_ID: usize = 0x5E7;
 pub(crate) const AUDIT_TIMER_ID: usize = 0x5E8;
+pub(crate) const FINDER_SPRING_TIMER: usize = 0x5E9;
 
 pub(crate) const WM_POINTERUPDATE: u32 = 0x0245;
 pub(crate) const WM_POINTERDOWN: u32 = 0x0246;
@@ -65,6 +67,12 @@ mod tests {
             WM_APP_BAR_BACKDROP,
             WM_APP_BAR_BLUETOOTH_HUD,
             WM_APP_BAR_CAPTURE,
+            WM_APP_NATIVE_MINIMIZE,
+            WM_APP_OPEN_FINDER,
+            otto_platform::WM_APP_UIA_INVOKE,
+            otto_platform::WM_APP_SHELF_EVENT,
+            otto_platform::APPBAR_CALLBACK_MESSAGE,
+            otto_platform::WM_APP_TRAY_ICON,
         ]));
         assert!(all_distinct(&[
             WM_APP_DOCK_KEY,
@@ -72,7 +80,20 @@ mod tests {
             otto_platform::DOCK_APPBAR_CALLBACK_MESSAGE,
             otto_platform::WM_APP_UIA_INVOKE,
         ]));
-        assert!(all_distinct(&[WM_APP_WINDOW_SYNC, WM_APP_NATIVE_MINIMIZE]));
+        assert!(all_distinct(&[
+            WM_APP_CONTROL_CENTER_KEY,
+            WM_APP_CONTROL_CENTER_BACKDROP,
+            otto_platform::WM_APP_CONTROL_CENTER_REFRESH,
+            otto_platform::WM_APP_UIA_INVOKE,
+        ]));
+        assert!(all_distinct(&[
+            WM_APP_MENU_BACKDROP,
+            otto_platform::WM_APP_UIA_INVOKE,
+        ]));
+        assert!(all_distinct(&[
+            WM_APP_SPOTLIGHT_BACKDROP,
+            otto_platform::WM_APP_UIA_INVOKE,
+        ]));
     }
 
     #[test]
@@ -85,8 +106,12 @@ mod tests {
         assert!(all_distinct(&[DOCK_POLL_TIMER, DOCK_ANIM_TIMER]));
         assert!(all_distinct(&[
             WINDOW_CONTROLS_ANIM_TIMER,
-            GREEN_HOVER_TIMER
+            GREEN_HOVER_TIMER,
         ]));
-        assert!(all_distinct(&[UPDATE_TIMER_ID, AUDIT_TIMER_ID]));
+        assert!(all_distinct(&[
+            UPDATE_TIMER_ID,
+            AUDIT_TIMER_ID,
+            GREEN_HOVER_TIMER,
+        ]));
     }
 }

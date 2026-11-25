@@ -9,6 +9,7 @@ pub enum ControlCenterPage {
     Bluetooth,
     Sound,
     Display,
+    Gallery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

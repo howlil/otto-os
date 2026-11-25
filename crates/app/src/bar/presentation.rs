@@ -6,15 +6,34 @@ use crate::win_msg::WM_APP_BAR_BACKDROP;
 use otto_core::{BACKDROP_PADDING_PT, CaptureRegion, Rect, capture_interval_for, capture_wanted};
 use otto_core::{BarPointer, HitTarget, Metrics, compute_layout_with_notch, scale};
 use otto_platform::is_running_on_battery;
-use otto_platform::{cursor_position, primary_screen, watch_top_edge, window_bounds};
-use otto_render::Renderer;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
+use otto_platform::{
+    cursor_position, hide_window, place, primary_screen, watch_top_edge, window_bounds,
 };
+use otto_render::Renderer;
 
 use super::Bar;
-use super::max_panel_surface_size;
+
+pub(super) fn max_panel_surface_size(dpi: u32) -> (i32, i32) {
+    let classic = Metrics::MACBOOK_PRO_14;
+    let island = Metrics::DYNAMIC_ISLAND;
+    let max_pts_w = (classic.notch_expanded_width + classic.notch_expanded_ear_radius * 2 + 8)
+        .max(island.notch_expanded_width + island.notch_expanded_ear_radius * 2 + 8);
+    let max_pts_h = (classic.notch_top_inset
+        + classic
+            .notch_expanded_height
+            .max(classic.notch_lyrics_height)
+            .max(classic.notch_stats_height)
+        + 4)
+    .max(
+        island.notch_top_inset
+            + island
+                .notch_expanded_height
+                .max(island.notch_lyrics_height)
+                .max(island.notch_stats_height)
+            + 4,
+    );
+    (scale(max_pts_w, dpi), scale(max_pts_h, dpi))
+}
 
 impl Bar {
     pub(super) fn ensure_renderer(&mut self, runtime: &RuntimeContext) -> bool {
@@ -53,10 +72,8 @@ impl Bar {
         self.stats_icons_attempted.clear();
         self.panel_visible = false;
         self.last_panel_rect = None;
-        unsafe {
-            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-            let _ = ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE);
-        }
+        hide_window(self.hwnd);
+        hide_window(self.panel_hwnd);
         if !crate::control_center::is_open(runtime) {
             otto_platform::stop_idle_audio_task();
             otto_platform::stop_idle_connectivity_task();
@@ -97,6 +114,7 @@ impl Bar {
             );
         }
         self.sync_bar_shelf_region();
+        self.recompute_secondary_layouts();
     }
 
     pub(super) fn on_shell_notification(
@@ -133,9 +151,41 @@ impl Bar {
         })
     }
 
+    pub(super) fn log_started(&self) {
+        otto_platform::log_info(
+            "bar",
+            &format!(
+                "started screen={}x{}@{}dpi bar={}x{} shown={} visible={} top_bar={} notch={} shell_appbar={} fg={}",
+                self.screen.width,
+                self.screen.height,
+                self.screen.dpi,
+                self.layout.bar.width,
+                self.layout.bar.height,
+                self.shown(),
+                self.visibility.is_visible(),
+                self.top_bar_enabled,
+                self.notch_enabled,
+                self.appbar.is_shell_owned(),
+                self.controls.active_app(),
+            ),
+        );
+    }
+
     pub(super) fn sync_full_screen(&mut self, runtime: &RuntimeContext) {
-        let active = self.shell_full_screen || self.foreground_covers_primary();
+        let fg_covers = self.foreground_covers_primary();
+        let active = self.shell_full_screen || fg_covers;
         if self.visibility.set_full_screen_app(active) {
+            otto_platform::log_info(
+                "bar",
+                &format!(
+                    "fullscreen={active} shell={} fg_covers={} shown={} visible={} fg={}",
+                    self.shell_full_screen,
+                    fg_covers,
+                    self.shown(),
+                    self.visibility.is_visible(),
+                    self.controls.active_app(),
+                ),
+            );
             self.apply_visibility(runtime);
         }
     }
@@ -173,10 +223,8 @@ impl Bar {
         self.notch.cancel_task_editor();
         self.io.hide_quick_capture(false);
         crate::menu::close(runtime);
-        unsafe {
-            let _ = ShowWindow(HWND(self.hwnd as *mut _), SW_HIDE);
-            let _ = ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE);
-        }
+        hide_window(self.hwnd);
+        hide_window(self.panel_hwnd);
         self.panel_visible = false;
         self.last_panel_rect = None;
     }
@@ -197,17 +245,15 @@ impl Bar {
         if !self.shown() {
             return;
         }
-        let _ = unsafe {
-            SetWindowPos(
-                HWND(self.hwnd as *mut _),
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                self.layout.bar.width,
-                self.layout.bar.height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        };
+        place(
+            self.hwnd,
+            Rect {
+                x: 0,
+                y: 0,
+                width: self.layout.bar.width,
+                height: self.layout.bar.height,
+            },
+        );
     }
 
     pub(super) fn sync_panel_visibility(&mut self) {
@@ -215,24 +261,14 @@ impl Bar {
             self.notch_enabled && self.notch.panel_expansion() > 0.005 && self.shown();
         if should_show {
             if !self.panel_visible || self.last_panel_rect != Some(self.layout.panel_window) {
-                let _ = unsafe {
-                    SetWindowPos(
-                        HWND(self.panel_hwnd as *mut _),
-                        Some(HWND_TOPMOST),
-                        self.layout.panel_window.x,
-                        self.layout.panel_window.y,
-                        self.layout.panel_window.width,
-                        self.layout.panel_window.height,
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                    )
-                };
+                place(self.panel_hwnd, self.layout.panel_window);
                 self.last_panel_rect = Some(self.layout.panel_window);
             }
             self.panel_visible = true;
             self.sync_quick_capture_overlay();
         } else if self.panel_visible {
             self.io.hide_quick_capture(false);
-            let _ = unsafe { ShowWindow(HWND(self.panel_hwnd as *mut _), SW_HIDE) };
+            hide_window(self.panel_hwnd);
             self.panel_visible = false;
             self.last_panel_rect = None;
             if let Some(renderer) = self.renderer.as_ref() {
@@ -292,12 +328,14 @@ impl Bar {
         self.sync_backdrop(runtime, true);
         self.place();
         self.present(runtime);
+        self.sync_secondary_bars(runtime);
         if self.top_bar_enabled || self.notch_enabled {
             self.ensure_anim_timer();
         }
     }
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
+        self.sync_secondary_backdrops(runtime, force);
         let appearance = crate::theme_state::appearance(runtime);
         let wanted = capture_wanted(&appearance, runtime.glass_enabled.get())
             && self.top_bar_enabled
@@ -472,15 +510,22 @@ impl Bar {
                 _ => None,
             },
         };
+        let engaged_cell = match hovered {
+            Some(HitTarget::FocusHeatmapCell(index)) => Some(usize::from(index)),
+            _ => None,
+        };
         runtime
             .focus_activity
             .try_borrow()
             .map(|activity| {
-                otto_core::FocusStatsView::resolve(
+                otto_core::FocusStatsView::resolve_with_heatmap(
                     &activity,
                     self.notch.stats_range(),
                     self.notch.stats_selected_day(),
                     engaged_day,
+                    self.notch.heatmap_filter(),
+                    self.notch.heatmap_selected_cell(),
+                    engaged_cell,
                 )
             })
             .unwrap_or_default()
@@ -490,6 +535,7 @@ impl Bar {
         runtime
             .focus_active
             .set(self.notch_enabled && self.notch.focus_active());
+        self.present_secondary_bars(runtime);
         if !self.shown() || !self.ensure_renderer(runtime) {
             return;
         }
@@ -528,19 +574,21 @@ impl Bar {
             renderer.present(
                 self.hwnd,
                 (0, 0),
-                &self.layout,
-                status,
-                self.controls.active_app(),
-                hovered,
-                self.focus.current(),
-                self.notch.hud_state(),
-                &pomodoro,
-                media.as_ref(),
-                self.notch.anim_phase(),
-                appearance,
-                privacy,
-                call.as_ref(),
-                notification.as_ref(),
+                &otto_render::BarPaintState {
+                    layout: &self.layout,
+                    status,
+                    app_name: self.controls.active_app(),
+                    hovered,
+                    focused: self.focus.current(),
+                    hud: self.notch.hud_state(),
+                    pomodoro: &pomodoro,
+                    media: media.as_ref(),
+                    anim_phase: self.notch.anim_phase(),
+                    appearance,
+                    privacy,
+                    call: call.as_ref(),
+                    notification: notification.as_ref(),
+                },
             ),
         );
         if self.panel_visible {
@@ -548,19 +596,21 @@ impl Bar {
                 "bar-panel",
                 renderer.present_panel(
                     self.panel_hwnd,
-                    &self.layout,
-                    hovered,
-                    self.focus.current(),
-                    &pomodoro,
-                    media.as_ref(),
-                    self.notch.anim_phase(),
-                    self.notch.lyrics_view(),
-                    self.notch.shelf_state(),
-                    self.notch.clipboard_state(),
-                    self.notch.tasks_state(),
-                    privacy,
-                    notification.as_ref(),
-                    &focus_stats,
+                    &otto_render::NotchPanelPaintState {
+                        layout: &self.layout,
+                        hovered,
+                        focused: self.focus.current(),
+                        pomodoro: &pomodoro,
+                        media: media.as_ref(),
+                        anim_phase: self.notch.anim_phase(),
+                        lyrics: self.notch.lyrics_view(),
+                        shelf_state: self.notch.shelf_state(),
+                        clipboard_state: self.notch.clipboard_state(),
+                        tasks_state: self.notch.tasks_state(),
+                        privacy,
+                        notification: notification.as_ref(),
+                        focus_stats: &focus_stats,
+                    },
                 ),
             );
         }

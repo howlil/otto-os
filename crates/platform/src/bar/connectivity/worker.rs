@@ -45,7 +45,9 @@ pub(crate) fn resume_connectivity_task() {
 pub(super) fn with_cache<T>(action: impl FnOnce(&mut ConnectivityCache) -> T) -> Option<T> {
     let mut guard = CACHE.lock().ok()?;
     let cache = guard.get_or_insert_with(ConnectivityCache::default);
-    Some(action(cache))
+    let result = action(cache);
+    drop(guard);
+    Some(result)
 }
 
 pub(super) fn enqueue(task: ConnectivityTask) -> bool {

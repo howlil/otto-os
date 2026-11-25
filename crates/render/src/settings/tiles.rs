@@ -1,18 +1,16 @@
 use otto_core::{Rect, SettingsPage};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
-};
-use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
-use windows_numerics::Vector2;
+use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 
 use super::SettingsRenderer;
-use super::palette::{WHITE, d2d, rect_f, rgba, tint};
+use crate::appearance::tokens::SYSTEM_BLUE;
+
+use super::palette::{WHITE, rect_f, tint};
 
 impl SettingsRenderer {
     pub(super) fn draw_app_icon(&self, tile: Rect) {
         let size = tile.width as f32;
-        self.fill_round(tile, size * 0.225, rgba(0x0A_84FF, 1.0));
+        self.fill_round(tile, size * 0.225, SYSTEM_BLUE);
         let cx = tile.x as f32 + size / 2.0;
         let cy = tile.y as f32 + size / 2.0;
         self.stroke_circle(cx, cy, size * 0.25, size * 0.1, WHITE);
@@ -124,37 +122,16 @@ impl SettingsRenderer {
     }
 
     pub(super) fn fill(&self, rect: Rect, color: D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.FillRectangle(&d2d(rect), &self.brush);
-        }
+        self.canvas.fill(rect, color);
     }
 
     pub(super) fn fill_round(&self, rect: Rect, radius: f32, color: D2D1_COLOR_F) {
-        self.fill_round_f(
-            rect_f(
-                rect.x as f32,
-                rect.y as f32,
-                rect.width as f32,
-                rect.height as f32,
-            ),
-            radius,
-            color,
-        );
+        self.canvas
+            .fill_squircle_f(crate::rect_to_d2d(rect), radius, self.dpi, color);
     }
 
     pub(super) fn fill_round_f(&self, rect: D2D_RECT_F, radius: f32, color: D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.FillRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brush,
-            );
-        }
+        self.canvas.fill_squircle_f(rect, radius, self.dpi, color);
     }
 
     pub(super) fn stroke_round_f(
@@ -164,33 +141,12 @@ impl SettingsRenderer {
         width: f32,
         color: D2D1_COLOR_F,
     ) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.DrawRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brush,
-                width,
-                &self.stroke,
-            );
-        }
+        self.canvas
+            .stroke_squircle_f(rect, radius, self.dpi, width, color);
     }
 
     pub(super) fn fill_circle(&self, cx: f32, cy: f32, radius: f32, color: D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(cx, cy),
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brush,
-            );
-        }
+        self.canvas.fill_circle(cx, cy, radius, color);
     }
 
     pub(super) fn stroke_circle(
@@ -201,32 +157,11 @@ impl SettingsRenderer {
         width: f32,
         color: D2D1_COLOR_F,
     ) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.DrawEllipse(
-                &D2D1_ELLIPSE {
-                    point: Vector2::new(cx, cy),
-                    radiusX: radius,
-                    radiusY: radius,
-                },
-                &self.brush,
-                width,
-                &self.stroke,
-            );
-        }
+        self.canvas.stroke_circle(cx, cy, radius, width, color);
     }
 
     pub(super) fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: D2D1_COLOR_F) {
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.DrawLine(
-                Vector2::new(x0, y0),
-                Vector2::new(x1, y1),
-                &self.brush,
-                width,
-                &self.stroke,
-            );
-        }
+        self.canvas.line(x0, y0, x1, y1, width, color);
     }
 
     pub(super) fn text(
@@ -236,20 +171,16 @@ impl SettingsRenderer {
         rect: Rect,
         color: D2D1_COLOR_F,
     ) {
-        if text.is_empty() || rect.is_empty() {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.brush.SetColor(&color);
-            self.target.DrawText(
-                &wide,
-                format,
-                &d2d(rect),
-                &self.brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
+        self.canvas.text(text, format, rect, color);
+    }
+
+    pub(super) fn tabular_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: Rect,
+        color: D2D1_COLOR_F,
+    ) {
+        self.canvas.tabular_text(text, format, rect, color);
     }
 }

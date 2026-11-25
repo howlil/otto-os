@@ -1,22 +1,15 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 
-use otto_core::{Appearance, MaterialVariant, ResolvedTheme, Rgba};
+use otto_core::{Appearance, MaterialVariant, ResolvedTheme};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1DCRenderTarget, ID2D1SolidColorBrush};
 use windows::core::Result;
 
 const BRUSH_CACHE_LIMIT: usize = 256;
 
-const fn d2d(color: Rgba) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: color.r,
-        g: color.g,
-        b: color.b,
-        a: color.a,
-    }
-}
+use crate::appearance::tokens::from_rgba as d2d;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LiquidGlassPalette {
@@ -110,6 +103,15 @@ impl LiquidGlassPalette {
             0.0
         }
     }
+
+    #[must_use]
+    pub const fn notch_ink(&self) -> D2D1_COLOR_F {
+        if self.is_high_contrast {
+            self.text_primary
+        } else {
+            crate::FOREGROUND
+        }
+    }
 }
 
 fn brush_key(color: D2D1_COLOR_F) -> u32 {
@@ -160,6 +162,8 @@ pub struct BrushPalette {
     pub separator: ID2D1SolidColorBrush,
     pub card_fill: ID2D1SolidColorBrush,
     pub on_accent: ID2D1SolidColorBrush,
+    notch_ink: Cell<D2D1_COLOR_F>,
+    toggle_active: Cell<D2D1_COLOR_F>,
     target: ID2D1DCRenderTarget,
     cache: RefCell<BrushCache>,
 }
@@ -295,6 +299,8 @@ impl BrushPalette {
                     },
                     None,
                 )?,
+                notch_ink: Cell::new(crate::FOREGROUND),
+                toggle_active: Cell::new(crate::appearance::tokens::ACCENT_BLUE),
                 target: target.clone(),
                 cache: RefCell::new(BrushCache::default()),
             })
@@ -302,6 +308,8 @@ impl BrushPalette {
     }
 
     pub fn update_theme(&self, palette: &LiquidGlassPalette) {
+        self.notch_ink.set(palette.notch_ink());
+        self.toggle_active.set(palette.toggle_active);
         unsafe {
             self.text_primary.SetColor(&palette.text_primary);
             self.text_muted.SetColor(&palette.text_muted);
@@ -315,6 +323,16 @@ impl BrushPalette {
             self.card_fill.SetColor(&palette.card_fill);
             self.on_accent.SetColor(&palette.on_accent);
         }
+    }
+
+    #[must_use]
+    pub fn notch_ink(&self) -> D2D1_COLOR_F {
+        self.notch_ink.get()
+    }
+
+    #[must_use]
+    pub fn toggle_active(&self) -> D2D1_COLOR_F {
+        self.toggle_active.get()
     }
 
     #[must_use]
@@ -459,6 +477,39 @@ mod tests {
             assert!((control_center.card_fill.a - base.card_fill.a).abs() < f32::EPSILON);
             assert!((control_center.text_muted.a - base.text_muted.a).abs() < f32::EPSILON);
             assert!(control_center.control_center_card_sheen_alpha().abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn notch_ink_adapts_to_high_contrast_white_and_black_themes() {
+        for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+            let palette = LiquidGlassPalette::for_appearance(&Appearance::glass(theme));
+            let ink = palette.notch_ink();
+            assert!((ink.r - 1.0).abs() < f32::EPSILON);
+            assert!((ink.g - 1.0).abs() < f32::EPSILON);
+            assert!((ink.b - 1.0).abs() < f32::EPSILON);
+        }
+
+        let hc_white = ContrastColors {
+            window: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            window_text: Rgba::new(0.0, 0.0, 0.0, 1.0),
+            highlight: Rgba::new(0.0, 0.0, 0.5, 1.0),
+            highlight_text: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            button_face: Rgba::new(0.95, 0.95, 0.95, 1.0),
+            gray_text: Rgba::new(0.35, 0.35, 0.35, 1.0),
+        };
+        for contrast in [ContrastColors::BLACK_THEME, hc_white] {
+            let palette = LiquidGlassPalette::for_appearance(&Appearance {
+                contrast: Some(contrast),
+                ..Appearance::glass(ResolvedTheme::Light)
+            });
+            let ink = rgba(palette.notch_ink());
+            let bg = rgba(palette.notch_obsidian);
+            assert!(
+                ink.contrast_ratio(bg) >= 7.0,
+                "high-contrast notch ink contrast ratio too low: {:.2}",
+                ink.contrast_ratio(bg)
+            );
         }
     }
 }

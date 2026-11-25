@@ -1,4 +1,7 @@
+use super::focus_activity_parse::{extract_search_from_title, infer_domain_from_title};
 use crate::bar::status::ClockTime;
+use crate::notch::focus_heatmap::FocusHeatmapLedger;
+use crate::notch::focus_mode::FocusCategoryStore;
 
 pub const FOCUS_IDLE_TIMEOUT_MS: u64 = 180_000;
 pub const FOCUS_MAX_STEP_MS: u64 = 15_000;
@@ -517,6 +520,8 @@ pub struct FocusActivityState {
     pub today: DailyActivityRecord,
     pub history: Vec<DailyActivityRecord>,
     pub blocklist: FocusBlocklist,
+    pub categories: FocusCategoryStore,
+    pub heatmap: FocusHeatmapLedger,
     current_app_key: Option<String>,
     current_app_name: Option<String>,
     current_domain: Option<String>,
@@ -560,7 +565,14 @@ impl FocusActivityState {
             ..DailyActivityRecord::default()
         };
         self.history.clear();
+        self.heatmap.entries.clear();
         self.last_search_key = None;
+        self.dirty = true;
+    }
+
+    pub fn record_completed_focus_session(&mut self, day: DayKey, category_id: &str) {
+        self.rollover_if_needed(day);
+        self.heatmap.record_completed_session(day, category_id);
         self.dirty = true;
     }
 
@@ -656,6 +668,27 @@ impl FocusActivityState {
         delta_clicks: u64,
         delta_keystrokes: u64,
     ) {
+        let cat_id = self.categories.active_category_id.clone();
+        self.record_sample_for_category(
+            day,
+            now_ms,
+            idle_ms,
+            focus_running,
+            &cat_id,
+            (delta_clicks, delta_keystrokes),
+        );
+    }
+
+    pub fn record_sample_for_category(
+        &mut self,
+        day: DayKey,
+        now_ms: u64,
+        idle_ms: u64,
+        focus_running: bool,
+        category_id: &str,
+        input_deltas: (u64, u64),
+    ) {
+        let (delta_clicks, delta_keystrokes) = input_deltas;
         self.rollover_if_needed(day);
         let delta_ms = match self.last_sample_ms {
             Some(prev) if now_ms > prev => (now_ms - prev).min(FOCUS_MAX_STEP_MS),
@@ -667,6 +700,7 @@ impl FocusActivityState {
             self.today.total_active_ms = self.today.total_active_ms.saturating_add(delta_ms);
             if focus_running {
                 self.today.focus_session_ms = self.today.focus_session_ms.saturating_add(delta_ms);
+                self.heatmap.record_focus(day, category_id, delta_ms);
             }
             if let Some(app_key) = self.current_app_key.clone() {
                 let name = self
@@ -710,14 +744,19 @@ impl FocusActivityState {
         if !focus_running {
             return None;
         }
-        if self.blocklist.is_app_blocked(app_key_raw, display_name) {
+        let cat_blocks_app = self
+            .categories
+            .active()
+            .should_block_app(app_key_raw, display_name);
+        if cat_blocks_app || self.blocklist.is_app_blocked(app_key_raw, display_name) {
             self.today.blocked_attempts = self.today.blocked_attempts.saturating_add(1);
             self.dirty = true;
             let label = sanitize_label(display_name, &normalize_app_key(app_key_raw), 40);
             return Some(FocusBlockEnforcement::App { label });
         }
         if let Some(raw_domain) = domain
-            && self.blocklist.is_website_blocked(raw_domain)
+            && (self.categories.active().should_block_website(raw_domain)
+                || self.blocklist.is_website_blocked(raw_domain))
         {
             let norm = normalize_domain(raw_domain).unwrap_or_else(|| raw_domain.to_owned());
             self.today.blocked_attempts = self.today.blocked_attempts.saturating_add(1);
@@ -798,6 +837,8 @@ impl FocusActivityState {
         for record in self.history.iter().take(FOCUS_HISTORY_DAYS) {
             encode_day_record(record, &mut lines);
         }
+        self.categories.encode_lines(&mut lines);
+        self.heatmap.encode_lines(&mut lines);
         let mut out = lines.join("\n");
         out.push('\n');
         out
@@ -811,6 +852,7 @@ impl FocusActivityState {
         }
         let mut state = Self::default();
         let mut records: Vec<DailyActivityRecord> = Vec::new();
+        let mut saw_custom_cat = false;
         for line in lines {
             let parts: Vec<&str> = line.split('\t').collect();
             match parts.first().copied() {
@@ -876,9 +918,14 @@ impl FocusActivityState {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    if !state.categories.decode_line(&parts, &mut saw_custom_cat) {
+                        let _ = state.heatmap.decode_line(&parts);
+                    }
+                }
             }
         }
+        state.categories.ensure_valid();
         records.sort_by_key(|record| std::cmp::Reverse(record.day));
         if let Some(first) = records.first().cloned() {
             state.today = first;
@@ -1058,7 +1105,7 @@ fn sanitize_field(raw: &str) -> String {
         .to_owned()
 }
 
-fn sanitize_label(raw: &str, fallback: &str, max_chars: usize) -> String {
+pub(super) fn sanitize_label(raw: &str, fallback: &str, max_chars: usize) -> String {
     let cleaned: String = raw
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1491,72 +1538,6 @@ fn strip_browser_suffix(title: &str) -> String {
             return trimmed.to_owned();
         }
     }
-}
-
-fn extract_search_from_title(clean_title: &str) -> Option<(String, String)> {
-    const PATTERNS: [(&str, &str); 6] = [
-        (" - Google Search", "Google"),
-        (" - Penelusuran Google", "Google"),
-        (" - Bing", "Bing"),
-        (" - Search", "Bing"),
-        (" at DuckDuckGo", "DuckDuckGo"),
-        (" - Brave Search", "Brave"),
-    ];
-    for (suffix, engine) in PATTERNS {
-        if let Some(query) = clean_title.strip_suffix(suffix) {
-            let normalized = sanitize_label(query, "", MAX_SEARCH_QUERY_CHARS);
-            if !normalized.is_empty() {
-                return Some((normalized, String::from(engine)));
-            }
-        }
-    }
-    None
-}
-
-fn infer_domain_from_title(clean_title: &str) -> Option<String> {
-    const KNOWN_TITLES: [(&str, &str); 15] = [
-        ("youtube", "youtube.com"),
-        ("reddit", "reddit.com"),
-        ("github", "github.com"),
-        ("stack overflow", "stackoverflow.com"),
-        ("instagram", "instagram.com"),
-        ("tiktok", "tiktok.com"),
-        ("facebook", "facebook.com"),
-        ("netflix", "netflix.com"),
-        ("twitch", "twitch.tv"),
-        ("chatgpt", "chatgpt.com"),
-        ("claude", "claude.ai"),
-        ("notion", "notion.so"),
-        ("figma", "figma.com"),
-        ("wikipedia", "wikipedia.org"),
-        ("linkedin", "linkedin.com"),
-    ];
-    let lower = clean_title.to_ascii_lowercase();
-    for (keyword, domain) in KNOWN_TITLES {
-        if lower == keyword
-            || lower.ends_with(&format!(" - {keyword}"))
-            || lower.ends_with(&format!(": {keyword}"))
-            || lower.starts_with(&format!("{keyword} - "))
-            || lower.starts_with(&format!("{keyword}: "))
-        {
-            return Some(String::from(domain));
-        }
-    }
-    if lower == "x"
-        || lower.ends_with(" / x")
-        || lower.ends_with(" - x")
-        || lower.contains(" on x:")
-    {
-        return Some(String::from("x.com"));
-    }
-    for token in clean_title.split([' ', '|', '—', '·']) {
-        if let Some(domain) = normalize_domain(token.trim_matches(|ch: char| {
-            matches!(ch, '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\'')
-        })) {
-            return Some(domain);
-        }
-    }
-    None
 }
 
 #[must_use]

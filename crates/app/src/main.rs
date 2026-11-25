@@ -4,6 +4,7 @@ mod appearance;
 mod bar;
 mod control_center;
 mod dock;
+mod finder;
 mod focus_shield;
 mod genie;
 mod host;
@@ -140,6 +141,13 @@ fn main() -> Result<()> {
             otto_platform::current_windows_build_label()
         ),
     );
+    let experimental_flags = otto_platform::read_experimental_flags();
+    if !experimental_flags.is_empty() {
+        otto_platform::log_info(
+            "app",
+            &format!("experimental_flags={}", experimental_flags.format_enabled()),
+        );
+    }
     let _ole = otto_platform::OleGuard::acquire();
     install_shell_recovery_panic_hook();
     otto_platform::enable_per_monitor_dpi();

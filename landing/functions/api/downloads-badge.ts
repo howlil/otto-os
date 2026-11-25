@@ -13,11 +13,7 @@ export function formatBadgeCount(count: number | null): string {
 }
 
 function escapeXml(text: string): string {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
 export function renderDownloadsBadgeSvg(count: number | null): string {
@@ -54,9 +50,7 @@ export const onRequestGet: PagesFunction = async ({ request }) => {
     status: 200,
     headers: {
       "content-type": "image/svg+xml; charset=utf-8",
-      "cache-control": outcome.ok
-        ? `public, max-age=60, s-maxage=${CACHE_SECONDS}`
-        : "no-store",
+      "cache-control": outcome.ok ? `public, max-age=60, s-maxage=${CACHE_SECONDS}` : "no-store",
     },
   });
 };

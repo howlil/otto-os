@@ -55,7 +55,7 @@ pub fn resume_recycle_bin_task() {
 }
 
 #[must_use]
-pub fn recycle_path(path: &str) -> bool {
+pub(crate) fn recycle_path(path: &str) -> bool {
     let mut wide: Vec<u16> = path.encode_utf16().collect();
     wide.push(0);
     wide.push(0);

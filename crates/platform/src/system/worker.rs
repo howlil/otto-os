@@ -43,17 +43,20 @@ impl HookStartup {
     }
 
     pub(crate) fn publish(&self, thread_id: Option<u32>) -> bool {
-        let mut phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
-        if matches!(*phase, HookStartupPhase::Cancelled) {
-            self.changed.notify_all();
-            return false;
-        }
-        *phase = match thread_id {
-            Some(id) => HookStartupPhase::Ready(id),
-            None => HookStartupPhase::Failed,
+        let cancelled = {
+            let mut phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(*phase, HookStartupPhase::Cancelled) {
+                true
+            } else {
+                *phase = match thread_id {
+                    Some(id) => HookStartupPhase::Ready(id),
+                    None => HookStartupPhase::Failed,
+                };
+                false
+            }
         };
         self.changed.notify_all();
-        thread_id.is_some()
+        !cancelled && thread_id.is_some()
     }
 
     pub(crate) fn wait_ready(&self, timeout: Duration) -> Option<u32> {

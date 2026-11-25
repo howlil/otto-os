@@ -2,22 +2,25 @@ use std::time::Instant;
 
 use crate::host::RuntimeContext;
 use otto_core::{SpotlightMode, SpotlightView, rank_spotlight_results};
-use otto_platform::{collect_spotlight_apps, monitor_work_area_at, primary_screen};
+use otto_platform::{collect_spotlight_apps_with_options, monitor_at};
 
 use super::SPOTLIGHT_CATALOG_TTL;
 use super::SPOTLIGHT_MAX_QUERY_CHARS;
 use super::SpotlightSurface;
 
 impl SpotlightSurface {
-    pub(super) fn load_catalog(&mut self) {
-        if self
-            .catalog_loaded_at
-            .is_some_and(|loaded| loaded.elapsed() < SPOTLIGHT_CATALOG_TTL)
+    pub(super) fn load_catalog(&mut self, runtime: &RuntimeContext) {
+        let finder_enabled = runtime.finder_enabled.get();
+        if self.catalog_finder_enabled == finder_enabled
+            && self
+                .catalog_loaded_at
+                .is_some_and(|loaded| loaded.elapsed() < SPOTLIGHT_CATALOG_TTL)
         {
             return;
         }
-        self.apps = collect_spotlight_apps();
+        self.apps = collect_spotlight_apps_with_options(finder_enabled);
         self.catalog_loaded_at = Some(Instant::now());
+        self.catalog_finder_enabled = finder_enabled;
         self.icons_attempted.clear();
         self.rebuild_results();
     }
@@ -79,11 +82,18 @@ impl SpotlightSurface {
     }
 
     pub(super) fn rebuild(&mut self, runtime: &RuntimeContext) {
-        self.screen = primary_screen();
+        self.monitor = if self.visible {
+            monitor_at(
+                self.window.x + self.window.width / 2,
+                self.window.y + self.window.height / 2,
+            )
+        } else {
+            monitor_at(0, 0)
+        };
         self.renderer = None;
         self.icons_attempted.clear();
         if self.visible {
-            self.work_area = monitor_work_area_at(self.window.x, self.window.y);
+            self.work_area = self.monitor.work_area;
             self.target_window = self.target_rect();
             self.source_window = self.window;
             self.window = self.clamp_window(self.window, self.work_area);

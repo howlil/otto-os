@@ -1,20 +1,19 @@
 use otto_core::{
-    Appearance, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout, GlassShape,
-    PixelLimits, Rect, RgbBuffer, ShelfThumbnail, scale,
+    Appearance, DownloadsStackEntry, DownloadsStackHit, DownloadsStackLayout, PixelLimits, Rect,
+    RgbBuffer, ShelfThumbnail, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D_RECT_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_LINE_JOIN_ROUND,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Bitmap, ID2D1DCRenderTarget,
-    ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, IDWriteTextFormat,
 };
 use windows::core::Result;
 use windows_numerics::Vector2;
@@ -24,42 +23,12 @@ use crate::appearance::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery, upload_bgra_bitmap,
 };
 use crate::appearance::theme::{BrushPalette, LiquidGlassPalette};
-use crate::{create_text_format, shared_d2d_factory, shared_dwrite_factory};
-
-const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
+use crate::appearance::tokens::{DOC_CORNER, DOC_PAGE, FOLDER_BACK, FOLDER_BLUE};
+use crate::kit::draw::{
+    draw_glass_or_fallback_shell, draw_text_on, fill_squircle_bitmap, fill_squircle_or_rounded,
+    stroke_squircle_or_rounded,
 };
-
-const FOLDER_BLUE: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.25,
-    g: 0.68,
-    b: 0.96,
-    a: 1.0,
-};
-
-const FOLDER_BACK: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.16,
-    g: 0.54,
-    b: 0.86,
-    a: 1.0,
-};
-
-const DOC_PAGE: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.92,
-    g: 0.94,
-    b: 0.98,
-    a: 0.96,
-};
-
-const DOC_CORNER: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.72,
-    g: 0.78,
-    b: 0.88,
-    a: 0.95,
-};
+use crate::{CLEAR, create_text_format, rect_to_d2d, shared_d2d_factory, shared_dwrite_factory};
 
 pub struct DownloadsStackRenderer {
     factory: ID2D1Factory,
@@ -191,13 +160,23 @@ impl DownloadsStackRenderer {
         items: &[DownloadsStackEntry],
         active_hit: DownloadsStackHit,
         appearance: Appearance,
+        finder_enabled: bool,
     ) -> Result<()> {
         let (max_width, max_height) = self.surface.size();
         let width = layout.window.width.clamp(1, max_width);
         let height = layout.window.height.clamp(1, max_height);
         draw_with_recovery(
             self,
-            |renderer| renderer.draw(width, height, layout, items, active_hit, appearance),
+            |renderer| {
+                renderer.draw(
+                    (width, height),
+                    layout,
+                    items,
+                    active_hit,
+                    appearance,
+                    finder_enabled,
+                )
+            },
             Self::recreate_target,
         )?;
         self.surface
@@ -211,21 +190,29 @@ impl DownloadsStackRenderer {
         items: &[DownloadsStackEntry],
         active_hit: DownloadsStackHit,
         appearance: Appearance,
+        finder_enabled: bool,
     ) -> Result<()> {
         let (max_width, max_height) = self.surface.size();
         let width = layout.window.width.clamp(1, max_width);
         let height = layout.window.height.clamp(1, max_height);
-        self.draw(width, height, layout, items, active_hit, appearance)
+        self.draw(
+            (width, height),
+            layout,
+            items,
+            active_hit,
+            appearance,
+            finder_enabled,
+        )
     }
 
     fn draw(
         &self,
-        width: i32,
-        height: i32,
+        (width, height): (i32, i32),
         layout: &DownloadsStackLayout,
         items: &[DownloadsStackEntry],
         active_hit: DownloadsStackHit,
         appearance: Appearance,
+        finder_enabled: bool,
     ) -> Result<()> {
         let appearance = self.glass.adaptive_appearance(&appearance);
         let palette = LiquidGlassPalette::for_appearance(&appearance);
@@ -238,7 +225,7 @@ impl DownloadsStackRenderer {
             self.draw_text(
                 &self.header_format,
                 "Downloads",
-                &layout.header_rect.to_d2d(),
+                &rect_to_d2d(layout.header_rect),
                 &self.brushes.text_primary,
             );
 
@@ -246,7 +233,7 @@ impl DownloadsStackRenderer {
                 self.draw_text(
                     &self.footer_format,
                     "Downloads is Empty",
-                    &empty_rect.to_d2d(),
+                    &rect_to_d2d(empty_rect),
                     &self.brushes.text_muted,
                 );
             } else {
@@ -276,21 +263,42 @@ impl DownloadsStackRenderer {
             } else {
                 self.brushes.card_fill.clone()
             };
-            let footer_rr = D2D1_ROUNDED_RECT {
-                rect: layout.open_folder_rect.to_d2d(),
-                radiusX: layout.tile_radius,
-                radiusY: layout.tile_radius,
+            fill_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                layout.open_folder_rect,
+                layout.tile_radius,
+                self.dpi,
+                &footer_fill,
+            );
+            let footer_rim = if palette.is_high_contrast {
+                self.brushes.specular_rim.clone()
+            } else {
+                self.brushes.alpha_brush(palette.text_primary, 0.08)
             };
-            self.target.FillRoundedRectangle(&footer_rr, &footer_fill);
+            stroke_squircle_or_rounded(
+                &self.factory,
+                &self.target,
+                layout.open_folder_rect,
+                layout.tile_radius,
+                self.dpi,
+                &footer_rim,
+                1.0,
+            );
             let footer_fg = if footer_hovered {
                 &self.brushes.on_accent
             } else {
                 &self.brushes.text_primary
             };
+            let footer_label = if finder_enabled {
+                "Open in Finder"
+            } else {
+                "Open in Explorer"
+            };
             self.draw_text(
                 &self.footer_format,
-                "Open in Explorer",
-                &layout.open_folder_rect.to_d2d(),
+                footer_label,
+                &rect_to_d2d(layout.open_folder_rect),
                 footer_fg,
             );
             Ok(())
@@ -305,7 +313,11 @@ impl DownloadsStackRenderer {
         appearance: &Appearance,
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
-        let shell_shape = GlassShape::from_rect(
+        draw_glass_or_fallback_shell(
+            &self.factory,
+            &self.target,
+            &self.glass,
+            &self.brushes,
             Rect {
                 x: 0,
                 y: 0,
@@ -313,43 +325,10 @@ impl DownloadsStackRenderer {
                 height,
             },
             radius,
-        );
-        let glass_drawn = self
-            .glass
-            .draw(&self.target, appearance, self.dpi, shell_shape, true)?;
-        if !glass_drawn {
-            let width = width as f32;
-            let height = height as f32;
-            let outer = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: 0.5,
-                    top: 0.5,
-                    right: width - 0.5,
-                    bottom: height - 0.5,
-                },
-                radiusX: radius,
-                radiusY: radius,
-            };
-            let inner = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: 1.5,
-                    top: 1.5,
-                    right: width - 1.5,
-                    bottom: height - 1.5,
-                },
-                radiusX: (radius - 1.0).max(1.0),
-                radiusY: (radius - 1.0).max(1.0),
-            };
-            unsafe {
-                let fill = &self.brushes.color_brush(palette.menu_fill);
-                let border = &self.brushes.color_brush(palette.menu_outer_border);
-                self.target.FillRoundedRectangle(&outer, fill);
-                self.target.DrawRoundedRectangle(&outer, border, 1.0, None);
-                self.target
-                    .DrawRoundedRectangle(&inner, &self.brushes.specular_rim, 1.0, None);
-            }
-        }
-        Ok(())
+            self.dpi,
+            appearance,
+            palette,
+        )
     }
 
     fn draw_tile(
@@ -361,37 +340,51 @@ impl DownloadsStackRenderer {
         selected: bool,
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
-        let tile_rect = tile.rect.to_d2d();
-        let rr = D2D1_ROUNDED_RECT {
-            rect: tile_rect,
-            radiusX: radius,
-            radiusY: radius,
+        let fill = if selected {
+            self.brushes.color_brush(palette.menu_hover_fill)
+        } else {
+            self.brushes.card_fill.clone()
         };
-        unsafe {
-            if selected {
-                let hover_brush = &self.brushes.color_brush(palette.menu_hover_fill);
-                self.target.FillRoundedRectangle(&rr, hover_brush);
-            } else {
-                self.target
-                    .FillRoundedRectangle(&rr, &self.brushes.card_fill);
-            }
-            self.target
-                .DrawRoundedRectangle(&rr, &self.brushes.specular_rim, 1.0, None);
+        fill_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            tile.rect,
+            radius,
+            self.dpi,
+            &fill,
+        );
+        let rim = if palette.is_high_contrast {
+            self.brushes.specular_rim.clone()
+        } else {
+            self.brushes
+                .alpha_brush(palette.text_primary, if selected { 0.14 } else { 0.08 })
+        };
+        stroke_squircle_or_rounded(
+            &self.factory,
+            &self.target,
+            tile.rect,
+            radius,
+            self.dpi,
+            &rim,
+            1.0,
+        );
 
-            let thumb = tile.thumb_rect.to_d2d();
-            if let Some(bmp) = bitmap {
-                self.target.DrawBitmap(
-                    bmp,
-                    Some(&raw const thumb),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
-            } else if tile.is_dir {
-                self.draw_folder_glyph(thumb);
-            } else {
-                self.draw_document_glyph(thumb)?;
-            }
+        let thumb = rect_to_d2d(tile.thumb_rect);
+        let thumb_radius = (radius - scale(2, self.dpi) as f32).max(scale(4, self.dpi) as f32);
+        if let Some(bmp) = bitmap {
+            let _ = fill_squircle_bitmap(
+                &self.factory,
+                &self.target,
+                tile.thumb_rect,
+                false,
+                thumb_radius,
+                bmp,
+                1.0,
+            );
+        } else if tile.is_dir {
+            self.draw_folder_glyph(thumb);
+        } else {
+            self.draw_document_glyph(thumb)?;
         }
         let fg = if selected {
             &self.brushes.on_accent
@@ -401,7 +394,7 @@ impl DownloadsStackRenderer {
         self.draw_text(
             &self.label_format,
             &entry.name,
-            &tile.label_rect.to_d2d(),
+            &rect_to_d2d(tile.label_rect),
             fg,
         );
         Ok(())
@@ -488,34 +481,13 @@ impl DownloadsStackRenderer {
         rect: &D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
-        if text.is_empty() {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.target.DrawText(
-                &wide,
-                format,
-                rect,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-    }
-}
-
-trait RectExt {
-    fn to_d2d(self) -> D2D_RECT_F;
-}
-
-impl RectExt for otto_core::Rect {
-    fn to_d2d(self) -> D2D_RECT_F {
-        D2D_RECT_F {
-            left: self.x as f32,
-            top: self.y as f32,
-            right: self.right() as f32,
-            bottom: self.bottom() as f32,
-        }
+        draw_text_on(
+            &self.target,
+            text,
+            format,
+            *rect,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
     }
 }

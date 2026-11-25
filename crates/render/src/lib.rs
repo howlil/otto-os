@@ -2,31 +2,40 @@ mod appearance;
 mod bar;
 mod control_center;
 mod dock;
+mod finder;
 mod focus_shield;
+mod kit;
 mod notch;
 mod popup;
+#[cfg(test)]
+mod resource_tests;
 mod settings;
 mod spotlight;
 mod window;
-
-mod kit;
-#[cfg(test)]
-mod resource_tests;
-
 use std::cell::{Cell, RefCell};
 use std::f32::consts::PI;
 
-pub use appearance::glass_gpu::release_shared_gpu;
-pub use appearance::theme::{BrushPalette, LiquidGlassPalette};
+pub(crate) use appearance::tokens::{
+    AMBER_WARN, BLACK, CHARGING_GREEN, CLEAR, EQUALIZER_GREEN, FOREGROUND, MUSIC_ACCENT, brighten,
+    rgb,
+};
+pub use appearance::{
+    glass_gpu::release_shared_gpu,
+    theme::{BrushPalette, LiquidGlassPalette},
+};
 pub use control_center::{ControlCenterPaintState, ControlCenterRenderer};
-pub use dock::renderer::{DockRenderItem, DockRenderer};
-pub use dock::stack::DownloadsStackRenderer;
+pub use dock::{
+    renderer::{DockRenderItem, DockRenderer},
+    stack::DownloadsStackRenderer,
+};
+pub use finder::{FinderPaintState, FinderRenderer};
 pub use focus_shield::FocusShieldRenderer;
+pub(crate) use kit::draw::rect_to_d2d;
 pub(crate) use kit::glyphs::{draw_bell_glyph, draw_speaker_glyph, draw_wifi_glyph};
 pub use popup::menu::{MenuHover, PopupMenuRenderer};
 pub use settings::{SettingsPaintState, SettingsRenderer};
 pub use spotlight::{SpotlightPaintEntry, SpotlightPaintState, SpotlightRenderer};
-pub use window::controls::WindowControlsRenderer;
+pub use window::controls::{WindowControlsPresent, WindowControlsRenderer};
 pub use window::genie::{GenieRenderer, build_fallback_card_snapshot};
 
 use appearance::surface::{
@@ -48,7 +57,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_ROUND,
     D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget,
-    ID2D1Factory, ID2D1GeometrySink, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1Factory, ID2D1GeometrySink, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
@@ -70,61 +80,10 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
-const BLACK: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 1.0,
-};
 const DISABLED_CONTROL_ALPHA: f32 = 0.35;
 const PANEL_CONTENT_RISE_PT: i32 = 8;
 const NOTCH_TAB_SLIDE_PT: i32 = 24;
 pub(crate) const GLYPH_STROKE_SCALE: f32 = 0.18;
-const FOREGROUND: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 0.95,
-};
-const CHARGING_GREEN: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.19,
-    g: 0.82,
-    b: 0.35,
-    a: 0.96,
-};
-const AMBER_WARN: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 0.62,
-    b: 0.04,
-    a: 0.96,
-};
-const MUSIC_ACCENT: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.988,
-    g: 0.235,
-    b: 0.329,
-    a: 1.0,
-};
-const EQUALIZER_GREEN: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.188,
-    g: 0.820,
-    b: 0.345,
-    a: 1.0,
-};
-const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
-};
-
-const fn rgb(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: r as f32 / 255.0,
-        g: g as f32 / 255.0,
-        b: b as f32 / 255.0,
-        a,
-    }
-}
 
 struct CachedNotchGeometry {
     rect: Rect,
@@ -195,6 +154,7 @@ pub struct Renderer {
     bar_chrome_hidden: Cell<bool>,
     notif_unread: Cell<bool>,
     reduced_motion: Cell<bool>,
+    high_contrast: Cell<bool>,
     notif_coalesce: Cell<f32>,
 }
 
@@ -644,6 +604,7 @@ impl Renderer {
                 bar_chrome_hidden: Cell::new(false),
                 notif_unread: Cell::new(false),
                 reduced_motion: Cell::new(false),
+                high_contrast: Cell::new(false),
                 notif_coalesce: Cell::new(1.0),
             })
         }
@@ -713,55 +674,31 @@ impl Renderer {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn present(
         &mut self,
         hwnd: isize,
         origin: (i32, i32),
-        layout: &Layout,
-        status: SystemStatus,
-        app_name: &str,
-        hovered: Option<HitTarget>,
-        focused: Option<HitTarget>,
-        hud: Option<NotchHudState>,
-        pomodoro: &PomodoroScene,
-        media: Option<&MediaScene>,
-        anim_phase: f32,
-        appearance: Appearance,
-        privacy: &PrivacyState,
-        call: Option<&otto_core::CallScene>,
-        notification: Option<&otto_core::NotificationPresentation>,
+        state: &BarPaintState<'_>,
     ) -> Result<()> {
-        if let Some(fields) =
-            self.bar_frame_fields(layout, status, hovered, focused, hud, appearance)
-            && self.last_bar_target.get() == Some((hwnd, origin))
+        if let Some(fields) = self.bar_frame_fields(
+            state.layout,
+            state.status,
+            state.hovered,
+            state.focused,
+            state.hud,
+            state.appearance,
+        ) && self.last_bar_target.get() == Some((hwnd, origin))
             && self.last_bar_frame.try_borrow().ok().is_some_and(|guard| {
                 guard
                     .as_ref()
-                    .is_some_and(|cached| cached.matches(&fields, app_name))
+                    .is_some_and(|cached| cached.matches(&fields, state.app_name))
             })
         {
             return Ok(());
         }
         draw_with_recovery(
             self,
-            |renderer| {
-                renderer.draw_bar(
-                    layout,
-                    status,
-                    app_name,
-                    hovered,
-                    focused,
-                    hud,
-                    pomodoro,
-                    media,
-                    anim_phase,
-                    appearance,
-                    privacy,
-                    call,
-                    notification,
-                )
-            },
+            |renderer| renderer.draw_bar(state),
             Self::recreate_target,
         )?;
         if let Err(err) = self.bar_surface.present(hwnd, origin) {
@@ -895,43 +832,14 @@ impl Renderer {
             .map(|(_, bmp)| bmp.clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn present_panel(
         &mut self,
         panel_hwnd: isize,
-        layout: &Layout,
-        hovered: Option<HitTarget>,
-        focused: Option<HitTarget>,
-        pomodoro: &PomodoroScene,
-        media: Option<&MediaScene>,
-        anim_phase: f32,
-        lyrics: LyricsView<'_>,
-        shelf_state: &ShelfState,
-        clipboard_state: &ClipboardState,
-        tasks_state: &TasksState,
-        privacy: &PrivacyState,
-        notification: Option<&otto_core::NotificationPresentation>,
-        focus_stats: &FocusStatsView,
+        state: &NotchPanelPaintState<'_>,
     ) -> Result<()> {
         draw_with_recovery(
             self,
-            |renderer| {
-                renderer.draw_panel(
-                    layout,
-                    hovered,
-                    focused,
-                    pomodoro,
-                    media,
-                    anim_phase,
-                    lyrics,
-                    shelf_state,
-                    clipboard_state,
-                    tasks_state,
-                    privacy,
-                    notification,
-                    focus_stats,
-                )
-            },
+            |renderer| renderer.draw_panel(state),
             Self::recreate_target,
         )?;
         let guard = self
@@ -943,10 +851,45 @@ impl Renderer {
             .ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))?;
         surface.present_sized(
             panel_hwnd,
-            (layout.panel_window.x, layout.panel_window.y),
-            (layout.panel_window.width, layout.panel_window.height),
+            (state.layout.panel_window.x, state.layout.panel_window.y),
+            (
+                state.layout.panel_window.width,
+                state.layout.panel_window.height,
+            ),
         )
     }
+}
+
+pub struct BarPaintState<'a> {
+    pub layout: &'a Layout,
+    pub status: SystemStatus,
+    pub app_name: &'a str,
+    pub hovered: Option<HitTarget>,
+    pub focused: Option<HitTarget>,
+    pub hud: Option<NotchHudState>,
+    pub pomodoro: &'a PomodoroScene,
+    pub media: Option<&'a MediaScene>,
+    pub anim_phase: f32,
+    pub appearance: Appearance,
+    pub privacy: &'a PrivacyState,
+    pub call: Option<&'a otto_core::CallScene>,
+    pub notification: Option<&'a otto_core::NotificationPresentation>,
+}
+
+pub struct NotchPanelPaintState<'a> {
+    pub layout: &'a Layout,
+    pub hovered: Option<HitTarget>,
+    pub focused: Option<HitTarget>,
+    pub pomodoro: &'a PomodoroScene,
+    pub media: Option<&'a MediaScene>,
+    pub anim_phase: f32,
+    pub lyrics: LyricsView<'a>,
+    pub shelf_state: &'a ShelfState,
+    pub clipboard_state: &'a ClipboardState,
+    pub tasks_state: &'a TasksState,
+    pub privacy: &'a PrivacyState,
+    pub notification: Option<&'a otto_core::NotificationPresentation>,
+    pub focus_stats: &'a FocusStatsView,
 }
 
 fn notch_arc_segment(x: f32, y: f32, radius: f32, sweep: D2D1_SWEEP_DIRECTION) -> D2D1_ARC_SEGMENT {
@@ -1230,24 +1173,6 @@ const fn translate_rect(rect: Rect, dx: i32) -> Rect {
     }
 }
 
-pub(crate) const fn rect_to_d2d(rect: Rect) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: rect.x as f32,
-        top: rect.y as f32,
-        right: rect.right() as f32,
-        bottom: rect.bottom() as f32,
-    }
-}
-
-const fn brighten(color: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: (color.r + amount).min(1.0),
-        g: (color.g + amount).min(1.0),
-        b: (color.b + amount).min(1.0),
-        a: color.a,
-    }
-}
-
 unsafe fn resolve_apple_font_family(dwrite: &IDWriteFactory) -> PCWSTR {
     if let Some(cached) = APPLE_FONT_FAMILY.with(Cell::get) {
         return cached;
@@ -1394,7 +1319,7 @@ pub(crate) fn draw_crescent_moon_outline(
 }
 
 fn try_draw_dwrite_tabular_layout(
-    target: &ID2D1DCRenderTarget,
+    target: &ID2D1RenderTarget,
     wide: &[u16],
     format: &IDWriteTextFormat,
     rect: D2D_RECT_F,
@@ -1422,7 +1347,7 @@ fn try_draw_dwrite_tabular_layout(
 }
 
 pub(crate) fn draw_dwrite_tabular_text(
-    target: &ID2D1DCRenderTarget,
+    target: &ID2D1RenderTarget,
     text: &str,
     format: &IDWriteTextFormat,
     rect: D2D_RECT_F,

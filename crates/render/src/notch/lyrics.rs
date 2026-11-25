@@ -5,7 +5,6 @@ use std::rc::Rc;
 use otto_core::{LyricsSheet, LyricsView, NowPlaying, Rect, scale};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP;
-use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
@@ -13,7 +12,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows_numerics::Vector2;
 
-use crate::{FOREGROUND, Renderer, shared_dwrite_factory};
+use crate::{Renderer, shared_dwrite_factory};
 
 const LYRIC_ROW_GAP_PT: i32 = 6;
 const LYRIC_PAD_PT: i32 = 14;
@@ -179,8 +178,9 @@ impl Renderer {
             right: drawer_rect.right() as f32 - pad,
             bottom: drawer_rect.bottom() as f32,
         };
+        let ink = self.notch_ink();
         if media.title.trim().is_empty() {
-            let empty_brush = &self.brushes.alpha_brush(FOREGROUND, 0.45 * alpha);
+            let empty_brush = &self.brushes.alpha_brush(ink, 0.45 * alpha);
             self.draw_text(
                 "Nothing playing",
                 &self.text_caption,
@@ -193,7 +193,7 @@ impl Renderer {
             } else {
                 0.45
             };
-            let status_brush = &self.brushes.alpha_brush(FOREGROUND, level * alpha);
+            let status_brush = &self.brushes.alpha_brush(ink, level * alpha);
             self.draw_text(
                 lyrics.status.placeholder(),
                 &self.text_caption,
@@ -208,22 +208,14 @@ impl Renderer {
             return;
         }
         let radius = scale(LYRIC_CARD_RADIUS_PT, self.dpi) as f32;
-        let card = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: drawer_rect.x as f32 + 0.5,
-                top: drawer_rect.y as f32 + 0.5,
-                right: drawer_rect.right() as f32 - 0.5,
-                bottom: drawer_rect.bottom() as f32 - 0.5,
-            },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let fill = self.brushes.alpha_brush(FOREGROUND, 0.05 * alpha);
-        let frame = self.brushes.alpha_brush(FOREGROUND, 0.10 * alpha);
-        unsafe {
-            self.target.FillRoundedRectangle(&card, &fill);
-            self.target.DrawRoundedRectangle(&card, &frame, 1.0, None);
-        }
+        let ink = self.notch_ink();
+        let fill = self.brushes.alpha_brush(ink, 0.05 * alpha);
+        let frame = self.brushes.alpha_brush(
+            ink,
+            if self.high_contrast.get() { 0.72 } else { 0.10 } * alpha,
+        );
+        self.draw_rounded_box(drawer_rect, radius, &fill);
+        self.draw_rounded_box_stroke(drawer_rect, radius, &frame, 1.0);
     }
 
     fn draw_lyric_lines(
@@ -324,9 +316,10 @@ impl Renderer {
     }
 
     fn draw_lyric_with_fill(&self, row: &LyricLayout, origin: Vector2, level: f32, progress: f32) {
+        let ink = self.notch_ink();
         let dim = &self
             .brushes
-            .alpha_brush(FOREGROUND, LYRIC_ACTIVE_BASE_ALPHA * level);
+            .alpha_brush(ink, LYRIC_ACTIVE_BASE_ALPHA * level);
         self.draw_lyric_layout(row, origin, dim);
         let widths: Vec<f32> = row.segments.iter().map(|segment| segment.width).collect();
         let feather = scale(LYRIC_WIPE_FEATHER_PT, self.dpi) as f32;
@@ -345,7 +338,7 @@ impl Renderer {
                     right: origin.X + segment.left + to,
                     bottom: origin.Y + segment.top + segment.height,
                 });
-                let band = &self.brushes.alpha_brush(FOREGROUND, 0.98 * level * weight);
+                let band = &self.brushes.alpha_brush(ink, 0.98 * level * weight);
                 self.draw_lyric_layout(row, origin, band);
                 self.pop_clip();
             }
@@ -353,15 +346,16 @@ impl Renderer {
     }
 
     fn draw_lyric_soft(&self, row: &LyricLayout, origin: Vector2, level: f32, radius: f32) {
+        let ink = self.notch_ink();
         if radius < LYRIC_BLUR_MIN_PX {
-            let sharp = &self.brushes.alpha_brush(FOREGROUND, level);
+            let sharp = &self.brushes.alpha_brush(ink, level);
             self.draw_lyric_layout(row, origin, sharp);
             return;
         }
-        let core = &self.brushes.alpha_brush(FOREGROUND, 0.28 * level);
+        let core = &self.brushes.alpha_brush(ink, 0.28 * level);
         self.draw_lyric_layout(row, origin, core);
-        let inner = &self.brushes.alpha_brush(FOREGROUND, 0.055 * level);
-        let outer = &self.brushes.alpha_brush(FOREGROUND, 0.035 * level);
+        let inner = &self.brushes.alpha_brush(ink, 0.055 * level);
+        let outer = &self.brushes.alpha_brush(ink, 0.035 * level);
         let inner_r = radius * LYRIC_BLUR_INNER_SCALE;
         for (dx, dy) in LYRIC_BLUR_RING {
             self.draw_lyric_layout(

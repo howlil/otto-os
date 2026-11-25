@@ -2,6 +2,8 @@ pub(crate) mod background_cleanup;
 pub(crate) mod com;
 pub(crate) mod diagnostics;
 pub(crate) mod file;
+pub(crate) mod flags;
+pub(crate) mod focus_relief;
 pub(crate) mod instance;
 pub(crate) mod os_version;
 pub(crate) mod startup;

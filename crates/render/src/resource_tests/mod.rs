@@ -1,8 +1,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{
-    DockRenderItem, DockRenderer, DownloadsStackRenderer, GenieRenderer, PopupMenuRenderer,
-    Renderer, WindowControlsRenderer, release_shared_factories, shared_d2d_factory,
+    ControlCenterRenderer, DockRenderItem, DockRenderer, DownloadsStackRenderer, GenieRenderer,
+    PopupMenuRenderer, Renderer, release_shared_factories, shared_d2d_factory,
 };
 use crate::appearance::surface::{
     DibSurface, DrawSession, create_dc_render_target, draw_on, upload_bgra_bitmap,
@@ -102,7 +102,7 @@ const RENDERER_KINDS: usize = 6;
 fn construct_renderer(kind: usize) {
     match kind % RENDERER_KINDS {
         0 => drop(DibSurface::new(320, 200).expect("surface")),
-        1 => drop(WindowControlsRenderer::new(108, 42).expect("window controls")),
+        1 => drop(ControlCenterRenderer::new(96).expect("control center")),
         2 => drop(DockRenderer::new(800, 160, 96).expect("dock")),
         3 => drop(PopupMenuRenderer::new(144).expect("popup menu")),
         4 => drop(
@@ -125,7 +125,6 @@ fn construct_each_renderer_once() {
 fn exercise_failed_constructions() {
     for _ in 0..ROUNDS {
         assert!(DibSurface::new(IMPOSSIBLE, IMPOSSIBLE).is_err());
-        assert!(WindowControlsRenderer::new(IMPOSSIBLE, IMPOSSIBLE).is_err());
         assert!(DockRenderer::new(IMPOSSIBLE, IMPOSSIBLE, 96).is_err());
         assert!(
             GenieRenderer::new(Rect {
@@ -295,21 +294,21 @@ fn shelf_render_and_thumbnail_churn_releases_bitmaps_and_gdi_handles() {
 
     let draw_once = |layout: &otto_core::Layout, state: &otto_core::ShelfState| {
         renderer
-            .draw_panel(
+            .draw_panel(&crate::NotchPanelPaintState {
                 layout,
-                Some(otto_core::HitTarget::ShelfItem(0)),
-                None,
-                &pomodoro,
-                None,
-                0.0,
+                hovered: Some(otto_core::HitTarget::ShelfItem(0)),
+                focused: None,
+                pomodoro: &pomodoro,
+                media: None,
+                anim_phase: 0.0,
                 lyrics,
-                state,
-                &clipboard,
-                &otto_core::TasksState::default(),
-                &privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                shelf_state: state,
+                clipboard_state: &clipboard,
+                tasks_state: &otto_core::TasksState::default(),
+                privacy: &privacy,
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("shelf draw");
     };
 
@@ -483,21 +482,21 @@ fn exercise_batch_1_2_bars_for_dpi(
                 compact_layout.clone()
             };
             renderer
-                .draw_bar(
-                    &layout,
+                .draw_bar(&crate::BarPaintState {
+                    layout: &layout,
                     status,
-                    "Finder",
-                    Some(otto_core::HitTarget::PrivacyIndicator),
-                    Some(otto_core::HitTarget::Notch),
+                    app_name: "Finder",
+                    hovered: Some(otto_core::HitTarget::PrivacyIndicator),
+                    focused: Some(otto_core::HitTarget::Notch),
                     hud,
                     pomodoro,
-                    Some(media),
-                    0.45,
+                    media: Some(media),
+                    anim_phase: 0.45,
                     appearance,
                     privacy,
-                    None,
-                    None,
-                )
+                    call: None,
+                    notification: None,
+                })
                 .expect("batch 1-2 bar draw");
         }
     }
@@ -525,44 +524,36 @@ fn exercise_batch_1_focus_and_alert(
     };
     let mut running_pomo = pomodoro.clone();
     running_pomo.state.status = otto_core::PomodoroStatus::Running;
-    for focus_mode in [
-        otto_core::FocusSubMode::Pomodoro,
-        otto_core::FocusSubMode::Timer,
-        otto_core::FocusSubMode::Stopwatch,
-    ] {
-        running_pomo.focus_mode = focus_mode;
-        let layout = otto_core::compute_layout_with_notch(
-            metrics,
-            1920,
-            dpi,
-            "Finder",
-            otto_core::NotchLayoutInput {
-                panel_expansion: 1.0,
-                focus_mode,
-                pomodoro_surface: running_pomo.view().surface,
-                media_present: true,
-                privacy: privacy_layout,
-                ..otto_core::NotchLayoutInput::default()
-            },
-        );
-        renderer
-            .draw_panel(
-                &layout,
-                Some(otto_core::HitTarget::PrivacyMicMute),
-                Some(otto_core::HitTarget::FocusMode(focus_mode)),
-                &running_pomo,
-                Some(media),
-                0.5,
-                idle_lyrics,
-                &empty_shelf,
-                &empty_clipboard,
-                &otto_core::TasksState::default(),
-                privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
-            .expect("focus submode draw");
-    }
+    let layout = otto_core::compute_layout_with_notch(
+        metrics,
+        1920,
+        dpi,
+        "Finder",
+        otto_core::NotchLayoutInput {
+            panel_expansion: 1.0,
+            pomodoro_surface: running_pomo.view().surface,
+            media_present: true,
+            privacy: privacy_layout,
+            ..otto_core::NotchLayoutInput::default()
+        },
+    );
+    renderer
+        .draw_panel(&crate::NotchPanelPaintState {
+            layout: &layout,
+            hovered: Some(otto_core::HitTarget::PrivacyMicMute),
+            focused: Some(otto_core::HitTarget::PomodoroPlayPause),
+            pomodoro: &running_pomo,
+            media: Some(media),
+            anim_phase: 0.5,
+            lyrics: idle_lyrics,
+            shelf_state: &empty_shelf,
+            clipboard_state: &empty_clipboard,
+            tasks_state: &otto_core::TasksState::default(),
+            privacy,
+            notification: None,
+            focus_stats: &otto_core::FocusStatsView::default(),
+        })
+        .expect("pomodoro panel draw");
 
     let mut alert_pomo = pomodoro.clone();
     alert_pomo.state.status = otto_core::PomodoroStatus::Alert;
@@ -584,21 +575,21 @@ fn exercise_batch_1_focus_and_alert(
         },
     );
     renderer
-        .draw_panel(
-            &alert_layout,
-            Some(otto_core::HitTarget::PomodoroStartNext),
-            None,
-            &alert_pomo,
-            Some(media),
-            0.5,
-            idle_lyrics,
-            &empty_shelf,
-            &empty_clipboard,
-            &otto_core::TasksState::default(),
+        .draw_panel(&crate::NotchPanelPaintState {
+            layout: &alert_layout,
+            hovered: Some(otto_core::HitTarget::PomodoroStartNext),
+            focused: None,
+            pomodoro: &alert_pomo,
+            media: Some(media),
+            anim_phase: 0.5,
+            lyrics: idle_lyrics,
+            shelf_state: &empty_shelf,
+            clipboard_state: &empty_clipboard,
+            tasks_state: &otto_core::TasksState::default(),
             privacy,
-            None,
-            &otto_core::FocusStatsView::default(),
-        )
+            notification: None,
+            focus_stats: &otto_core::FocusStatsView::default(),
+        })
         .expect("pomodoro alert draw");
 }
 
@@ -650,21 +641,21 @@ fn exercise_batch_2_shelf(
             },
         );
         renderer
-            .draw_panel(
-                &layout,
-                Some(otto_core::HitTarget::ShelfAdd),
-                None,
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: Some(otto_core::HitTarget::ShelfAdd),
+                focused: None,
                 pomodoro,
-                Some(media),
-                0.5,
-                idle_lyrics,
+                media: Some(media),
+                anim_phase: 0.5,
+                lyrics: idle_lyrics,
                 shelf_state,
-                &empty_clipboard,
-                &otto_core::TasksState::default(),
+                clipboard_state: &empty_clipboard,
+                tasks_state: &otto_core::TasksState::default(),
                 privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("shelf tab draw");
     }
 }
@@ -741,21 +732,21 @@ fn exercise_batch_3_clipboard(
             },
         );
         renderer
-            .draw_panel(
-                &layout,
-                hover,
-                Some(otto_core::HitTarget::NotchTabClipboard),
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: hover,
+                focused: Some(otto_core::HitTarget::NotchTabClipboard),
                 pomodoro,
-                Some(media),
-                0.5,
-                idle_lyrics,
-                &empty_shelf,
+                media: Some(media),
+                anim_phase: 0.5,
+                lyrics: idle_lyrics,
+                shelf_state: &empty_shelf,
                 clipboard_state,
-                &otto_core::TasksState::default(),
+                tasks_state: &otto_core::TasksState::default(),
                 privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("clipboard tab draw");
     }
 }
@@ -816,21 +807,21 @@ fn exercise_tasks_tab(
             },
         );
         renderer
-            .draw_panel(
-                &layout,
-                hover,
-                Some(otto_core::HitTarget::NotchTabTasks),
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: hover,
+                focused: Some(otto_core::HitTarget::NotchTabTasks),
                 pomodoro,
-                None,
-                0.0,
-                idle_lyrics,
-                &empty_shelf,
-                &empty_clipboard,
+                media: None,
+                anim_phase: 0.0,
+                lyrics: idle_lyrics,
+                shelf_state: &empty_shelf,
+                clipboard_state: &empty_clipboard,
                 tasks_state,
                 privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("tasks tab draw");
     }
 }
@@ -877,21 +868,21 @@ fn exercise_batch_4_notifications(
     );
     renderer.set_notification_unread(true);
     renderer
-        .draw_bar(
-            &peek_layout,
-            otto_core::SystemStatus::default(),
-            "Finder",
-            None,
-            None,
-            None,
+        .draw_bar(&crate::BarPaintState {
+            layout: &peek_layout,
+            status: otto_core::SystemStatus::default(),
+            app_name: "Finder",
+            hovered: None,
+            focused: None,
+            hud: None,
             pomodoro,
-            None,
-            0.3,
-            otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
+            media: None,
+            anim_phase: 0.3,
+            appearance: otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
             privacy,
-            None,
-            Some(&peek_content),
-        )
+            call: None,
+            notification: Some(&peek_content),
+        })
         .expect("notification peek draw");
     renderer.set_notification_unread(false);
 
@@ -948,21 +939,21 @@ fn exercise_batch_4_notifications(
             otto_core::HitTarget::NotificationClose
         };
         renderer
-            .draw_panel(
-                &layout,
-                Some(hovered),
-                Some(otto_core::HitTarget::NotificationCard),
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: Some(hovered),
+                focused: Some(otto_core::HitTarget::NotificationCard),
                 pomodoro,
-                None,
-                0.5,
-                idle_lyrics,
-                &empty_shelf,
-                &empty_clipboard,
-                &otto_core::TasksState::default(),
+                media: None,
+                anim_phase: 0.5,
+                lyrics: idle_lyrics,
+                shelf_state: &empty_shelf,
+                clipboard_state: &empty_clipboard,
+                tasks_state: &otto_core::TasksState::default(),
                 privacy,
-                Some(&content),
-                &otto_core::FocusStatsView::default(),
-            )
+                notification: Some(&content),
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("notification card draw");
     }
 }
@@ -1014,21 +1005,21 @@ fn exercise_batch_1_2_panels_for_dpi(
             },
         );
         renderer
-            .draw_panel(
-                &layout,
-                Some(otto_core::HitTarget::MediaPlayPause),
-                None,
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: Some(otto_core::HitTarget::MediaPlayPause),
+                focused: None,
                 pomodoro,
-                Some(media),
-                0.5,
+                media: Some(media),
+                anim_phase: 0.5,
                 lyrics,
-                &empty_shelf,
-                &empty_clipboard,
-                &otto_core::TasksState::default(),
+                shelf_state: &empty_shelf,
+                clipboard_state: &empty_clipboard,
+                tasks_state: &otto_core::TasksState::default(),
                 privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("media tab draw");
     }
 }
@@ -1213,8 +1204,10 @@ fn control_center_renders_main_and_subpanels_across_dpis_without_leaking() {
             ControlCenterPage::Bluetooth,
             ControlCenterPage::Sound,
             ControlCenterPage::Display,
+            ControlCenterPage::Gallery,
         ] {
             snap.page = page;
+            snap.editing = page == ControlCenterPage::Main;
             let layout = otto_core::compute_control_center_layout_for_snapshot(
                 &ControlCenterMetrics::DEFAULT,
                 ControlCenterPlacement {
@@ -1239,6 +1232,8 @@ fn control_center_renders_main_and_subpanels_across_dpis_without_leaking() {
                         pressed: None,
                         focused,
                         morph_progress: None,
+                        editing: snap.editing,
+                        ..super::ControlCenterPaintState::default()
                     },
                     &Appearance::glass(ResolvedTheme::Dark),
                 )
@@ -1404,21 +1399,21 @@ fn renderer_recreate_target_keeps_drawing_and_gui_counts_flat() {
     )
     .expect("renderer");
     let draw_once = |r: &Renderer| {
-        r.draw_bar(
-            &layout,
+        r.draw_bar(&crate::BarPaintState {
+            layout: &layout,
             status,
-            "Finder",
-            None,
-            None,
-            None,
-            &pomodoro,
-            None,
-            0.0,
-            otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
-            &privacy,
-            None,
-            None,
-        )
+            app_name: "Finder",
+            hovered: None,
+            focused: None,
+            hud: None,
+            pomodoro: &pomodoro,
+            media: None,
+            anim_phase: 0.0,
+            appearance: otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
+            privacy: &privacy,
+            call: None,
+            notification: None,
+        })
         .expect("draw bar");
     };
     draw_once(&renderer);
@@ -1439,7 +1434,6 @@ fn secondary_renderers_recreate_target_without_error() {
     dock.set_icon(String::from("app"), BITMAP_SIDE, BITMAP_SIDE, &pixels)
         .expect("dock icon");
     let mut menu = PopupMenuRenderer::new(96).expect("menu");
-    let mut controls = WindowControlsRenderer::new(80, 24).expect("controls");
 
     let baseline = GuiCounts::now();
     for _ in 0..ROUNDS {
@@ -1449,7 +1443,6 @@ fn secondary_renderers_recreate_target_without_error() {
         dock.recreate_target().expect("dock recreate");
         assert!(!dock.has_icon("app"));
         menu.recreate_target().expect("menu recreate");
-        controls.recreate_target().expect("controls recreate");
     }
     baseline.assert_no_growth("secondary renderers target recreate");
 }
@@ -1577,6 +1570,7 @@ fn dock_badges_progress_and_downloads_stack_render_without_leaking() {
                     &stack_items,
                     otto_core::DownloadsStackHit::Item(1),
                     otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark),
+                    true,
                 )
                 .expect("render downloads stack");
             stack.recreate_target().expect("stack recreate");
@@ -1722,21 +1716,21 @@ fn floating_notch_squircle_tabular_rim_and_secondary_circle_do_not_leak() {
     let exercise = || {
         for _ in 0..20 {
             renderer
-                .draw_bar(
-                    &layout,
+                .draw_bar(&crate::BarPaintState {
+                    layout: &layout,
                     status,
-                    "Finder",
-                    Some(otto_core::HitTarget::NotchSecondary),
-                    None,
-                    None,
-                    &pomodoro,
-                    None,
-                    0.3,
+                    app_name: "Finder",
+                    hovered: Some(otto_core::HitTarget::NotchSecondary),
+                    focused: None,
+                    hud: None,
+                    pomodoro: &pomodoro,
+                    media: None,
+                    anim_phase: 0.3,
                     appearance,
-                    &privacy,
-                    None,
-                    None,
-                )
+                    privacy: &privacy,
+                    call: None,
+                    notification: None,
+                })
                 .expect("floating bar draw");
             let rect = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
                 left: 8.0,
@@ -1808,10 +1802,21 @@ fn draw_test_bar(
     let privacy = otto_core::PrivacyState::default();
     let status = otto_core::SystemStatus::default();
     let appearance = otto_core::Appearance::glass(otto_core::ResolvedTheme::Dark);
-    renderer.draw_bar(
-        layout, status, "Finder", None, None, hud, &pomodoro, None, 0.0, appearance, &privacy,
-        None, None,
-    )
+    renderer.draw_bar(&crate::BarPaintState {
+        layout,
+        status,
+        app_name: "Finder",
+        hovered: None,
+        focused: None,
+        hud,
+        pomodoro: &pomodoro,
+        media: None,
+        anim_phase: 0.0,
+        appearance,
+        privacy: &privacy,
+        call: None,
+        notification: None,
+    })
 }
 
 #[test]
@@ -1858,21 +1863,21 @@ fn compact_call_activity_draws_for_voice_video_and_muted_calls() {
             elapsed: String::from("12:34"),
         };
         renderer
-            .draw_bar(
-                &layout,
+            .draw_bar(&crate::BarPaintState {
+                layout: &layout,
                 status,
-                "Finder",
-                None,
-                None,
-                None,
-                &pomodoro,
-                None,
-                0.4,
+                app_name: "Finder",
+                hovered: None,
+                focused: None,
+                hud: None,
+                pomodoro: &pomodoro,
+                media: None,
+                anim_phase: 0.4,
                 appearance,
-                &privacy,
-                Some(&scene),
-                None,
-            )
+                privacy: &privacy,
+                call: Some(&scene),
+                notification: None,
+            })
             .expect("call compact draw");
     }
     renderer.set_reduced_motion(false);
@@ -1936,19 +1941,21 @@ fn bar_frame_key_memoizes_when_panel_open_and_skips_present() {
         .present(
             0,
             (0, 0),
-            &open_layout,
-            status,
-            "Finder",
-            Some(otto_core::HitTarget::PomodoroPlayPause),
-            Some(otto_core::HitTarget::PomodoroReset),
-            None,
-            &pomodoro,
-            None,
-            0.5,
-            appearance,
-            &privacy,
-            None,
-            None,
+            &crate::BarPaintState {
+                layout: &open_layout,
+                status,
+                app_name: "Finder",
+                hovered: Some(otto_core::HitTarget::PomodoroPlayPause),
+                focused: Some(otto_core::HitTarget::PomodoroReset),
+                hud: None,
+                pomodoro: &pomodoro,
+                media: None,
+                anim_phase: 0.5,
+                appearance,
+                privacy: &privacy,
+                call: None,
+                notification: None,
+            },
         )
         .expect("memoized present skips UpdateLayeredWindow");
 
@@ -2006,6 +2013,10 @@ fn bar_frame_key_invalidates_on_backdrop_brand_recreate_closed_and_hud() {
         draw_test_bar(r, &open_layout, None).expect("draw open bar");
         assert!(r.last_bar_frame.borrow().is_some());
     };
+
+    draw_open(&renderer);
+    renderer.set_brand_icon(otto_core::BrandIcon::Windows);
+    assert!(renderer.last_bar_frame.borrow().is_none());
 
     draw_open(&renderer);
     renderer.set_brand_icon(otto_core::BrandIcon::ClassicApple);
@@ -2084,25 +2095,25 @@ fn panel_surface_allocates_lazily_and_releases_gdi_objects_on_release() {
     let baseline = GuiCounts::now();
     for round in 0..2 {
         renderer
-            .draw_panel(
-                &layout,
-                None,
-                None,
-                &pomodoro,
-                None,
-                0.0,
-                otto_core::LyricsView {
+            .draw_panel(&crate::NotchPanelPaintState {
+                layout: &layout,
+                hovered: None,
+                focused: None,
+                pomodoro: &pomodoro,
+                media: None,
+                anim_phase: 0.0,
+                lyrics: otto_core::LyricsView {
                     sheet: None,
                     status: otto_core::LyricsStatus::Idle,
                     animated: false,
                 },
-                &shelf,
-                &clipboard,
-                &tasks,
-                &privacy,
-                None,
-                &otto_core::FocusStatsView::default(),
-            )
+                shelf_state: &shelf,
+                clipboard_state: &clipboard,
+                tasks_state: &tasks,
+                privacy: &privacy,
+                notification: None,
+                focus_stats: &otto_core::FocusStatsView::default(),
+            })
             .expect("draw panel");
         assert!(renderer.panel_surface.borrow().is_some());
         assert!(
@@ -2216,21 +2227,21 @@ fn draw_focus_stats_case(
         animated: false,
     };
     renderer
-        .draw_panel(
+        .draw_panel(&crate::NotchPanelPaintState {
             layout,
-            hover,
+            hovered: hover,
             focused,
-            &pomodoro,
-            None,
-            0.0,
+            pomodoro: &pomodoro,
+            media: None,
+            anim_phase: 0.0,
             lyrics,
-            &otto_core::ShelfState::default(),
-            &otto_core::ClipboardState::default(),
-            &otto_core::TasksState::default(),
-            &otto_core::PrivacyState::default(),
-            None,
-            stats,
-        )
+            shelf_state: &otto_core::ShelfState::default(),
+            clipboard_state: &otto_core::ClipboardState::default(),
+            tasks_state: &otto_core::TasksState::default(),
+            privacy: &otto_core::PrivacyState::default(),
+            notification: None,
+            focus_stats: stats,
+        })
         .expect("focus stats draw");
 }
 

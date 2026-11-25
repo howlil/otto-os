@@ -1,4 +1,4 @@
-use otto_core::{FocusShieldDismissal, Rect, focus_shield_layout, is_back_hit};
+use otto_core::{Appearance, FocusShieldDismissal, Rect, focus_shield_layout, is_back_hit};
 use otto_render::FocusShieldRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
@@ -32,10 +32,17 @@ pub(crate) struct FocusShield {
 }
 
 impl FocusShield {
-    fn paint(&mut self, window: isize, frame: Rect, dpi: u32, label: &str) -> bool {
+    fn paint(
+        &mut self,
+        window: isize,
+        frame: Rect,
+        dpi: u32,
+        label: &str,
+        appearance: Appearance,
+    ) -> bool {
         let size = (frame.width, frame.height);
         if self.renderer.is_none() || self.renderer_size != size {
-            match FocusShieldRenderer::new(size.0, size.1) {
+            match FocusShieldRenderer::new(size.0, size.1, dpi) {
                 Ok(renderer) => {
                     self.renderer = Some(renderer);
                     self.renderer_size = size;
@@ -49,7 +56,7 @@ impl FocusShield {
         let Some(renderer) = self.renderer.as_mut() else {
             return false;
         };
-        match renderer.present(window, (frame.x, frame.y), dpi, label) {
+        match renderer.present(window, (frame.x, frame.y), dpi, label, appearance) {
             Ok(()) => true,
             Err(error) => {
                 otto_platform::log_error("focus-shield", &format!("present failed: {error}"));
@@ -88,11 +95,12 @@ pub(crate) fn block(runtime: &RuntimeContext, target: ShieldTarget) {
     let Some(window) = ensure_window(runtime) else {
         return;
     };
+    let appearance = crate::theme_state::appearance(runtime);
     let painted = runtime
         .focus_shield
         .try_borrow_mut()
         .is_ok_and(|mut state| {
-            let painted = state.paint(window, frame, dpi, &target.label);
+            let painted = state.paint(window, frame, dpi, &target.label, appearance);
             if painted {
                 state.shown = Some(Shown { target, frame, dpi });
             }
@@ -134,13 +142,14 @@ pub(crate) fn sync(runtime: &RuntimeContext, focus_running: bool) {
 
 fn reposition(runtime: &RuntimeContext, shown: Shown, frame: Rect) {
     let dpi = otto_platform::window_dpi(shown.target.window);
+    let appearance = crate::theme_state::appearance(runtime);
     let placed = runtime
         .focus_shield
         .try_borrow_mut()
         .ok()
         .and_then(|mut state| {
             let window = state.window?;
-            if !state.paint(window, frame, dpi, &shown.target.label) {
+            if !state.paint(window, frame, dpi, &shown.target.label, appearance) {
                 return None;
             }
             state.shown = Some(Shown {

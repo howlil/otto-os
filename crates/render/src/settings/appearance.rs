@@ -1,8 +1,7 @@
 use otto_core::{AccentColor, AppearanceStyle, Rect, Rgba, SettingsHit};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
-use windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
 
-use super::palette::{Palette, ROW_PAD_POINTS, WHITE, d2d, from_rgba, rect_f, rgba, with_alpha};
+use super::palette::{Palette, ROW_PAD_POINTS, WHITE, from_rgba, rect_f, rgba, with_alpha};
 use super::{SettingsPaintState, SettingsRenderer};
 
 fn blend_d2d(base: D2D1_COLOR_F, accent: D2D1_COLOR_F, factor: f32, alpha: f32) -> D2D1_COLOR_F {
@@ -28,14 +27,10 @@ fn preview_surface_colors(
     style: AppearanceStyle,
     dark: bool,
     accent: D2D1_COLOR_F,
-    high_contrast: bool,
+    palette: &Palette,
 ) -> (D2D1_COLOR_F, D2D1_COLOR_F) {
-    if high_contrast {
-        return if dark {
-            (rgba(0x00_0000, 1.0), WHITE)
-        } else {
-            (WHITE, rgba(0x00_0000, 1.0))
-        };
+    if palette.high_contrast {
+        return (palette.background, palette.text);
     }
     match (style, dark) {
         (AppearanceStyle::LiquidGlass, true) => (rgba(0x16_1A26, 0.42), rgba(0xFF_FFFF, 0.72)),
@@ -191,13 +186,10 @@ impl SettingsRenderer {
         palette: &Palette,
     ) {
         let radius = self.px(8) as f32;
-        unsafe {
-            self.target
-                .PushAxisAlignedClip(&d2d(rect), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        }
+        self.canvas.push_clip(rect);
         self.draw_style_preview_backdrop(rect, radius, dark, accent, high_contrast);
 
-        let (shell_fill, shell_rim) = preview_surface_colors(style, dark, accent, high_contrast);
+        let (shell_fill, shell_rim) = preview_surface_colors(style, dark, accent, palette);
         let bar_h = self.px(8).max(5);
         self.fill(
             Rect {
@@ -280,9 +272,7 @@ impl SettingsRenderer {
             0.8,
             shell_rim,
         );
-        unsafe {
-            self.target.PopAxisAlignedClip();
-        }
+        self.canvas.pop_clip();
     }
 
     #[allow(clippy::too_many_arguments)]

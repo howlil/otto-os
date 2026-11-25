@@ -1,28 +1,32 @@
 use otto_core::{
-    FocusSubMode, HitTarget, Layout, NotchExpandedTab, POMODORO_EXTEND_LABEL, PomodoroProgress,
-    PomodoroScene, PomodoroStatus, PomodoroSurface, PomodoroTone, PomodoroView, Rect, scale,
+    HitTarget, Layout, NotchExpandedTab, POMODORO_EXTEND_LABEL, PomodoroProgress, PomodoroScene,
+    PomodoroStatus, PomodoroSurface, PomodoroTone, PomodoroView, Rect, scale,
 };
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush};
 use windows::core::Result;
 use windows_numerics::Vector2;
 
 use crate::appearance::palette::TonePalette;
+use crate::appearance::tokens::{
+    LONG_BREAK_BLUE as LONG_BREAK_ACCENT, SYSTEM_GREEN as SHORT_BREAK_ACCENT,
+    URGENT_CORAL as CORAL, category_d2d_color,
+};
+use crate::kit::draw::center_of;
 use crate::{
-    BLACK, FOREGROUND, GLYPH_STROKE_SCALE, Renderer, brighten, rect_to_d2d, rgb, translate_rect,
+    BLACK, FOREGROUND, GLYPH_STROKE_SCALE, Renderer, brighten, rect_to_d2d, translate_rect,
 };
 
-const FOCUS_ACCENT: D2D1_COLOR_F = rgb(255, 146, 48, 1.0);
-const SHORT_BREAK_ACCENT: D2D1_COLOR_F = rgb(48, 209, 88, 1.0);
-const LONG_BREAK_ACCENT: D2D1_COLOR_F = rgb(0, 145, 255, 1.0);
-const CORAL: D2D1_COLOR_F = rgb(255, 66, 69, 1.0);
-
-pub(crate) fn pomodoro_colors(tone: PomodoroTone, dim: f32, urgent: bool) -> TonePalette {
+fn pomodoro_colors_with_focus(
+    tone: PomodoroTone,
+    focus_accent: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    dim: f32,
+    urgent: bool,
+) -> TonePalette {
     let accent = match tone {
-        PomodoroTone::Focus => FOCUS_ACCENT,
+        PomodoroTone::Focus => focus_accent,
         PomodoroTone::ShortBreak => SHORT_BREAK_ACCENT,
         PomodoroTone::LongBreak => LONG_BREAK_ACCENT,
-        PomodoroTone::Timer | PomodoroTone::Stopwatch => FOREGROUND,
     };
     let mut colors = TonePalette {
         from: accent,
@@ -39,14 +43,32 @@ pub(crate) fn pomodoro_colors(tone: PomodoroTone, dim: f32, urgent: bool) -> Ton
     colors.dimmed(dim)
 }
 
-fn center_of(rect: Rect) -> Vector2 {
-    Vector2::new(
-        rect.x as f32 + rect.width as f32 * 0.5,
-        rect.y as f32 + rect.height as f32 * 0.5,
-    )
-}
-
 impl Renderer {
+    fn resolve_pomodoro_colors(
+        &self,
+        tone: PomodoroTone,
+        scene: &PomodoroScene,
+        dim: f32,
+        urgent: bool,
+    ) -> TonePalette {
+        let focus_accent = category_d2d_color(scene.category_color);
+        let mut colors = pomodoro_colors_with_focus(tone, focus_accent, dim, urgent);
+        if self.high_contrast.get() && !urgent {
+            colors.text = self.notch_ink();
+        }
+        colors
+    }
+
+    fn contrast_ink_on(
+        bg: windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F,
+    ) -> windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+        if bg.r * 0.2126 + bg.g * 0.7152 + bg.b * 0.0722 < 0.4 {
+            FOREGROUND
+        } else {
+            BLACK
+        }
+    }
+
     fn icon_stroke(size: f32) -> f32 {
         (size * GLYPH_STROKE_SCALE).max(1.5)
     }
@@ -173,111 +195,6 @@ impl Renderer {
         }
     }
 
-    fn draw_hourglass_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = Self::icon_stroke(g);
-        let top = center.Y - g * 0.85;
-        let bottom = center.Y + g * 0.85;
-        let cap = g * 0.68;
-        let waist = g * 0.54;
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(center.X - cap, top),
-                Vector2::new(center.X + cap, top),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(center.X - cap, bottom),
-                Vector2::new(center.X + cap, bottom),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(center.X - waist, top),
-                Vector2::new(center.X + waist, bottom),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(center.X + waist, top),
-                Vector2::new(center.X - waist, bottom),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
-    }
-
-    fn draw_stopwatch_glyph(&self, center: Vector2, g: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = Self::icon_stroke(g);
-        let dial = Vector2::new(center.X, center.Y + g * 0.14);
-        let r = g * 0.78;
-        let crown_y = dial.Y - r - g * 0.24;
-        unsafe {
-            self.target.DrawEllipse(
-                &D2D1_ELLIPSE {
-                    point: dial,
-                    radiusX: r,
-                    radiusY: r,
-                },
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(center.X, dial.Y - r),
-                Vector2::new(center.X, crown_y),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(center.X - g * 0.28, crown_y),
-                Vector2::new(center.X + g * 0.28, crown_y),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                dial,
-                Vector2::new(dial.X + r * 0.55, dial.Y - r * 0.45),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
-    }
-
-    fn draw_lap_flag_glyph(&self, cx: f32, cy: f32, size: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (size * 0.22).max(1.4);
-        let pole_x = cx - size * 0.48;
-        let top_y = cy - size * 0.85;
-        let bottom_y = cy + size * 0.85;
-        let tip = Vector2::new(cx + size * 0.72, cy - size * 0.34);
-        let fold = Vector2::new(pole_x, cy + size * 0.16);
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(pole_x, top_y),
-                Vector2::new(pole_x, bottom_y),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(pole_x, top_y),
-                tip,
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target
-                .DrawLine(tip, fold, brush, stroke, &self.stroke_style);
-        }
-    }
-
     fn draw_tone_glyph(
         &self,
         center: Vector2,
@@ -289,8 +206,6 @@ impl Renderer {
             PomodoroTone::Focus => self.draw_tomato_glyph(center, g, brush),
             PomodoroTone::ShortBreak => self.draw_cup_glyph(center, g, brush),
             PomodoroTone::LongBreak => self.draw_moon_glyph(center, g, brush)?,
-            PomodoroTone::Timer => self.draw_hourglass_glyph(center, g, brush),
-            PomodoroTone::Stopwatch => self.draw_stopwatch_glyph(center, g, brush),
         }
         Ok(())
     }
@@ -306,15 +221,16 @@ impl Renderer {
         if alpha <= 0.005 {
             return Ok(());
         }
-        let view = scene.compact_view();
-        let colors = pomodoro_colors(view.tone, scene.dim, view.urgent);
+        let view = scene.view();
+        let colors = self.resolve_pomodoro_colors(view.tone, scene, scene.dim, view.urgent);
         let (ring_progress, ring_status, time_text) = scene.compact_ring();
         let center = center_of(layout.compact_ring);
         let radius = scale(7, self.dpi) as f32;
         let stroke = (scale(5, self.dpi) as f32 * 0.5).max(2.0);
+        let ink = self.notch_ink();
 
         let accent = self.brushes.alpha_brush(colors.accent, alpha);
-        let track = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
+        let track = self.brushes.alpha_brush(ink, 0.18 * alpha);
         self.draw_progress_ring(
             center.X,
             center.Y,
@@ -356,8 +272,9 @@ impl Renderer {
                 rect_to_d2d(layout.compact_peek),
                 &peek_brush,
             );
-        } else if let Some(fills) = scene.compact_cycle_progress() {
-            let track = self.brushes.alpha_brush(FOREGROUND, 0.16 * alpha);
+        } else {
+            let fills = scene.compact_cycle_progress();
+            let track = self.brushes.alpha_brush(ink, 0.16 * alpha);
             for (rect, fill) in layout.compact_cycle_steps.iter().zip(fills) {
                 let radius = rect.height as f32 * 0.5;
                 self.draw_rounded_box(*rect, radius, &track);
@@ -400,14 +317,14 @@ impl Renderer {
         if alpha <= 0.005 || layout.notch_secondary.is_empty() {
             return Ok(());
         }
-        let view = scene.compact_view();
-        let colors = pomodoro_colors(view.tone, scene.dim, view.urgent);
+        let view = scene.view();
+        let colors = self.resolve_pomodoro_colors(view.tone, scene, scene.dim, view.urgent);
         let (ring_progress, ring_status, _) = scene.compact_ring();
         let center = center_of(layout.notch_secondary);
         let radius = (layout.notch_secondary.width as f32 * 0.28).max(scale(6, self.dpi) as f32);
         let stroke = (scale(5, self.dpi) as f32 * 0.5).max(2.0);
         let accent = self.brushes.alpha_brush(colors.accent, alpha);
-        let track = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
+        let track = self.brushes.alpha_brush(self.notch_ink(), 0.18 * alpha);
         self.draw_progress_ring(
             center.X,
             center.Y,
@@ -476,17 +393,14 @@ impl Renderer {
         has_media: bool,
         scene: &PomodoroScene,
     ) {
+        let ink = self.notch_ink();
         let strip = translate_rect(layout.notch_tab_strip, -offset_x);
         if !strip.is_empty() {
-            let strip_brush = self.brushes.alpha_brush(FOREGROUND, 0.07 * alpha);
+            let strip_brush = self.brushes.alpha_brush(ink, 0.07 * alpha);
             self.draw_rounded_box(strip, strip.height as f32 * 0.5, &strip_brush);
         }
 
-        let focus_label = match scene.focus_mode {
-            FocusSubMode::Pomodoro => scene.state.phase.short_label(),
-            FocusSubMode::Timer => "Timer",
-            FocusSubMode::Stopwatch => "Watch",
-        };
+        let focus_label = scene.state.phase.short_label();
         let tabs = [
             (
                 translate_rect(layout.notch_tab_pomodoro, -offset_x),
@@ -540,56 +454,16 @@ impl Renderer {
         }
 
         if session_alpha > 0.0 {
-            self.draw_focus_mode_strip(layout, offset_x, session_alpha, hovered, scene);
+            self.draw_focus_category_pill(layout, offset_x, session_alpha, hovered, scene);
+            self.draw_focus_settings_button(layout, offset_x, session_alpha, hovered);
             let view = scene.view();
-            let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * session_alpha);
+            let muted = self.brushes.alpha_brush(ink, 0.55 * session_alpha);
             self.draw_text(
                 &view.session_label,
                 &self.text_pomodoro_sub_trailing,
                 rect_to_d2d(translate_rect(layout.pomodoro.session_label, -offset_x)),
                 &muted,
             );
-        }
-    }
-
-    fn draw_focus_mode_strip(
-        &self,
-        layout: &Layout,
-        offset_x: i32,
-        alpha: f32,
-        hovered: Option<HitTarget>,
-        scene: &PomodoroScene,
-    ) {
-        let first = translate_rect(layout.pomodoro.focus_modes[0], -offset_x);
-        if first.is_empty() {
-            return;
-        }
-        let glyph_r = scale(5, self.dpi) as f32;
-        for mode in FocusSubMode::ALL {
-            let rect = translate_rect(layout.pomodoro.focus_modes[mode.index()], -offset_x);
-            if rect.is_empty() {
-                continue;
-            }
-            let target = HitTarget::FocusMode(mode);
-            let active = scene.focus_mode == mode;
-            let fill = if active {
-                0.20
-            } else if hovered == Some(target) {
-                0.12
-            } else {
-                0.06
-            };
-            let pill = self.brushes.alpha_brush(FOREGROUND, fill * alpha);
-            self.draw_rounded_box(rect, rect.height as f32 * 0.5, &pill);
-            let ink = self
-                .brushes
-                .alpha_brush(FOREGROUND, if active { 0.96 } else { 0.56 } * alpha);
-            let center = center_of(rect);
-            match mode {
-                FocusSubMode::Pomodoro => self.draw_tomato_glyph(center, glyph_r, &ink),
-                FocusSubMode::Timer => self.draw_hourglass_glyph(center, glyph_r, &ink),
-                FocusSubMode::Stopwatch => self.draw_stopwatch_glyph(center, glyph_r, &ink),
-            }
         }
     }
 
@@ -602,6 +476,7 @@ impl Renderer {
         hovered: bool,
         alpha: f32,
     ) {
+        let fg = self.notch_ink();
         let fill = if active {
             0.18
         } else if hovered {
@@ -610,12 +485,12 @@ impl Renderer {
             0.0
         };
         if fill > 0.0 {
-            let pill = self.brushes.alpha_brush(FOREGROUND, fill * alpha);
+            let pill = self.brushes.alpha_brush(fg, fill * alpha);
             self.draw_rounded_box(rect, rect.height as f32 * 0.5, &pill);
         }
         let ink = self
             .brushes
-            .alpha_brush(FOREGROUND, if active { 0.96 } else { 0.58 } * alpha);
+            .alpha_brush(fg, if active { 0.96 } else { 0.58 } * alpha);
         let glyph_x = if active {
             rect.x as f32 + scale(15, self.dpi) as f32
         } else {
@@ -663,49 +538,28 @@ impl Renderer {
         let right = center.X + r * 0.92;
         let top = center.Y - r * 0.15;
         let bottom = center.Y + r * 0.78;
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(left, top),
-                Vector2::new(left, bottom),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(left, bottom),
-                Vector2::new(right, bottom),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(right, bottom),
-                Vector2::new(right, top),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
+        let segs = [
+            (Vector2::new(left, top), Vector2::new(left, bottom)),
+            (Vector2::new(left, bottom), Vector2::new(right, bottom)),
+            (Vector2::new(right, bottom), Vector2::new(right, top)),
+            (
                 Vector2::new(center.X, center.Y - r * 0.82),
                 Vector2::new(center.X, center.Y + r * 0.22),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
+            ),
+            (
                 Vector2::new(center.X - r * 0.36, center.Y - r * 0.14),
                 Vector2::new(center.X, center.Y + r * 0.24),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
+            ),
+            (
                 Vector2::new(center.X + r * 0.36, center.Y - r * 0.14),
                 Vector2::new(center.X, center.Y + r * 0.24),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
+            ),
+        ];
+        unsafe {
+            for (a, b) in segs {
+                self.target
+                    .DrawLine(a, b, brush, stroke, &self.stroke_style);
+            }
         }
     }
 
@@ -766,8 +620,9 @@ impl Renderer {
             right: title_rect.right,
             bottom: (oy + scale(96, self.dpi)) as f32,
         };
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.56 * alpha);
+        let ink = self.notch_ink();
+        let fg = self.brushes.alpha_brush(ink, 0.92 * alpha);
+        let muted = self.brushes.alpha_brush(ink, 0.56 * alpha);
         self.draw_text(title, &self.text_app_bold, title_rect, &fg);
         self.draw_text(subtitle, &self.text_pomodoro_sub, sub_rect, &muted);
     }
@@ -783,7 +638,8 @@ impl Renderer {
         active_task: Option<&str>,
     ) -> Result<()> {
         let view = scene.view();
-        let colors = pomodoro_colors(view.tone, scene.dim, view.urgent);
+        let colors = self.resolve_pomodoro_colors(view.tone, scene, scene.dim, view.urgent);
+        let fg_ink = self.notch_ink();
         let icon = translate_rect(layout.pomodoro.icon, -offset_x);
         let icon_center = center_of(icon);
         let icon_radius = icon.width as f32 * 0.5;
@@ -806,16 +662,19 @@ impl Renderer {
                 );
             }
         }
-        let glyph_ink = self
-            .brushes
-            .alpha_brush(BLACK, (0.78 - scene.dim * 0.2) * alpha);
+        let glyph_ink = self.brushes.alpha_brush(
+            Self::contrast_ink_on(colors.accent),
+            (0.78 - scene.dim * 0.2) * alpha,
+        );
         self.draw_tone_glyph(icon_center, icon_radius * 0.46, view.tone, &glyph_ink)?;
+
+        self.draw_focus_duration_steppers(layout, offset_x, alpha, hovered, scene);
 
         let time_alpha = 0.96 - scene.dim * 0.34;
         let time_brush = if view.urgent {
             self.brushes.alpha_brush(CORAL, alpha)
         } else {
-            self.brushes.alpha_brush(FOREGROUND, time_alpha * alpha)
+            self.brushes.alpha_brush(fg_ink, time_alpha * alpha)
         };
         self.draw_tabular_text(
             &view.headline,
@@ -823,7 +682,7 @@ impl Renderer {
             rect_to_d2d(translate_rect(layout.pomodoro.time, -offset_x)),
             &time_brush,
         );
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.60 * alpha);
+        let muted = self.brushes.alpha_brush(fg_ink, 0.60 * alpha);
         self.draw_text(
             active_task.unwrap_or(&view.subtitle),
             &self.text_pomodoro_sub,
@@ -832,11 +691,15 @@ impl Renderer {
         );
 
         self.draw_pomodoro_buttons(layout, offset_x, alpha, hovered, scene, &colors)?;
-        match view.surface {
-            PomodoroSurface::Setup => {
-                self.draw_pomodoro_presets(layout, offset_x, alpha, hovered, scene);
+        if scene.category_picker_open {
+            self.draw_focus_category_picker_strip(layout, offset_x, alpha, hovered, scene);
+        } else {
+            match view.surface {
+                PomodoroSurface::Setup => {
+                    self.draw_pomodoro_presets(layout, offset_x, alpha, hovered, scene);
+                }
+                _ => self.draw_pomodoro_progress(layout, offset_x, alpha, scene, &view, &colors),
             }
-            _ => self.draw_pomodoro_progress(layout, offset_x, alpha, scene, &view, &colors),
         }
         Ok(())
     }
@@ -850,7 +713,8 @@ impl Renderer {
         scene: &PomodoroScene,
         colors: &TonePalette,
     ) -> Result<()> {
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let notch_fg = self.notch_ink();
+        let fg = self.brushes.alpha_brush(notch_fg, 0.96 * alpha);
         let secondary = [
             (layout.pomodoro.reset_button, HitTarget::PomodoroReset, true),
             (layout.pomodoro.skip_button, HitTarget::PomodoroSkip, false),
@@ -861,13 +725,11 @@ impl Renderer {
             }
             let rect = translate_rect(rect, -offset_x);
             let fill = if hovered == Some(target) { 0.26 } else { 0.14 };
-            self.draw_circle_button(rect, &self.brushes.alpha_brush(FOREGROUND, fill * alpha));
+            self.draw_circle_button(rect, &self.brushes.alpha_brush(notch_fg, fill * alpha));
             let center = center_of(rect);
             let size = scale(6, self.dpi) as f32;
             if is_reset {
                 self.draw_reset_glyph(center.X, center.Y, size, &fg)?;
-            } else if scene.focus_mode == FocusSubMode::Stopwatch {
-                self.draw_lap_flag_glyph(center.X, center.Y, size, &fg);
             } else {
                 self.draw_skip_glyph(center.X, center.Y, size, &fg)?;
             }
@@ -889,11 +751,12 @@ impl Renderer {
             *colors
         };
         self.fill_gradient_circle(center, radius, &lit, alpha);
-        let ink = self
-            .brushes
-            .alpha_brush(BLACK, (0.92 - scene.dim * 0.2) * alpha);
+        let ink = self.brushes.alpha_brush(
+            Self::contrast_ink_on(lit.accent),
+            (0.92 - scene.dim * 0.2) * alpha,
+        );
         let glyph = scale(8, self.dpi) as f32;
-        if scene.active_status() == PomodoroStatus::Running {
+        if scene.state.status == PomodoroStatus::Running {
             self.draw_pause_glyph(center.X, center.Y, glyph, &ink);
         } else {
             self.draw_play_glyph(center.X, center.Y, glyph, &ink)?;
@@ -909,10 +772,9 @@ impl Renderer {
         hovered: Option<HitTarget>,
         scene: &PomodoroScene,
     ) {
-        let Some(presets) = scene.presets_minutes() else {
-            return;
-        };
-        let selected = scene.selected_preset_seconds();
+        let presets = scene.presets_minutes();
+        let fg = self.notch_ink();
+        let selected = scene.state.total_seconds;
         for (index, minutes) in presets.iter().enumerate() {
             let rect = translate_rect(layout.pomodoro.presets[index], -offset_x);
             if rect.is_empty() {
@@ -926,11 +788,11 @@ impl Renderer {
             } else {
                 0.08
             };
-            let chip = self.brushes.alpha_brush(FOREGROUND, fill * alpha);
+            let chip = self.brushes.alpha_brush(fg, fill * alpha);
             self.draw_rounded_box(rect, rect.height as f32 * 0.5, &chip);
             let ink = self
                 .brushes
-                .alpha_brush(FOREGROUND, if active { 0.96 } else { 0.68 } * alpha);
+                .alpha_brush(fg, if active { 0.96 } else { 0.68 } * alpha);
             self.draw_text(
                 &format!("{minutes} min"),
                 &self.text_tab,
@@ -949,7 +811,8 @@ impl Renderer {
         view: &PomodoroView,
         colors: &TonePalette,
     ) {
-        let track = self.brushes.alpha_brush(FOREGROUND, 0.12 * alpha);
+        let fg = self.notch_ink();
+        let track = self.brushes.alpha_brush(fg, 0.12 * alpha);
         let segments = layout
             .pomodoro
             .segments
@@ -998,7 +861,7 @@ impl Renderer {
             }
         }
         let _ = scene;
-        let footer = self.brushes.alpha_brush(FOREGROUND, 0.52 * alpha);
+        let footer = self.brushes.alpha_brush(fg, 0.52 * alpha);
         self.draw_text(
             &view.footer_left,
             &self.text_pomodoro_sub,
@@ -1023,19 +886,15 @@ impl Renderer {
         scene: &PomodoroScene,
     ) {
         let view = scene.view();
-        let colors = pomodoro_colors(view.tone, 0.0, false);
+        let colors = self.resolve_pomodoro_colors(view.tone, scene, 0.0, false);
+        let notch_fg = self.notch_ink();
         let icon = translate_rect(layout.pomodoro.icon, -offset_x);
         let icon_center = center_of(icon);
         let icon_radius = icon.width as f32 * 0.5;
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.55 * alpha);
+        let muted = self.brushes.alpha_brush(notch_fg, 0.55 * alpha);
         let header = translate_rect(layout.notch_tab_pomodoro, -offset_x);
-        let alert_header = if scene.focus_mode == FocusSubMode::Timer {
-            "Quick timer"
-        } else {
-            "Pomodoro"
-        };
         self.draw_text(
-            alert_header,
+            "Pomodoro",
             &self.text_pomodoro_sub,
             D2D_RECT_F {
                 left: header.x as f32,
@@ -1053,10 +912,12 @@ impl Renderer {
         );
 
         self.fill_solid_circle(icon_center, icon_radius, colors.accent, alpha);
-        let ink = self.brushes.alpha_brush(BLACK, 0.78 * alpha);
+        let ink = self
+            .brushes
+            .alpha_brush(Self::contrast_ink_on(colors.accent), 0.78 * alpha);
         self.draw_check_glyph(icon_center, icon_radius * 0.46, &ink);
 
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let fg = self.brushes.alpha_brush(notch_fg, 0.96 * alpha);
         self.draw_text(
             &view.headline,
             &self.text_alert_title,
@@ -1067,7 +928,7 @@ impl Renderer {
             &view.subtitle,
             &self.text_pomodoro_sub,
             rect_to_d2d(translate_rect(layout.pomodoro.subtitle, -offset_x)),
-            &self.brushes.alpha_brush(FOREGROUND, 0.60 * alpha),
+            &self.brushes.alpha_brush(notch_fg, 0.60 * alpha),
         );
 
         let extend = translate_rect(layout.pomodoro.alert_extend_button, -offset_x);
@@ -1079,7 +940,7 @@ impl Renderer {
         self.draw_rounded_box(
             extend,
             extend.height as f32 * 0.5,
-            &self.brushes.alpha_brush(FOREGROUND, extend_fill * alpha),
+            &self.brushes.alpha_brush(notch_fg, extend_fill * alpha),
         );
         self.draw_text(
             POMODORO_EXTEND_LABEL,
@@ -1099,45 +960,46 @@ impl Renderer {
             colors
         };
         self.fill_gradient_rounded(rect_to_d2d(start), start.height as f32 * 0.5, &lit, alpha);
-        let label = if scene.focus_mode == FocusSubMode::Timer {
-            "Restart"
-        } else {
-            scene
-                .state
-                .alert
-                .map_or("Start", |alert| alert.action_label())
-        };
+        let label = scene
+            .state
+            .alert
+            .map_or("Start", |alert| alert.action_label());
         self.draw_text(
             label,
             &self.text_app_bold,
             rect_to_d2d(start),
-            &self.brushes.alpha_brush(BLACK, 0.92 * alpha),
+            &self
+                .brushes
+                .alpha_brush(Self::contrast_ink_on(lit.accent), 0.92 * alpha),
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+
     use super::*;
+    use crate::appearance::tokens::FOCUS_ORANGE;
+
+    fn pomodoro_colors(tone: PomodoroTone, dim: f32, urgent: bool) -> TonePalette {
+        pomodoro_colors_with_focus(tone, FOCUS_ORANGE, dim, urgent)
+    }
 
     fn channel_gap(a: D2D1_COLOR_F, b: D2D1_COLOR_F) -> f32 {
         (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
     }
 
     #[test]
-    fn phase_accents_are_solid_and_tool_modes_are_neutral() {
+    fn phase_accents_are_solid() {
         let focus = pomodoro_colors(PomodoroTone::Focus, 0.0, false);
         let short = pomodoro_colors(PomodoroTone::ShortBreak, 0.0, false);
         let long = pomodoro_colors(PomodoroTone::LongBreak, 0.0, false);
-        let timer = pomodoro_colors(PomodoroTone::Timer, 0.0, false);
-        let stopwatch = pomodoro_colors(PomodoroTone::Stopwatch, 0.0, false);
         assert!(channel_gap(focus.accent, short.accent) > 0.3);
         assert!(channel_gap(short.accent, long.accent) > 0.3);
         assert!(channel_gap(focus.from, focus.to) < 0.001);
         assert!(channel_gap(short.from, short.to) < 0.001);
         assert!(channel_gap(long.from, long.to) < 0.001);
-        assert!(channel_gap(timer.accent, FOREGROUND) < 0.001);
-        assert!(channel_gap(stopwatch.accent, FOREGROUND) < 0.001);
     }
 
     #[test]

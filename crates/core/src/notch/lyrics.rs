@@ -160,10 +160,10 @@ fn ease_window(position_ms: u64, start: u64, end: u64) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-pub const LYRIC_SCROLL_LEAD_MS: u64 = 120;
-pub const LYRIC_SCROLL_SETTLE_MS: u64 = 120;
-pub const LYRIC_FILL_MAX_MS: u64 = 6_000;
-pub const LYRIC_LAST_LINE_MS: u64 = 4_000;
+pub(crate) const LYRIC_SCROLL_LEAD_MS: u64 = 120;
+pub(crate) const LYRIC_SCROLL_SETTLE_MS: u64 = 120;
+pub(crate) const LYRIC_FILL_MAX_MS: u64 = 6_000;
+pub(crate) const LYRIC_LAST_LINE_MS: u64 = 4_000;
 
 pub const MAX_LRC_LINES: usize = 1_000;
 pub const MAX_LRC_TOTAL_TEXT_BYTES: usize = 131_072;
@@ -235,7 +235,7 @@ pub fn parse_lrc(content: &str) -> LyricsSheet {
             }
         }
 
-        let text = remaining.trim().to_string();
+        let text = remaining.trim().to_owned();
         for ts in timestamps {
             if collected.len() >= MAX_LRC_LINES
                 || total_text_bytes.saturating_add(text.len()) > MAX_LRC_TOTAL_TEXT_BYTES

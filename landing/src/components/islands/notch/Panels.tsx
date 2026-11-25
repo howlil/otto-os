@@ -1,5 +1,4 @@
-import type { ReactNode } from "react";
-import { motion } from "motion/react";
+import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
   ClipboardList,
@@ -14,11 +13,12 @@ import {
   SkipForward,
   Timer,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import { T } from "../../lib/T";
+import { motion } from "motion/react";
+import type { ReactNode } from "react";
 import { clamp, formatClock } from "../../lib/spring";
+import { T } from "../../lib/T";
 import { Cover, Equalizer } from "./Compact";
-import { FOCUS_CUT, FOCUS_TOTAL, LYRICS, PALETTE, TRACK_LENGTH, lyricAt, type NotchTabKey } from "./spec";
+import { FOCUS_CUT, FOCUS_TOTAL, LYRICS, lyricAt, type NotchTabKey, PALETTE, TRACK_LENGTH } from "./spec";
 
 const TABS: Record<NotchTabKey, { icon: LucideIcon; label: string }> = {
   focus: { icon: Timer, label: "Focus" },
@@ -31,15 +31,13 @@ const TABS: Record<NotchTabKey, { icon: LucideIcon; label: string }> = {
 
 const TAB_KEYS: NotchTabKey[] = ["focus", "time", "pocket", "clip", "tasks", "music"];
 
-export function NotchTabs({
-  active,
-  onSelect,
-}: {
-  active: NotchTabKey;
-  onSelect?: (tab: NotchTabKey) => void;
-}) {
+export function NotchTabs({ active, onSelect }: { active: NotchTabKey; onSelect?: (tab: NotchTabKey) => void }) {
   return (
-    <div className="flex items-center gap-0.5 rounded-full bg-white/[0.08] p-[3px]" role="tablist" aria-label="Notch tabs">
+    <div
+      className="flex items-center gap-0.5 rounded-full bg-white/[0.08] p-[3px]"
+      role="tablist"
+      aria-label="Notch tabs"
+    >
       {TAB_KEYS.map((tab) => {
         const { icon: Icon, label } = TABS[tab];
         const on = tab === active;
@@ -102,7 +100,13 @@ export function Pill({
       </button>
     );
   }
-  return <span className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-semibold ${toneClass}`}>{children}</span>;
+  return (
+    <span
+      className={`inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-semibold ${toneClass}`}
+    >
+      {children}
+    </span>
+  );
 }
 
 export function PanelFrame({
@@ -127,7 +131,15 @@ export function PanelFrame({
   );
 }
 
-function IconButton({ label, onClick, children }: { label: [string, string]; onClick: () => void; children: ReactNode }) {
+function IconButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: [string, string];
+  onClick: () => void;
+  children: ReactNode;
+}) {
   return (
     <button
       type="button"
@@ -160,8 +172,6 @@ function Tomato({ size }: { size: number }) {
   );
 }
 
-export type FocusMode = "pomo" | "timer" | "watch";
-
 export function FocusPanel({
   remaining,
   running,
@@ -170,8 +180,6 @@ export function FocusPanel({
   onSkip,
   onSelectTab,
   total = FOCUS_TOTAL,
-  mode = "pomo",
-  onModeChange,
   activeTask,
 }: {
   remaining: number;
@@ -181,55 +189,32 @@ export function FocusPanel({
   onSkip: () => void;
   onSelectTab?: (tab: NotchTabKey) => void;
   total?: number;
-  mode?: FocusMode;
-  onModeChange?: (mode: FocusMode) => void;
   activeTask?: [string, string] | null;
 }) {
-  const urgent = mode !== "watch" && remaining <= FOCUS_CUT;
-  const fraction = mode === "watch" ? ((remaining % 60) / 60) : (total - remaining) / Math.max(1, total);
-  const accent = mode === "pomo" ? PALETTE.focus : "#f5f5f7";
+  const urgent = remaining <= FOCUS_CUT;
+  const fraction = (total - remaining) / Math.max(1, total);
+  const accent = PALETTE.focus;
 
   return (
-    <PanelFrame
-      tab="focus"
-      onSelectTab={onSelectTab}
-      actions={
-        onModeChange ? (
-          <div className="flex items-center rounded-full bg-white/[0.08] p-[2px]" role="group" aria-label="Focus mode">
-            {(["pomo", "timer", "watch"] as FocusMode[]).map((item) => (
-              <button
-                key={item}
-                type="button"
-                aria-pressed={mode === item}
-                onClick={() => onModeChange(item)}
-                className={`h-[18px] rounded-full px-1.5 text-[10px] font-semibold capitalize transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff] ${
-                  mode === item ? "bg-white/[0.18] text-[#f5f5f7]" : "text-[#a8abb2] hover:text-[#f5f5f7]"
-                }`}
-              >
-                {item === "pomo" ? "Pomo" : item === "timer" ? "Timer" : "Watch"}
-              </button>
-            ))}
-          </div>
-        ) : null
-      }
-    >
+    <PanelFrame tab="focus" onSelectTab={onSelectTab}>
       <div className="flex h-full flex-col justify-between">
         <div className="flex items-center gap-3">
           <span
             className="grid size-12 shrink-0 place-items-center rounded-[14px]"
-            style={{ background: mode === "pomo" ? "rgb(255 146 48 / 0.16)" : "rgb(255 255 255 / 0.1)" }}
+            style={{ background: "rgb(255 146 48 / 0.16)" }}
           >
-            {mode === "pomo" ? <Tomato size={28} /> : <Timer size={22} strokeWidth={1.9} className="text-[#f5f5f7]" aria-hidden="true" />}
+            <Tomato size={28} />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-[30px] leading-none font-semibold tracking-[-0.02em] tabular-nums" style={{ color: urgent ? PALETTE.urgent : PALETTE.ink }}>
+            <p
+              className="text-[30px] leading-none font-semibold tracking-[-0.02em] tabular-nums"
+              style={{ color: urgent ? PALETTE.urgent : PALETTE.ink }}
+            >
               {formatClock(remaining)}
             </p>
             <p className="mt-1.5 truncate text-[11px] text-[#a8abb2]">
               {activeTask ? (
                 <T id={activeTask[0]} en={activeTask[1]} />
-              ) : mode === "watch" ? (
-                <T id="Stopwatch aktif" en="Stopwatch running" />
               ) : (
                 <T id="Fokus dalam · selesai 12:48" en="Deep focus · ends 12:48" />
               )}
@@ -247,14 +232,12 @@ export function FocusPanel({
               }`}
               style={{ background: accent }}
             >
-              {running && (mode === "watch" || remaining > 0) ? (
+              {running && remaining > 0 ? (
                 <Pause size={15} fill="currentColor" aria-hidden="true" />
               ) : (
                 <Play size={15} fill="currentColor" aria-hidden="true" />
               )}
-              <span className="sr-only">
-                {running ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}
-              </span>
+              <span className="sr-only">{running ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}</span>
             </button>
             <IconButton label={["Lewati", "Skip"]} onClick={onSkip}>
               <SkipForward size={14} fill="currentColor" strokeWidth={1.6} aria-hidden="true" />
@@ -273,8 +256,12 @@ export function FocusPanel({
             ))}
           </div>
           <div className="mt-1.5 flex justify-between text-[10px] text-[#a8abb2] tabular-nums">
-            <span><T id="Mulai 12:23" en="Started 12:23" /></span>
-            <span><T id="Istirahat 12:48" en="Next break 12:48" /></span>
+            <span>
+              <T id="Mulai 12:23" en="Started 12:23" />
+            </span>
+            <span>
+              <T id="Istirahat 12:48" en="Next break 12:48" />
+            </span>
           </div>
         </div>
       </div>
@@ -296,7 +283,7 @@ function LyricsCard({ index, fraction, reduced }: { index: number; fraction: num
       >
         {rows.map((row, slot) => {
           const line = LYRICS[row];
-          if (!line) return <span key={`empty-${slot}`} className="h-[30px]" />;
+          if (!line) return <span key={`empty-${row}`} className="h-[30px]" />;
           const active = slot === 1;
           return (
             <motion.p
@@ -367,7 +354,9 @@ export function MusicPanel({
             }`}
           >
             <Quote size={12} fill={lyricsOn ? "currentColor" : "none"} strokeWidth={2} aria-hidden="true" />
-            <span className="sr-only"><T id="Tampilkan lirik" en="Toggle lyrics" /></span>
+            <span className="sr-only">
+              <T id="Tampilkan lirik" en="Toggle lyrics" />
+            </span>
           </button>
         </div>
       }
@@ -378,7 +367,10 @@ export function MusicPanel({
           <div className="min-w-0 flex-1">
             <p className="truncate text-[15px] leading-tight font-semibold">Lampu Kota</p>
             <p className="truncate text-[11px] text-[#a8abb2]">
-              <T id={playing ? "Hujan Sore · Akustik" : "Dijeda · Hujan Sore"} en={playing ? "Hujan Sore · Acoustic" : "Paused · Hujan Sore"} />
+              <T
+                id={playing ? "Hujan Sore · Akustik" : "Dijeda · Hujan Sore"}
+                en={playing ? "Hujan Sore · Acoustic" : "Paused · Hujan Sore"}
+              />
             </p>
           </div>
           <Equalizer playing={playing} color={PALETTE.cover} reduced={reduced} />
@@ -392,7 +384,11 @@ export function MusicPanel({
               className="grid size-10 place-items-center rounded-full text-black transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#75b0ff]"
               style={{ background: PALETTE.cover }}
             >
-              {playing ? <Pause size={15} fill="currentColor" aria-hidden="true" /> : <Play size={15} fill="currentColor" aria-hidden="true" />}
+              {playing ? (
+                <Pause size={15} fill="currentColor" aria-hidden="true" />
+              ) : (
+                <Play size={15} fill="currentColor" aria-hidden="true" />
+              )}
               <span className="sr-only">{playing ? <T id="Jeda" en="Pause" /> : <T id="Putar" en="Play" />}</span>
             </button>
             <IconButton label={["Berikutnya", "Next"]} onClick={onNext}>
@@ -414,7 +410,10 @@ export function MusicPanel({
             className="group relative flex h-4 w-full items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#75b0ff]"
           >
             <span className="relative h-1 w-full overflow-hidden rounded-full bg-white/[0.16]">
-              <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${position * 100}%`, background: PALETTE.cover }} />
+              <span
+                className="absolute inset-y-0 left-0 rounded-full"
+                style={{ width: `${position * 100}%`, background: PALETTE.cover }}
+              />
             </span>
             <span
               className="pointer-events-none absolute size-2.5 -translate-x-1/2 rounded-full bg-white opacity-0 transition-opacity group-hover:opacity-100"

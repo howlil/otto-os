@@ -29,18 +29,20 @@ use windows::core::Result;
 mod actions;
 mod entries;
 mod keyboard;
+mod monitors;
 mod pointer;
 mod presentation;
+mod secondary_input;
 mod timing;
 mod visibility;
 
-pub use self::actions::activate_overflow_entry;
-pub use self::actions::apply_preferences;
+pub(crate) use self::actions::activate_overflow_entry;
+pub(crate) use self::actions::apply_preferences;
 use self::actions::count_entries;
 use self::actions::entry_options;
-pub use self::actions::execute_dock_menu_command;
-pub use self::actions::set_capture_visible;
-pub use self::actions::set_glass_enabled;
+pub(crate) use self::actions::execute_dock_menu_command;
+pub(crate) use self::actions::set_capture_visible;
+pub(crate) use self::actions::set_glass_enabled;
 use self::actions::sync_icons;
 
 const DOCK_POLL_MS: u32 = 150;
@@ -119,9 +121,10 @@ pub(crate) struct Dock {
     downloads_progress: Option<f32>,
     badge_poll_tick: u32,
     last_focus_badge_suppressed: bool,
+    secondary_docks: Vec<self::monitors::SecondaryDock>,
 }
 
-pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     let preferences = runtime.dock_preferences.get();
     if preferences.show_trash {
         resume_recycle_bin_task();
@@ -203,12 +206,28 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
             .flatten(),
         badge_poll_tick: 0,
         last_focus_badge_suppressed: false,
+        secondary_docks: Vec::new(),
     };
     dock.refresh_cover();
     let _ = dock.sync_reservation();
     dock.sync_backdrop(runtime, true);
     dock.place();
     dock.present(runtime);
+    dock.sync_secondary_docks(runtime);
+    otto_platform::log_info(
+        "dock",
+        &format!(
+            "started origin={:?} size={}x{} entries={} fs_cover={} shell_fs={} overlap={} autohide={}",
+            dock.window_origin(),
+            dock.layout.window_width,
+            dock.layout.window_height,
+            dock.entries.len(),
+            dock.fullscreen_covered,
+            dock.shell_full_screen,
+            dock.window_overlaps,
+            dock.preferences.autohide,
+        ),
+    );
 
     unsafe {
         SetTimer(
@@ -227,11 +246,12 @@ pub fn start(runtime: &RuntimeContext, hwnd: isize) -> Result<()> {
     Ok(())
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     shutdown_recycle_bin_task();
     if let Ok(mut guard) = runtime.dock.try_borrow_mut()
         && let Some(mut dock) = guard.take()
     {
+        dock.teardown_secondary_docks(runtime);
         dock.stop_animating();
         otto_platform::watch_bottom_edge(None, dock.screen.width, dock.screen.height);
         otto_platform::stop_routing_if_targets(dock.hwnd);
@@ -278,7 +298,7 @@ fn handle_accessible_object(
         .map(LRESULT)
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,
@@ -286,6 +306,18 @@ pub fn handle_message(
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     wake_for_message(runtime, message);
+    let is_secondary = hwnd != runtime.dock_hwnd.get()
+        && runtime
+            .dock
+            .try_borrow()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|dock| dock.has_secondary_hwnd(hwnd)))
+            .unwrap_or(false);
+    if is_secondary {
+        return self::secondary_input::handle_secondary_message(
+            runtime, hwnd, message, wparam, lparam,
+        );
+    }
     match message {
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         WM_CLOSE => Some(LRESULT(0)),
@@ -380,7 +412,7 @@ const fn unpack_point(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-pub fn keyboard_entry_count(runtime: &RuntimeContext) -> usize {
+pub(crate) fn keyboard_entry_count(runtime: &RuntimeContext) -> usize {
     runtime
         .dock
         .try_borrow()
@@ -389,15 +421,15 @@ pub fn keyboard_entry_count(runtime: &RuntimeContext) -> usize {
         .unwrap_or(0)
 }
 
-pub fn enter_keyboard_focus(runtime: &RuntimeContext, from_end: bool) {
+pub(crate) fn enter_keyboard_focus(runtime: &RuntimeContext, from_end: bool) {
     with_dock(runtime, |dock| dock.enter_keyboard_focus(runtime, from_end));
 }
 
-pub fn wake(runtime: &RuntimeContext) {
+pub(crate) fn wake(runtime: &RuntimeContext) {
     with_dock(runtime, |dock| dock.wake(runtime));
 }
 
-pub fn wake_timer_only(runtime: &RuntimeContext) {
+pub(crate) fn wake_timer_only(runtime: &RuntimeContext) {
     with_dock(runtime, Dock::wake_timer_only);
 }
 
@@ -409,14 +441,18 @@ fn with_dock(runtime: &RuntimeContext, action: impl FnOnce(&mut Dock)) {
     }
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
+pub(crate) fn repaint(runtime: &RuntimeContext) {
     with_dock(runtime, |dock| {
         dock.sync_backdrop(runtime, true);
         dock.present(runtime);
+        for index in 0..dock.secondary_docks.len() {
+            dock.sync_secondary_backdrop(runtime, index, true);
+        }
+        dock.present_secondary_docks(runtime);
     });
 }
 
-pub fn on_taskbar_created(runtime: &RuntimeContext) {
+pub(crate) fn on_taskbar_created(runtime: &RuntimeContext) {
     with_dock(runtime, |dock| dock.on_taskbar_created(runtime));
 }
 
@@ -448,17 +484,32 @@ fn dock_target_in(dock: &Dock, hwnd: isize) -> Option<Rect> {
 }
 
 #[must_use]
-pub fn dock_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Option<Rect> {
+pub(crate) fn dock_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Option<Rect> {
     let guard = runtime.dock.try_borrow().ok()?;
     let dock = guard.as_ref()?;
+    let monitor = otto_platform::monitor_for_window(hwnd);
+    if !monitor.primary
+        && let Some(sec) = dock.secondary_for_monitor(monitor.id)
+    {
+        return sec.target_for_window(dock, hwnd);
+    }
     dock_target_in(dock, hwnd)
 }
 
 #[must_use]
-pub fn fallback_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Rect {
+pub(crate) fn fallback_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Rect {
+    let monitor = otto_platform::monitor_for_window(hwnd);
     if let Ok(guard) = runtime.dock.try_borrow()
         && let Some(dock) = guard.as_ref()
     {
+        if !monitor.primary
+            && let Some(sec) = dock.secondary_for_monitor(monitor.id)
+        {
+            if let Some(target) = sec.target_for_window(dock, hwnd) {
+                return target;
+            }
+            return sec.fallback_target(dock);
+        }
         if let Some(target) = dock_target_in(dock, hwnd) {
             return target;
         }
@@ -474,18 +525,20 @@ pub fn fallback_target_for_window(runtime: &RuntimeContext, hwnd: isize) -> Rect
             height: size,
         };
     }
-    let screen = primary_screen();
-    let size = scale(48, screen.dpi).max(24);
+    let size = scale(48, monitor.dpi).max(24);
     Rect {
-        x: (screen.width - size) / 2,
-        y: screen.height - size - 4,
+        x: monitor.bounds.x + (monitor.bounds.width - size) / 2,
+        y: monitor.bounds.bottom() - size - 4,
         width: size,
         height: size,
     }
 }
 
 #[must_use]
-pub fn fallback_card_context(runtime: &RuntimeContext, hwnd: isize) -> (Option<IconBitmap>, bool) {
+pub(crate) fn fallback_card_context(
+    runtime: &RuntimeContext,
+    hwnd: isize,
+) -> (Option<IconBitmap>, bool) {
     let dark_theme = crate::theme_state::appearance(runtime).theme == ResolvedTheme::Dark;
     let icon = runtime
         .dock

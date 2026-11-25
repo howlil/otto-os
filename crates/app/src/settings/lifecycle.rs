@@ -1,15 +1,15 @@
 use otto_core::{
-    ContentLayout, ControlCenterPort, FocusSettingsTab, FocusTextField, SettingsContent,
-    SettingsPage,
+    ContentLayout, FocusSettingsTab, FocusTextField, SettingsContent, SettingsPage, UpdatesPort,
 };
 use otto_platform::{
-    WindowsControlCenter, apply_settings_chrome, create_settings_window, destroy_settings_window,
+    WindowsUpdatesPort, apply_settings_chrome, create_settings_window, destroy_settings_window,
     hide_settings_window, invalidate_settings_window, is_settings_window_foreground,
-    is_settings_window_visible, present_settings_window, read_launch_at_login,
-    settings_glass_available,
+    is_settings_window_maximized, is_settings_window_visible, kill_window_timer,
+    present_settings_window, read_launch_at_login, settings_glass_available,
 };
 
 use crate::host::RuntimeContext;
+use crate::win_msg::GREEN_HOVER_TIMER;
 
 use super::actions::{arm_update_timer, disarm_audit_timer, sync_audit_timer};
 use super::{CatalogLoadState, SettingsWindow, refresh_model, with_window};
@@ -34,7 +34,15 @@ pub(crate) fn open_focus_activity(runtime: &RuntimeContext) {
     open_with_focus_tab(
         runtime,
         Some(SettingsPage::Focus),
-        Some(FocusSettingsTab::Activity),
+        Some(FocusSettingsTab::Insights),
+    );
+}
+
+pub(crate) fn open_focus_modes(runtime: &RuntimeContext) {
+    open_with_focus_tab(
+        runtime,
+        Some(SettingsPage::Focus),
+        Some(FocusSettingsTab::Modes),
     );
 }
 
@@ -54,7 +62,7 @@ fn open_with_focus_tab(
         otto_platform::signal_command_failure();
         return;
     };
-    let update_state = WindowsControlCenter.poll_update_state();
+    let update_state = WindowsUpdatesPort.poll_update_state();
     let busy_update = update_state.is_busy();
     with_window(runtime, |window| {
         window.launch_at_login = read_launch_at_login();
@@ -82,12 +90,14 @@ fn open_with_focus_tab(
     );
     with_window(runtime, |window| {
         window.glass = glass;
+        window.active = true;
+        window.maximized = is_settings_window_maximized(hwnd);
+        window.alt_down = false;
         window.renderer = None;
         window.icons_attempted.clear();
     });
     present_settings_window(hwnd);
     invalidate_settings_window(hwnd);
-    crate::window_controls::notify_own_window_change(runtime);
 }
 
 pub(crate) fn toggle(runtime: &RuntimeContext) {
@@ -104,12 +114,17 @@ pub(crate) fn toggle(runtime: &RuntimeContext) {
 
 pub(super) fn close(runtime: &RuntimeContext) {
     let closed_hwnd = with_window(runtime, |window| {
+        if window.green_hover_armed {
+            window.green_hover_armed = false;
+            kill_window_timer(window.hwnd, GREEN_HOVER_TIMER);
+        }
         hide_settings_window(window.hwnd);
         window.renderer = None;
         window.content = SettingsContent::default();
         window.blocks = ContentLayout::default();
         window.hovered = None;
         window.pressed = None;
+        window.alt_down = false;
         window.tracking_leave = false;
         window.icons_attempted.clear();
         window.focus_state.focused_field = FocusTextField::None;
@@ -124,7 +139,6 @@ pub(super) fn close(runtime: &RuntimeContext) {
     });
     if let Some(hwnd) = closed_hwnd {
         disarm_audit_timer(hwnd);
-        crate::window_controls::notify_own_window_change(runtime);
         otto_platform::trim_working_set();
     }
 }

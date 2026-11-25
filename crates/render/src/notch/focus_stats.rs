@@ -2,15 +2,15 @@ use otto_core::{
     DayBar, FocusStatsRange, FocusStatsView, FocusUsageRow, HitTarget, Layout, Rect, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1SolidColorBrush};
+use windows::Win32::Graphics::Direct2D::{D2D1_ELLIPSE, ID2D1SolidColorBrush};
 use windows::core::Result;
 use windows_numerics::Vector2;
 
-use crate::{FOREGROUND, Renderer, rect_to_d2d, rgb, translate_rect};
-
-const SCREEN_TIME_BLUE: D2D1_COLOR_F = rgb(10, 132, 255, 1.0);
-const FOCUS_ORANGE: D2D1_COLOR_F = rgb(255, 146, 48, 1.0);
-const SHIELD_GREEN: D2D1_COLOR_F = rgb(48, 209, 88, 1.0);
+use crate::appearance::tokens::{
+    FOCUS_ORANGE, SYSTEM_BLUE as SCREEN_TIME_BLUE, SYSTEM_GREEN as SHIELD_GREEN,
+};
+use crate::kit::icons::{ChevronDir, draw_chevron_glyph};
+use crate::{Renderer, rect_to_d2d, rgb, translate_rect};
 const BADGE_TINTS: [D2D1_COLOR_F; 6] = [
     rgb(10, 132, 255, 1.0),
     rgb(94, 92, 230, 1.0),
@@ -32,7 +32,7 @@ struct WeekDayColumnStyle {
 
 impl Renderer {
     fn is_high_contrast_notch(&self) -> bool {
-        unsafe { self.brushes.specular_rim.GetColor().a >= 0.85 }
+        self.high_contrast.get()
     }
 
     pub(crate) fn draw_expanded_focus_stats(
@@ -52,34 +52,26 @@ impl Renderer {
             return Ok(());
         }
         let high_contrast = self.is_high_contrast_notch();
+        let ink = self.notch_ink();
         let radius = scale(12, self.dpi) as f32;
         let fill = self
             .brushes
-            .alpha_brush(FOREGROUND, if high_contrast { 0.09 } else { 0.055 } * alpha);
+            .alpha_brush(ink, if high_contrast { 0.09 } else { 0.055 } * alpha);
         self.draw_rounded_box(body, radius, &fill);
         let border = self
             .brushes
-            .alpha_brush(FOREGROUND, if high_contrast { 0.72 } else { 0.10 } * alpha);
-        let border_rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: body.x as f32 + 0.5,
-                top: body.y as f32 + 0.5,
-                right: body.right() as f32 - 0.5,
-                bottom: body.bottom() as f32 - 0.5,
-            },
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target
-                .DrawRoundedRectangle(&border_rect, &border, 1.0, None);
-        }
+            .alpha_brush(ink, if high_contrast { 0.72 } else { 0.10 } * alpha);
+        self.draw_rounded_box_stroke(body, radius, &border, 1.0);
 
         self.push_clip(rect_to_d2d(body));
         let result = match stats.range {
             FocusStatsRange::Today => self.draw_focus_stats_today(body, alpha, stats),
             FocusStatsRange::Week => {
                 self.draw_focus_stats_week(layout, offset_x, body, alpha, hovered, stats);
+                Ok(())
+            }
+            FocusStatsRange::Heatmap => {
+                self.draw_focus_stats_heatmap(layout, offset_x, body, alpha, hovered, stats);
                 Ok(())
             }
         };
@@ -97,9 +89,15 @@ impl Renderer {
     ) {
         let today_rect = translate_rect(layout.stats.range_today, -offset_x);
         let week_rect = translate_rect(layout.stats.range_week, -offset_x);
+        let heat_rect = translate_rect(layout.stats.range_heatmap, -offset_x);
         let details_rect = translate_rect(layout.stats.open_settings, -offset_x);
-        if !today_rect.is_empty() && !week_rect.is_empty() {
-            self.draw_stats_range_switch(today_rect, week_rect, alpha, hovered, stats.range);
+        if !today_rect.is_empty() && !week_rect.is_empty() && !heat_rect.is_empty() {
+            self.draw_stats_range_switch(
+                [today_rect, week_rect, heat_rect],
+                alpha,
+                hovered,
+                stats.range,
+            );
         }
         if !details_rect.is_empty() {
             self.draw_stats_details_button(details_rect, alpha, hovered);
@@ -108,20 +106,21 @@ impl Renderer {
 
     fn draw_stats_range_switch(
         &self,
-        today_rect: Rect,
-        week_rect: Rect,
+        rects: [Rect; 3],
         alpha: f32,
         hovered: Option<HitTarget>,
         active_range: FocusStatsRange,
     ) {
-        let track = today_rect.union(&week_rect);
-        let track_brush = self.brushes.alpha_brush(FOREGROUND, 0.075 * alpha);
+        let ink_color = self.notch_ink();
+        let track = rects[0].union(&rects[2]);
+        let track_brush = self.brushes.alpha_brush(ink_color, 0.075 * alpha);
         self.draw_rounded_box(track, track.height as f32 * 0.5, &track_brush);
 
         let inset = scale(2, self.dpi);
         for (range, rect) in [
-            (FocusStatsRange::Today, today_rect),
-            (FocusStatsRange::Week, week_rect),
+            (FocusStatsRange::Today, rects[0]),
+            (FocusStatsRange::Week, rects[1]),
+            (FocusStatsRange::Heatmap, rects[2]),
         ] {
             let active = active_range == range;
             let is_hovered = hovered == Some(HitTarget::FocusStatsRange(range));
@@ -132,14 +131,14 @@ impl Renderer {
                 height: (rect.height - inset * 2).max(0),
             };
             if active {
-                let fill = self.brushes.alpha_brush(FOREGROUND, 0.18 * alpha);
+                let fill = self.brushes.alpha_brush(ink_color, 0.18 * alpha);
                 self.draw_rounded_box(pill, pill.height as f32 * 0.5, &fill);
             } else if is_hovered {
-                let fill = self.brushes.alpha_brush(FOREGROUND, 0.08 * alpha);
+                let fill = self.brushes.alpha_brush(ink_color, 0.08 * alpha);
                 self.draw_rounded_box(pill, pill.height as f32 * 0.5, &fill);
             }
             let ink = self.brushes.alpha_brush(
-                FOREGROUND,
+                ink_color,
                 if active {
                     0.96
                 } else if is_hovered {
@@ -158,14 +157,15 @@ impl Renderer {
         alpha: f32,
         hovered: Option<HitTarget>,
     ) {
+        let fg = self.notch_ink();
         let is_hovered = hovered == Some(HitTarget::FocusStatsOpenSettings);
         let fill = self
             .brushes
-            .alpha_brush(FOREGROUND, if is_hovered { 0.14 } else { 0.07 } * alpha);
+            .alpha_brush(fg, if is_hovered { 0.14 } else { 0.07 } * alpha);
         self.draw_rounded_box(details_rect, details_rect.height as f32 * 0.5, &fill);
         let ink = self
             .brushes
-            .alpha_brush(FOREGROUND, if is_hovered { 0.94 } else { 0.64 } * alpha);
+            .alpha_brush(fg, if is_hovered { 0.94 } else { 0.64 } * alpha);
         let chevron_pad = scale(13, self.dpi);
         self.draw_text(
             "Details",
@@ -196,7 +196,7 @@ impl Renderer {
 
         self.draw_today_hero_column(inner_left, inner_top, left_w, alpha, stats)?;
 
-        let divider = self.brushes.alpha_brush(FOREGROUND, 0.09 * alpha);
+        let divider = self.brushes.alpha_brush(self.notch_ink(), 0.09 * alpha);
         unsafe {
             self.target.DrawLine(
                 Vector2::new(
@@ -225,8 +225,9 @@ impl Renderer {
         alpha: f32,
         stats: &FocusStatsView,
     ) -> Result<()> {
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.54 * alpha);
-        let primary = self.brushes.alpha_brush(FOREGROUND, 0.96 * alpha);
+        let ink = self.notch_ink();
+        let muted = self.brushes.alpha_brush(ink, 0.54 * alpha);
+        let primary = self.brushes.alpha_brush(ink, 0.96 * alpha);
         let cap_h = scale(14, self.dpi);
         self.draw_text(
             "Screen Time",
@@ -273,7 +274,7 @@ impl Renderer {
             (inner_top + scale(82, self.dpi)) as f32,
         );
         let ring_active = self.brushes.alpha_brush(FOCUS_ORANGE, 0.96 * alpha);
-        let ring_track = self.brushes.alpha_brush(FOREGROUND, 0.13 * alpha);
+        let ring_track = self.brushes.alpha_brush(ink, 0.13 * alpha);
         self.draw_progress_ring(
             ring_center.X,
             ring_center.Y,
@@ -284,7 +285,7 @@ impl Renderer {
             &ring_track,
         )?;
         let pct_label = format!("{}%", stats.today_focus_percent);
-        let pct_ink = self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
+        let pct_ink = self.brushes.alpha_brush(ink, 0.92 * alpha);
         self.draw_tabular_text(
             &pct_label,
             &self.text_stats_badge,
@@ -331,7 +332,8 @@ impl Renderer {
         alpha: f32,
         stats: &FocusStatsView,
     ) {
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.54 * alpha);
+        let ink = self.notch_ink();
+        let muted = self.brushes.alpha_brush(ink, 0.54 * alpha);
         self.draw_text(
             "Most Used",
             &self.text_caption,
@@ -345,8 +347,8 @@ impl Renderer {
         );
 
         if stats.top_apps.is_empty() {
-            let empty_main = self.brushes.alpha_brush(FOREGROUND, 0.52 * alpha);
-            let empty_sub = self.brushes.alpha_brush(FOREGROUND, 0.36 * alpha);
+            let empty_main = self.brushes.alpha_brush(ink, 0.52 * alpha);
+            let empty_sub = self.brushes.alpha_brush(ink, 0.36 * alpha);
             self.draw_text(
                 "No app usage yet",
                 &self.text_pomodoro_sub,
@@ -407,21 +409,14 @@ impl Renderer {
                 alpha,
             )
         });
+        let ink = self.notch_ink();
         if !drew_icon {
             let tint = BADGE_TINTS[usize::from(item.color_index) % BADGE_TINTS.len()];
             let badge_fill = self.brushes.alpha_brush(tint, 0.24 * alpha);
             let badge_border = self.brushes.alpha_brush(tint, 0.46 * alpha);
-            let badge_box = D2D1_ROUNDED_RECT {
-                rect: rect_to_d2d(badge_rect),
-                radiusX: badge_r,
-                radiusY: badge_r,
-            };
-            unsafe {
-                self.target.FillRoundedRectangle(&badge_box, &badge_fill);
-                self.target
-                    .DrawRoundedRectangle(&badge_box, &badge_border, 1.0, None);
-            }
-            let badge_ink = self.brushes.alpha_brush(FOREGROUND, 0.94 * alpha);
+            self.draw_rounded_box(badge_rect, badge_r, &badge_fill);
+            self.draw_rounded_box_stroke(badge_rect, badge_r, &badge_border, 1.0);
+            let badge_ink = self.brushes.alpha_brush(ink, 0.94 * alpha);
             self.draw_text(
                 &item.badge,
                 &self.text_stats_badge,
@@ -434,7 +429,7 @@ impl Renderer {
         let dur_w = scale(46, self.dpi);
         let label_right = (row.right() - dur_w - scale(4, self.dpi)).max(content_x);
         let label_h = scale(16, self.dpi);
-        let label_ink = self.brushes.alpha_brush(FOREGROUND, 0.92 * alpha);
+        let label_ink = self.brushes.alpha_brush(ink, 0.92 * alpha);
         self.draw_text(
             &item.label,
             &self.text_pomodoro_sub,
@@ -446,7 +441,7 @@ impl Renderer {
             },
             &label_ink,
         );
-        let dur_ink = self.brushes.alpha_brush(FOREGROUND, 0.64 * alpha);
+        let dur_ink = self.brushes.alpha_brush(ink, 0.64 * alpha);
         self.draw_tabular_text(
             &item.duration_text,
             &self.text_stats_trailing,
@@ -469,7 +464,7 @@ impl Renderer {
             width: bar_w,
             height: bar_h,
         };
-        let track_brush = self.brushes.alpha_brush(FOREGROUND, 0.10 * alpha);
+        let track_brush = self.brushes.alpha_brush(ink, 0.10 * alpha);
         self.draw_rounded_box(track, bar_r, &track_brush);
 
         let fill_w = (bar_w * i32::from(item.share_percent) / 100)
@@ -508,8 +503,9 @@ impl Renderer {
         let readout_y = body.y + scale(10, self.dpi);
         let readout_h = scale(18, self.dpi);
         let legend_w = scale(106, self.dpi);
+        let ink = self.notch_ink();
         let readout_ink = self.brushes.alpha_brush(
-            FOREGROUND,
+            ink,
             if stats.active_day.is_some() {
                 0.96
             } else {
@@ -548,7 +544,7 @@ impl Renderer {
         let max_bar_h = (baseline - plot_top).max(scale(14, self.dpi));
         let high_contrast = self.is_high_contrast_notch();
 
-        let base_brush = self.brushes.alpha_brush(FOREGROUND, 0.12 * alpha);
+        let base_brush = self.brushes.alpha_brush(ink, 0.12 * alpha);
         unsafe {
             self.target.DrawLine(
                 Vector2::new(first.x as f32, baseline as f32 + 0.5),
@@ -632,7 +628,7 @@ impl Renderer {
     fn draw_week_legend(&self, right: i32, y: i32, height: i32, alpha: f32) {
         let swatch = scale(6, self.dpi);
         let swatch_y = y + (height - swatch) / 2;
-        let muted = self.brushes.alpha_brush(FOREGROUND, 0.54 * alpha);
+        let muted = self.brushes.alpha_brush(self.notch_ink(), 0.54 * alpha);
 
         let focus_text_w = scale(34, self.dpi);
         let focus_swatch_x = right - focus_text_w - swatch - scale(4, self.dpi);
@@ -689,35 +685,25 @@ impl Renderer {
     }
 
     fn draw_week_day_backdrop(&self, col: Rect, style: WeekDayColumnStyle) {
+        let ink = self.notch_ink();
         let col_r = scale(6, self.dpi) as f32;
-        let hover_fill = self.brushes.alpha_brush(FOREGROUND, 0.08 * style.alpha);
+        let hover_fill = self.brushes.alpha_brush(ink, 0.08 * style.alpha);
         self.draw_rounded_box(col, col_r, &hover_fill);
         if style.is_selected || style.high_contrast {
             let rim = self.brushes.alpha_brush(
                 if style.high_contrast {
-                    FOREGROUND
+                    ink
                 } else {
                     FOCUS_ORANGE
                 },
                 if style.high_contrast { 0.72 } else { 0.42 } * style.alpha,
             );
-            let frame = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: col.x as f32 + 0.5,
-                    top: col.y as f32 + 0.5,
-                    right: col.right() as f32 - 0.5,
-                    bottom: col.bottom() as f32 - 0.5,
-                },
-                radiusX: col_r,
-                radiusY: col_r,
-            };
-            unsafe {
-                self.target.DrawRoundedRectangle(&frame, &rim, 1.0, None);
-            }
+            self.draw_rounded_box_stroke(col, col_r, &rim, 1.0);
         }
     }
 
     fn draw_week_day_bars(&self, day: &DayBar, col: Rect, style: WeekDayColumnStyle) {
+        let ink = self.notch_ink();
         let bar_w =
             scale(18, self.dpi).min((col.width - scale(8, self.dpi)).max(scale(6, self.dpi)));
         let bar_x = col.x + (col.width - bar_w) / 2;
@@ -735,7 +721,7 @@ impl Renderer {
             height: total_h,
         };
         let total_brush = if day.active_ms == 0 {
-            self.brushes.alpha_brush(FOREGROUND, 0.14 * style.alpha)
+            self.brushes.alpha_brush(ink, 0.14 * style.alpha)
         } else {
             let opacity = if style.is_active || day.is_today {
                 0.84
@@ -765,24 +751,18 @@ impl Renderer {
             let focus_brush = self
                 .brushes
                 .alpha_brush(FOCUS_ORANGE, focus_opacity * style.alpha);
-            self.draw_rounded_box(focus_rect, bar_r.min(focus_h as f32 * 0.5), &focus_brush);
+            let focus_r = bar_r.min(focus_h as f32 * 0.5);
+            self.draw_rounded_box(focus_rect, focus_r, &focus_brush);
             if style.high_contrast {
-                let hc_rim = self.brushes.alpha_brush(FOREGROUND, 0.85 * style.alpha);
-                let frame = D2D1_ROUNDED_RECT {
-                    rect: rect_to_d2d(focus_rect),
-                    radiusX: bar_r.min(focus_h as f32 * 0.5),
-                    radiusY: bar_r.min(focus_h as f32 * 0.5),
-                };
-                unsafe {
-                    self.target.DrawRoundedRectangle(&frame, &hc_rim, 1.0, None);
-                }
+                let hc_rim = self.brushes.alpha_brush(ink, 0.85 * style.alpha);
+                self.draw_rounded_box_stroke(focus_rect, focus_r, &hc_rim, 1.0);
             }
         }
     }
 
     fn draw_week_day_label(&self, day: &DayBar, col: Rect, style: WeekDayColumnStyle) {
         let label_ink = self.brushes.alpha_brush(
-            FOREGROUND,
+            self.notch_ink(),
             if style.is_active || day.is_today {
                 0.94
             } else {
@@ -845,22 +825,14 @@ impl Renderer {
     }
 
     fn draw_right_chevron(&self, cx: f32, cy: f32, r: f32, brush: &ID2D1SolidColorBrush) {
-        let stroke = (r * 0.48).max(1.25);
-        unsafe {
-            self.target.DrawLine(
-                Vector2::new(cx - r * 0.5, cy - r),
-                Vector2::new(cx + r * 0.5, cy),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-            self.target.DrawLine(
-                Vector2::new(cx + r * 0.5, cy),
-                Vector2::new(cx - r * 0.5, cy + r),
-                brush,
-                stroke,
-                &self.stroke_style,
-            );
-        }
+        draw_chevron_glyph(
+            &self.target,
+            &self.stroke_style,
+            Vector2::new(cx, cy),
+            r * 1.15,
+            (r * 0.48).max(1.25),
+            ChevronDir::Right,
+            brush,
+        );
     }
 }

@@ -4,6 +4,7 @@ use crate::settings_window::SettingsPage;
 
 use super::commands::ControlCenterClickOutcome;
 use super::commands::ControlCenterCommand;
+use super::grid::ControlKind;
 use super::layout_types::ControlCenterHitTarget;
 use super::layout_types::ControlCenterLayout;
 use super::model::ControlCenterPage;
@@ -14,6 +15,10 @@ pub fn control_center_action(
     snapshot: &ControlCenterSnapshot,
     target: ControlCenterHitTarget,
 ) -> Option<ControlCenterClickOutcome> {
+    match canvas_edit_action(snapshot, target) {
+        ActionDispatch::Handled(outcome) => return outcome,
+        ActionDispatch::Unhandled => {}
+    }
     let outcome =
         match target {
             ControlCenterHitTarget::WifiToggle => {
@@ -51,9 +56,6 @@ pub fn control_center_action(
             )),
             ControlCenterHitTarget::DisplayOpenPage => {
                 stay(ControlCenterCommand::OpenPage(ControlCenterPage::Display))
-            }
-            ControlCenterHitTarget::DisplaySlider | ControlCenterHitTarget::SoundSlider => {
-                return None;
             }
             ControlCenterHitTarget::SoundOpenPage => {
                 stay(ControlCenterCommand::OpenPage(ControlCenterPage::Sound))
@@ -98,8 +100,126 @@ pub fn control_center_action(
             }
             ControlCenterHitTarget::FooterPrimary => return footer_primary_action(snapshot.page),
             ControlCenterHitTarget::FooterSecondary => return footer_secondary_action(snapshot),
+            _ => return None,
         };
     Some(outcome)
+}
+
+enum ActionDispatch {
+    Handled(Option<ControlCenterClickOutcome>),
+    Unhandled,
+}
+
+fn canvas_edit_action(
+    snapshot: &ControlCenterSnapshot,
+    target: ControlCenterHitTarget,
+) -> ActionDispatch {
+    match target {
+        ControlCenterHitTarget::CanvasBackground => {
+            ActionDispatch::Handled(Some(if snapshot.page == ControlCenterPage::Main {
+                if snapshot.editing {
+                    stay(ControlCenterCommand::ExitEditMode)
+                } else {
+                    dismiss(ControlCenterCommand::Dismiss)
+                }
+            } else {
+                stay(ControlCenterCommand::Back)
+            }))
+        }
+        ControlCenterHitTarget::ToolbarAdd | ControlCenterHitTarget::AddControlButton => {
+            ActionDispatch::Handled(Some(stay(ControlCenterCommand::OpenGallery)))
+        }
+        ControlCenterHitTarget::ToolbarEdit => {
+            ActionDispatch::Handled(Some(stay(ControlCenterCommand::ToggleEditMode)))
+        }
+        ControlCenterHitTarget::ToolbarReset => {
+            ActionDispatch::Handled(Some(stay(ControlCenterCommand::ResetGrid)))
+        }
+        ControlCenterHitTarget::TileRemove(id) => {
+            ActionDispatch::Handled(Some(stay(ControlCenterCommand::RemoveTile(id))))
+        }
+        ControlCenterHitTarget::TileResize(id) => {
+            ActionDispatch::Handled(Some(stay(ControlCenterCommand::CycleTileSize(id))))
+        }
+        ControlCenterHitTarget::TileMove(_)
+        | ControlCenterHitTarget::TileSlider(_)
+        | ControlCenterHitTarget::DisplaySlider
+        | ControlCenterHitTarget::SoundSlider => ActionDispatch::Handled(None),
+        ControlCenterHitTarget::TileAction(id) => ActionDispatch::Handled(
+            snapshot
+                .grid
+                .tile(id)
+                .and_then(|tile| tile_kind_action(snapshot, tile.kind)),
+        ),
+        ControlCenterHitTarget::TileDetail(id) => ActionDispatch::Handled(
+            snapshot
+                .grid
+                .tile(id)
+                .and_then(|tile| tile_detail_action(tile.kind)),
+        ),
+        ControlCenterHitTarget::GalleryItem(index) => {
+            let outcome = ControlKind::ALL.get(index).and_then(|&kind| {
+                (!snapshot.grid.contains_kind(kind))
+                    .then(|| stay(ControlCenterCommand::AddControl(kind)))
+            });
+            ActionDispatch::Handled(outcome)
+        }
+        _ => ActionDispatch::Unhandled,
+    }
+}
+
+fn tile_kind_action(
+    snapshot: &ControlCenterSnapshot,
+    kind: ControlKind,
+) -> Option<ControlCenterClickOutcome> {
+    match kind {
+        ControlKind::Mute => Some(stay(ControlCenterCommand::ToggleMute)),
+        ControlKind::NightLight => Some(dismiss(ControlCenterCommand::OpenSettings(
+            ControlCenterAction::OpenNightLight,
+        ))),
+        ControlKind::Appearance => Some(stay(ControlCenterCommand::ToggleDarkMode)),
+        ControlKind::Screenshot => Some(dismiss(ControlCenterCommand::OpenSettings(
+            ControlCenterAction::Screenshot,
+        ))),
+        ControlKind::LockScreen => Some(dismiss(ControlCenterCommand::OpenSettings(
+            ControlCenterAction::LockScreen,
+        ))),
+        ControlKind::TaskView => Some(dismiss(ControlCenterCommand::OpenSettings(
+            ControlCenterAction::TaskView,
+        ))),
+        ControlKind::Finder => Some(dismiss(ControlCenterCommand::OpenFinder)),
+        ControlKind::Spotlight => Some(dismiss(ControlCenterCommand::OpenSpotlight)),
+        ControlKind::Settings => Some(dismiss(ControlCenterCommand::OpenSettingsWindow(
+            SettingsPage::Overview,
+        ))),
+        ControlKind::Wifi => snapshot
+            .wifi
+            .supported
+            .then(|| stay(ControlCenterCommand::ToggleWifi)),
+        ControlKind::Bluetooth => snapshot
+            .bluetooth
+            .supported
+            .then(|| stay(ControlCenterCommand::ToggleBluetooth)),
+        _ => None,
+    }
+}
+
+fn tile_detail_action(kind: ControlKind) -> Option<ControlCenterClickOutcome> {
+    match kind {
+        ControlKind::Wifi => Some(stay(ControlCenterCommand::OpenPage(
+            ControlCenterPage::Wifi,
+        ))),
+        ControlKind::Bluetooth => Some(stay(ControlCenterCommand::OpenPage(
+            ControlCenterPage::Bluetooth,
+        ))),
+        ControlKind::Brightness => Some(stay(ControlCenterCommand::OpenPage(
+            ControlCenterPage::Display,
+        ))),
+        ControlKind::Volume => Some(stay(ControlCenterCommand::OpenPage(
+            ControlCenterPage::Sound,
+        ))),
+        _ => None,
+    }
 }
 
 #[must_use]
@@ -132,6 +252,7 @@ pub const fn subpanel_opener_target(page: ControlCenterPage) -> Option<ControlCe
         ControlCenterPage::Bluetooth => Some(ControlCenterHitTarget::BluetoothOpenPage),
         ControlCenterPage::Sound => Some(ControlCenterHitTarget::SoundOpenPage),
         ControlCenterPage::Display => Some(ControlCenterHitTarget::DisplayOpenPage),
+        ControlCenterPage::Gallery => Some(ControlCenterHitTarget::ToolbarAdd),
     }
 }
 
@@ -140,7 +261,9 @@ pub fn scroll_offset_for_item(
     layout: &ControlCenterLayout,
     target: ControlCenterHitTarget,
 ) -> Option<i32> {
-    let ControlCenterHitTarget::SubPanelItem(index) = target else {
+    let (ControlCenterHitTarget::SubPanelItem(index) | ControlCenterHitTarget::GalleryItem(index)) =
+        target
+    else {
         return None;
     };
     let item = layout.items.get(index)?;
@@ -257,6 +380,22 @@ pub(super) fn main_focus_targets(
             ControlCenterHitTarget::MediaNext,
         ),
     ]);
+    for tile in &layout.tiles {
+        match tile.kind {
+            ControlKind::Mute
+            | ControlKind::NightLight
+            | ControlKind::Appearance
+            | ControlKind::Screenshot
+            | ControlKind::LockScreen
+            | ControlKind::TaskView
+            | ControlKind::Finder
+            | ControlKind::Spotlight
+            | ControlKind::Settings => {
+                candidates.push((tile.rect, true, ControlCenterHitTarget::TileAction(tile.id)));
+            }
+            _ => {}
+        }
+    }
     candidates
         .into_iter()
         .filter_map(|(rect, enabled, target)| (enabled && !rect.is_empty()).then_some(target))
@@ -296,7 +435,12 @@ pub(super) fn subpanel_focus_targets(
         _ => {}
     }
     for index in 0..layout.items.len() {
-        out.push(ControlCenterHitTarget::SubPanelItem(index));
+        let target = if layout.page == ControlCenterPage::Gallery {
+            ControlCenterHitTarget::GalleryItem(index)
+        } else {
+            ControlCenterHitTarget::SubPanelItem(index)
+        };
+        out.push(target);
     }
     if !layout.footer_primary.is_empty() {
         out.push(ControlCenterHitTarget::FooterPrimary);
@@ -331,7 +475,7 @@ pub(super) fn subpanel_item_action(
                 device.id.clone(),
             )))
         }
-        ControlCenterPage::Main | ControlCenterPage::Display => None,
+        ControlCenterPage::Main | ControlCenterPage::Display | ControlCenterPage::Gallery => None,
     }
 }
 
@@ -349,7 +493,7 @@ pub(super) fn footer_primary_action(page: ControlCenterPage) -> Option<ControlCe
         ControlCenterPage::Display => Some(dismiss(ControlCenterCommand::OpenSettings(
             ControlCenterAction::OpenDisplay,
         ))),
-        ControlCenterPage::Main => None,
+        ControlCenterPage::Main | ControlCenterPage::Gallery => None,
     }
 }
 
@@ -363,7 +507,8 @@ pub(super) fn footer_secondary_action(
         ControlCenterPage::Main
         | ControlCenterPage::Wifi
         | ControlCenterPage::Bluetooth
-        | ControlCenterPage::Sound => None,
+        | ControlCenterPage::Sound
+        | ControlCenterPage::Gallery => None,
     }
 }
 

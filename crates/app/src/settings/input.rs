@@ -1,26 +1,32 @@
-use std::mem::size_of;
-
 use otto_core::{
-    ClipboardPayload, FocusSettingsTab, FocusTextField, SettingsHit, SettingsPage, scale,
+    ClipboardPayload, FocusSettingsTab, FocusTextField, SettingsHit, SettingsPage,
+    WindowControlAction, scale,
 };
 use otto_platform::{
-    ClipboardRead, apply_settings_min_track, invalidate_settings_window,
-    is_settings_window_visible, read_clipboard_payload, settings_client_size, suggested_dpi_rect,
+    ClipboardRead, apply_settings_min_track, capture_mouse, client_to_screen, current_process_id,
+    handle_settings_ncactivate, handle_settings_nccalcsize, handle_settings_nchittest,
+    invalidate_settings_window, is_settings_window_maximized, is_settings_window_visible,
+    is_virtual_key_down, kill_window_timer, minimize_settings_window, place_no_zorder,
+    read_clipboard_payload, release_capture_if_owned, set_window_timer, settings_client_size,
+    suggested_dpi_rect, toggle_settings_window_maximize, track_mouse_leave,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+    VK_BACK, VK_DOWN, VK_ESCAPE, VK_F4, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
     WM_DWMCOLORIZATIONCOLORCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WM_WINDOWPOSCHANGED,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+    WM_THEMECHANGED, WM_TIMER,
 };
 
 use crate::host::RuntimeContext;
-use crate::win_msg::{AUDIT_TIMER_ID, UPDATE_TIMER_ID, WM_MOUSELEAVE, WM_UNICHAR};
+use crate::win_msg::{
+    AUDIT_TIMER_ID, GREEN_HOVER_TIMER, UPDATE_TIMER_ID, WM_MOUSELEAVE, WM_UNICHAR,
+};
+use crate::window_controls::{GREEN_HOVER_MS, is_alt_pressed, open_tiling_menu};
 
 use super::actions::{activate, poll_update_check, submit_blocked_website};
 use super::lifecycle::{close, refresh_appearance, repaint};
@@ -71,7 +77,7 @@ fn handle_focused_input_keydown(
     focused_field: FocusTextField,
     key: u16,
 ) -> LRESULT {
-    let ctrl_down = (unsafe { GetAsyncKeyState(0x11) } as u16 & 0x8000) != 0;
+    let ctrl_down = is_virtual_key_down(0x11);
     if ctrl_down && key == 0x56 {
         if let ClipboardRead::Captured {
             payload: ClipboardPayload::Text(text) | ClipboardPayload::Link(text),
@@ -115,6 +121,10 @@ fn handle_focused_input_keydown(
         value if value == VK_RETURN.0 => {
             if focused_field == FocusTextField::WebsiteDomain {
                 submit_blocked_website(runtime);
+            } else if focused_field == FocusTextField::CategoryName {
+                super::actions::submit_focus_category(runtime);
+            } else if focused_field == FocusTextField::CategoryRename {
+                super::actions::submit_rename_focus_category(runtime);
             } else {
                 with_window(runtime, |window| {
                     window.focus_state.focused_field = FocusTextField::None;
@@ -162,8 +172,8 @@ fn handle_keydown(runtime: &RuntimeContext, key: u16) -> Option<LRESULT> {
                 return false;
             }
             let next = match window.focus_state.tab {
-                FocusSettingsTab::BlockApps => FocusSettingsTab::Activity,
-                FocusSettingsTab::Activity => FocusSettingsTab::BlockApps,
+                FocusSettingsTab::Modes => FocusSettingsTab::Insights,
+                FocusSettingsTab::Insights => FocusSettingsTab::Modes,
             };
             window.focus_state.select_tab(next);
             window.scroll = 0;
@@ -186,6 +196,41 @@ fn handle_keydown(runtime: &RuntimeContext, key: u16) -> Option<LRESULT> {
     None
 }
 
+fn cancel_green_hover(window: &mut super::SettingsWindow) {
+    if window.green_hover_armed {
+        window.green_hover_armed = false;
+        kill_window_timer(window.hwnd, GREEN_HOVER_TIMER);
+    }
+}
+
+fn sync_green_hover(window: &mut super::SettingsWindow, hit: Option<SettingsHit>) {
+    let should_arm =
+        hit == Some(SettingsHit::WindowControl(
+            WindowControlAction::ToggleMaximize,
+        )) && window.pressed.is_none()
+            && window.active;
+    if should_arm {
+        if !window.green_hover_armed {
+            window.green_hover_armed =
+                set_window_timer(window.hwnd, GREEN_HOVER_TIMER, GREEN_HOVER_MS);
+        }
+    } else {
+        cancel_green_hover(window);
+    }
+}
+
+fn open_settings_tiling_menu(runtime: &RuntimeContext, hwnd: isize) {
+    let Some(zoom_rect) = with_window(runtime, |window| window.layout.window_controls[2].rect)
+    else {
+        return;
+    };
+    if zoom_rect.is_empty() {
+        return;
+    }
+    let (anchor_x, anchor_y) = client_to_screen(hwnd, zoom_rect.x, zoom_rect.bottom() + 4);
+    open_tiling_menu(runtime, hwnd, current_process_id(), anchor_x, anchor_y);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_message(
     runtime: &RuntimeContext,
@@ -194,11 +239,25 @@ pub(crate) fn handle_message(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
+    if message == WM_NCCALCSIZE {
+        return handle_settings_nccalcsize(hwnd, wparam.0, lparam.0).map(LRESULT);
+    }
+    if message == WM_NCACTIVATE {
+        return handle_settings_ncactivate(hwnd).map(LRESULT);
+    }
     let known = with_window(runtime, |window| window.hwnd == hwnd)?;
     if !known {
         return None;
     }
     match message {
+        WM_SYSKEYDOWN if (wparam.0 & 0xFFFF) as u16 == VK_F4.0 && is_alt_pressed() => {
+            close(runtime);
+            Some(LRESULT(0))
+        }
+        WM_NCHITTEST => handle_settings_nchittest(hwnd, lparam.0, |x, y| {
+            with_window(runtime, |window| window.layout.is_titlebar_drag(x, y)).unwrap_or(false)
+        })
+        .map(LRESULT),
         WM_ERASEBKGND => Some(LRESULT(1)),
         WM_PAINT => {
             paint(runtime, hwnd);
@@ -210,6 +269,7 @@ pub(crate) fn handle_message(
         }
         WM_SIZE => {
             with_window(runtime, |window| {
+                window.maximized = is_settings_window_maximized(hwnd);
                 window.relayout();
                 let (width, height) = settings_client_size(hwnd);
                 let resized = window
@@ -222,34 +282,31 @@ pub(crate) fn handle_message(
                 }
             });
             invalidate_settings_window(hwnd);
-            crate::window_controls::notify_own_window_change(runtime);
             Some(LRESULT(0))
         }
         WM_DPICHANGED => {
             if let Some(rect) = suggested_dpi_rect(lparam) {
-                unsafe {
-                    let _ = SetWindowPos(
-                        HWND(hwnd as *mut _),
-                        None,
-                        rect.x,
-                        rect.y,
-                        rect.width,
-                        rect.height,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
+                place_no_zorder(hwnd, rect);
             }
             with_window(runtime, |window| {
+                window.maximized = is_settings_window_maximized(hwnd);
                 window.relayout();
                 window.renderer = None;
                 window.icons_attempted.clear();
             });
             invalidate_settings_window(hwnd);
-            crate::window_controls::notify_own_window_change(runtime);
             Some(LRESULT(0))
         }
-        WM_MOVE | WM_ACTIVATE | WM_WINDOWPOSCHANGED => {
-            crate::window_controls::notify_own_window_change(runtime);
+        WM_ACTIVATE => {
+            let active = (wparam.0 & 0xFFFF) != 0;
+            with_window(runtime, |window| {
+                window.active = active;
+                if !active {
+                    cancel_green_hover(window);
+                    window.alt_down = false;
+                }
+            });
+            invalidate_settings_window(hwnd);
             None
         }
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
@@ -262,18 +319,15 @@ pub(crate) fn handle_message(
             let changed = with_window(runtime, |window| {
                 if !window.tracking_leave {
                     window.tracking_leave = true;
-                    let mut track = TRACKMOUSEEVENT {
-                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: HWND(hwnd as *mut _),
-                        dwHoverTime: 0,
-                    };
-                    unsafe {
-                        let _ = TrackMouseEvent(&mut track);
-                    }
+                    let _ = track_mouse_leave(hwnd);
                 }
                 let hit = window.hit(x, y);
-                let changed = hit != window.hovered;
+                let over_control = matches!(hit, Some(SettingsHit::WindowControl(_)));
+                let next_alt = over_control && is_alt_pressed();
+                let alt_changed = next_alt != window.alt_down;
+                window.alt_down = next_alt;
+                sync_green_hover(window, hit);
+                let changed = hit != window.hovered || alt_changed;
                 window.hovered = hit;
                 changed
             })
@@ -287,31 +341,102 @@ pub(crate) fn handle_message(
             with_window(runtime, |window| {
                 window.tracking_leave = false;
                 window.hovered = None;
+                window.alt_down = false;
+                cancel_green_hover(window);
             });
             invalidate_settings_window(hwnd);
             Some(LRESULT(0))
         }
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_point(lparam);
-            with_window(runtime, |window| window.pressed = window.hit(x, y));
-            unsafe {
-                let _ = SetCapture(HWND(hwnd as *mut _));
+            let pressed_control = with_window(runtime, |window| {
+                cancel_green_hover(window);
+                let hit = window.hit(x, y);
+                window.pressed = hit;
+                window.hovered = hit;
+                matches!(hit, Some(SettingsHit::WindowControl(_)))
+            })
+            .unwrap_or(false);
+            capture_mouse(hwnd);
+            if pressed_control {
+                invalidate_settings_window(hwnd);
             }
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
             let (x, y) = unpack_point(lparam);
-            unsafe {
-                let _ = ReleaseCapture();
-            }
-            let hit = with_window(runtime, |window| {
+            let (pressed_was_control, hit) = with_window(runtime, |window| {
                 let pressed = window.pressed.take();
                 let released = window.hit(x, y);
-                (pressed == released).then_some(released).flatten()
+                window.hovered = released;
+                sync_green_hover(window, released);
+                let matched = (pressed == released).then_some(released).flatten();
+                (
+                    matches!(pressed, Some(SettingsHit::WindowControl(_))),
+                    matched,
+                )
             })
-            .flatten();
+            .unwrap_or((false, None));
+            let _ = release_capture_if_owned(hwnd);
+            if pressed_was_control {
+                invalidate_settings_window(hwnd);
+            }
             if let Some(hit) = hit {
-                activate(runtime, hit);
+                match hit {
+                    SettingsHit::WindowControl(WindowControlAction::Close) => close(runtime),
+                    SettingsHit::WindowControl(WindowControlAction::Minimize) => {
+                        if runtime.genie_enabled.get() {
+                            let _ = crate::genie::minimize_window(runtime, hwnd);
+                        } else {
+                            minimize_settings_window(hwnd);
+                        }
+                    }
+                    SettingsHit::WindowControl(WindowControlAction::ToggleMaximize) => {
+                        toggle_settings_window_maximize(hwnd);
+                    }
+                    other => activate(runtime, other),
+                }
+            }
+            Some(LRESULT(0))
+        }
+        WM_CAPTURECHANGED => {
+            let had_press =
+                with_window(runtime, |window| window.pressed.take().is_some()).unwrap_or(false);
+            if had_press {
+                invalidate_settings_window(hwnd);
+            }
+            Some(LRESULT(0))
+        }
+        WM_RBUTTONUP => {
+            let (x, y) = unpack_point(lparam);
+            let over_controls = with_window(runtime, |window| {
+                let hit = window.hit(x, y);
+                if matches!(hit, Some(SettingsHit::WindowControl(_))) {
+                    cancel_green_hover(window);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+            over_controls.then(|| {
+                open_settings_tiling_menu(runtime, hwnd);
+                LRESULT(0)
+            })
+        }
+        WM_TIMER if wparam.0 == GREEN_HOVER_TIMER => {
+            let ready = with_window(runtime, |window| {
+                cancel_green_hover(window);
+                window.hovered
+                    == Some(SettingsHit::WindowControl(
+                        WindowControlAction::ToggleMaximize,
+                    ))
+                    && window.pressed.is_none()
+                    && window.active
+            })
+            .unwrap_or(false);
+            if ready {
+                open_settings_tiling_menu(runtime, hwnd);
             }
             Some(LRESULT(0))
         }
@@ -381,5 +506,80 @@ pub(crate) fn handle_message(
             Some(LRESULT(0))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use otto_core::{SettingsHit, SettingsPage, compute_settings_layout};
+    use otto_platform::{create_settings_window, destroy_settings_window};
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_CAPTURECHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    };
+
+    use super::handle_message;
+    use crate::host::{RuntimeContext, SETTINGS_WND_PROC};
+    use crate::settings_window::SettingsWindow;
+
+    struct WindowGuard(isize);
+
+    impl Drop for WindowGuard {
+        fn drop(&mut self) {
+            destroy_settings_window(self.0);
+        }
+    }
+
+    const fn pack_point(x: i32, y: i32) -> LPARAM {
+        LPARAM(((y as u16 as isize) << 16) | (x as u16 as isize))
+    }
+
+    #[test]
+    fn sidebar_click_navigates_and_capture_loss_cancels_press() {
+        let hwnd = create_settings_window(SETTINGS_WND_PROC).expect("hidden settings window");
+        let _guard = WindowGuard(hwnd);
+        let runtime = RuntimeContext::new(false);
+        let mut window = SettingsWindow::new(hwnd);
+        window.layout = compute_settings_layout(920, 620, 96);
+        let modules_rect = window
+            .layout
+            .page_rect(SettingsPage::Modules)
+            .expect("modules page slot");
+        let appearance_rect = window
+            .layout
+            .page_rect(SettingsPage::Appearance)
+            .expect("appearance page slot");
+        *runtime.settings_window.borrow_mut() = Some(window);
+
+        let pt = pack_point(
+            modules_rect.x + modules_rect.width / 2,
+            modules_rect.y + modules_rect.height / 2,
+        );
+        assert!(handle_message(&runtime, hwnd, WM_LBUTTONDOWN, WPARAM(0), pt).is_some());
+        assert_eq!(
+            runtime
+                .settings_window
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.pressed),
+            Some(SettingsHit::Page(SettingsPage::Modules))
+        );
+        assert!(handle_message(&runtime, hwnd, WM_LBUTTONUP, WPARAM(0), pt).is_some());
+        assert_eq!(
+            runtime.settings_window.borrow().as_ref().map(|w| w.page),
+            Some(SettingsPage::Modules)
+        );
+
+        let pt2 = pack_point(
+            appearance_rect.x + appearance_rect.width / 2,
+            appearance_rect.y + appearance_rect.height / 2,
+        );
+        assert!(handle_message(&runtime, hwnd, WM_LBUTTONDOWN, WPARAM(0), pt2).is_some());
+        assert!(handle_message(&runtime, hwnd, WM_CAPTURECHANGED, WPARAM(0), LPARAM(0)).is_some());
+        assert!(handle_message(&runtime, hwnd, WM_LBUTTONUP, WPARAM(0), pt2).is_some());
+        assert_eq!(
+            runtime.settings_window.borrow().as_ref().map(|w| w.page),
+            Some(SettingsPage::Modules)
+        );
     }
 }

@@ -17,13 +17,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SC_MINIMIZE,
     SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSCOMMAND, WM_TIMER,
-    WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+    WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU, WindowFromPoint,
 };
 use windows::core::BOOL;
 
 use otto_core::scale;
 
-use crate::window::caption::{covering_caption_of_with_frame, dwm_rect};
+use crate::window::caption::{dwm_rect, native_caption_of};
 use crate::worker::{HookStartup, HookThread, install_hook_thread, uninstall_hook_thread};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -48,8 +48,13 @@ static HOOK_THREAD: Mutex<Option<HookThread>> = Mutex::new(None);
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 static TARGET: AtomicIsize = AtomicIsize::new(0);
 static MESSAGE: AtomicU32 = AtomicU32::new(0);
+static INTERCEPT_ENABLED: AtomicBool = AtomicBool::new(false);
 static SWALLOW_BUTTON_UP: AtomicBool = AtomicBool::new(false);
 static MOUSE_CLICK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_native_minimize_intercept_enabled(enabled: bool) {
+    INTERCEPT_ENABLED.store(enabled, Ordering::Release);
+}
 
 #[must_use]
 pub fn take_mouse_click_count() -> u64 {
@@ -105,10 +110,9 @@ const fn rect_contains(rect: RECT, x: i32, y: i32, margin: i32) -> bool {
 }
 
 const fn has_minimize_caption_style(style: u32) -> bool {
-    let has_caption = style & WS_CAPTION.0 == WS_CAPTION.0;
-    let custom_resizable_chrome = !has_caption && style & WS_THICKFRAME.0 != 0;
-    (has_caption && style & WS_SYSMENU.0 != 0 && style & WS_MINIMIZEBOX.0 != 0)
-        || custom_resizable_chrome
+    style & WS_CAPTION.0 == WS_CAPTION.0
+        && style & WS_SYSMENU.0 != 0
+        && style & WS_MINIMIZEBOX.0 != 0
 }
 
 fn is_within_top_caption_band(x: i32, y: i32, frame: RECT, dpi: u32) -> bool {
@@ -187,15 +191,15 @@ fn top_level_window_at(x: i32, y: i32) -> Option<(HWND, RECT)> {
 }
 
 fn belongs_to_this_process(window: HWND) -> bool {
-    if crate::window::ops::is_own_settings_window(window) {
-        return false;
-    }
     let mut process = 0_u32;
     unsafe { GetWindowThreadProcessId(window, Some(&raw mut process)) };
     process == unsafe { GetCurrentProcessId() }
 }
 
 fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
+    if !INTERCEPT_ENABLED.load(Ordering::Acquire) {
+        return None;
+    }
     let (window, frame) = top_level_window_at(x, y)?;
     if belongs_to_this_process(window) {
         return None;
@@ -208,9 +212,7 @@ fn minimize_target_under(x: i32, y: i32) -> Option<isize> {
     if !is_within_top_caption_band(x, y, frame, dpi) {
         return None;
     }
-    let hit = covering_caption_of_with_frame(window, style, frame)?
-        .minimize_button()?
-        .contains(x, y);
+    let hit = native_caption_of(window)?.minimize_button()?.contains(x, y);
     if !hit || crate::window::model::is_window_uipi_blocked(window) {
         return None;
     }
@@ -368,6 +370,7 @@ pub fn install_native_minimize_hook(target_hwnd: isize, message: u32) -> bool {
 }
 
 pub fn uninstall_native_minimize_hook() {
+    INTERCEPT_ENABLED.store(false, Ordering::Release);
     TARGET.store(0, Ordering::Release);
     MESSAGE.store(0, Ordering::Release);
     SWALLOW_BUTTON_UP.store(false, Ordering::Release);
@@ -444,6 +447,9 @@ mod tests {
         assert!(has_minimize_caption_style(style_ok));
         assert!(!has_minimize_caption_style(WS_CAPTION.0 | WS_SYSMENU.0));
         assert!(!has_minimize_caption_style(WS_SYSMENU.0 | WS_MINIMIZEBOX.0));
+        assert!(!has_minimize_caption_style(
+            windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME.0 | WS_MINIMIZEBOX.0
+        ));
 
         let frame = RECT {
             left: 100,

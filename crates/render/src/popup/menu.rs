@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 
 use otto_core::{
-    Appearance, CalendarControl, EstimatedMenuText, GlassShape, MenuRow, MenuTextMeasure,
-    NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_WIDTH, PopupMenuLayout, PopupMenuRowLayout,
-    Rect, RgbBuffer, badge_ink_is_dark, compute_calendar_layout, month_name, notification_badge,
-    scale,
+    Appearance, CalendarControl, EstimatedMenuText, MenuRow, MenuTextMeasure,
+    NOTIFICATION_CENTER_CARD_RADIUS, NOTIFICATION_CENTER_MAX_HEIGHT, NOTIFICATION_CENTER_WIDTH,
+    PopupMenuLayout, PopupMenuRowLayout, Rect, RgbBuffer, badge_ink_is_dark,
+    compute_calendar_layout, month_name, notification_badge, scale,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN,
@@ -12,14 +12,13 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP, D2D1_ELLIPSE,
-    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Brush,
-    ID2D1DCRenderTarget, ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Brush, ID2D1DCRenderTarget,
+    ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_WRAP, IDWriteTextFormat,
 };
 use windows::core::Result;
 use windows_numerics::Vector2;
@@ -41,35 +40,16 @@ use crate::appearance::surface::{
     DibSurface, create_dc_render_target, draw_on, draw_with_recovery,
 };
 use crate::appearance::theme::{BrushPalette, LiquidGlassPalette};
+use crate::appearance::tokens::{SYSTEM_RED as TODAY_FILL, WHITE as TODAY_INK};
+use crate::kit::draw::{draw_glass_or_fallback_shell, draw_text_on, measure_text_width};
+use crate::kit::icons::{ChevronDir, draw_chevron_glyph, draw_close_x_glyph};
 use crate::{
-    BLACK, CachedCoverArt, create_text_format, rect_to_d2d, shared_d2d_factory,
-    shared_dwrite_factory,
-};
-
-const CLEAR: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
-};
-
-const TODAY_FILL: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 0.27,
-    b: 0.23,
-    a: 1.0,
-};
-
-const TODAY_INK: D2D1_COLOR_F = D2D1_COLOR_F {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
+    BLACK, CLEAR, CachedCoverArt, create_text_format, draw_dwrite_tabular_text, rect_to_d2d,
+    shared_d2d_factory, shared_dwrite_factory,
 };
 
 const ADJACENT_DAY_OPACITY: f32 = 0.55;
-const NOTIFICATION_CARD_RADIUS: i32 = 16;
-const NOTIFICATION_ICON_SIZE: i32 = 36;
+const NOTIFICATION_ICON_SIZE: i32 = 32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MenuHover {
@@ -387,41 +367,35 @@ impl PopupMenuRenderer {
         if !layout.is_scrollable() {
             return;
         }
-        let center = layout.viewport.x as f32 + layout.viewport.width as f32 * 0.5;
-        let half = scale(5, self.dpi) as f32;
-        let rise = scale(3, self.dpi) as f32;
-        let brush = &self.brushes.text_muted;
-        let chevron = |tip_y: f32, direction: f32| unsafe {
-            let tip = Vector2::new(center, tip_y);
-            for side in [-1.0, 1.0] {
-                self.target.DrawLine(
-                    Vector2::new(center + side * half, tip_y + direction * rise),
-                    tip,
-                    brush,
-                    1.5,
-                    &self.stroke_style,
-                );
-            }
-        };
+        let center_x = layout.viewport.x as f32 + layout.viewport.width as f32 * 0.5;
+        let reach = scale(5, self.dpi) as f32;
+        let stroke = (scale(2, self.dpi) as f32 * 0.75).max(1.4);
         if layout.scroll_offset > 0 {
-            chevron(layout.viewport.y as f32 - rise * 0.5, 1.0);
+            draw_chevron_glyph(
+                &self.target,
+                &self.stroke_style,
+                Vector2::new(center_x, layout.viewport.y as f32),
+                reach,
+                stroke,
+                ChevronDir::Up,
+                &self.brushes.text_muted,
+            );
         }
         if layout.scroll_offset < layout.max_scroll() {
-            chevron(layout.viewport.bottom() as f32 + rise * 0.5, -1.0);
+            draw_chevron_glyph(
+                &self.target,
+                &self.stroke_style,
+                Vector2::new(center_x, layout.viewport.bottom() as f32),
+                reach,
+                stroke,
+                ChevronDir::Down,
+                &self.brushes.text_muted,
+            );
         }
     }
 
     pub(super) fn measure(text: &str, format: &IDWriteTextFormat) -> Option<i32> {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        unsafe {
-            let layout = shared_dwrite_factory()
-                .ok()?
-                .CreateTextLayout(&wide, format, 4096.0, 64.0)
-                .ok()?;
-            layout.GetMetrics(&raw mut metrics).ok()?;
-        }
-        Some(metrics.widthIncludingTrailingWhitespace.ceil() as i32 + 2)
+        Some(measure_text_width(text, format, 4096.0)?.ceil() as i32 + 2)
     }
 
     #[expect(clippy::too_many_lines)]
@@ -525,33 +499,23 @@ impl PopupMenuRenderer {
                         right: (text_rect.right - shortcut_column).max(text_rect.left + 1.0),
                         ..text_rect
                     };
-                    let label_wide: Vec<u16> = label.encode_utf16().collect();
-                    self.target.DrawText(
-                        &label_wide,
-                        &self.label_format,
-                        &label_rect,
-                        fg,
-                        D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    self.draw_clipped_text(&self.label_format, label, &label_rect, fg);
 
                     if !shortcut.is_empty() {
+                        let hovered_shortcut = is_hovered.then(|| {
+                            self.brushes.alpha_brush(
+                                palette.on_accent,
+                                if palette.is_high_contrast { 1.0 } else { 0.88 },
+                            )
+                        });
                         let sb = if !*enabled {
                             &self.brushes.text_disabled
-                        } else if is_hovered {
-                            &self.brushes.text_primary
+                        } else if let Some(ref brush) = hovered_shortcut {
+                            brush
                         } else {
                             &self.brushes.text_muted
                         };
-                        let short_wide: Vec<u16> = shortcut.encode_utf16().collect();
-                        self.target.DrawText(
-                            &short_wide,
-                            &self.shortcut_format,
-                            &text_rect,
-                            sb,
-                            D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
+                        self.draw_clipped_text(&self.shortcut_format, shortcut, &text_rect, sb);
                     }
                 }
             }
@@ -642,7 +606,7 @@ impl PopupMenuRenderer {
                     );
                 }
             }
-            self.draw_text(&cell.day.day.to_string(), format, &rect, brush);
+            draw_dwrite_tabular_text(&self.target, &cell.day.day.to_string(), format, rect, brush);
         }
     }
 
@@ -683,21 +647,20 @@ impl PopupMenuRenderer {
                     );
                 }
                 CalendarControl::Previous | CalendarControl::Next => {
-                    let direction = if control == CalendarControl::Previous {
-                        -1.0
+                    let dir = if control == CalendarControl::Previous {
+                        ChevronDir::Left
                     } else {
-                        1.0
+                        ChevronDir::Right
                     };
-                    let tip = Vector2::new(cx + direction * reach * 0.5, cy);
-                    for side in [-1.0, 1.0] {
-                        self.target.DrawLine(
-                            Vector2::new(cx - direction * reach * 0.5, cy + side * reach),
-                            tip,
-                            ink,
-                            stroke,
-                            &self.stroke_style,
-                        );
-                    }
+                    draw_chevron_glyph(
+                        &self.target,
+                        &self.stroke_style,
+                        Vector2::new(cx, cy),
+                        reach,
+                        stroke,
+                        dir,
+                        ink,
+                    );
                 }
             }
         }
@@ -710,17 +673,14 @@ impl PopupMenuRenderer {
         rect: &D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.target.DrawText(
-                &wide,
-                format,
-                rect,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
+        draw_text_on(
+            &self.target,
+            text,
+            format,
+            *rect,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
     }
 
     pub(super) fn fill_shape(
@@ -730,20 +690,7 @@ impl PopupMenuRenderer {
         geom: Option<&ID2D1PathGeometry>,
         brush: &ID2D1Brush,
     ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.FillGeometry(geom, brush, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target.FillRoundedRectangle(&rounded, brush);
-        }
+        crate::kit::draw::fill_shape(&self.target, rect, radius, geom, brush);
     }
 
     pub(super) fn draw_shape(
@@ -754,21 +701,7 @@ impl PopupMenuRenderer {
         brush: &ID2D1Brush,
         stroke_width: f32,
     ) {
-        if let Some(geom) = geom {
-            unsafe {
-                self.target.DrawGeometry(geom, brush, stroke_width, None);
-            }
-            return;
-        }
-        let rounded = D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        unsafe {
-            self.target
-                .DrawRoundedRectangle(&rounded, brush, stroke_width, None);
-        }
+        crate::kit::draw::stroke_shape(&self.target, rect, radius, geom, brush, stroke_width);
     }
 
     pub(super) fn draw_shell(
@@ -779,7 +712,11 @@ impl PopupMenuRenderer {
         appearance: &Appearance,
         palette: &LiquidGlassPalette,
     ) -> Result<()> {
-        let shell_shape = GlassShape::from_rect(
+        draw_glass_or_fallback_shell(
+            &self.factory,
+            &self.target,
+            &self.glass,
+            &self.brushes,
             Rect {
                 x: 0,
                 y: 0,
@@ -787,44 +724,10 @@ impl PopupMenuRenderer {
                 height,
             },
             radius,
-        );
-        if self
-            .glass
-            .draw(&self.target, appearance, self.dpi, shell_shape, true)?
-        {
-            return Ok(());
-        }
-
-        let width = width as f32;
-        let height = height as f32;
-        let outer_rect = D2D_RECT_F {
-            left: 0.5,
-            top: 0.5,
-            right: width - 0.5,
-            bottom: height - 0.5,
-        };
-        let inner_rect = D2D_RECT_F {
-            left: 1.5,
-            top: 1.5,
-            right: width - 1.5,
-            bottom: height - 1.5,
-        };
-        let inner_radius = (radius - 1.0).max(1.0);
-        let outer_geom = crate::build_squircle_path(&self.factory, outer_rect, radius).ok();
-        let inner_geom = crate::build_squircle_path(&self.factory, inner_rect, inner_radius).ok();
-        let fill = &self.brushes.color_brush(palette.menu_fill);
-        let outer_border = &self.brushes.color_brush(palette.menu_outer_border);
-        let inner_border = &self.brushes.specular_rim;
-        self.fill_shape(outer_rect, radius, outer_geom.as_ref(), fill);
-        self.draw_shape(outer_rect, radius, outer_geom.as_ref(), outer_border, 1.0);
-        self.draw_shape(
-            inner_rect,
-            inner_radius,
-            inner_geom.as_ref(),
-            inner_border,
-            1.0,
-        );
-        Ok(())
+            self.dpi,
+            appearance,
+            palette,
+        )
     }
 
     fn draw_checkmark(
@@ -872,7 +775,7 @@ impl PopupMenuRenderer {
             right: row.rect.right() as f32,
             bottom: (row.rect.bottom() as f32 - gap_y).max(row.rect.y as f32 + gap_y + 1.0),
         };
-        let radius = scale(NOTIFICATION_CARD_RADIUS, self.dpi) as f32;
+        let radius = scale(NOTIFICATION_CENTER_CARD_RADIUS, self.dpi) as f32;
         let card_geom = crate::build_squircle_path(&self.factory, card_rect, radius).ok();
         self.fill_shape(
             card_rect,
@@ -957,10 +860,11 @@ impl PopupMenuRenderer {
         if hovered {
             self.draw_notification_close(trailing_rect, palette);
         } else {
-            self.draw_clipped_text(
-                &self.shortcut_format,
+            draw_dwrite_tabular_text(
+                &self.target,
                 timestamp_label,
-                &trailing_rect,
+                &self.shortcut_format,
+                trailing_rect,
                 secondary,
             );
         }
@@ -985,7 +889,7 @@ impl PopupMenuRenderer {
         let ink = if badge_ink_is_dark(badge.color) {
             self.brushes.alpha_brush(BLACK, 0.88)
         } else {
-            self.brushes.on_accent.clone()
+            self.brushes.white.clone()
         };
         self.draw_clipped_text(&self.today_format, initial, &rect, &ink);
     }
@@ -994,7 +898,6 @@ impl PopupMenuRenderer {
         let radius = scale(8, self.dpi) as f32;
         let center = Vector2::new(area.right - radius, (area.top + area.bottom) * 0.5);
         let disc = self.brushes.alpha_brush(palette.text_primary, 0.16);
-        let arm = radius * 0.38;
         unsafe {
             self.target.FillEllipse(
                 &D2D1_ELLIPSE {
@@ -1004,16 +907,15 @@ impl PopupMenuRenderer {
                 },
                 &disc,
             );
-            for (dx, dy) in [(arm, arm), (arm, -arm)] {
-                self.target.DrawLine(
-                    Vector2::new(center.X - dx, center.Y - dy),
-                    Vector2::new(center.X + dx, center.Y + dy),
-                    &self.brushes.text_muted,
-                    1.25,
-                    &self.stroke_style,
-                );
-            }
         }
+        draw_close_x_glyph(
+            &self.target,
+            &self.stroke_style,
+            center,
+            radius * 0.38,
+            (scale(1, self.dpi) as f32 * 1.25).max(1.25),
+            &self.brushes.text_muted,
+        );
     }
 
     pub(super) fn draw_clipped_text(
@@ -1023,20 +925,14 @@ impl PopupMenuRenderer {
         rect: &D2D_RECT_F,
         brush: &ID2D1SolidColorBrush,
     ) {
-        if text.is_empty() {
-            return;
-        }
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            self.target.DrawText(
-                &wide,
-                format,
-                rect,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
+        draw_text_on(
+            &self.target,
+            text,
+            format,
+            *rect,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+        );
     }
 }
 
@@ -1165,6 +1061,70 @@ mod tests {
         .expect("hovered calendar control render");
         let hovered = pixel_at(&menu, px - 10, py);
         assert_ne!(idle, hovered);
+        drop(menu);
+        release_shared_factories();
+    }
+
+    #[test]
+    fn light_mode_hovered_menu_shortcut_uses_high_contrast_on_accent_ink() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let menu = PopupMenuRenderer::new(96).expect("popup menu");
+        let rows = [MenuRow::item(1, "New Window", "Ctrl+N")];
+        let layout = otto_core::compute_popup_menu_layout(
+            &PopupMenuMetrics::default(),
+            PopupMenuPlacement {
+                bounds: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                dpi: 96,
+                anchor: MenuAnchor::BelowPoint { x: 400, y: 36 },
+                scroll_offset: 0,
+            },
+            &rows,
+            &menu,
+        );
+        let light = Appearance {
+            transparency: false,
+            ..Appearance::glass(ResolvedTheme::Light)
+        };
+        menu.render_preview(
+            &layout,
+            &rows,
+            MenuHover {
+                row: Some(0),
+                calendar: None,
+            },
+            light,
+        )
+        .expect("light hovered menu render");
+        let row = layout.rows[0].rect;
+        let [pill_b, _, pill_r, _] = pixel_at(&menu, row.x + 8, row.y + 4);
+        assert!(
+            pill_b > 180 && pill_r < 80,
+            "expected blue accent hover pill, got rgb({pill_r}, _, {pill_b})"
+        );
+        let right = (row.right() as f32 - layout.right_pad).round() as i32;
+        let left = (right as f32 - layout.shortcut_col_width).floor() as i32;
+        let mut max_r = 0u8;
+        let mut min_b = u8::MAX;
+        for y in (row.y + 2)..(row.bottom() - 2) {
+            for x in left.max(row.x)..right {
+                let [b, _, r, _] = pixel_at(&menu, x, y);
+                max_r = max_r.max(r);
+                min_b = min_b.min(b);
+            }
+        }
+        assert!(
+            max_r > pill_r.saturating_add(120),
+            "expected bright on_accent shortcut ink over hover pill, got max_r={max_r}, pill_r={pill_r}"
+        );
+        assert!(
+            min_b >= pill_b.saturating_sub(30),
+            "shortcut ink darkened hover pill blue channel: min_b={min_b}, pill_b={pill_b}"
+        );
         drop(menu);
         release_shared_factories();
     }

@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use otto_core::{PixelLimits, RgbBuffer, bgra_layout};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, ROP_CODE, SRCCOPY};
+use windows::Win32::Graphics::Gdi::{
+    BitBlt, CAPTUREBLT, HALFTONE, ROP_CODE, SRCCOPY, SetBrushOrgEx, SetStretchBltMode, StretchBlt,
+};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_WICPixelFormat32bppBGRA, IWICImagingFactory,
     WICBitmapDitherTypeNone, WICBitmapInterpolationModeLinear, WICBitmapPaletteTypeCustom,
@@ -314,9 +316,14 @@ fn crop_bgra_region(
 #[must_use]
 pub fn capture_wallpaper_now(origin: (i32, i32), width: u32, height: u32) -> Option<RgbBuffer> {
     let _ = bgra_layout(width, height, PixelLimits::BACKDROP).ok()?;
+    let monitor = crate::screen::monitor_at(origin.0, origin.1);
+    if !monitor.primary {
+        return None;
+    }
     let screen = primary_screen();
     let screen_w = u32::try_from(screen.width.max(1)).ok()?;
     let screen_h = u32::try_from(screen.height.max(1)).ok()?;
+    let local_origin = (origin.0 - monitor.bounds.x, origin.1 - monitor.bounds.y);
     WALLPAPER_CACHE.with(|slot| {
         let mut cache = slot.try_borrow_mut().ok()?;
         let now = Instant::now();
@@ -363,7 +370,14 @@ pub fn capture_wallpaper_now(origin: (i32, i32), width: u32, height: u32) -> Opt
             }
         }
         let held = cache.as_ref()?;
-        crop_bgra_region(&held.bgra, held.width, held.height, origin, width, height)
+        crop_bgra_region(
+            &held.bgra,
+            held.width,
+            held.height,
+            local_origin,
+            width,
+            height,
+        )
     })
 }
 
@@ -379,6 +393,61 @@ pub fn capture_backdrop_now(origin: (i32, i32), width: u32, height: u32) -> Opti
         }
         grabber.as_ref()?.grab_fast(origin)
     })
+}
+
+#[must_use]
+pub fn capture_screen_scaled_now(
+    origin: (i32, i32),
+    src_width: u32,
+    src_height: u32,
+    max_dim: u32,
+) -> Option<RgbBuffer> {
+    if src_width == 0 || src_height == 0 || max_dim == 0 {
+        return None;
+    }
+    let capped_max = max_dim.min(1_024);
+    let (dst_w, dst_h) = if src_width >= src_height {
+        let w = src_width.min(capped_max);
+        let h = ((u64::from(src_height) * u64::from(w)) / u64::from(src_width))
+            .max(1)
+            .min(u64::from(capped_max)) as u32;
+        (w, h)
+    } else {
+        let h = src_height.min(capped_max);
+        let w = ((u64::from(src_width) * u64::from(h)) / u64::from(src_height))
+            .max(1)
+            .min(u64::from(capped_max)) as u32;
+        (w, h)
+    };
+    let layout = bgra_layout(dst_w, dst_h, PixelLimits::BACKDROP).ok()?;
+    let screen = ScreenDc::acquire()?;
+    let canvas = CaptureCanvas::create(&screen, layout)?;
+    let src_w = i32::try_from(src_width).ok()?;
+    let src_h = i32::try_from(src_height).ok()?;
+    let target_w = i32::try_from(dst_w).ok()?;
+    let target_h = i32::try_from(dst_h).ok()?;
+    let blitted = unsafe {
+        let _ = SetStretchBltMode(canvas.dc(), HALFTONE);
+        let _ = SetBrushOrgEx(canvas.dc(), 0, 0, None);
+        StretchBlt(
+            canvas.dc(),
+            0,
+            0,
+            target_w,
+            target_h,
+            Some(screen.handle()),
+            origin.0,
+            origin.1,
+            src_w,
+            src_h,
+            SRCCOPY,
+        )
+        .as_bool()
+    };
+    if !blitted {
+        return None;
+    }
+    RgbBuffer::from_bgra(dst_w, dst_h, canvas.as_bytes()).ok()
 }
 
 fn screen_grab() -> impl FnMut(&BackdropRequest) -> Option<BackdropFrame> {

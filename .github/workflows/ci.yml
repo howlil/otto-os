@@ -46,6 +46,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Dependency policy and advisories (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2
+        with:
+          arguments: --all-features
+
       - name: Test core, render, and app crates
         run: cargo test -p otto-core -p otto-render -p otto-os -- --test-threads=1
 
@@ -71,6 +76,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Lint and format landing site
+        run: bun x biome ci .
+
+      - name: Check Astro templates
+        run: bun run check
+
       - name: Typecheck landing site
         run: bun x tsc --noEmit
 
@@ -79,3 +90,6 @@ jobs:
 
       - name: Build landing site
         run: bun run build
+
+      - name: Smoke check built landing pages and assets
+        run: bun run scripts/smoke-build.ts

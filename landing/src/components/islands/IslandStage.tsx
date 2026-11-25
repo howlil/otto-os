@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
-import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
+import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
   ClipboardList,
@@ -13,7 +12,8 @@ import {
   Timer,
   Volume2,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 import {
   CallCompact,
@@ -25,9 +25,8 @@ import {
   SecondaryFocus,
   SecondaryMusic,
 } from "./notch/Compact";
-import { FocusPanel, MusicPanel, type FocusMode } from "./notch/Panels";
+import { FocusPanel, MusicPanel } from "./notch/Panels";
 import { ScreenTimePanel } from "./notch/ScreenTimePanel";
-import { ClipPanel, PocketPanel, TasksPanel } from "./PocketClip";
 import {
   CALL_START,
   COMPACT_SHAPE,
@@ -38,16 +37,17 @@ import {
   INSTANT,
   ISLAND,
   LYRICS,
+  lyricAt,
+  type NotchStyleMode,
+  type NotchTabKey,
+  type NotchWorkspace,
   SECONDARY_SHAPE,
   SHAPE,
   TRACK_LENGTH,
   TRACK_START,
   WORKSPACES,
-  lyricAt,
-  type NotchStyleMode,
-  type NotchTabKey,
-  type NotchWorkspace,
 } from "./notch/spec";
+import { ClipPanel, PocketPanel, TasksPanel } from "./PocketClip";
 
 const WORKSPACE_ICON: Record<NotchWorkspace, LucideIcon> = {
   focus: Timer,
@@ -83,7 +83,6 @@ export function IslandStage() {
   const [workspace, setWorkspace] = useState<NotchWorkspace>("time");
   const [styleMode, setStyleMode] = useState<NotchStyleMode>("island");
 
-  const [focusMode, setFocusMode] = useState<FocusMode>("pomo");
   const [remaining, setRemaining] = useState(FOCUS_START);
   const [running, setRunning] = useState(true);
   const [activeTask, setActiveTask] = useState<[string, string] | null>([
@@ -110,32 +109,26 @@ export function IslandStage() {
 
   useEffect(() => {
     if (!auto || !inView || reduced) return;
-    const id = window.setTimeout(() => {
+    const id = window.setInterval(() => {
       setWorkspace((curr) => {
         const index = WORKSPACES.findIndex((item) => item.id === curr);
         return WORKSPACES[(index + 1) % WORKSPACES.length].id;
       });
     }, 3800);
-    return () => window.clearTimeout(id);
-  }, [auto, inView, reduced, workspace]);
+    return () => window.clearInterval(id);
+  }, [auto, inView, reduced]);
 
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(() => {
-      setRemaining((value) => {
-        if (focusMode === "watch") return value + 1;
-        return value > 0 ? value - 1 : FOCUS_TOTAL;
-      });
+      setRemaining((value) => (value > 0 ? value - 1 : FOCUS_TOTAL));
     }, 1000);
     return () => window.clearInterval(id);
-  }, [running, focusMode]);
+  }, [running]);
 
   useEffect(() => {
     if (!playing) return;
-    const id = window.setInterval(
-      () => setElapsed((value) => (value + 0.25 >= TRACK_LENGTH ? 0 : value + 0.25)),
-      250,
-    );
+    const id = window.setInterval(() => setElapsed((value) => (value + 0.25 >= TRACK_LENGTH ? 0 : value + 0.25)), 250);
     return () => window.clearInterval(id);
   }, [playing]);
 
@@ -149,14 +142,6 @@ export function IslandStage() {
     setAuto(false);
     setTasksComposing(false);
     setWorkspace(tab);
-  }
-
-  function handleFocusModeChange(next: FocusMode) {
-    setFocusMode(next);
-    if (next === "pomo") setRemaining(FOCUS_START);
-    if (next === "timer") setRemaining(600);
-    if (next === "watch") setRemaining(142);
-    setRunning(true);
   }
 
   const isClassic = styleMode === "classic";
@@ -218,11 +203,9 @@ export function IslandStage() {
           <FocusPanel
             remaining={remaining}
             running={running}
-            mode={focusMode}
             activeTask={activeTask}
-            onModeChange={handleFocusModeChange}
             onToggle={() => setRunning((v) => !v)}
-            onReset={() => setRemaining(focusMode === "watch" ? 0 : focusMode === "timer" ? 600 : FOCUS_TOTAL)}
+            onReset={() => setRemaining(FOCUS_TOTAL)}
             onSkip={() => setRemaining(FOCUS_TOTAL)}
             onSelectTab={handleSelectTab}
           />
@@ -287,12 +270,19 @@ export function IslandStage() {
           <h2 className="text-[clamp(2.25rem,4.4vw,3.5rem)] leading-[1.04] font-medium tracking-[-0.035em] text-stage-ink text-balance">
             <T id="Satu notch, semua ruang kerjanya." en="One notch, every workspace." />
           </h2>
-          <p className="mx-auto mt-5 max-w-[560px] text-[19px] leading-[1.5] text-stage-muted text-pretty" aria-live="polite">
+          <p
+            className="mx-auto mt-5 max-w-[560px] text-[19px] leading-[1.5] text-stage-muted text-pretty"
+            aria-live="polite"
+          >
             <T id={currentMeta.summary[0]} en={currentMeta.summary[1]} />
           </p>
         </div>
 
-        <div className="inline-flex rounded-full bg-white/[0.08] p-1 ring-1 ring-inset ring-white/10" role="group" aria-label="Notch bezel style">
+        <div
+          className="inline-flex rounded-full bg-white/[0.08] p-1 ring-1 ring-inset ring-white/10"
+          role="group"
+          aria-label="Notch bezel style"
+        >
           <button
             type="button"
             aria-pressed={styleMode === "island"}
@@ -316,10 +306,7 @@ export function IslandStage() {
         </div>
       </div>
 
-      <div
-        ref={stageRef}
-        className="relative mt-8 h-[300px] w-full overflow-hidden"
-      >
+      <div ref={stageRef} className="relative mt-8 h-[300px] w-full overflow-hidden">
         <div
           className="absolute top-0 left-1/2 h-[310px] w-[440px]"
           style={{ transform: `translateX(-50%) scale(${scale})`, transformOrigin: "50% 0" }}
@@ -375,7 +362,9 @@ export function IslandStage() {
                 ) : (
                   <SecondaryMusic playing={playing} reduced={reduced} />
                 )}
-                <span className="sr-only"><T id="Tukar aktivitas utama dan sekunder" en="Swap primary and secondary activity" /></span>
+                <span className="sr-only">
+                  <T id="Tukar aktivitas utama dan sekunder" en="Swap primary and secondary activity" />
+                </span>
               </motion.button>
             ) : null}
           </AnimatePresence>
@@ -427,7 +416,9 @@ export function IslandStage() {
                     aria-pressed={micMuted}
                     onClick={() => setMicMuted((v) => !v)}
                     className={`inline-flex h-7 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium ring-1 ring-inset ${
-                      micMuted ? "bg-[#ff453a]/25 text-[#ff8a82] ring-[#ff453a]/40" : "bg-white/[0.08] text-stage-ink ring-white/12"
+                      micMuted
+                        ? "bg-[#ff453a]/25 text-[#ff8a82] ring-[#ff453a]/40"
+                        : "bg-white/[0.08] text-stage-ink ring-white/12"
                     }`}
                   >
                     {micMuted ? <MicOff size={12} aria-hidden="true" /> : <Mic size={12} aria-hidden="true" />}

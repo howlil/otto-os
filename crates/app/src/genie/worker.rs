@@ -4,10 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::win_msg::WM_APP_GENIE_DONE;
 use otto_core::{GenieDirection, MotionPreference, Rect, WindowIdentity, compute_genie_geometry};
-use otto_platform::{ComGuard, join_within};
+use otto_platform::{ComGuard, join_within, post_window_message};
 use otto_render::GenieRenderer;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::Result;
 
 use super::FRAME_WAIT_TIMEOUT_MS;
@@ -99,24 +97,26 @@ impl WorkerShared {
     }
 
     pub(super) fn send_command(&self, mut command: RenderCommand) {
-        let mut guard = self.lock();
-        match &mut command {
-            RenderCommand::Begin(job) => guard.generation = job.generation,
-            RenderCommand::Clear(generation) => {
-                if guard.stopping || *generation < guard.generation {
-                    return;
+        {
+            let mut guard = self.lock();
+            match &mut command {
+                RenderCommand::Begin(job) => guard.generation = job.generation,
+                RenderCommand::Clear(generation) => {
+                    if guard.stopping || *generation < guard.generation {
+                        return;
+                    }
+                    if *generation == guard.generation {
+                        *generation = guard.generation.saturating_add(1);
+                    }
+                    guard.generation = *generation;
                 }
-                if *generation == guard.generation {
-                    *generation = guard.generation.saturating_add(1);
+                RenderCommand::Shutdown => {
+                    guard.generation = guard.generation.saturating_add(1);
+                    guard.stopping = true;
                 }
-                guard.generation = *generation;
             }
-            RenderCommand::Shutdown => {
-                guard.generation = guard.generation.saturating_add(1);
-                guard.stopping = true;
-            }
+            guard.pending = Some(command);
         }
-        guard.pending = Some(command);
         self.wake_worker.notify_all();
     }
 
@@ -141,13 +141,20 @@ impl WorkerShared {
     }
 
     pub(super) fn publish_frame0(&self, generation: u64, ok: bool) {
-        let mut guard = self.lock();
-        if ok {
-            guard.renderer_warm = true;
-        }
-        if generation >= guard.frame0_generation {
-            guard.frame0_generation = generation;
-            guard.frame0_ok = ok;
+        let notify = {
+            let mut guard = self.lock();
+            if ok {
+                guard.renderer_warm = true;
+            }
+            if generation >= guard.frame0_generation {
+                guard.frame0_generation = generation;
+                guard.frame0_ok = ok;
+                true
+            } else {
+                false
+            }
+        };
+        if notify {
             self.wake_ui.notify_all();
         }
     }
@@ -248,14 +255,7 @@ pub(super) fn post_worker_done(notify_hwnd: isize, generation: u64) {
         return;
     }
     if let Ok(wparam) = usize::try_from(generation) {
-        unsafe {
-            let _ = PostMessageW(
-                Some(HWND(notify_hwnd as *mut _)),
-                WM_APP_GENIE_DONE,
-                WPARAM(wparam),
-                LPARAM(0),
-            );
-        }
+        let _ = post_window_message(notify_hwnd, WM_APP_GENIE_DONE, wparam, 0);
     }
 }
 

@@ -10,7 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{bar, control_center, dock, genie, menu, settings_window, spotlight, window_controls};
-use otto_core::{AppearancePreferences, DockPreferences, MenuBarPreferences};
+use otto_core::{AppearancePreferences, BrandIcon, DockPreferences, MenuBarPreferences};
 
 use super::ModalActionGuard;
 use super::plugins::PluginId;
@@ -29,7 +29,7 @@ use super::with_host_read;
 pub(super) struct PendingPreferences {
     pub(super) capture_visible: Option<bool>,
     pub(super) hotkeys_enabled: Option<bool>,
-    pub(super) classic_logo: Option<bool>,
+    pub(super) brand_icon: Option<BrandIcon>,
     pub(super) notch_enabled: Option<bool>,
     pub(super) dynamic_island: Option<bool>,
     pub(super) privacy_indicators: Option<bool>,
@@ -39,6 +39,7 @@ pub(super) struct PendingPreferences {
     pub(super) media_module: Option<bool>,
     pub(super) focus_module: Option<bool>,
     pub(super) background_cleanup: Option<bool>,
+    pub(super) finder_enabled: Option<bool>,
     pub(super) menu_bar: Option<MenuBarPreferences>,
     pub(super) quick_capture: Option<bool>,
     pub(super) onboarding_seen: Option<bool>,
@@ -50,7 +51,7 @@ impl PendingPreferences {
         Self {
             capture_visible: runtime.pending_capture_visible.take(),
             hotkeys_enabled: runtime.pending_hotkeys_enabled.take(),
-            classic_logo: runtime.pending_classic_logo.take(),
+            brand_icon: runtime.pending_brand_icon.take(),
             notch_enabled: runtime.pending_notch_enabled.take(),
             dynamic_island: runtime.pending_dynamic_island.take(),
             privacy_indicators: runtime.pending_privacy_indicators.take(),
@@ -60,6 +61,7 @@ impl PendingPreferences {
             media_module: runtime.pending_media_module.take(),
             focus_module: runtime.pending_focus_module.take(),
             background_cleanup: runtime.pending_background_cleanup.take(),
+            finder_enabled: runtime.pending_finder_enabled.take(),
             menu_bar: runtime.pending_menu_bar.take(),
             quick_capture: runtime.pending_quick_capture.take(),
             onboarding_seen: runtime.pending_onboarding_seen.take(),
@@ -70,7 +72,7 @@ impl PendingPreferences {
     pub(super) fn has_change(&self) -> bool {
         self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
-            || self.classic_logo.is_some()
+            || self.brand_icon.is_some()
             || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
             || self.privacy_indicators.is_some()
@@ -80,6 +82,7 @@ impl PendingPreferences {
             || self.media_module.is_some()
             || self.focus_module.is_some()
             || self.background_cleanup.is_some()
+            || self.finder_enabled.is_some()
             || self.menu_bar.is_some()
             || self.quick_capture.is_some()
             || self.onboarding_seen.is_some()
@@ -89,7 +92,7 @@ impl PendingPreferences {
     pub(super) fn affects_ui(&self) -> bool {
         self.capture_visible.is_some()
             || self.hotkeys_enabled.is_some()
-            || self.classic_logo.is_some()
+            || self.brand_icon.is_some()
             || self.notch_enabled.is_some()
             || self.dynamic_island.is_some()
             || self.privacy_indicators.is_some()
@@ -99,6 +102,7 @@ impl PendingPreferences {
             || self.media_module.is_some()
             || self.focus_module.is_some()
             || self.background_cleanup.is_some()
+            || self.finder_enabled.is_some()
             || self.menu_bar.is_some()
             || self.quick_capture.is_some()
             || self.appearance.is_some()
@@ -112,6 +116,7 @@ pub(super) struct PendingDispatch {
     pub(super) preferences: PendingPreferences,
     pub(super) end_session: bool,
     pub(super) modal: Option<bar::PreparedModalAction>,
+    pub(super) destroy_hwnds: Vec<HWND>,
 }
 
 pub(super) fn dispatch_runtime_message(
@@ -126,6 +131,7 @@ pub(super) fn dispatch_runtime_message(
         let plugin_toggles = host.runtime.take_plugin_toggles();
         let preferences = PendingPreferences::take_from(&host.runtime);
         let end_session = host.runtime.pending_end_session.take();
+        let destroy_hwnds = host.runtime.take_pending_destroy_hwnds();
         let raw_modal = host
             .runtime
             .pending_modal_action
@@ -146,9 +152,11 @@ pub(super) fn dispatch_runtime_message(
                 preferences,
                 end_session,
                 modal,
+                destroy_hwnds,
             },
         ))
     })?;
+    super::destroy_hwnds(&pending.destroy_hwnds);
     let had_plugin_toggles = !pending.plugin_toggles.is_empty();
     for (plugin, enabled) in pending.plugin_toggles {
         if set_plugin_enabled(plugin, enabled).is_err() {
@@ -181,6 +189,11 @@ pub(super) fn dispatch_runtime_message(
         with_host_read(|host| control_center::repaint(&host.runtime));
         with_host_read(|host| settings_window::repaint(&host.runtime));
     }
+    let mut post_destroy = Vec::new();
+    with_host_read(|host| {
+        post_destroy = host.runtime.take_pending_destroy_hwnds();
+    });
+    super::destroy_hwnds(&post_destroy);
     if let Some(prepared) = pending.modal {
         MODAL_ACTION_ACTIVE.with(|flag| flag.set(true));
         let _modal_guard = ModalActionGuard;
@@ -208,8 +221,8 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             if let Some(enabled) = pending.hotkeys_enabled {
                 prefs.hotkeys_enabled = enabled;
             }
-            if let Some(classic) = pending.classic_logo {
-                prefs.classic_logo = classic;
+            if let Some(brand_icon) = pending.brand_icon {
+                prefs.brand_icon = brand_icon;
             }
             if let Some(notch_enabled) = pending.notch_enabled {
                 prefs.notch_enabled = notch_enabled;
@@ -237,6 +250,9 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             }
             if let Some(background_cleanup) = pending.background_cleanup {
                 prefs.background_cleanup = background_cleanup;
+            }
+            if let Some(finder_enabled) = pending.finder_enabled {
+                prefs.finder_enabled = finder_enabled;
             }
             if let Some(menu_bar) = pending.menu_bar {
                 prefs.menu_bar = menu_bar;
@@ -272,7 +288,7 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
                 }
                 bar::set_hotkeys_enabled(&host.runtime, updated.hotkeys_enabled);
             }
-            if pending.classic_logo.is_some() {
+            if pending.brand_icon.is_some() {
                 bar::set_brand_icon(&host.runtime, updated.brand_icon());
             }
             if pending.notch_enabled.is_some() {
@@ -281,7 +297,6 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
             if pending.dynamic_island.is_some() {
                 let style = updated.notch_style();
                 bar::set_notch_style(&host.runtime, style);
-                window_controls::set_notch_style(&host.runtime, style);
             }
             if pending.privacy_indicators.is_some() {
                 bar::set_privacy_indicators_enabled(&host.runtime, updated.privacy_indicators);
@@ -312,6 +327,19 @@ pub(super) fn apply_pending_preference_changes(pending: &PendingPreferences) -> 
                 host.runtime.appearance_preferences.set(updated.appearance);
                 crate::theme_state::sync_effective_glass(&host.runtime);
             }
+            if let Some(enabled) = pending.finder_enabled {
+                otto_platform::set_finder_shortcut_hook(
+                    if enabled {
+                        host.runtime.bar_hwnd.get()
+                    } else {
+                        0
+                    },
+                    crate::win_msg::WM_APP_OPEN_FINDER,
+                );
+                if !enabled {
+                    crate::finder::close(&host.runtime);
+                }
+            }
             sync_platform_tasks(&host.config);
             if disabled_any_feature(pending) {
                 reclaim_disabled_memory(host);
@@ -330,6 +358,7 @@ fn disabled_any_feature(pending: &PendingPreferences) -> bool {
         || pending.media_module == Some(false)
         || pending.focus_module == Some(false)
         || pending.background_cleanup == Some(false)
+        || pending.finder_enabled == Some(false)
         || pending.quick_capture == Some(false)
         || pending.menu_bar.is_some_and(|prefs| !prefs.show_background)
         || pending
@@ -407,6 +436,7 @@ pub(super) fn handle_taskbar_created(message: u32) -> bool {
             if let Some(tray) = host.tray_icon.as_ref() {
                 let _ = tray.re_add();
             }
+            bar::on_taskbar_created(&host.runtime);
             dock::on_taskbar_created(&host.runtime);
             handled = true;
         }
@@ -441,6 +471,12 @@ pub(super) unsafe extern "system" fn bar_window_proc(
             if message == otto_platform::WM_APP_TRAY_ICON {
                 if let Some(event) = otto_platform::classify_tray_icon_message(lparam.0) {
                     handle_tray_icon_event(runtime, event);
+                }
+                return Some(LRESULT(0));
+            }
+            if message == crate::win_msg::WM_APP_OPEN_FINDER {
+                if runtime.finder_enabled.get() {
+                    crate::finder::open(runtime, None);
                 }
                 return Some(LRESULT(0));
             }
@@ -520,7 +556,12 @@ pub(super) unsafe extern "system" fn settings_window_proc(
 ) -> LRESULT {
     safe_window_proc(hwnd, message, wparam, lparam, || {
         dispatch_runtime_message(|runtime| {
-            settings_window::handle_message(runtime, hwnd.0 as isize, message, wparam, lparam)
+            let raw = hwnd.0 as isize;
+            if runtime.creating_finder.get() || crate::finder::owns_hwnd(runtime, raw) {
+                crate::finder::handle_message(runtime, raw, message, wparam, lparam)
+            } else {
+                settings_window::handle_message(runtime, raw, message, wparam, lparam)
+            }
         })
     })
 }

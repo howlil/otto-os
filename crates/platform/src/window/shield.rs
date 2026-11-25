@@ -1,18 +1,25 @@
 use std::ffi::c_void;
+use std::mem::size_of;
 
-use otto_core::Rect;
-use windows::Win32::Foundation::HWND;
+use otto_core::{Rect, ResizeEdge};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS;
+use windows::Win32::Graphics::Gdi::{ClientToScreen, ValidateRect};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LEFT, VK_MENU};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_LEFT, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, GW_HWNDNEXT, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-    GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IsIconic, IsWindowVisible,
-    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow,
-    WS_EX_TOOLWINDOW,
+    DestroyWindow, GW_HWNDNEXT, GWL_EXSTYLE, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongW, GetWindowTextLengthW, GetWindowThreadProcessId, HWND_TOPMOST, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZEWE, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW,
+    SM_CXDRAG, SM_CYDRAG, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowPos, ShowWindow, WS_EX_TOOLWINDOW,
 };
 
 use super::caption::dwm_rect;
@@ -81,6 +88,178 @@ pub fn hide_window(window: isize) {
 pub fn destroy_window(window: isize) {
     unsafe {
         let _ = DestroyWindow(handle(window));
+    }
+}
+
+#[must_use]
+pub fn set_window_timer(window: isize, timer_id: usize, interval_ms: u32) -> bool {
+    if window == 0 {
+        return false;
+    }
+    unsafe { SetTimer(Some(handle(window)), timer_id, interval_ms, None) != 0 }
+}
+
+pub fn kill_window_timer(window: isize, timer_id: usize) {
+    if window != 0 {
+        unsafe {
+            let _ = KillTimer(Some(handle(window)), timer_id);
+        }
+    }
+}
+
+#[must_use]
+pub fn post_window_message(window: isize, message: u32, wparam: usize, lparam: isize) -> bool {
+    if window == 0 {
+        return false;
+    }
+    unsafe {
+        PostMessageW(
+            Some(handle(window)),
+            message,
+            WPARAM(wparam),
+            LPARAM(lparam),
+        )
+        .is_ok()
+    }
+}
+
+pub fn assert_window_topmost(window: isize) {
+    if window != 0 {
+        unsafe {
+            let _ = SetWindowPos(
+                handle(window),
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+pub fn place_no_zorder(window: isize, rect: Rect) {
+    if window != 0 {
+        unsafe {
+            let _ = SetWindowPos(
+                handle(window),
+                None,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    }
+}
+
+pub fn show_window_no_activate(window: isize) {
+    if window != 0 {
+        unsafe {
+            let _ = ShowWindow(handle(window), SW_SHOWNOACTIVATE);
+        }
+    }
+}
+
+pub fn show_and_focus_window(window: isize) {
+    if window != 0 {
+        let hwnd = handle(window);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
+    }
+}
+
+#[must_use]
+pub fn raw_foreground_window() -> isize {
+    unsafe { GetForegroundWindow() }.0 as isize
+}
+
+pub fn set_foreground_window(window: isize) {
+    if window != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(handle(window));
+        }
+    }
+}
+
+#[must_use]
+pub fn track_mouse_leave(window: isize) -> bool {
+    if window == 0 {
+        return false;
+    }
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: handle(window),
+        dwHoverTime: 0,
+    };
+    unsafe { TrackMouseEvent(&raw mut track) }.is_ok()
+}
+
+pub fn capture_mouse(window: isize) {
+    if window != 0 {
+        unsafe {
+            let _ = SetCapture(handle(window));
+        }
+    }
+}
+
+pub fn release_mouse_capture() {
+    unsafe {
+        let _ = ReleaseCapture();
+    }
+}
+
+#[must_use]
+pub fn client_to_screen(window: isize, x: i32, y: i32) -> (i32, i32) {
+    let mut point = POINT { x, y };
+    if window != 0 {
+        unsafe {
+            let _ = ClientToScreen(handle(window), &raw mut point);
+        }
+    }
+    (point.x, point.y)
+}
+
+#[must_use]
+pub fn drag_thresholds() -> (i32, i32) {
+    (
+        unsafe { GetSystemMetrics(SM_CXDRAG) }.max(4),
+        unsafe { GetSystemMetrics(SM_CYDRAG) }.max(4),
+    )
+}
+
+#[must_use]
+pub fn is_virtual_key_down(vk: i32) -> bool {
+    (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0
+}
+
+#[must_use]
+pub fn set_resize_cursor(edge: ResizeEdge) -> bool {
+    let id = match edge {
+        ResizeEdge::Top => IDC_SIZENS,
+        ResizeEdge::TopRight => IDC_SIZENESW,
+        ResizeEdge::Right => IDC_SIZEWE,
+    };
+    unsafe {
+        let Ok(cursor) = LoadCursorW(None, id) else {
+            return false;
+        };
+        let _ = SetCursor(Some(cursor));
+    }
+    true
+}
+
+pub fn validate_window_rect(window: isize) {
+    if window != 0 {
+        unsafe {
+            let _ = ValidateRect(Some(handle(window)), None);
+        }
     }
 }
 

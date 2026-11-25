@@ -6,10 +6,11 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{SPOTLIGHT_TIMER, WM_APP_SPOTLIGHT_BACKDROP, WM_UNICHAR};
 use otto_core::DockEntry;
 use otto_core::{
-    MotionPreference, Rect, SPOTLIGHT_DEFAULT_HEIGHT_POINTS, SPOTLIGHT_DEFAULT_WIDTH_POINTS,
-    SpotlightHit, SpotlightLayout, SpotlightMode, SpotlightView, scale,
+    MotionMetrics, MotionPreference, Rect, SPOTLIGHT_DEFAULT_HEIGHT_POINTS,
+    SPOTLIGHT_DEFAULT_WIDTH_POINTS, SpotlightHit, SpotlightLayout, SpotlightMode, SpotlightView,
+    scale,
 };
-use otto_platform::{PrimaryScreen, monitor_work_area_at, primary_screen};
+use otto_platform::{DisplayMonitor, monitor_at};
 use otto_render::SpotlightRenderer;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -22,7 +23,7 @@ mod input;
 mod lifecycle;
 mod presentation;
 
-const SPOTLIGHT_TICK_MS: u32 = 16;
+const SPOTLIGHT_TICK_MS: u32 = MotionMetrics::MACOS_LIKE.animation_tick_ms;
 const SPOTLIGHT_CATALOG_TTL: Duration = Duration::from_mins(5);
 const SPOTLIGHT_BLUR_TOGGLE_GRACE: Duration = Duration::from_millis(250);
 const SPOTLIGHT_MAX_QUERY_CHARS: usize = 160;
@@ -90,11 +91,12 @@ struct PointerDrag {
 
 pub(crate) struct SpotlightSurface {
     hwnd: isize,
-    screen: PrimaryScreen,
+    monitor: DisplayMonitor,
     work_area: Rect,
     renderer: Option<SpotlightRenderer>,
     apps: Vec<DockEntry>,
     catalog_loaded_at: Option<Instant>,
+    catalog_finder_enabled: bool,
     icons_attempted: HashSet<String>,
     query: String,
     query_state: QueryEditorState,
@@ -126,13 +128,15 @@ pub(crate) struct SpotlightSurface {
 
 impl SpotlightSurface {
     fn new(hwnd: isize) -> Self {
+        let monitor = monitor_at(0, 0);
         Self {
             hwnd,
-            screen: primary_screen(),
-            work_area: monitor_work_area_at(0, 0),
+            monitor,
+            work_area: monitor.work_area,
             renderer: None,
             apps: Vec::new(),
             catalog_loaded_at: None,
+            catalog_finder_enabled: false,
             icons_attempted: HashSet::new(),
             query: String::new(),
             query_state: QueryEditorState::default(),
@@ -179,13 +183,13 @@ impl SpotlightSurface {
     }
 }
 
-pub fn start(runtime: &RuntimeContext, hwnd: isize) {
+pub(crate) fn start(runtime: &RuntimeContext, hwnd: isize) {
     if let Ok(mut slot) = runtime.spotlight.try_borrow_mut() {
         *slot = Some(SpotlightSurface::new(hwnd));
     }
 }
 
-pub fn stop(runtime: &RuntimeContext) {
+pub(crate) fn stop(runtime: &RuntimeContext) {
     if let Ok(mut guard) = runtime.spotlight.try_borrow_mut()
         && let Some(mut surface) = guard.take()
     {
@@ -194,7 +198,7 @@ pub fn stop(runtime: &RuntimeContext) {
     }
 }
 
-pub fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Search,
@@ -203,7 +207,7 @@ pub fn toggle_search(runtime: &RuntimeContext, trigger: Option<Rect>) {
     );
 }
 
-pub fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Apps,
@@ -212,7 +216,7 @@ pub fn toggle_apps(runtime: &RuntimeContext, trigger: Option<Rect>) {
     );
 }
 
-pub fn toggle_from_hotkey(runtime: &RuntimeContext, trigger: Option<Rect>) {
+pub(crate) fn toggle_from_hotkey(runtime: &RuntimeContext, trigger: Option<Rect>) {
     toggle_mode(
         runtime,
         SpotlightMode::Search,
@@ -258,14 +262,14 @@ fn toggle_mode(
     });
 }
 
-pub fn close(runtime: &RuntimeContext) {
+pub(crate) fn close(runtime: &RuntimeContext) {
     with_spotlight(runtime, |surface| {
         surface.restore_focus_on_close = true;
         surface.hide();
     });
 }
 
-pub fn repaint(runtime: &RuntimeContext) {
+pub(crate) fn repaint(runtime: &RuntimeContext) {
     with_spotlight(runtime, |surface| {
         if surface.visible {
             surface.present(runtime);
@@ -274,7 +278,7 @@ pub fn repaint(runtime: &RuntimeContext) {
 }
 
 #[must_use]
-pub fn is_open(runtime: &RuntimeContext) -> bool {
+pub(crate) fn is_open(runtime: &RuntimeContext) -> bool {
     runtime
         .spotlight
         .try_borrow()
@@ -283,7 +287,7 @@ pub fn is_open(runtime: &RuntimeContext) -> bool {
         .unwrap_or(false)
 }
 
-pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
+pub(crate) fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     with_spotlight(runtime, |surface| {
         if !enabled {
             surface.backdrop = None;
@@ -298,7 +302,7 @@ pub fn set_glass_enabled(runtime: &RuntimeContext, enabled: bool) {
     });
 }
 
-pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
+pub(crate) fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     with_spotlight(runtime, |surface| {
         if let Some(feed) = surface.backdrop.as_mut() {
             feed.set_capture_visible(visible);
@@ -308,7 +312,7 @@ pub fn set_capture_visible(runtime: &RuntimeContext, visible: bool) {
     });
 }
 
-pub fn handle_message(
+pub(crate) fn handle_message(
     runtime: &RuntimeContext,
     hwnd: isize,
     message: u32,

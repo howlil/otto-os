@@ -1,12 +1,9 @@
-use std::ffi::c_void;
 use std::time::Instant;
 
 const CHANGE_MEMORY_MS: u64 = 1_500;
 
 use otto_core::{CaptureGate, CaptureRegion, RgbBuffer};
-use otto_platform::{BackdropRequest, BackdropWorker};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use otto_platform::{BackdropRequest, BackdropWorker, post_window_message};
 
 pub(crate) struct BackdropUpdate {
     pub(crate) pixels: RgbBuffer,
@@ -68,13 +65,8 @@ impl BackdropFeed {
         hidden_windows: Vec<isize>,
         capture_visible: bool,
     ) -> Self {
-        let worker = BackdropWorker::spawn(move || unsafe {
-            let _ = PostMessageW(
-                Some(HWND(hwnd as *mut c_void)),
-                wake_message,
-                WPARAM(0),
-                LPARAM(0),
-            );
+        let worker = BackdropWorker::spawn(move || {
+            let _ = post_window_message(hwnd, wake_message, 0, 0);
         });
         let (policy, initial_hide) = CaptureAffinityPolicy::new(capture_visible);
         let feed = Self {

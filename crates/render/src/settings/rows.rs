@@ -1,5 +1,8 @@
 use otto_core::{BadgeTone, CardLayout, Rect, SettingsHit, SettingsRow, SettingsRowValue};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows_numerics::Vector2;
+
+use crate::kit::icons::ChevronDir;
 
 use super::palette::{
     BADGE_WIDTH_POINTS, CARD_RADIUS_POINTS, DOT_POINTS, KEYCAP_GAP_POINTS, KEYCAP_HEIGHT_POINTS,
@@ -53,7 +56,7 @@ impl SettingsRenderer {
             1.0,
             palette.hairline,
         );
-        let inner_radius = (radius - 3.0).max(2.0);
+        let inner_radius = (radius - self.px(4) as f32).max(2.0);
         for (index, (row, rect)) in rows.iter().zip(&card.rows).enumerate() {
             let parts = card.row_parts.get(index).map_or(&[][..], Vec::as_slice);
             let hovered = state.hovered
@@ -149,6 +152,10 @@ impl SettingsRenderer {
                     rect,
                     palette,
                 );
+                rect.x + pad
+            }
+            SettingsRowValue::FocusHeatmap(_) => {
+                self.draw_focus_heatmap_row(state, coords, row, parts, rect, palette);
                 rect.x + pad
             }
             SettingsRowValue::UsageBar {
@@ -368,6 +375,7 @@ impl SettingsRenderer {
             | SettingsRowValue::TextInput { .. }
             | SettingsRowValue::KpiStrip(_)
             | SettingsRowValue::WeeklyChart(_)
+            | SettingsRowValue::FocusHeatmap(_)
             | SettingsRowValue::UsageBar { .. }
             | SettingsRowValue::StylePicker { .. }
             | SettingsRowValue::AccentSwatches { .. }
@@ -425,31 +433,51 @@ impl SettingsRenderer {
         } else {
             track.x + pad
         };
+        let thumb_color = if on {
+            palette.on_accent
+        } else if palette.high_contrast {
+            palette.text
+        } else {
+            WHITE
+        };
         self.fill_circle(
             thumb_x as f32 + thumb as f32 / 2.0,
             track.y as f32 + height as f32 / 2.0,
             thumb as f32 / 2.0,
-            with_alpha(WHITE, alpha),
+            with_alpha(thumb_color, alpha),
         );
     }
 
     fn draw_chevron(&self, cx: i32, row: Rect, color: D2D1_COLOR_F) {
         let cy = row.y as f32 + row.height as f32 / 2.0;
         let reach = self.px(4) as f32;
-        let x = cx as f32;
-        self.line(x - reach / 2.0, cy - reach, x + reach / 2.0, cy, 1.5, color);
-        self.line(x + reach / 2.0, cy, x - reach / 2.0, cy + reach, 1.5, color);
+        self.canvas.chevron(
+            Vector2::new(cx as f32, cy),
+            reach,
+            1.5,
+            ChevronDir::Right,
+            color,
+        );
     }
 
     fn draw_updown(&self, cx: i32, row: Rect, color: D2D1_COLOR_F) {
         let cy = row.y as f32 + row.height as f32 / 2.0;
         let reach = self.px(3) as f32;
-        let x = cx as f32;
-        let gap = self.px(2) as f32;
-        self.line(x - reach, cy - gap, x, cy - gap - reach, 1.4, color);
-        self.line(x, cy - gap - reach, x + reach, cy - gap, 1.4, color);
-        self.line(x - reach, cy + gap, x, cy + gap + reach, 1.4, color);
-        self.line(x, cy + gap + reach, x + reach, cy + gap, 1.4, color);
+        let gap = self.px(3) as f32;
+        self.canvas.chevron(
+            Vector2::new(cx as f32, cy - gap),
+            reach,
+            1.4,
+            ChevronDir::Up,
+            color,
+        );
+        self.canvas.chevron(
+            Vector2::new(cx as f32, cy + gap),
+            reach,
+            1.4,
+            ChevronDir::Down,
+            color,
+        );
     }
 
     fn draw_audit_pill(

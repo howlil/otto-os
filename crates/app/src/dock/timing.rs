@@ -4,10 +4,9 @@ use crate::host::RuntimeContext;
 use crate::win_msg::{DOCK_ANIM_TIMER, DOCK_POLL_TIMER};
 use otto_core::{DockPort, advance_bounce_phase, animate_value, dock_should_hide};
 use otto_platform::{
-    cursor_position, motion_preference, watch_bottom_edge, window_change_generations,
+    cursor_position, kill_window_timer, motion_preference, set_window_timer,
+    window_change_generations,
 };
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 
 use super::DOCK_ENTRIES_FALLBACK_TICKS;
 use super::DOCK_REVEAL_BAND;
@@ -65,6 +64,7 @@ impl Dock {
         let (_, win_top) = self.window_origin();
         let local_x = gx;
         let local_y = gy - win_top;
+        let on_primary = gx >= 0 && gx < self.screen.width && gy >= 0 && gy < self.screen.height;
 
         let should_auto_hide = dock_should_hide(
             self.preferences,
@@ -72,8 +72,9 @@ impl Dock {
             self.window_overlaps,
         );
 
-        let at_bottom_edge = gy >= self.screen.height - DOCK_REVEAL_BAND;
-        let in_interactive_zone = self.anim.hide_progress < 0.85
+        let at_bottom_edge = on_primary && gy >= self.screen.height - DOCK_REVEAL_BAND;
+        let in_interactive_zone = on_primary
+            && self.anim.hide_progress < 0.85
             && local_x >= self.layout.pill.x - 20
             && local_x <= self.layout.pill.right() + 20
             && local_y >= self.layout.pill.y - 36;
@@ -139,23 +140,26 @@ impl Dock {
             self.present(runtime);
         }
         let hidden = self.anim.should_hide;
-        watch_bottom_edge(
-            hidden.then_some(DOCK_REVEAL_BAND),
-            self.screen.width,
-            self.screen.height,
-        );
         let reveal_needs_polling = should_auto_hide && (!hidden || generations.is_none());
         self.sync_keyboard_focus(runtime);
         let geometry_changed = self
             .backdrop_gate
             .should_refresh(generations.map(|changes| changes.geometry));
         self.sync_backdrop(runtime, geometry_changed);
+        let secondary_busy = self.poll_secondary_docks(
+            runtime,
+            dirty,
+            cover_geometry_changed,
+            geometry_changed,
+            generations.is_some(),
+        );
         let busy = dirty
             || self.focus.is_active()
             || reveal_needs_polling
             || self.hovering
             || self.anim.timer_running
-            || self.drag.start_idx.is_some();
+            || self.drag.start_idx.is_some()
+            || secondary_busy;
         if let Some(interval) = self.cadence.observe(busy) {
             self.set_poll_interval(interval);
         }
@@ -175,14 +179,7 @@ impl Dock {
     }
 
     pub(super) fn set_poll_interval(&self, interval: u32) {
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                DOCK_POLL_TIMER,
-                interval,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, DOCK_POLL_TIMER, interval);
     }
 
     pub(super) fn on_anim_timer(&mut self, runtime: &RuntimeContext) {
@@ -289,29 +286,23 @@ impl Dock {
     }
 
     pub(super) fn ensure_animating(&mut self) {
-        if !self.anim.timer_running {
-            let timer = unsafe {
-                SetTimer(
-                    Some(HWND(self.hwnd as *mut _)),
-                    DOCK_ANIM_TIMER,
-                    self.motion_metrics.animation_tick_ms,
-                    None,
-                )
-            };
-            if timer != 0 {
-                otto_platform::begin_fine_timing();
-                self.anim.timer_running = true;
-                self.anim.last_tick = Instant::now();
-            }
+        if !self.anim.timer_running
+            && set_window_timer(
+                self.hwnd,
+                DOCK_ANIM_TIMER,
+                self.motion_metrics.animation_tick_ms,
+            )
+        {
+            otto_platform::begin_fine_timing();
+            self.anim.timer_running = true;
+            self.anim.last_tick = Instant::now();
         }
     }
 
     pub(super) fn stop_animating(&mut self) {
         if self.anim.timer_running {
             self.anim.timer_running = false;
-            unsafe {
-                let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), DOCK_ANIM_TIMER);
-            }
+            kill_window_timer(self.hwnd, DOCK_ANIM_TIMER);
             otto_platform::end_fine_timing();
         }
     }

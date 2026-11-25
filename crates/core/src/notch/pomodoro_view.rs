@@ -1,7 +1,7 @@
 use crate::bar::status::ClockTime;
+use crate::notch::focus_mode::{CategoryColor, CategoryIcon};
 use crate::notch::pomodoro::{
-    FocusSubMode, POMODORO_PRESETS_MINUTES, PomodoroAlert, PomodoroPhase, PomodoroState,
-    PomodoroStatus, QuickTimerState, StopwatchState, TIMER_PRESETS_MINUTES, format_duration_ms,
+    POMODORO_PRESETS_MINUTES, PomodoroAlert, PomodoroPhase, PomodoroState, PomodoroStatus,
 };
 
 pub const POMODORO_SESSIONS_PER_CYCLE: u8 = 4;
@@ -11,8 +11,6 @@ pub enum PomodoroTone {
     Focus,
     ShortBreak,
     LongBreak,
-    Timer,
-    Stopwatch,
 }
 
 impl PomodoroTone {
@@ -47,25 +45,6 @@ impl PomodoroSurface {
                 PomodoroPhase::Focus => Self::Setup,
                 PomodoroPhase::ShortBreak | PomodoroPhase::LongBreak => Self::Ready,
             },
-        }
-    }
-
-    #[must_use]
-    pub const fn of_timer_state(state: &QuickTimerState) -> Self {
-        match state.status {
-            PomodoroStatus::Alert => Self::Alert,
-            PomodoroStatus::Running => Self::Running,
-            PomodoroStatus::Paused => Self::Paused,
-            PomodoroStatus::Idle => Self::Setup,
-        }
-    }
-
-    #[must_use]
-    pub const fn of_stopwatch_state(state: &StopwatchState) -> Self {
-        match state.status() {
-            PomodoroStatus::Running => Self::Running,
-            PomodoroStatus::Paused => Self::Paused,
-            PomodoroStatus::Idle | PomodoroStatus::Alert => Self::Ready,
         }
     }
 }
@@ -106,99 +85,6 @@ impl PomodoroView {
             footer_right: footer_right(state, surface),
             session_label: session_label(state, surface),
             progress: progress(state),
-        }
-    }
-
-    #[must_use]
-    pub fn resolve_timer(state: &QuickTimerState, now: ClockTime) -> Self {
-        let surface = PomodoroSurface::of_timer_state(state);
-        let ends = || format_minute_of_day(state.ends_minute(now.minute_of_day()));
-        let headline = if surface == PomodoroSurface::Alert {
-            String::from("Timer complete")
-        } else {
-            state.format_time()
-        };
-        let subtitle = match surface {
-            PomodoroSurface::Setup | PomodoroSurface::Ready => {
-                String::from("Pick a quick timer or scroll to adjust")
-            }
-            PomodoroSurface::Running if state.is_last_minute() => {
-                format!("Almost done · ends {}", ends())
-            }
-            PomodoroSurface::Running => format!("Countdown · ends {}", ends()),
-            PomodoroSurface::Paused => {
-                format!("Paused · {} min left", state.remaining_seconds.div_ceil(60))
-            }
-            PomodoroSurface::Alert => String::from("Your quick timer finished"),
-        };
-        let (footer_left, footer_right) =
-            if matches!(surface, PomodoroSurface::Running | PomodoroSurface::Paused) {
-                (
-                    String::from("Quick countdown"),
-                    String::from("Alerts at 00:00"),
-                )
-            } else {
-                (String::new(), String::new())
-            };
-        Self {
-            surface,
-            tone: PomodoroTone::Timer,
-            dimmed: surface == PomodoroSurface::Paused,
-            urgent: state.is_last_minute(),
-            headline,
-            subtitle,
-            footer_left,
-            footer_right,
-            session_label: String::from("Timer"),
-            progress: PomodoroProgress::Bar(1.0 - state.progress()),
-        }
-    }
-
-    #[must_use]
-    pub fn resolve_stopwatch(state: &StopwatchState) -> Self {
-        let surface = PomodoroSurface::of_stopwatch_state(state);
-        let subtitle = match surface {
-            PomodoroSurface::Running => match state.last_lap_ms {
-                Some(lap_ms) => format!(
-                    "Running · Lap {} at {}",
-                    state.lap_count,
-                    format_duration_ms(lap_ms)
-                ),
-                None => String::from("Counting up"),
-            },
-            PomodoroSurface::Paused => {
-                if state.lap_count > 0 {
-                    format!("Paused · {} laps recorded", state.lap_count)
-                } else {
-                    String::from("Paused · Press play to resume")
-                }
-            }
-            _ => String::from("Ready · Start counting up"),
-        };
-        let footer_left = state.last_lap_ms.map_or_else(String::new, |lap_ms| {
-            format!("Last lap {}", format_duration_ms(lap_ms))
-        });
-        let footer_right = if state.lap_count > 0 {
-            format!("{} laps", state.lap_count)
-        } else {
-            String::new()
-        };
-        let session_label = if state.lap_count > 0 {
-            format!("Lap {}", state.lap_count)
-        } else {
-            String::from("Stopwatch")
-        };
-        Self {
-            surface,
-            tone: PomodoroTone::Stopwatch,
-            dimmed: surface == PomodoroSurface::Paused,
-            urgent: false,
-            headline: state.format_time(),
-            subtitle,
-            footer_left,
-            footer_right,
-            session_label,
-            progress: PomodoroProgress::Bar(state.progress()),
         }
     }
 }
@@ -354,15 +240,20 @@ pub struct PomodoroPeekFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PomodoroScene {
     pub state: PomodoroState,
-    pub timer: QuickTimerState,
-    pub stopwatch: StopwatchState,
-    pub focus_mode: FocusSubMode,
-    pub compact_mode: FocusSubMode,
     pub clock: ClockTime,
     pub glow: f32,
     pub dim: f32,
     pub pulse: f32,
     pub peek: Option<PomodoroPeekFrame>,
+    pub category_id: String,
+    pub category_name: String,
+    pub category_color: CategoryColor,
+    pub category_icon: CategoryIcon,
+    pub policy_summary: String,
+    pub relief_summary: String,
+    pub category_picker_open: bool,
+    pub categories: Vec<(String, String, CategoryColor)>,
+    pub custom_time_input: Option<String>,
 }
 
 impl PomodoroScene {
@@ -370,10 +261,6 @@ impl PomodoroScene {
     pub fn steady(state: PomodoroState, clock: ClockTime) -> Self {
         Self {
             state,
-            timer: QuickTimerState::new(),
-            stopwatch: StopwatchState::new(),
-            focus_mode: FocusSubMode::Pomodoro,
-            compact_mode: FocusSubMode::Pomodoro,
             clock,
             glow: if state.status == PomodoroStatus::Running {
                 1.0
@@ -387,79 +274,68 @@ impl PomodoroScene {
             },
             pulse: if state.is_last_minute() { 1.0 } else { 0.0 },
             peek: None,
-        }
-    }
-
-    #[must_use]
-    pub fn view_for_mode(&self, mode: FocusSubMode) -> PomodoroView {
-        match mode {
-            FocusSubMode::Pomodoro => PomodoroView::resolve(&self.state, self.clock),
-            FocusSubMode::Timer => PomodoroView::resolve_timer(&self.timer, self.clock),
-            FocusSubMode::Stopwatch => PomodoroView::resolve_stopwatch(&self.stopwatch),
+            category_id: String::from("coding"),
+            category_name: String::from("Coding"),
+            category_color: CategoryColor::Orange,
+            category_icon: CategoryIcon::Code,
+            policy_summary: String::new(),
+            relief_summary: String::new(),
+            category_picker_open: false,
+            categories: Vec::new(),
+            custom_time_input: None,
         }
     }
 
     #[must_use]
     pub fn view(&self) -> PomodoroView {
-        self.view_for_mode(self.focus_mode)
+        let mut view = PomodoroView::resolve(&self.state, self.clock);
+        if let Some(raw) = &self.custom_time_input {
+            view.headline = if raw.is_empty() {
+                String::from("__:00")
+            } else {
+                format!("{raw}:00")
+            };
+            view.subtitle = String::from("Type 1-180 min · Enter to apply");
+        } else if view.surface == PomodoroSurface::Setup && !self.policy_summary.is_empty() {
+            view.subtitle.clone_from(&self.policy_summary);
+        } else if matches!(
+            view.surface,
+            PomodoroSurface::Running | PomodoroSurface::Paused
+        ) && self.state.phase == PomodoroPhase::Focus
+            && !self.category_name.is_empty()
+        {
+            if view.surface == PomodoroSurface::Running {
+                let ends = format_minute_of_day(self.state.ends_minute(self.clock.minute_of_day()));
+                view.subtitle = if self.state.is_last_minute() {
+                    format!("{} · almost done · ends {ends}", self.category_name)
+                } else {
+                    format!("{} · ends {ends}", self.category_name)
+                };
+            }
+            if !self.relief_summary.is_empty() {
+                view.footer_right.clone_from(&self.relief_summary);
+            }
+        }
+        view
     }
 
     #[must_use]
-    pub fn compact_view(&self) -> PomodoroView {
-        self.view_for_mode(self.compact_mode)
-    }
-
-    #[must_use]
-    pub fn compact_cycle_progress(&self) -> Option<[f32; 4]> {
-        (self.compact_mode == FocusSubMode::Pomodoro).then(|| cycle_progress(&self.state))
+    pub fn compact_cycle_progress(&self) -> [f32; 4] {
+        cycle_progress(&self.state)
     }
 
     #[must_use]
     pub fn compact_ring(&self) -> (f32, PomodoroStatus, String) {
-        match self.compact_mode {
-            FocusSubMode::Pomodoro => (
-                self.state.progress(),
-                self.state.status,
-                self.state.format_time(),
-            ),
-            FocusSubMode::Timer => (
-                self.timer.progress(),
-                self.timer.status,
-                self.timer.format_time(),
-            ),
-            FocusSubMode::Stopwatch => (
-                self.stopwatch.progress(),
-                self.stopwatch.status(),
-                self.stopwatch.format_time(),
-            ),
-        }
+        (
+            self.state.progress(),
+            self.state.status,
+            self.state.format_time(),
+        )
     }
 
     #[must_use]
-    pub const fn active_status(&self) -> PomodoroStatus {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => self.state.status,
-            FocusSubMode::Timer => self.timer.status,
-            FocusSubMode::Stopwatch => self.stopwatch.status(),
-        }
-    }
-
-    #[must_use]
-    pub const fn presets_minutes(&self) -> Option<[u32; 4]> {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => Some(POMODORO_PRESETS_MINUTES),
-            FocusSubMode::Timer => Some(TIMER_PRESETS_MINUTES),
-            FocusSubMode::Stopwatch => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn selected_preset_seconds(&self) -> u32 {
-        match self.focus_mode {
-            FocusSubMode::Pomodoro => self.state.total_seconds,
-            FocusSubMode::Timer => self.timer.total_seconds,
-            FocusSubMode::Stopwatch => 0,
-        }
+    pub const fn presets_minutes(&self) -> [u32; 4] {
+        POMODORO_PRESETS_MINUTES
     }
 }
 
@@ -648,32 +524,5 @@ mod tests {
         assert_eq!(PomodoroPeek::Paused.text(&state), "Paused");
         assert_eq!(PomodoroPeek::Extended.text(&state), "+5 min added");
         assert_eq!(PomodoroPeek::FiveMinutesLeft.text(&state), "5 minutes left");
-    }
-
-    #[test]
-    fn timer_and_stopwatch_views_reflect_their_sub_mode_state() {
-        let now = at(14, 10);
-        let mut scene = PomodoroScene::steady(PomodoroState::new(), now);
-        scene.focus_mode = FocusSubMode::Timer;
-        scene.timer.set_preset(10);
-        let timer_setup = scene.view();
-        assert_eq!(timer_setup.tone, PomodoroTone::Timer);
-        assert_eq!(timer_setup.headline, "10:00");
-        assert_eq!(timer_setup.session_label, "Timer");
-
-        scene.timer.toggle_run();
-        let timer_running = scene.view();
-        assert_eq!(timer_running.subtitle, "Countdown · ends 14:20");
-
-        scene.focus_mode = FocusSubMode::Stopwatch;
-        scene.stopwatch.toggle_run();
-        scene.stopwatch.advance_ms(65_000);
-        scene.stopwatch.record_lap();
-        let sw_view = scene.view();
-        assert_eq!(sw_view.tone, PomodoroTone::Stopwatch);
-        assert_eq!(sw_view.headline, "01:05");
-        assert_eq!(sw_view.session_label, "Lap 1");
-        assert_eq!(sw_view.footer_left, "Last lap 01:05");
-        assert_eq!(sw_view.footer_right, "1 laps");
     }
 }

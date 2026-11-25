@@ -78,9 +78,12 @@ pub(crate) struct RuntimeContext {
     pub(crate) control_center: RefCell<Option<control_center::ControlCenterSurface>>,
     pub(crate) spotlight: RefCell<Option<spotlight::SpotlightSurface>>,
     pub(crate) settings_window: RefCell<Option<settings_window::SettingsWindow>>,
+    pub(crate) finder_window: RefCell<Option<crate::finder::FinderWindow>>,
+    pub(crate) creating_finder: Cell<bool>,
     pub(crate) bar_hwnd: Cell<isize>,
     pub(crate) dock_hwnd: Cell<isize>,
-    pub(crate) window_controls_hwnd: Cell<isize>,
+    pub(crate) secondary_bar_hwnds: RefCell<Vec<isize>>,
+    pub(crate) secondary_dock_hwnds: RefCell<Vec<isize>>,
     pub(crate) system_appearance: Cell<SystemAppearance>,
     pub(crate) appearance_preferences: Cell<AppearancePreferences>,
     pub(crate) blur_supported: Cell<bool>,
@@ -97,7 +100,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) genie_enabled: Cell<bool>,
     pub(crate) hotkeys_enabled: Cell<bool>,
     pub(crate) capture_visible: Cell<bool>,
-    pub(crate) classic_logo_enabled: Cell<bool>,
+    pub(crate) brand_icon: Cell<BrandIcon>,
     pub(crate) dynamic_island_enabled: Cell<bool>,
     pub(crate) privacy_indicators_enabled: Cell<bool>,
     pub(crate) clipboard_history_enabled: Cell<bool>,
@@ -106,13 +109,14 @@ pub(crate) struct RuntimeContext {
     pub(crate) media_module_enabled: Cell<bool>,
     pub(crate) focus_module_enabled: Cell<bool>,
     pub(crate) background_cleanup_enabled: Cell<bool>,
+    pub(crate) finder_enabled: Cell<bool>,
     pub(crate) menu_bar: Cell<MenuBarPreferences>,
     pub(crate) quick_capture_enabled: Cell<bool>,
     pub(crate) onboarding_seen: Cell<bool>,
     pub(crate) pending_plugin_toggles: [Cell<Option<bool>>; 4],
     pub(crate) pending_capture_visible: Cell<Option<bool>>,
     pub(crate) pending_hotkeys_enabled: Cell<Option<bool>>,
-    pub(crate) pending_classic_logo: Cell<Option<bool>>,
+    pub(crate) pending_brand_icon: Cell<Option<BrandIcon>>,
     pub(crate) pending_notch_enabled: Cell<Option<bool>>,
     pub(crate) pending_dynamic_island: Cell<Option<bool>>,
     pub(crate) pending_privacy_indicators: Cell<Option<bool>>,
@@ -122,6 +126,7 @@ pub(crate) struct RuntimeContext {
     pub(crate) pending_media_module: Cell<Option<bool>>,
     pub(crate) pending_focus_module: Cell<Option<bool>>,
     pub(crate) pending_background_cleanup: Cell<Option<bool>>,
+    pub(crate) pending_finder_enabled: Cell<Option<bool>>,
     pub(crate) pending_menu_bar: Cell<Option<MenuBarPreferences>>,
     pub(crate) pending_quick_capture: Cell<Option<bool>>,
     pub(crate) pending_onboarding_seen: Cell<Option<bool>>,
@@ -144,9 +149,12 @@ impl RuntimeContext {
             control_center: RefCell::new(None),
             spotlight: RefCell::new(None),
             settings_window: RefCell::new(None),
+            finder_window: RefCell::new(None),
+            creating_finder: Cell::new(false),
             bar_hwnd: Cell::new(0),
             dock_hwnd: Cell::new(0),
-            window_controls_hwnd: Cell::new(0),
+            secondary_bar_hwnds: RefCell::new(Vec::new()),
+            secondary_dock_hwnds: RefCell::new(Vec::new()),
             system_appearance: Cell::new(SystemAppearance::DEFAULT),
             appearance_preferences: Cell::new(AppearancePreferences::default()),
             blur_supported: Cell::new(false),
@@ -163,7 +171,7 @@ impl RuntimeContext {
             genie_enabled: Cell::new(true),
             hotkeys_enabled: Cell::new(true),
             capture_visible: Cell::new(false),
-            classic_logo_enabled: Cell::new(false),
+            brand_icon: Cell::new(BrandIcon::Otto),
             dynamic_island_enabled: Cell::new(false),
             privacy_indicators_enabled: Cell::new(true),
             clipboard_history_enabled: Cell::new(true),
@@ -172,13 +180,14 @@ impl RuntimeContext {
             media_module_enabled: Cell::new(true),
             focus_module_enabled: Cell::new(true),
             background_cleanup_enabled: Cell::new(false),
+            finder_enabled: Cell::new(true),
             menu_bar: Cell::new(MenuBarPreferences::default()),
             quick_capture_enabled: Cell::new(false),
             onboarding_seen: Cell::new(false),
             pending_plugin_toggles: [const { Cell::new(None) }; 4],
             pending_capture_visible: Cell::new(None),
             pending_hotkeys_enabled: Cell::new(None),
-            pending_classic_logo: Cell::new(None),
+            pending_brand_icon: Cell::new(None),
             pending_notch_enabled: Cell::new(None),
             pending_dynamic_island: Cell::new(None),
             pending_privacy_indicators: Cell::new(None),
@@ -188,6 +197,7 @@ impl RuntimeContext {
             pending_media_module: Cell::new(None),
             pending_focus_module: Cell::new(None),
             pending_background_cleanup: Cell::new(None),
+            pending_finder_enabled: Cell::new(None),
             pending_menu_bar: Cell::new(None),
             pending_quick_capture: Cell::new(None),
             pending_onboarding_seen: Cell::new(None),
@@ -231,12 +241,39 @@ impl RuntimeContext {
         pending.drain(..).map(|raw| HWND(raw as *mut _)).collect()
     }
 
-    pub(crate) fn brand_icon(&self) -> BrandIcon {
-        if self.classic_logo_enabled.get() {
-            BrandIcon::ClassicApple
-        } else {
-            BrandIcon::Otto
+    pub(crate) fn set_secondary_bar_hwnds(&self, hwnds: Vec<isize>) {
+        if let Ok(mut slot) = self.secondary_bar_hwnds.try_borrow_mut() {
+            *slot = hwnds;
         }
+    }
+
+    pub(crate) fn set_secondary_dock_hwnds(&self, hwnds: Vec<isize>) {
+        if let Ok(mut slot) = self.secondary_dock_hwnds.try_borrow_mut() {
+            *slot = hwnds;
+        }
+    }
+
+    pub(crate) fn overlay_anchor_hwnds(&self) -> Vec<isize> {
+        let mut anchors = Vec::new();
+        let primary_bar = self.bar_hwnd.get();
+        if primary_bar != 0 {
+            anchors.push(primary_bar);
+        }
+        let primary_dock = self.dock_hwnd.get();
+        if primary_dock != 0 {
+            anchors.push(primary_dock);
+        }
+        if let Ok(bars) = self.secondary_bar_hwnds.try_borrow() {
+            anchors.extend(bars.iter().copied().filter(|&hwnd| hwnd != 0));
+        }
+        if let Ok(docks) = self.secondary_dock_hwnds.try_borrow() {
+            anchors.extend(docks.iter().copied().filter(|&hwnd| hwnd != 0));
+        }
+        anchors
+    }
+
+    pub(crate) fn brand_icon(&self) -> BrandIcon {
+        self.brand_icon.get()
     }
 
     pub(crate) fn notch_style(&self) -> NotchStyle {
@@ -250,7 +287,7 @@ impl RuntimeContext {
     pub(super) fn apply_preferences(&self, preferences: AppPreferences) {
         self.capture_visible.set(preferences.capture_visible);
         self.hotkeys_enabled.set(preferences.hotkeys_enabled);
-        self.classic_logo_enabled.set(preferences.classic_logo);
+        self.brand_icon.set(preferences.brand_icon);
         self.notch_enabled.set(preferences.notch_enabled);
         self.dynamic_island_enabled.set(preferences.dynamic_island);
         self.privacy_indicators_enabled
@@ -263,6 +300,7 @@ impl RuntimeContext {
         self.focus_module_enabled.set(preferences.focus_module);
         self.background_cleanup_enabled
             .set(preferences.background_cleanup);
+        self.finder_enabled.set(preferences.finder_enabled);
         self.menu_bar.set(preferences.menu_bar);
         self.quick_capture_enabled.set(preferences.quick_capture);
         self.onboarding_seen.set(preferences.onboarding_seen);

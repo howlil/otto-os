@@ -12,14 +12,10 @@ use otto_core::{
 };
 use otto_platform::{
     LyricsOutcome, cursor_position, foreground_application, foreground_title_generation,
-    is_escape_down, motion_preference, notify_bluetooth_hardware_change, read_system_status,
-    register_idle_wake, request_browser_url_inspection, save_focus_activity, suppress_native_osd,
-    take_browser_url_inspection, take_keystroke_count, take_mouse_click_count,
-    unregister_idle_wake, user_idle_ms, watch_top_edge, window_change_generations,
-};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, KillTimer, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos,
+    is_escape_down, kill_window_timer, motion_preference, notify_bluetooth_hardware_change, place,
+    read_system_status, register_idle_wake, request_browser_url_inspection, save_focus_activity,
+    set_window_timer, suppress_native_osd, take_browser_url_inspection, take_keystroke_count,
+    take_mouse_click_count, unregister_idle_wake, user_idle_ms, window_change_generations,
 };
 
 use super::Bar;
@@ -34,14 +30,7 @@ impl Bar {
         if self.status_timer_running || (!self.top_bar_enabled && !self.notch_enabled) {
             return;
         }
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                STATUS_TIMER,
-                STATUS_POLL_MS,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, STATUS_TIMER, STATUS_POLL_MS);
         register_idle_wake(self.hwnd, WM_APP_IDLE_WAKE);
         self.status_timer_running = true;
     }
@@ -52,40 +41,25 @@ impl Bar {
         }
         self.status_timer_running = false;
         unregister_idle_wake();
-        unsafe {
-            let hwnd = Some(HWND(self.hwnd as *mut _));
-            let _ = KillTimer(hwnd, STATUS_TIMER);
-            let _ = KillTimer(hwnd, DEADLINE_TIMER);
-        }
+        kill_window_timer(self.hwnd, STATUS_TIMER);
+        kill_window_timer(self.hwnd, DEADLINE_TIMER);
     }
 
     pub(super) fn ensure_anim_timer(&mut self) {
         if !self.top_bar_enabled && !self.notch_enabled {
             return;
         }
-        if !self.animating {
-            let timer = unsafe {
-                SetTimer(
-                    Some(HWND(self.hwnd as *mut _)),
-                    HUD_ANIM_TIMER,
-                    HUD_ANIM_MS,
-                    None,
-                )
-            };
-            if timer != 0 {
-                otto_platform::begin_fine_timing();
-                self.animating = true;
-                self.settle_ticks = 10;
-            }
+        if !self.animating && set_window_timer(self.hwnd, HUD_ANIM_TIMER, HUD_ANIM_MS) {
+            otto_platform::begin_fine_timing();
+            self.animating = true;
+            self.settle_ticks = 10;
         }
     }
 
     pub(super) fn stop_anim_timer(&mut self) {
         if self.animating {
             self.animating = false;
-            unsafe {
-                let _ = KillTimer(Some(HWND(self.hwnd as *mut _)), HUD_ANIM_TIMER);
-            }
+            kill_window_timer(self.hwnd, HUD_ANIM_TIMER);
             otto_platform::end_fine_timing();
         }
     }
@@ -123,14 +97,7 @@ impl Bar {
         if !self.status_timer_running {
             return;
         }
-        unsafe {
-            SetTimer(
-                Some(HWND(self.hwnd as *mut _)),
-                STATUS_TIMER,
-                interval,
-                None,
-            );
-        }
+        let _ = set_window_timer(self.hwnd, STATUS_TIMER, interval);
     }
 
     pub(super) const fn periodic_due(&self, every_ticks: u8) -> bool {
@@ -162,6 +129,7 @@ impl Bar {
             || crate::control_center::is_open(runtime)
             || crate::menu::is_calendar_open(runtime)
             || crate::menu::is_notification_open(runtime)
+            || self.secondary_needs_polling()
     }
 
     pub(super) fn refresh_motion(&mut self) {
@@ -179,9 +147,7 @@ impl Bar {
     pub(super) fn run_tick(&mut self, runtime: &RuntimeContext, force_media: bool) {
         self.maintain_ticks = self.maintain_ticks.wrapping_add(1);
         self.track_reveal(runtime);
-        if !self.cadence.is_idle() || self.periodic_due(MAINTAIN_EVERY_TICKS) {
-            crate::window_controls::poll_foreground(runtime);
-        }
+        self.track_secondary_reveal(runtime);
         if self.periodic_due(MAINTAIN_EVERY_TICKS) {
             if self.notch_enabled && self.notch.hud_enabled() {
                 suppress_native_osd();
@@ -192,17 +158,7 @@ impl Bar {
                 self.layout.bar.height,
             );
             if self.panel_visible && self.shown() {
-                let _ = unsafe {
-                    SetWindowPos(
-                        HWND(self.panel_hwnd as *mut _),
-                        Some(HWND_TOPMOST),
-                        self.layout.panel_window.x,
-                        self.layout.panel_window.y,
-                        self.layout.panel_window.width,
-                        self.layout.panel_window.height,
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                    )
-                };
+                place(self.panel_hwnd, self.layout.panel_window);
                 self.io.raise_quick_capture();
             }
         }
@@ -236,6 +192,8 @@ impl Bar {
             self.sync_foreground(runtime, foreground_changed);
         dirty |= fg_dirty;
         self.sync_full_screen(runtime);
+        self.sync_secondary_full_screen(runtime);
+        crate::window_controls::poll_foreground(runtime);
         self.sync_backdrop(runtime, foreground_changed);
         self.sync_keyboard_focus(runtime);
         if self.notch.is_seek_dragging() && is_escape_down() {
@@ -253,11 +211,7 @@ impl Bar {
             self.present(runtime);
         }
         self.schedule_deadline();
-        watch_top_edge(
-            self.hidden_for_full_screen(),
-            self.screen.width,
-            self.screen.height,
-        );
+        self.sync_top_edge_watches();
         let busy = self.status_busy(runtime, dirty);
         self.observe_cadence(busy);
     }
@@ -295,14 +249,15 @@ impl Bar {
         if latest.input_lang.is_empty() && !previous.input_lang.is_empty() {
             latest.input_lang = previous.input_lang;
         }
-        let mut dirty = false;
-        if self.notch_enabled
+        let mut dirty = if self.notch_enabled
             && self.notch.hud_enabled()
             && let Some(event) = detect_hud_event(previous, latest)
         {
             self.notch.trigger_hud(event);
-            dirty = true;
-        }
+            true
+        } else {
+            false
+        };
         self.notch.set_clock(latest.clock);
         if self
             .notch
@@ -317,11 +272,8 @@ impl Bar {
     }
 
     pub(super) fn schedule_deadline(&self) {
-        let hwnd = Some(HWND(self.hwnd as *mut _));
         if !self.notch_enabled {
-            unsafe {
-                let _ = KillTimer(hwnd, DEADLINE_TIMER);
-            }
+            kill_window_timer(self.hwnd, DEADLINE_TIMER);
             return;
         }
         let now = Instant::now();
@@ -331,18 +283,13 @@ impl Bar {
                     .saturating_duration_since(now)
                     .as_millis()
                     .max(MIN_DEADLINE_MS);
-                unsafe {
-                    SetTimer(
-                        hwnd,
-                        DEADLINE_TIMER,
-                        u32::try_from(wait).unwrap_or(u32::MAX),
-                        None,
-                    );
-                }
+                let _ = set_window_timer(
+                    self.hwnd,
+                    DEADLINE_TIMER,
+                    u32::try_from(wait).unwrap_or(u32::MAX),
+                );
             }
-            None => unsafe {
-                let _ = KillTimer(hwnd, DEADLINE_TIMER);
-            },
+            None => kill_window_timer(self.hwnd, DEADLINE_TIMER),
         }
     }
 
@@ -480,6 +427,31 @@ impl Bar {
         let keystrokes = take_keystroke_count();
         let focus_running = self.notch_enabled && self.notch.is_focus_blocking_active();
         focus_shield::sync(runtime, focus_running);
+        if focus_running != self.last_focus_relief_active {
+            self.last_focus_relief_active = focus_running;
+            if focus_running {
+                let active_cat = runtime
+                    .focus_activity
+                    .try_borrow()
+                    .ok()
+                    .map(|fa| fa.categories.active().clone());
+                if let Some(cat) = active_cat {
+                    let outcome = otto_platform::apply_focus_relief(&cat, self.own_pid);
+                    let summary = if outcome.closed_apps > 0 || outcome.throttled_apps > 0 {
+                        format!(
+                            "Relief: {} throttled · {} closed",
+                            outcome.throttled_apps, outcome.closed_apps
+                        )
+                    } else {
+                        String::new()
+                    };
+                    self.notch.set_focus_relief_summary(summary);
+                }
+            } else {
+                otto_platform::release_focus_relief();
+                self.notch.set_focus_relief_summary(String::new());
+            }
+        }
 
         let mut blocked_hud: Option<NotchHudKind> = None;
         let mut block_target: Option<ShieldTarget> = None;
@@ -507,7 +479,14 @@ impl Bar {
                     fa.observe_foreground(day, "", "", None);
                 }
             }
-            fa.record_sample(day, now_ms, idle_ms, focus_running, clicks, keystrokes);
+            fa.record_sample_for_category(
+                day,
+                now_ms,
+                idle_ms,
+                focus_running,
+                self.notch.active_category_id(),
+                (clicks, keystrokes),
+            );
             stats_updated = fa.is_dirty();
 
             if focus_running

@@ -1,0 +1,33 @@
+# Human ownership boundaries for high-pain Otto OS surfaces.
+# Every path below requires explicit maintainer sign-off before merge.
+
+# Core contracts, layout/UIA single source of truth, and experimental flags
+/crates/core/src/layout/ @howlil
+/crates/core/src/runtime/ @howlil
+/crates/core/src/settings/ @howlil
+
+# Win32 shell hooks, window lifecycle, crash recovery, process audit, and in-app updater
+/crates/platform/src/input/ @howlil
+/crates/platform/src/system/ @howlil
+/crates/platform/src/window/ @howlil
+/crates/platform/src/bar/appbar.rs @howlil
+/crates/platform/src/control_center/updates.rs @howlil
+
+# Host composition root and architecture fitness gates
+/crates/app/src/main.rs @howlil
+/crates/app/src/host/ @howlil
+
+# Supply chain, CI/CD, packaging, D1 database migrations, and repository contracts
+/Cargo.toml @howlil
+/Cargo.lock @howlil
+/clippy.toml @howlil
+/deny.toml @howlil
+/rust-toolchain.toml @howlil
+/.github/ @howlil
+/.githooks/ @howlil
+/packaging/ @howlil
+/scripts/ @howlil
+/landing/migrations/ @howlil
+/landing/functions/ @howlil
+/AGENTS.md @howlil
+/.agents/ @howlil

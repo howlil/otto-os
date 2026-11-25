@@ -16,6 +16,7 @@ pub use self::layout::{
     ResizeEdge, WindowControlAction, WindowControlsLayout, WindowControlsMetrics,
 };
 pub use self::state::{
-    CommandScope, WindowControlsState, accepts_window_controls, application_command_targets,
-    window_control_scope, window_controls_visible_under_bar,
+    BarWindowControlsView, CommandScope, WindowControlsState, accepts_window_controls,
+    active_bar_window_controls, application_command_targets, window_control_scope,
+    window_controls_visible_under_bar,
 };

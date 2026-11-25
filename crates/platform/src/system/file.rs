@@ -9,11 +9,11 @@ use windows::Win32::Storage::FileSystem::{
 use windows::core::{Error, PCWSTR, Result};
 
 pub const DATA_DIR_OVERRIDE: &str = "OTTO_OS_DATA_DIR";
-pub const PROD_DATA_DIR_NAME: &str = "otto-os";
-pub const DEV_DATA_DIR_NAME: &str = "otto-os-dev";
+pub(crate) const PROD_DATA_DIR_NAME: &str = "otto-os";
+pub(crate) const DEV_DATA_DIR_NAME: &str = "otto-os-dev";
 
 #[must_use]
-pub const fn default_data_dir_name(is_debug_build: bool) -> &'static str {
+pub(crate) const fn default_data_dir_name(is_debug_build: bool) -> &'static str {
     if is_debug_build {
         DEV_DATA_DIR_NAME
     } else {
@@ -22,7 +22,7 @@ pub const fn default_data_dir_name(is_debug_build: bool) -> &'static str {
 }
 
 #[must_use]
-pub fn resolve_data_dir(
+pub(crate) fn resolve_data_dir(
     override_dir: Option<&OsStr>,
     local_app_data: Option<&OsStr>,
     is_debug_build: bool,

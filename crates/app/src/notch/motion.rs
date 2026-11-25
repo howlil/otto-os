@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use otto_core::{
-    FocusSubMode, MotionMetrics, MotionPreference, NotchAction, NotchExpandedTab, PomodoroPeek,
-    PomodoroStatus, PomodoroTick, animate_value, island_targets, step_spring,
+    MotionMetrics, MotionPreference, NotchAction, NotchExpandedTab, PomodoroPeek, PomodoroStatus,
+    PomodoroTick, animate_value, island_targets, step_spring,
 };
 
 use super::ALERT_HOLD_MS;
@@ -20,30 +20,13 @@ impl NotchController {
     pub(crate) fn suspend(&mut self, now: Instant) -> NotchUpdate {
         let now_ms = self.millis(now);
         let tick = self.clock.suspend(&mut self.pomodoro, now_ms);
-        let timer_tick = self
-            .timer_clock
-            .suspend_timer(&mut self.quick_timer, now_ms);
-        let sw_changed = self.stopwatch_clock.suspend(&mut self.stopwatch, now_ms);
-        let (mut changed, mut effect) = self.apply_tick(tick, now);
-        if tick == PomodoroTick::Completed {
-            self.focus_mode = FocusSubMode::Pomodoro;
-        }
-        let (timer_changed, timer_effect) = self.apply_tick(timer_tick, now);
-        if timer_tick == PomodoroTick::Completed {
-            self.focus_mode = FocusSubMode::Timer;
-        }
-        changed |= timer_changed || sw_changed;
-        if effect.is_none() {
-            effect = timer_effect;
-        }
+        let (changed, effect) = self.apply_tick(tick, now);
         NotchUpdate { changed, effect }
     }
 
     pub(crate) fn resume(&mut self, now: Instant) {
         let now_ms = self.millis(now);
         self.clock.resume(now_ms);
-        self.timer_clock.resume(now_ms);
-        self.stopwatch_clock.resume(now_ms);
     }
 
     pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
@@ -51,14 +34,6 @@ impl NotchController {
         let pomodoro = self
             .clock
             .next_wakeup_ms(&self.pomodoro, now_ms)
-            .map(|at| self.epoch + Duration::from_millis(at));
-        let timer = self
-            .timer_clock
-            .next_timer_wakeup_ms(&self.quick_timer, now_ms)
-            .map(|at| self.epoch + Duration::from_millis(at));
-        let stopwatch = self
-            .stopwatch_clock
-            .next_wakeup_ms(&self.stopwatch, now_ms, self.is_stopwatch_visible())
             .map(|at| self.epoch + Duration::from_millis(at));
         let alert = self.alert_until.filter(|_| self.has_alert());
         let call = self
@@ -81,8 +56,6 @@ impl NotchController {
             .map(|at| at + Duration::from_millis(metrics.media_pause_hold_ms));
         [
             pomodoro,
-            timer,
-            stopwatch,
             alert,
             call,
             notification,
@@ -181,8 +154,7 @@ impl NotchController {
                 .media
                 .as_ref()
                 .is_some_and(|media| media.playing && !media.has_known_duration());
-        let countdown_running = self.pomodoro.status == PomodoroStatus::Running
-            || self.quick_timer.status == PomodoroStatus::Running;
+        let countdown_running = self.pomodoro.status == PomodoroStatus::Running;
         let ringing = self.notification_stage(self.last_anim_instant)
             == Some(otto_core::NotificationStage::Ringing);
         let coalescing = self

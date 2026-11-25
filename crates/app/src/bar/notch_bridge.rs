@@ -5,10 +5,9 @@ use crate::notch::{NotchEffect, TaskSubmitResult};
 use otto_core::{HitTarget, NotchAction, NotchHudKind, NotchLayoutInput, NotchPort};
 use otto_platform::release_capture_if_owned;
 use otto_platform::{
-    CaptureEvent, cursor_position, save_tasks, signal_command_failure,
+    CaptureEvent, cursor_position, drag_thresholds, save_tasks, signal_command_failure,
     unregister_bluetooth_hud_target,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
 
 use super::Bar;
 use super::modal::DeferredModalAction;
@@ -157,10 +156,7 @@ impl Bar {
     ) -> Option<DeferredModalAction> {
         self.io.pending_shelf_drag.as_ref()?;
         let (x, y) = self.translate_client_point(source_hwnd, raw_x, raw_y);
-        let slop = (
-            unsafe { GetSystemMetrics(SM_CXDRAG) }.max(4),
-            unsafe { GetSystemMetrics(SM_CYDRAG) }.max(4),
-        );
+        let slop = drag_thresholds();
         self.io.take_shelf_drag_if_moved(x, y, slop)
     }
 
@@ -203,17 +199,13 @@ impl Bar {
     }
 
     pub(super) fn refresh_media(&mut self, force_media: bool) -> bool {
-        let mut dirty = false;
-        if (self.top_bar_enabled || self.notch_enabled)
+        let mut dirty = (self.top_bar_enabled || self.notch_enabled)
             && should_refresh_system_status(
                 force_media,
                 self.cadence.is_idle(),
                 self.maintain_ticks,
             )
-            && self.refresh_system_status()
-        {
-            dirty = true;
-        }
+            && self.refresh_system_status();
         if !self.notch_enabled {
             return dirty;
         }
@@ -245,6 +237,12 @@ impl Bar {
             return false;
         };
         match effect {
+            NotchEffect::Platform(NotchAction::ShelfReveal(otto_core::ShelfPayload::File(
+                path,
+            ))) if runtime.finder_enabled.get() => {
+                crate::finder::reveal_path(runtime, &path);
+                false
+            }
             NotchEffect::Platform(action) => {
                 self.notch_port.execute(action.clone());
                 if matches!(action, NotchAction::ToggleMicMute) {
@@ -269,6 +267,49 @@ impl Bar {
             }
             NotchEffect::OpenFocusActivitySettings => {
                 crate::settings_window::open_focus_activity(runtime);
+                false
+            }
+            NotchEffect::OpenFocusModeSettings => {
+                crate::settings_window::open_focus_modes(runtime);
+                false
+            }
+            NotchEffect::SelectFocusCategory(category_id) => {
+                if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut()
+                    && fa.categories.select(&category_id)
+                {
+                    fa.mark_dirty();
+                    if otto_platform::save_focus_activity(&fa) {
+                        fa.mark_saved();
+                    }
+                }
+                crate::settings_window::repaint_if_focus_page(runtime);
+                true
+            }
+            NotchEffect::UpdateFocusDuration {
+                category_id,
+                minutes,
+            } => {
+                if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut()
+                    && let Some(cat) = fa.categories.by_id_mut(&category_id)
+                {
+                    cat.focus_minutes = minutes.clamp(1, otto_core::POMODORO_MAX_MINUTES);
+                    fa.mark_dirty();
+                    if otto_platform::save_focus_activity(&fa) {
+                        fa.mark_saved();
+                    }
+                }
+                crate::settings_window::repaint_if_focus_page(runtime);
+                false
+            }
+            NotchEffect::RecordCompletedSession { category_id } => {
+                let day = otto_core::DayKey::from_clock(self.controls.status().clock);
+                if let Ok(mut fa) = runtime.focus_activity.try_borrow_mut() {
+                    fa.record_completed_focus_session(day, &category_id);
+                    if otto_platform::save_focus_activity(&fa) {
+                        fa.mark_saved();
+                    }
+                }
+                crate::settings_window::repaint_if_focus_page(runtime);
                 false
             }
             NotchEffect::CopyClipboard(payload) => {
@@ -296,6 +337,11 @@ impl Bar {
         };
         let effect_changed = self.apply_notch_effect(runtime, update.effect);
         if update.changed || effect_changed {
+            if self.notch.is_editing_custom_time() {
+                let _ = otto_platform::route_bar_keys(self.hwnd, crate::win_msg::WM_APP_BAR_KEY);
+            } else if !self.focus.is_active() {
+                otto_platform::stop_routing_if_targets(self.hwnd);
+            }
             self.recompute_layout();
             self.sync_panel_visibility();
             self.present(runtime);

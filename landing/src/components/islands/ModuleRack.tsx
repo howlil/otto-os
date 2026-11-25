@@ -1,7 +1,21 @@
-import { useEffect, useRef, useState } from "react";
-import { useInView, useReducedMotion } from "motion/react";
-import { ClipboardList, Inbox, LayoutGrid, Leaf, Minimize2, Music, PanelTop, Pill, PenLine, Search, SlidersHorizontal, Timer, WandSparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import {
+  ClipboardList,
+  Inbox,
+  LayoutGrid,
+  Leaf,
+  Minimize2,
+  Music,
+  PanelTop,
+  PenLine,
+  Pill,
+  Search,
+  SlidersHorizontal,
+  Timer,
+  WandSparkles,
+} from "lucide-react";
+import { useInView, useReducedMotion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 import { T } from "../lib/T";
 import { Switch } from "./Switch";
 
@@ -60,7 +74,9 @@ export function ModuleRack() {
   return (
     <div ref={rootRef} className="mx-auto w-full max-w-[920px]">
       <div className="flex items-baseline gap-3 border-b border-line pb-8 tabular-nums" aria-live="polite">
-        <span className="text-[64px] leading-none font-medium tracking-[-0.04em] text-ink sm:text-[80px]">{active}</span>
+        <span className="text-[64px] leading-none font-medium tracking-[-0.04em] text-ink sm:text-[80px]">
+          {active}
+        </span>
         <span className="text-[16px] text-ink-soft">
           / {MODULES.length} <T id="modul aktif" en="modules active" />
         </span>
@@ -80,7 +96,9 @@ export function ModuleRack() {
               >
                 <Icon size={17} strokeWidth={1.9} />
               </span>
-              <span className={`min-w-0 flex-1 truncate text-[15px] font-medium transition-colors ${on ? "text-ink" : "text-muted"}`}>
+              <span
+                className={`min-w-0 flex-1 truncate text-[15px] font-medium transition-colors ${on ? "text-ink" : "text-muted"}`}
+              >
                 {module.label}
               </span>
               <Switch checked={on} onChange={(next) => toggle(index, next)} label={[module.label, module.label]} />

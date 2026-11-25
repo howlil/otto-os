@@ -98,7 +98,7 @@ fn lookup_cached_logo(cache_key: &str, now: Instant) -> CachedLogo {
         return CachedLogo::Expired;
     };
     if let Some(bytes) = &entry.bytes {
-        return CachedLogo::Hit(bytes.clone());
+        return CachedLogo::Hit(Arc::clone(bytes));
     }
     if now.saturating_duration_since(entry.cached_at) < NOTIF_LOGO_MISS_TTL {
         CachedLogo::RecentMiss
@@ -178,13 +178,15 @@ fn catalog_entry_matches_notification(
 fn find_catalog_icon_source(app_id: &str, app_name: &str) -> Option<(String, Option<String>)> {
     let mut guard = catalog_cache_lock().lock().ok()?;
     let catalog = guard.get_or_insert_with(crate::spotlight::collect_focus_catalog_apps);
-    catalog
+    let found = catalog
         .iter()
         .find(|entry| catalog_entry_matches_notification(entry, app_id, app_name))
         .map(|entry| {
             let detail = (!entry.detail.is_empty()).then(|| entry.detail.clone());
             (entry.icon_source.clone(), detail)
-        })
+        });
+    drop(guard);
+    found
 }
 
 fn resolve_fallback_icon_bytes(app_id: &str, app_name: &str) -> Option<Arc<[u8]>> {
@@ -655,7 +657,7 @@ pub fn request_notification_access() -> NotificationAccess {
 }
 
 #[must_use]
-pub fn aggregate_app_counts(items: &[NotificationSummary]) -> HashMap<String, u32> {
+pub(crate) fn aggregate_app_counts(items: &[NotificationSummary]) -> HashMap<String, u32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     for item in items {
         let key = item.app_id.trim().to_ascii_lowercase();

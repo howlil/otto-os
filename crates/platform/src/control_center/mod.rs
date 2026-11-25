@@ -1,14 +1,16 @@
+mod storage;
 mod updates;
 
 use otto_core::{
     AudioOutputDevice, BluetoothState, CMD_CAL_SETTINGS, CMD_CC_BLUETOOTH, CMD_CC_CALENDAR,
     CMD_CC_DISPLAY, CMD_CC_FOCUS, CMD_CC_MEDIA_NEXT, CMD_CC_MEDIA_PREVIOUS, CMD_CC_MEDIA_TOGGLE,
-    CMD_CC_SOUND, CMD_CC_WIFI, ControlCenterAction, ControlCenterPort, MediaCommand, NowPlaying,
-    SystemStatus, WifiState,
+    CMD_CC_SOUND, CMD_CC_WIFI, ControlCenterAction, ControlCenterPort, MediaCommand,
+    NotificationCenterPort, NowPlaying, SystemStatus, UpdatesPort, WifiState,
 };
 
 use crate::actions::{
-    execute_control_center_command, open_night_light_settings, open_power_settings,
+    execute_control_center_command, lock_screen, open_night_light_settings, open_power_settings,
+    open_task_view, trigger_screenshot,
 };
 use crate::bar::audio::{read_audio_outputs, set_audio_output, set_system_mute, set_system_volume};
 use crate::bar::connectivity::{
@@ -18,16 +20,23 @@ use crate::bar::connectivity::{
 use crate::bar::status::{read_system_status, set_display_brightness};
 use crate::notch::media::read_now_playing;
 
+pub use self::storage::{load_control_center_grid, save_control_center_grid};
 pub(crate) use self::updates::resume_update_check_task;
-use self::updates::{
-    check_for_updates_sync, launch_staged_installer, mark_update_install_failed,
-    open_releases_page, poll_async_update_state, poll_async_update_status,
-    start_async_update_check, start_async_update_install, take_ready_installer_path,
-};
 pub use self::updates::{cleanup_stale_updates, shutdown_update_check_task};
+use self::updates::{
+    launch_staged_installer, mark_update_install_failed, open_releases_page,
+    poll_async_update_state, start_async_update_check, start_async_update_install,
+    take_ready_installer_path,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsControlCenter;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WindowsUpdatesPort;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WindowsNotificationPort;
 
 impl ControlCenterPort for WindowsControlCenter {
     fn read_system_status(&self) -> SystemStatus {
@@ -54,56 +63,12 @@ impl ControlCenterPort for WindowsControlCenter {
         crate::startup::read_launch_at_login()
     }
 
-    fn set_launch_at_login(&self, enabled: bool) -> bool {
-        crate::startup::set_launch_at_login(enabled)
-    }
-
-    fn open_logs_folder(&self) {
-        let _ = crate::diagnostics::open_logs_folder();
-    }
-
     fn read_audio_outputs(&self) -> Vec<AudioOutputDevice> {
         read_audio_outputs()
     }
 
     fn set_audio_output(&self, id: &str) -> bool {
         set_audio_output(id)
-    }
-
-    fn check_for_updates(&self) -> Option<String> {
-        Some(check_for_updates_sync())
-    }
-
-    fn start_update_check(&self) -> bool {
-        start_async_update_check()
-    }
-
-    fn poll_update_status(&self) -> Option<String> {
-        poll_async_update_status()
-    }
-
-    fn poll_update_state(&self) -> otto_core::UpdateState {
-        poll_async_update_state()
-    }
-
-    fn start_update_install(&self) -> bool {
-        start_async_update_install()
-    }
-
-    fn take_ready_installer(&self) -> Option<String> {
-        take_ready_installer_path()
-    }
-
-    fn launch_update_installer(&self, path: &str) -> bool {
-        launch_staged_installer(path)
-    }
-
-    fn mark_update_install_failed(&self, message: &str) {
-        mark_update_install_failed(message);
-    }
-
-    fn open_releases_page(&self) {
-        open_releases_page();
     }
 
     fn execute(&self, action: ControlCenterAction) {
@@ -122,6 +87,18 @@ impl ControlCenterPort for WindowsControlCenter {
                 open_power_settings();
                 return;
             }
+            ControlCenterAction::LockScreen => {
+                lock_screen();
+                return;
+            }
+            ControlCenterAction::Screenshot => {
+                trigger_screenshot();
+                return;
+            }
+            ControlCenterAction::TaskView => {
+                open_task_view();
+                return;
+            }
             _ => {}
         }
         let command = match action {
@@ -130,7 +107,10 @@ impl ControlCenterPort for WindowsControlCenter {
             ControlCenterAction::Media(MediaCommand::Previous) => CMD_CC_MEDIA_PREVIOUS,
             ControlCenterAction::Media(MediaCommand::Seek(_))
             | ControlCenterAction::OpenNightLight
-            | ControlCenterAction::OpenPowerSettings => unreachable!(),
+            | ControlCenterAction::OpenPowerSettings
+            | ControlCenterAction::LockScreen
+            | ControlCenterAction::Screenshot
+            | ControlCenterAction::TaskView => unreachable!(),
             ControlCenterAction::OpenCalendar => CMD_CC_CALENDAR,
             ControlCenterAction::OpenCalendarSettings => CMD_CAL_SETTINGS,
             ControlCenterAction::OpenWifi => CMD_CC_WIFI,
@@ -165,7 +145,39 @@ impl ControlCenterPort for WindowsControlCenter {
     fn toggle_bluetooth_device(&self, id: &str, connect: bool) -> bool {
         toggle_bluetooth_device(id, connect)
     }
+}
 
+impl UpdatesPort for WindowsUpdatesPort {
+    fn start_update_check(&self) -> bool {
+        start_async_update_check()
+    }
+
+    fn poll_update_state(&self) -> otto_core::UpdateState {
+        poll_async_update_state()
+    }
+
+    fn start_update_install(&self) -> bool {
+        start_async_update_install()
+    }
+
+    fn take_ready_installer(&self) -> Option<String> {
+        take_ready_installer_path()
+    }
+
+    fn launch_update_installer(&self, path: &str) -> bool {
+        launch_staged_installer(path)
+    }
+
+    fn mark_update_install_failed(&self, message: &str) {
+        mark_update_install_failed(message);
+    }
+
+    fn open_releases_page(&self) {
+        open_releases_page();
+    }
+}
+
+impl NotificationCenterPort for WindowsNotificationPort {
     fn read_notifications(&self) -> otto_core::NotificationCenterSnapshot {
         crate::notch::notifications::read_notifications_snapshot()
     }

@@ -68,7 +68,7 @@ pub enum DockPosition {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct DockPreferences {
     pub position: DockPosition,
@@ -459,13 +459,26 @@ pub fn compute_dock_layout(metrics: &DockMetrics, input: DockInput<'_>) -> DockL
 }
 
 #[must_use]
-pub fn dock_rest_zone(layout: &DockLayout, screen_height: i32) -> Option<Rect> {
+pub fn dock_rest_zone_in_bounds(layout: &DockLayout, bounds: Rect) -> Option<Rect> {
     (!layout.pill.is_empty()).then_some(Rect {
-        x: layout.pill.x,
-        y: screen_height - layout.rest_height,
+        x: bounds.x + layout.pill.x,
+        y: bounds.bottom() - layout.rest_height,
         width: layout.pill.width,
         height: layout.rest_height,
     })
+}
+
+#[must_use]
+pub fn dock_rest_zone(layout: &DockLayout, screen_height: i32) -> Option<Rect> {
+    dock_rest_zone_in_bounds(
+        layout,
+        Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: screen_height,
+        },
+    )
 }
 
 #[must_use]
@@ -678,11 +691,9 @@ pub fn parse_title_progress(title: &str) -> Option<f32> {
         .or_else(|| trimmed.split_whitespace().next())?;
     let pct_str = candidate.trim().strip_suffix('%')?;
     let pct: f32 = pct_str.trim().parse().ok()?;
-    if (0.0..=100.0).contains(&pct) {
-        Some((pct / 100.0).clamp(0.0, 1.0))
-    } else {
-        None
-    }
+    (0.0..=100.0)
+        .contains(&pct)
+        .then(|| (pct / 100.0).clamp(0.0, 1.0))
 }
 
 #[must_use]

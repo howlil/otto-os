@@ -1,5 +1,6 @@
 use crate::layout::Rect;
 
+use super::grid::ControlKind;
 use super::model::ControlCenterPage;
 use super::snapshot::SubPanelGroupLayout;
 
@@ -23,6 +24,14 @@ pub struct ControlCenterMetrics {
     pub group_header_height: i32,
     pub group_gap: i32,
     pub error_banner_height: i32,
+    pub cell_size: i32,
+    pub cell_gap: i32,
+    pub tile_radius: i32,
+    pub canvas_right_margin: i32,
+    pub canvas_top_gap: i32,
+    pub toolbar_height: i32,
+    pub gallery_width: i32,
+    pub gallery_row_height: i32,
 }
 
 impl ControlCenterMetrics {
@@ -45,6 +54,14 @@ impl ControlCenterMetrics {
         group_header_height: 24,
         group_gap: 12,
         error_banner_height: 28,
+        cell_size: 74,
+        cell_gap: 12,
+        tile_radius: 22,
+        canvas_right_margin: 18,
+        canvas_top_gap: 14,
+        toolbar_height: 32,
+        gallery_width: 388,
+        gallery_row_height: 56,
     };
 }
 
@@ -67,6 +84,18 @@ pub struct ControlCenterPlacement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlCenterHitTarget {
+    CanvasBackground,
+    ToolbarAdd,
+    ToolbarEdit,
+    ToolbarReset,
+    AddControlButton,
+    TileRemove(u32),
+    TileResize(u32),
+    TileMove(u32),
+    TileAction(u32),
+    TileSlider(u32),
+    TileDetail(u32),
+    GalleryItem(usize),
     WifiToggle,
     WifiOpenPage,
     BluetoothToggle,
@@ -90,9 +119,39 @@ pub enum ControlCenterHitTarget {
     FooterSecondary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlTileLayout {
+    pub id: u32,
+    pub kind: ControlKind,
+    pub col: u8,
+    pub row: u8,
+    pub cols: u8,
+    pub rows: u8,
+    pub rect: Rect,
+    pub radius: i32,
+    pub remove_badge: Rect,
+    pub resize_handle: Rect,
+    pub slider_rect: Rect,
+    pub slider_vertical: bool,
+    pub primary_rect: Rect,
+    pub secondary_rect: Rect,
+    pub tertiary_rect: Rect,
+    pub detail_rect: Rect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ControlCenterLayout {
     pub window: Rect,
+    pub canvas_panel: Rect,
+    pub toolbar_add: Rect,
+    pub toolbar_edit: Rect,
+    pub toolbar_reset: Rect,
+    pub add_control_button: Rect,
+    pub grid_origin: (i32, i32),
+    pub cell_px: i32,
+    pub cell_gap_px: i32,
+    pub grid_rows: u8,
+    pub tiles: Vec<ControlTileLayout>,
     pub page: ControlCenterPage,
     pub shell_radius: i32,
     pub card_radius: i32,

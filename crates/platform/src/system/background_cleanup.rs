@@ -39,6 +39,7 @@ struct CleanupState {
     runtime: Option<CleanupRuntime>,
     auto_origins: HashMap<u32, Origin>,
     manual_origins: HashMap<u32, Origin>,
+    focus_origins: HashMap<u32, Origin>,
     prev_cpu_sample: Option<(Instant, HashMap<u32, u64>)>,
 }
 
@@ -47,6 +48,7 @@ static STATE: LazyLock<Mutex<CleanupState>> = LazyLock::new(|| {
         runtime: None,
         auto_origins: HashMap::new(),
         manual_origins: HashMap::new(),
+        focus_origins: HashMap::new(),
         prev_cpu_sample: None,
     })
 });
@@ -113,7 +115,45 @@ pub fn shutdown_background_cleanup() {
         let Ok(mut guard) = STATE.lock() else {
             return;
         };
-        guard.manual_origins.drain().collect()
+        let mut all: Vec<(u32, Origin)> = guard.manual_origins.drain().collect();
+        all.extend(guard.focus_origins.drain());
+        all
+    };
+    for (pid, origin) in released {
+        restore(pid, &origin);
+    }
+}
+
+pub(super) fn throttle_exe_for_focus(exe_name: &str) -> usize {
+    let target = exe_name.to_ascii_lowercase();
+    let pids: Vec<u32> = list_processes()
+        .into_iter()
+        .filter(|(_, name)| name.eq_ignore_ascii_case(&target))
+        .map(|(pid, _)| pid)
+        .collect();
+    let mut newly = Vec::new();
+    for pid in pids {
+        if let Some(origin) = throttle(pid) {
+            newly.push((pid, origin));
+        }
+    }
+    let count = newly.len();
+    if count > 0
+        && let Ok(mut guard) = STATE.lock()
+    {
+        for (pid, origin) in newly {
+            guard.focus_origins.entry(pid).or_insert(origin);
+        }
+    }
+    count
+}
+
+pub(super) fn release_focus_throttles() {
+    let released: Vec<(u32, Origin)> = {
+        let Ok(mut guard) = STATE.lock() else {
+            return;
+        };
+        guard.focus_origins.drain().collect()
     };
     for (pid, origin) in released {
         restore(pid, &origin);
@@ -123,8 +163,8 @@ pub fn shutdown_background_cleanup() {
 fn cleanup_worker(signal: &Receiver<()>) {
     let mut tracker = HogTracker::default();
     let mut last_sample = Instant::now();
-    while let Err(RecvTimeoutError::Timeout) =
-        signal.recv_timeout(Duration::from_secs(HOG_SAMPLE_INTERVAL_SECS))
+    while signal.recv_timeout(Duration::from_secs(HOG_SAMPLE_INTERVAL_SECS))
+        == Err(RecvTimeoutError::Timeout)
     {
         let now = Instant::now();
         let elapsed_100ns =
@@ -385,7 +425,7 @@ pub fn toggle_process_group_throttle(exe_name: &str) -> Option<bool> {
         let is_throttled = pids.iter().any(|pid| {
             guard.manual_origins.contains_key(pid) || guard.auto_origins.contains_key(pid)
         });
-        if is_throttled {
+        is_throttled.then(|| {
             let mut out = Vec::new();
             for pid in &pids {
                 if let Some(origin) = guard.manual_origins.remove(pid) {
@@ -395,10 +435,8 @@ pub fn toggle_process_group_throttle(exe_name: &str) -> Option<bool> {
                     out.push((*pid, origin));
                 }
             }
-            Some(out)
-        } else {
-            None
-        }
+            out
+        })
     };
 
     if let Some(to_restore) = restore_list {

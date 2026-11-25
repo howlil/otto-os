@@ -90,7 +90,7 @@ pub fn read_clipboard_payload() -> ClipboardRead {
 }
 
 #[must_use]
-pub fn copy_clipboard_payload(payload: &ClipboardPayload) -> Option<u32> {
+pub(crate) fn copy_clipboard_payload(payload: &ClipboardPayload) -> Option<u32> {
     let normalized = payload.clone().normalize()?;
     let (format, hglobal) = match &normalized {
         ClipboardPayload::Files(paths) => {

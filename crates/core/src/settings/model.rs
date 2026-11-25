@@ -2,6 +2,7 @@ use crate::appearance::material::SystemAppearance;
 use crate::appearance::theme::AppearancePreferences;
 use crate::bar::menu_bar::{BarHideMode, BarItem, MenuBarPreferences};
 use crate::dock::layout::{DOCK_ICON_LARGE, DOCK_ICON_SMALL, DockPreferences};
+use crate::settings::preferences::BrandIcon;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OttoSettingSection {
@@ -47,7 +48,6 @@ pub enum OttoSettingKind {
     FocusModule,
     QuickCapture,
     OnlineLyrics,
-    ClassicLogo,
     DockHideTaskbar,
     DockShowDownloads,
     DockShowTrash,
@@ -58,6 +58,7 @@ pub enum OttoSettingKind {
     LaunchAtLogin,
     CaptureVisible,
     BackgroundCleanup,
+    Finder,
     MenuBarBackground,
     MenuBarKeepNotch,
     MenuBarTray,
@@ -83,7 +84,6 @@ impl OttoSettingKind {
         Self::FocusModule,
         Self::QuickCapture,
         Self::OnlineLyrics,
-        Self::ClassicLogo,
         Self::DockHideTaskbar,
         Self::DockShowDownloads,
         Self::DockShowTrash,
@@ -94,6 +94,7 @@ impl OttoSettingKind {
         Self::LaunchAtLogin,
         Self::CaptureVisible,
         Self::BackgroundCleanup,
+        Self::Finder,
         Self::MenuBarBackground,
         Self::MenuBarKeepNotch,
         Self::MenuBarTray,
@@ -140,7 +141,6 @@ impl OttoSettingKind {
             Self::FocusModule => "Focus & Pomodoro",
             Self::QuickCapture => "Quick Capture",
             Self::OnlineLyrics => "Online Lyrics",
-            Self::ClassicLogo => "Classic Brand Logo",
             Self::DockHideTaskbar => "Hide Windows Taskbar",
             Self::DockShowDownloads => "Downloads Stack",
             Self::DockShowTrash => "Trash Bin",
@@ -151,6 +151,7 @@ impl OttoSettingKind {
             Self::LaunchAtLogin => "Launch at Login",
             Self::CaptureVisible => "Visible in Captures",
             Self::BackgroundCleanup => "Background Cleanup",
+            Self::Finder => "Otto Finder",
             Self::MenuBarBackground => "Menu Bar Background",
             Self::MenuBarKeepNotch => "Notch Stays Visible",
             Self::MenuBarTray => BarItem::Tray.label(),
@@ -175,10 +176,9 @@ impl OttoSettingKind {
             Self::NotchHud => "Notch volume & brightness OSD",
             Self::DynamicIsland => "Floating pill instead of attached notch",
             Self::MediaModule => "System media watcher & playback bar",
-            Self::FocusModule => "Pomodoro, timer & stopwatch tab",
+            Self::FocusModule => "Pomodoro focus tab",
             Self::QuickCapture => "Tasks tab & Ctrl+Alt+Q capture",
             Self::OnlineLyrics => "Fetch synced & plain lyrics online",
-            Self::ClassicLogo => "Classic emblem in left menu bar",
             Self::DockHideTaskbar => "Auto-hide taskbar while Dock runs",
             Self::DockShowDownloads => "Show Downloads folder stack",
             Self::DockShowTrash => "Show Recycle Bin item on Dock",
@@ -189,6 +189,7 @@ impl OttoSettingKind {
             Self::LaunchAtLogin => "Start Otto OS automatically at sign-in",
             Self::CaptureVisible => "Show overlays in screenshots",
             Self::BackgroundCleanup => "Throttle idle apps hogging CPU",
+            Self::Finder => "macOS-style File Explorer for Dock & Top Bar",
             Self::MenuBarBackground => "Glass behind the menu bar",
             Self::MenuBarKeepNotch => "Keep the notch when the bar hides",
             Self::MenuBarTray => BarItem::Tray.subtitle(),
@@ -205,10 +206,11 @@ pub enum OttoSettingItem {
     Toggle(OttoSettingKind),
     DockIconSize,
     MenuBarHide,
+    BrandLogo,
 }
 
 impl OttoSettingItem {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::Toggle(OttoSettingKind::Dock),
         Self::DockIconSize,
         Self::Toggle(OttoSettingKind::DockMagnification),
@@ -218,6 +220,7 @@ impl OttoSettingItem {
         Self::Toggle(OttoSettingKind::DockHideTaskbar),
         Self::Toggle(OttoSettingKind::DockReserveSpace),
         Self::Toggle(OttoSettingKind::TopBar),
+        Self::BrandLogo,
         Self::MenuBarHide,
         Self::Toggle(OttoSettingKind::MenuBarKeepNotch),
         Self::Toggle(OttoSettingKind::MenuBarBackground),
@@ -238,11 +241,11 @@ impl OttoSettingItem {
         Self::Toggle(OttoSettingKind::DropShelf),
         Self::Toggle(OttoSettingKind::WindowControls),
         Self::Toggle(OttoSettingKind::Genie),
-        Self::Toggle(OttoSettingKind::ClassicLogo),
         Self::Toggle(OttoSettingKind::LaunchAtLogin),
         Self::Toggle(OttoSettingKind::Hotkeys),
         Self::Toggle(OttoSettingKind::CaptureVisible),
         Self::Toggle(OttoSettingKind::BackgroundCleanup),
+        Self::Toggle(OttoSettingKind::Finder),
     ];
 
     #[must_use]
@@ -251,6 +254,7 @@ impl OttoSettingItem {
             Self::Toggle(kind) => kind.section(),
             Self::DockIconSize => OttoSettingSection::Behavior,
             Self::MenuBarHide => OttoSettingSection::Visibility,
+            Self::BrandLogo => OttoSettingSection::Main,
         }
     }
 
@@ -260,6 +264,7 @@ impl OttoSettingItem {
             Self::Toggle(kind) => kind.label(),
             Self::DockIconSize => "Dock Icon Size",
             Self::MenuBarHide => "Auto-Hide Menu Bar",
+            Self::BrandLogo => "Menu Bar Logo",
         }
     }
 }
@@ -280,7 +285,7 @@ pub struct SystemSettingsState {
     pub launch_at_login: bool,
     pub hotkeys_enabled: bool,
     pub capture_visible: bool,
-    pub classic_logo: bool,
+    pub brand_icon: BrandIcon,
     pub dynamic_island: bool,
     pub privacy_indicators: bool,
     pub clipboard_history: bool,
@@ -289,6 +294,7 @@ pub struct SystemSettingsState {
     pub media_module: bool,
     pub focus_module: bool,
     pub background_cleanup: bool,
+    pub finder_enabled: bool,
     pub quick_capture: bool,
 }
 
@@ -323,7 +329,6 @@ impl OttoSettingsSnapshot {
             OttoSettingKind::FocusModule => self.system.focus_module,
             OttoSettingKind::QuickCapture => self.system.quick_capture,
             OttoSettingKind::OnlineLyrics => self.online_lyrics,
-            OttoSettingKind::ClassicLogo => self.system.classic_logo,
             OttoSettingKind::DockHideTaskbar => self.dock.hide_taskbar,
             OttoSettingKind::DockShowDownloads => self.dock.show_downloads,
             OttoSettingKind::DockShowTrash => self.dock.show_trash,
@@ -334,6 +339,7 @@ impl OttoSettingsSnapshot {
             OttoSettingKind::LaunchAtLogin => self.system.launch_at_login,
             OttoSettingKind::CaptureVisible => self.system.capture_visible,
             OttoSettingKind::BackgroundCleanup => self.system.background_cleanup,
+            OttoSettingKind::Finder => self.system.finder_enabled,
             OttoSettingKind::MenuBarBackground => self.menu_bar.show_background,
             OttoSettingKind::MenuBarKeepNotch => self.menu_bar.keep_notch,
             OttoSettingKind::MenuBarTray => !self.menu_bar.hidden_items.contains(BarItem::Tray),
@@ -374,7 +380,8 @@ impl OttoSettingsSnapshot {
                 | OttoSettingKind::MenuBarNotifications
                 | OttoSettingKind::MenuBarClock,
             )
-            | OttoSettingItem::MenuBarHide => self.plugins.top_bar,
+            | OttoSettingItem::MenuBarHide
+            | OttoSettingItem::BrandLogo => self.plugins.top_bar,
             OttoSettingItem::Toggle(
                 OttoSettingKind::DynamicIsland
                 | OttoSettingKind::NotchHud
@@ -390,6 +397,7 @@ impl OttoSettingsSnapshot {
             OttoSettingItem::Toggle(kind) => kind.subtitle(),
             OttoSettingItem::DockIconSize => "Base size for Dock icons",
             OttoSettingItem::MenuBarHide => "Hide the bar until the pointer reaches the top",
+            OttoSettingItem::BrandLogo => "Emblem in the left menu bar",
         }
     }
 

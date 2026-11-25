@@ -10,16 +10,18 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::core::Result;
 use windows_numerics::Vector2;
 
-use crate::{EQUALIZER_GREEN, FOREGROUND, Renderer, rect_to_d2d, rgb, translate_rect};
+use crate::appearance::tokens::{
+    SYSTEM_BLUE as PRIVACY_BLUE, SYSTEM_GREEN, SYSTEM_ORANGE as PRIVACY_ORANGE, SYSTEM_RED,
+    with_alpha,
+};
+use crate::{EQUALIZER_GREEN, Renderer, rect_to_d2d, translate_rect};
 
-const PRIVACY_ORANGE: D2D1_COLOR_F = rgb(255, 159, 10, 1.0);
-const PRIVACY_BLUE: D2D1_COLOR_F = rgb(10, 132, 255, 1.0);
-const MUTED_FILL: D2D1_COLOR_F = rgb(255, 69, 58, 0.24);
-const MUTED_BORDER: D2D1_COLOR_F = rgb(255, 69, 58, 0.48);
-const MIC_ACTIVE_FILL: D2D1_COLOR_F = rgb(255, 159, 10, 0.20);
-const MIC_ACTIVE_BORDER: D2D1_COLOR_F = rgb(255, 159, 10, 0.48);
-const CAM_ACTIVE_FILL: D2D1_COLOR_F = rgb(48, 209, 88, 0.18);
-const CAM_ACTIVE_BORDER: D2D1_COLOR_F = rgb(48, 209, 88, 0.44);
+const MUTED_FILL: D2D1_COLOR_F = with_alpha(SYSTEM_RED, 0.24);
+const MUTED_BORDER: D2D1_COLOR_F = with_alpha(SYSTEM_RED, 0.48);
+const MIC_ACTIVE_FILL: D2D1_COLOR_F = with_alpha(PRIVACY_ORANGE, 0.20);
+const MIC_ACTIVE_BORDER: D2D1_COLOR_F = with_alpha(PRIVACY_ORANGE, 0.48);
+const CAM_ACTIVE_FILL: D2D1_COLOR_F = with_alpha(SYSTEM_GREEN, 0.18);
+const CAM_ACTIVE_BORDER: D2D1_COLOR_F = with_alpha(SYSTEM_GREEN, 0.44);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrivacyDotKind {
@@ -96,7 +98,7 @@ impl Renderer {
                 radiusX: scale(9, self.dpi) as f32,
                 radiusY: scale(9, self.dpi) as f32,
             };
-            let hover_brush = self.brushes.alpha_brush(FOREGROUND, 0.14);
+            let hover_brush = self.brushes.alpha_brush(self.notch_ink(), 0.14);
             unsafe {
                 self.target.FillRoundedRectangle(&hover_rect, &hover_brush);
             }
@@ -166,12 +168,13 @@ impl Renderer {
         if pill.is_empty() {
             return Ok(());
         }
+        let ink = self.notch_ink();
         let is_hovered = hovered == Some(HitTarget::PrivacyMicMute);
         let (fill, border, accent) = match pill_tone(privacy) {
             PillTone::Muted => (
                 self.brushes.alpha_brush(MUTED_FILL, alpha),
                 self.brushes.alpha_brush(MUTED_BORDER, alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.94 * alpha),
+                self.brushes.alpha_brush(ink, 0.94 * alpha),
             ),
             PillTone::MicActive => (
                 self.brushes
@@ -187,9 +190,9 @@ impl Renderer {
             ),
             PillTone::Neutral => (
                 self.brushes
-                    .alpha_brush(FOREGROUND, (if is_hovered { 0.16 } else { 0.08 }) * alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.14 * alpha),
-                self.brushes.alpha_brush(FOREGROUND, 0.88 * alpha),
+                    .alpha_brush(ink, (if is_hovered { 0.16 } else { 0.08 }) * alpha),
+                self.brushes.alpha_brush(ink, 0.14 * alpha),
+                self.brushes.alpha_brush(ink, 0.88 * alpha),
             ),
         };
         let radius = pill.height as f32 * 0.5;
@@ -204,7 +207,7 @@ impl Renderer {
                 .DrawRoundedRectangle(&rounded, &border, 1.0, None);
         }
 
-        let fg = self.brushes.alpha_brush(FOREGROUND, 0.94 * alpha);
+        let fg = self.brushes.alpha_brush(ink, 0.94 * alpha);
         let compact = pill.width <= scale(54, self.dpi);
         let pad_x = scale(6, self.dpi) as f32;
         let half_h = scale(5, self.dpi) as f32;

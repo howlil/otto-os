@@ -1,8 +1,8 @@
 use super::{ALERT_HOLD_MS, NotchController, NotchEffect, NotchHotkey, NotchUpdate, unix_now_ms};
 use otto_core::{
-    ClockTime, FocusSubMode, HitTarget, IslandMode, MediaCommand, MotionPreference, NotchAction,
+    ClockTime, HitTarget, IslandMode, MediaCommand, MotionPreference, NotchAction,
     NotchExpandedTab, NotchHudKind, NotificationStage, NotificationSummary, NowPlaying,
-    PomodoroStatus, PomodoroSurface,
+    PomodoroStatus,
 };
 use std::time::{Duration, Instant};
 
@@ -1330,73 +1330,6 @@ fn track_change_resets_loaded_lyrics() {
     };
     notch.set_media(Some(different_track));
     assert!(notch.lyrics_view().sheet.is_none());
-}
-
-#[test]
-fn quick_timer_presets_countdown_alert_and_extend_work_through_focus_sub_mode() {
-    let mut notch = idle_notch();
-    let start = notch.epoch;
-    let _ = notch.handle_click(HitTarget::FocusMode(FocusSubMode::Timer));
-    let _ = notch.handle_click(HitTarget::PomodoroPreset(0));
-    assert_eq!(notch.quick_timer.remaining_seconds, 60);
-
-    let _ = notch.handle_click(HitTarget::PomodoroPlayPause);
-    notch.timer_clock.restart(0);
-    assert_eq!(notch.quick_timer.status, PomodoroStatus::Running);
-
-    let mut now = start;
-    let mut alert_effect = None;
-    for _ in 0..3 {
-        now += Duration::from_secs(20);
-        let update = notch.sync_clock(now);
-        if update.effect.is_some() {
-            alert_effect = update.effect;
-        }
-    }
-    assert!(matches!(
-        alert_effect,
-        Some(NotchEffect::Platform(NotchAction::PlayPomodoroChime))
-    ));
-    assert_eq!(notch.quick_timer.status, PomodoroStatus::Alert);
-    assert_eq!(
-        notch.layout_input(true).pomodoro_surface,
-        PomodoroSurface::Alert
-    );
-
-    let _ = notch.handle_click(HitTarget::PomodoroExtendFive);
-    assert_eq!(notch.quick_timer.status, PomodoroStatus::Running);
-    assert_eq!(notch.quick_timer.remaining_seconds, 5 * 60);
-}
-
-#[test]
-fn stopwatch_records_laps_resets_and_gates_one_hz_wakeups_on_visibility() {
-    let mut notch = idle_notch();
-    let start = notch.epoch;
-    let _ = notch.handle_click(HitTarget::FocusMode(FocusSubMode::Stopwatch));
-    let _ = notch.handle_click(HitTarget::PomodoroPlayPause);
-    notch.stopwatch_clock.restart(0);
-
-    assert_eq!(notch.next_deadline(start), None);
-
-    notch.panel_expansion = 1.0;
-    let revealed_at = start + Duration::from_secs(5);
-    let deadline = notch
-        .next_deadline(revealed_at)
-        .expect("visible stopwatch should schedule a 1 Hz wakeup");
-    assert!(deadline - revealed_at <= Duration::from_secs(1));
-
-    let update = notch.sync_clock(revealed_at);
-    assert!(update.changed);
-    assert_eq!(notch.stopwatch.elapsed_ms, 5_000);
-
-    let _ = notch.handle_click(HitTarget::PomodoroSkip);
-    assert_eq!(notch.stopwatch.lap_count, 1);
-    assert_eq!(notch.stopwatch.last_lap_ms, Some(5_000));
-
-    let _ = notch.handle_click(HitTarget::PomodoroReset);
-    assert_eq!(notch.stopwatch.elapsed_ms, 0);
-    assert_eq!(notch.stopwatch.lap_count, 0);
-    assert!(!notch.stopwatch.running);
 }
 
 #[test]

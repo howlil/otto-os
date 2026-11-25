@@ -1,26 +1,18 @@
-use crate::backdrop_feed::BackdropFeed;
 use crate::host::RuntimeContext;
-use crate::win_msg::WM_APP_CONTROL_CENTER_BACKDROP;
 use otto_core::{
-    BACKDROP_PADDING_PT, CaptureRegion, ControlCenterPlacement, capture_interval_for,
     capture_wanted, compute_control_center_layout_for_snapshot, control_center_focus_targets,
-    scale,
 };
-use otto_platform::{is_running_on_battery, monitor_work_area_at, primary_screen};
+use otto_platform::{monitor_at, place};
 use otto_render::{ControlCenterPaintState, ControlCenterRenderer};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
-};
 use windows::core::Result;
 
-use super::ControlCenterSurface;
+use super::{ControlCenterSurface, DragMode};
 use crate::settings::settings_snapshot;
 
 impl ControlCenterSurface {
     pub(super) fn ensure_renderer(&mut self) -> Result<()> {
         if self.renderer.is_none() {
-            self.renderer = Some(ControlCenterRenderer::new(self.screen.dpi)?);
+            self.renderer = Some(ControlCenterRenderer::new(self.monitor.dpi)?);
         }
         Ok(())
     }
@@ -39,16 +31,17 @@ impl ControlCenterSurface {
         self.snapshot.bluetooth = self.port.read_bluetooth_state();
         self.snapshot.audio_outputs = self.port.read_audio_outputs();
         self.snapshot.settings = settings_snapshot(runtime, self.port.read_launch_at_login());
+        self.snapshot.theme = crate::theme_state::appearance(runtime).theme;
     }
 
     pub(super) fn relayout(&mut self) {
         let page = self.snapshot.page;
-        let bounds = monitor_work_area_at(self.anchor_right, self.anchor_y);
+        let bounds = self.monitor.bounds;
         self.layout = compute_control_center_layout_for_snapshot(
             &self.metrics,
-            ControlCenterPlacement {
+            otto_core::ControlCenterPlacement {
                 bounds,
-                dpi: self.screen.dpi,
+                dpi: self.monitor.dpi,
                 anchor_right: self.anchor_right,
                 anchor_y: self.anchor_y,
                 page,
@@ -65,17 +58,7 @@ impl ControlCenterSurface {
     }
 
     pub(super) fn place(&self) {
-        let _ = unsafe {
-            SetWindowPos(
-                HWND(self.hwnd as *mut _),
-                Some(HWND_TOPMOST),
-                self.layout.window.x,
-                self.layout.window.y,
-                self.layout.window.width,
-                self.layout.window.height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        };
+        place(self.hwnd, self.layout.window);
     }
 
     pub(super) fn sync_backdrop(&mut self, runtime: &RuntimeContext, force: bool) {
@@ -84,38 +67,17 @@ impl ControlCenterSurface {
             && self.hwnd != 0
             && capture_wanted(&appearance, runtime.glass_enabled.get());
         if !wanted {
-            if let Some(feed) = self.backdrop.as_mut()
-                && feed.is_active()
-            {
-                feed.reset();
-            }
             if let Some(renderer) = self.renderer.as_ref() {
                 renderer.clear_backdrop();
             }
             return;
         }
-        if self.backdrop.is_none() {
-            self.backdrop = Some(BackdropFeed::start(
-                self.hwnd,
-                WM_APP_CONTROL_CENTER_BACKDROP,
-                vec![self.hwnd],
-                runtime.capture_visible.get(),
-            ));
+        if force
+            && let Some(renderer) = self.renderer.as_ref()
+            && !renderer.has_backdrop()
+        {
+            self.prime_backdrop(runtime);
         }
-        let Some(feed) = self.backdrop.as_mut() else {
-            return;
-        };
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
-        let Some(region) = CaptureRegion::padded_to_screen(
-            self.layout.window,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
-            return;
-        };
-        let interval = capture_interval_for(is_running_on_battery(), self.visible);
-        feed.request(region, interval, force);
     }
 
     pub(super) fn prime_backdrop(&mut self, runtime: &RuntimeContext) {
@@ -135,42 +97,52 @@ impl ControlCenterSurface {
         if renderer.has_backdrop() {
             return;
         }
-        let pad = scale(BACKDROP_PADDING_PT, self.screen.dpi);
-        let Some(region) = CaptureRegion::padded_to_screen(
-            self.layout.window,
-            pad,
-            self.screen.width,
-            self.screen.height,
-        ) else {
+        let bounds = self.monitor.bounds;
+        let Ok(src_w) = u32::try_from(bounds.width) else {
+            return;
+        };
+        let Ok(src_h) = u32::try_from(bounds.height) else {
             return;
         };
         if let Some(pixels) =
-            otto_platform::capture_backdrop_now(region.origin(), region.width, region.height)
+            otto_platform::capture_screen_scaled_now((bounds.x, bounds.y), src_w, src_h, 480)
         {
-            renderer.set_backdrop(
-                pixels,
-                (
-                    region.x - self.layout.window.x,
-                    region.y - self.layout.window.y,
-                ),
-            );
+            renderer.set_canvas_backdrop(pixels);
         }
     }
 
-    pub(super) fn on_backdrop(&mut self, runtime: &RuntimeContext) {
-        let Some(update) = self.backdrop.as_mut().and_then(BackdropFeed::poll) else {
-            return;
-        };
-        let local = (
-            update.origin.0 - self.layout.window.x,
-            update.origin.1 - self.layout.window.y,
-        );
-        if self.ensure_renderer().is_ok()
-            && let Some(renderer) = self.renderer.as_ref()
-        {
-            renderer.set_backdrop(update.pixels, local);
+    fn active_drag_preview(&self) -> (Option<otto_core::Rect>, Option<u32>) {
+        match self.drag {
+            Some(DragMode::ResizeTile {
+                tile_id,
+                moved: true,
+                preview_cols,
+                preview_rows,
+                ..
+            }) => {
+                let preview = self.snapshot.grid.tile(tile_id).map(|tile| {
+                    let max_col = otto_core::CONTROL_GRID_COLUMNS.saturating_sub(preview_cols);
+                    let col = tile.col.min(max_col);
+                    self.layout
+                        .grid_rect_for(col, tile.row, preview_cols, preview_rows)
+                });
+                (preview, None)
+            }
+            Some(DragMode::MoveTile {
+                tile_id,
+                moved: true,
+                preview_col,
+                preview_row,
+                ..
+            }) => {
+                let preview = self.snapshot.grid.tile(tile_id).map(|tile| {
+                    self.layout
+                        .grid_rect_for(preview_col, preview_row, tile.cols, tile.rows)
+                });
+                (preview, Some(tile_id))
+            }
+            _ => (None, None),
         }
-        self.present(runtime);
     }
 
     pub(super) fn present(&mut self, runtime: &RuntimeContext) {
@@ -178,6 +150,7 @@ impl ControlCenterSurface {
             return;
         }
         let appearance = crate::theme_state::appearance(runtime);
+        let (drag_preview, dragging_tile) = self.active_drag_preview();
         if self.ensure_renderer().is_err() {
             return;
         }
@@ -187,6 +160,9 @@ impl ControlCenterSurface {
                 pressed: self.pressed.filter(|target| Some(*target) == self.hovered),
                 focused: self.focus.current(),
                 morph_progress: self.morph_progress,
+                editing: self.snapshot.editing,
+                drag_preview,
+                dragging_tile,
             };
             crate::host::log_present_error(
                 "control-center",
@@ -205,15 +181,18 @@ impl ControlCenterSurface {
         if !self.visible {
             return;
         }
-        let prev_dpi = self.screen.dpi;
-        self.screen = primary_screen();
-        if self.screen.dpi != prev_dpi {
+        let prev_dpi = self.monitor.dpi;
+        self.monitor = monitor_at(self.anchor_right - 1, self.anchor_y);
+        if self.monitor.dpi != prev_dpi {
             self.renderer = None;
+        }
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.clear_backdrop();
         }
         self.sync_snapshot(runtime);
         self.relayout();
         self.place();
-        self.sync_backdrop(runtime, true);
+        self.prime_backdrop(runtime);
         self.present(runtime);
     }
 }
