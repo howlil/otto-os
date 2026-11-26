@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="510" viewBox="0 0 1000 510" role="img" aria-labelledby="title desc">
 <title id="title">Otto OS adoption and GitHub release statistics</title>
-<desc id="desc">Observed application downloads: 171, stars: 1, forks: 1. 3 daily snapshots. The bar chart shows download counts by release.</desc>
+<desc id="desc">Observed application downloads: 180, stars: 1, forks: 1. 4 daily snapshots. The bar chart shows download counts by release.</desc>
 <style><![CDATA[
 text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
 .bg{fill:#fff}.border{fill:none;stroke:#e5e7eb;stroke-width:1}.divider,.grid{stroke:#e5e7eb;stroke-width:1}
@@ -19,10 +19,10 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
 <text x="54" y="54" class="heading" >OTTO OS</text>
 <text x="54" y="73" class="eyebrow" >OPEN-SOURCE DESKTOP SHELL / WINDOWS 11</text>
 <text x="966" y="53" class="eyebrow" text-anchor="end">GITHUB RELEASE METRICS</text>
-<text x="966" y="72" class="meta" text-anchor="end">Updated Nov 25, 2026</text>
+<text x="966" y="72" class="meta" text-anchor="end">Updated Nov 26, 2026</text>
 <line x1="32" y1="92" x2="968" y2="92" class="divider"/>
 <text x="36" y="125" class="eyebrow" >APPLICATION DOWNLOADS</text>
-<text x="36" y="175" class="value" >171</text>
+<text x="36" y="175" class="value" >180</text>
 <text x="389" y="125" class="eyebrow" >GITHUB STARS</text>
 <text x="389" y="175" class="value" >1</text>
 <text x="703" y="125" class="eyebrow" >FORKS</text>
@@ -36,37 +36,37 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
 <line x1="108" y1="422" x2="630" y2="422" class="grid"/>
 <text x="96" y="426" class="tick" text-anchor="end">0</text>
 <line x1="108" y1="386" x2="630" y2="386" class="grid"/>
-<text x="96" y="390" class="tick" text-anchor="end">43</text>
+<text x="96" y="390" class="tick" text-anchor="end">45</text>
 <line x1="108" y1="350" x2="630" y2="350" class="grid"/>
-<text x="96" y="354" class="tick" text-anchor="end">86</text>
+<text x="96" y="354" class="tick" text-anchor="end">90</text>
 <line x1="108" y1="314" x2="630" y2="314" class="grid"/>
-<text x="96" y="318" class="tick" text-anchor="end">129</text>
+<text x="96" y="318" class="tick" text-anchor="end">135</text>
 <line x1="108" y1="278" x2="630" y2="278" class="grid"/>
-<text x="96" y="282" class="tick" text-anchor="end">172</text>
-<path d="M108.00 338.28 L369.00 289.72 L630.00 278.84" class="trend"/>
-<circle cx="630.00" cy="278.84" r="5" class="pt"/>
+<text x="96" y="282" class="tick" text-anchor="end">180</text>
+<path d="M108.00 342.00 L282.00 295.60 L456.00 285.20 L630.00 278.00" class="trend"/>
+<circle cx="630.00" cy="278.00" r="5" class="pt"/>
 <text x="108" y="449" class="tick" >Nov 23, 2026</text>
-<text x="630" y="449" class="tick" text-anchor="end">Nov 25, 2026</text>
+<text x="630" y="449" class="tick" text-anchor="end">Nov 26, 2026</text>
 <text x="700" y="288" class="meta" >v1.0.0</text>
 <rect x="782" y="277" width="148" height="10" rx="5" class="barbg"/>
-<rect x="782" y="277" width="7.278688524590164" height="10" rx="5" class="bar"/>
+<rect x="782" y="277" width="6.8307692307692305" height="10" rx="5" class="bar"/>
 <text x="965" y="287" class="tick" text-anchor="end">6</text>
 <text x="700" y="324" class="meta" >v1.1.0</text>
 <rect x="782" y="313" width="148" height="10" rx="5" class="barbg"/>
-<rect x="782" y="313" width="4.852459016393443" height="10" rx="5" class="bar"/>
+<rect x="782" y="313" width="4.553846153846154" height="10" rx="5" class="bar"/>
 <text x="965" y="323" class="tick" text-anchor="end">4</text>
 <text x="700" y="360" class="meta" >v1.2.0</text>
 <rect x="782" y="349" width="148" height="10" rx="5" class="barbg"/>
-<rect x="782" y="349" width="3.639344262295082" height="10" rx="5" class="bar"/>
+<rect x="782" y="349" width="3.4153846153846152" height="10" rx="5" class="bar"/>
 <text x="965" y="359" class="tick" text-anchor="end">3</text>
 <text x="700" y="396" class="meta" >v1.3.0</text>
 <rect x="782" y="385" width="148" height="10" rx="5" class="barbg"/>
-<rect x="782" y="385" width="43.67213114754098" height="10" rx="5" class="bar"/>
-<text x="965" y="395" class="tick" text-anchor="end">36</text>
+<rect x="782" y="385" width="42.12307692307692" height="10" rx="5" class="bar"/>
+<text x="965" y="395" class="tick" text-anchor="end">37</text>
 <text x="700" y="432" class="meta" >v1.3.1</text>
 <rect x="782" y="421" width="148" height="10" rx="5" class="barbg"/>
 <rect x="782" y="421" width="148" height="10" rx="5" class="bar"/>
-<text x="965" y="431" class="tick" text-anchor="end">122</text>
+<text x="965" y="431" class="tick" text-anchor="end">130</text>
 <line x1="32" y1="465" x2="968" y2="465" class="divider"/>
 <text x="36" y="489" class="eyebrow" >SOURCE  ·  GITHUB RELEASE EXE + ZIP</text>
 <text x="966" y="489" class="tick" text-anchor="end">Installer and portable ZIP requests only; not unique users or installations.</text>
